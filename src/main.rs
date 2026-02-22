@@ -196,6 +196,11 @@ fn main() -> Result<()> {
                         }
                         cfg.boot_timeout = secs;
                     }
+                    "join_as_sudo_user" => match value.as_str() {
+                        "yes" => cfg.join_as_sudo_user = true,
+                        "no" => cfg.join_as_sudo_user = false,
+                        _ => bail!("invalid value for join_as_sudo_user: {value} (expected yes or no)"),
+                    },
                     _ => bail!("unknown config key: {key}"),
                 }
                 config::save(&cfg, config_path)?;
@@ -210,7 +215,7 @@ fn main() -> Result<()> {
         }
         Command::Exec { name, command } => {
             validate_name(&name)?;
-            containers::exec(&name, &command, cli.verbose)?;
+            containers::exec(&cfg.datadir, &name, &command, cfg.join_as_sudo_user, cli.verbose)?;
         }
         Command::Start { name, timeout } => {
             system_check::check_systemd_version(257)?;
@@ -227,7 +232,7 @@ fn main() -> Result<()> {
         Command::Join { name, command } => {
             validate_name(&name)?;
             eprintln!("joining '{name}'");
-            containers::join(&cfg.datadir, &name, &command, cli.verbose)?;
+            containers::join(&cfg.datadir, &name, &command, cfg.join_as_sudo_user, cli.verbose)?;
         }
         Command::Logs { name, args } => {
             system_check::check_dependencies(&[
@@ -264,7 +269,7 @@ fn main() -> Result<()> {
             let remaining = boot_timeout.saturating_sub(boot_start.elapsed());
             systemd::wait_for_dbus(&name, remaining, cli.verbose)?;
             eprintln!("joining '{name}'");
-            containers::join(&cfg.datadir, &name, &command, cli.verbose)?;
+            containers::join(&cfg.datadir, &name, &command, cfg.join_as_sudo_user, cli.verbose)?;
         }
         Command::Ps => {
             let entries = containers::list(&cfg.datadir)?;

@@ -332,6 +332,7 @@ pub fn join(
     datadir: &Path,
     name: &str,
     command: &[String],
+    join_as_sudo_user: bool,
     verbose: bool,
 ) -> Result<()> {
     ensure_exists(datadir, name)?;
@@ -340,20 +341,50 @@ pub fn join(
         bail!("container '{name}' is not running");
     }
 
-    machinectl_shell(name, command, verbose)
+    machinectl_shell(datadir, name, command, join_as_sudo_user, verbose)
 }
 
-pub fn exec(name: &str, command: &[String], verbose: bool) -> Result<()> {
+pub fn exec(
+    datadir: &Path,
+    name: &str,
+    command: &[String],
+    join_as_sudo_user: bool,
+    verbose: bool,
+) -> Result<()> {
     if !systemd::is_active(name)? {
         bail!("container '{name}' is not running");
     }
 
-    machinectl_shell(name, command, verbose)
+    machinectl_shell(datadir, name, command, join_as_sudo_user, verbose)
 }
 
-fn machinectl_shell(name: &str, command: &[String], verbose: bool) -> Result<()> {
+fn machinectl_shell(
+    datadir: &Path,
+    name: &str,
+    command: &[String],
+    join_as_sudo_user: bool,
+    verbose: bool,
+) -> Result<()> {
     let mut cmd = std::process::Command::new("machinectl");
-    cmd.arg("shell").arg(name);
+    cmd.arg("shell");
+
+    if join_as_sudo_user {
+        let state_path = datadir.join("state").join(name);
+        if let Ok(state) = State::read_from(&state_path) {
+            if state.get("ROOTFS") == Some("") {
+                if let Some(su) = crate::sudo_user() {
+                    if verbose {
+                        eprintln!("host rootfs container: joining as user '{}'", su.name);
+                    }
+                    cmd.args(["--uid", &su.name]);
+                } else if verbose {
+                    eprintln!("host rootfs container but no sudo user detected; joining as root");
+                }
+            }
+        }
+    }
+
+    cmd.arg(name);
     if !command.is_empty() {
         cmd.args(command);
     }

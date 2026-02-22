@@ -19,6 +19,9 @@ pub struct Config {
 
     #[serde(default = "default_boot_timeout")]
     pub boot_timeout: u64,
+
+    #[serde(default = "default_join_as_sudo_user")]
+    pub join_as_sudo_user: bool,
 }
 
 fn default_interactive() -> bool {
@@ -33,12 +36,17 @@ fn default_boot_timeout() -> u64 {
     60
 }
 
+fn default_join_as_sudo_user() -> bool {
+    true
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
             interactive: true,
             datadir: default_datadir(),
             boot_timeout: default_boot_timeout(),
+            join_as_sudo_user: default_join_as_sudo_user(),
         }
     }
 }
@@ -46,9 +54,11 @@ impl Default for Config {
 impl Config {
     pub fn display(&self) {
         let interactive = if self.interactive { "yes" } else { "no" };
+        let join_as_sudo_user = if self.join_as_sudo_user { "yes" } else { "no" };
         println!("interactive = {interactive}");
         println!("datadir = {}", self.datadir.display());
         println!("boot_timeout = {}", self.boot_timeout);
+        println!("join_as_sudo_user = {join_as_sudo_user}");
     }
 }
 

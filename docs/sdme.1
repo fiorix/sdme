@@ -131,6 +131,15 @@ Default:
 Absolute path to the data directory.
 Default:
 .BR /var/lib/sdme .
+.TP
+.B join_as_sudo_user
+Automatically join host\-rootfs containers as the
+.B SUDO_USER
+instead of root.
+Values:
+.BR yes " or " no .
+Default:
+.BR yes .
 .RE
 .SH CONFIGURATION
 The configuration file is in TOML format, located at
@@ -157,6 +166,21 @@ String.
 Absolute path to the data directory.
 Default:
 .BR /var/lib/sdme .
+.TP
+.B join_as_sudo_user
+Boolean.
+When true and the container uses the host root filesystem,
+.B sdme join
+and
+.B sdme exec
+pass
+.BI \-\-uid " SUDO_USER"
+to
+.BR machinectl (1)
+so the session runs as the invoking user rather than root.
+Containers created with an imported rootfs are unaffected.
+Default:
+.BR true .
 .SH FILES
 .TP
 .I /var/lib/sdme/
