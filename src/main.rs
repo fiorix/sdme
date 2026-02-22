@@ -107,9 +107,9 @@ enum Command {
 
 #[derive(Subcommand)]
 enum RootfsCommand {
-    /// Import a root filesystem from a directory, tarball, or URL
+    /// Import a root filesystem from a directory, tarball, URL, or QCOW2 image
     Import {
-        /// Source: directory path, tarball file (.tar, .tar.gz, .tar.bz2, .tar.xz), or URL
+        /// Source: directory path, tarball file (.tar, .tar.gz, .tar.bz2, .tar.xz), URL, or QCOW2 image
         source: String,
         /// Name for the imported rootfs
         #[arg(short, long)]

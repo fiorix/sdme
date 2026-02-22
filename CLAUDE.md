@@ -44,7 +44,7 @@ The project is a single Rust binary (`src/main.rs`) backed by a shared library (
 | `sdme rm` | Remove containers (stops if running, deletes state + files) |
 | `sdme ps` | List containers with status, health, and shared directory |
 | `sdme logs` | View container logs (exec's `journalctl`) |
-| `sdme rootfs import` | Import a rootfs from a directory, tarball, URL, or OCI image |
+| `sdme rootfs import` | Import a rootfs from a directory, tarball, URL, OCI image, or QCOW2 disk image |
 | `sdme rootfs ls` | List imported root filesystems |
 | `sdme rootfs rm` | Remove imported root filesystems |
 | `sdme config get/set` | View or modify configuration |
@@ -59,7 +59,7 @@ The project is a single Rust binary (`src/main.rs`) backed by a shared library (
 | `src/systemd.rs` | D-Bus helpers (start/status), template unit generation, env files |
 | `src/system_check.rs` | Version checks (systemd), dependency checks (`find_program`) |
 | `src/rootfs.rs` | Rootfs listing, removal, os-release parsing, distro detection |
-| `src/import.rs` | Rootfs import: directory copy, tarball extraction, URL download, OCI image extraction |
+| `src/import.rs` | Rootfs import: directory copy, tarball extraction, URL download, OCI image extraction, QCOW2 disk image import |
 | `src/config.rs` | Config file loading/saving (`~/.config/sdme/sdmerc`) |
 
 ### Rust Dependencies
@@ -86,6 +86,7 @@ The project is a single Rust binary (`src/main.rs`) backed by a shared library (
 | `systemd-nspawn` | `systemd-container` | Running containers |
 | `machinectl` | `systemd-container` | `sdme join`, `sdme exec`, `sdme stop`, `sdme new` |
 | `journalctl` | `systemd` | `sdme logs` |
+| `qemu-nbd` | `qemu-utils` | `sdme rootfs import` (QCOW2 images only) |
 
 Dependencies are checked at runtime before use via `system_check::check_dependencies()`, which resolves each binary in PATH and prints the resolved path with `-v`.
 
@@ -95,4 +96,4 @@ Dependencies are checked at runtime before use via `system_check::check_dependen
 - **Datadir**: always `/var/lib/sdme`.
 - **Container management**: `join` and `exec` use `machinectl shell`; `stop` uses `machinectl poweroff` for clean shutdown.
 - **D-Bus**: used for `start_unit`, `daemon_reload`, `is_unit_active`, `get_systemd_version`. Always system bus.
-- **Rootfs import sources**: `sdme rootfs import` auto-detects the source type: URL prefix (`http://`/`https://`) → download + tarball extraction; existing directory → directory copy; existing file → tarball extraction via native Rust crates (`tar`, `flate2`, `bzip2`, `xz2`, `zstd`) with magic-byte compression detection. OCI container images (`.oci.tar.xz`, etc.) are auto-detected after tarball extraction by checking for an `oci-layout` file; the manifest chain is walked and filesystem layers are extracted in order with whiteout marker handling.
+- **Rootfs import sources**: `sdme rootfs import` auto-detects the source type: URL prefix (`http://`/`https://`) → download + tarball extraction; existing directory → directory copy; QCOW2 disk image (magic bytes `QFI\xfb`) → mount via `qemu-nbd` + copy filesystem tree; existing file → tarball extraction via native Rust crates (`tar`, `flate2`, `bzip2`, `xz2`, `zstd`) with magic-byte compression detection. OCI container images (`.oci.tar.xz`, etc.) are auto-detected after tarball extraction by checking for an `oci-layout` file; the manifest chain is walked and filesystem layers are extracted in order with whiteout marker handling. QCOW2 import loads the `nbd` kernel module, connects the image read-only via `qemu-nbd`, discovers partitions via `/sys/block/`, mounts the largest partition, and copies the tree using the same `copy_tree()` used for directory imports.

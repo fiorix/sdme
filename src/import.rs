@@ -1,10 +1,11 @@
-//! Rootfs import logic: directory copy, tarball extraction, URL download, and OCI image support.
+//! Rootfs import logic: directory copy, tarball extraction, URL download, OCI image, and QCOW2 support.
 //!
 //! This module handles all import sources for `sdme rootfs import`:
 //! - Local directories (recursive copy preserving permissions, ownership, xattrs)
 //! - Tarball files (.tar, .tar.gz, .tar.bz2, .tar.xz, .tar.zst)
 //! - HTTP/HTTPS URLs pointing to tarballs
 //! - OCI container image archives (.oci.tar, .oci.tar.xz, etc.)
+//! - QCOW2 disk images (via qemu-nbd, auto-detected by magic bytes)
 
 use std::ffi::CString;
 use std::fs::{self, File};
@@ -12,6 +13,7 @@ use std::io::Read;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
@@ -24,10 +26,26 @@ use crate::{State, validate_name};
 enum SourceKind {
     Directory(PathBuf),
     Tarball(PathBuf),
+    QcowImage(PathBuf),
     Url(String),
 }
 
-/// Detect whether the source is a URL, directory, tarball file, or invalid.
+/// QCOW2 magic bytes: "QFI\xfb".
+const QCOW2_MAGIC: [u8; 4] = [0x51, 0x46, 0x49, 0xfb];
+
+/// Check if a file is a QCOW2 image by reading its magic bytes.
+fn is_qcow2(path: &Path) -> bool {
+    let Ok(mut file) = File::open(path) else {
+        return false;
+    };
+    let mut magic = [0u8; 4];
+    if file.read_exact(&mut magic).is_ok() {
+        return magic == QCOW2_MAGIC;
+    }
+    false
+}
+
+/// Detect whether the source is a URL, directory, qcow2 image, tarball file, or invalid.
 fn detect_source_kind(source: &str) -> Result<SourceKind> {
     if source.starts_with("http://") || source.starts_with("https://") {
         return Ok(SourceKind::Url(source.to_string()));
@@ -38,6 +56,9 @@ fn detect_source_kind(source: &str) -> Result<SourceKind> {
         return Ok(SourceKind::Directory(path.to_path_buf()));
     }
     if path.is_file() {
+        if is_qcow2(path) {
+            return Ok(SourceKind::QcowImage(path.to_path_buf()));
+        }
         return Ok(SourceKind::Tarball(path.to_path_buf()));
     }
     if !path.exists() {
@@ -700,6 +721,199 @@ fn import_url(
     result
 }
 
+// --- QCOW2 import ---
+
+/// Import a QCOW2 disk image by mounting it via qemu-nbd and copying the filesystem tree.
+///
+/// Steps:
+/// 1. Load the `nbd` kernel module
+/// 2. Find a free `/dev/nbdN` device
+/// 3. Connect the qcow2 image via `qemu-nbd`
+/// 4. Discover and mount the root partition
+/// 5. Copy the mounted tree to the staging directory
+/// 6. Clean up (unmount, disconnect)
+fn import_qcow2(image: &Path, staging_dir: &Path, verbose: bool) -> Result<()> {
+    crate::system_check::check_dependencies(
+        &[("qemu-nbd", "apt install qemu-utils")],
+        verbose,
+    )?;
+
+    if verbose {
+        eprintln!("importing qcow2 image: {}", image.display());
+    }
+
+    // Load the nbd kernel module.
+    let status = Command::new("modprobe")
+        .args(["nbd", "max_part=16"])
+        .status()
+        .context("failed to run modprobe nbd")?;
+    if !status.success() {
+        bail!("modprobe nbd failed (is the nbd kernel module available?)");
+    }
+
+    // Find a free /dev/nbdN device.
+    let nbd_dev = find_free_nbd_device()?;
+    if verbose {
+        eprintln!("using nbd device: {}", nbd_dev.display());
+    }
+
+    // Connect the image. Everything after this point must disconnect on cleanup.
+    let status = Command::new("qemu-nbd")
+        .args(["--read-only", "--connect"])
+        .arg(&nbd_dev)
+        .arg(image)
+        .status()
+        .context("failed to run qemu-nbd")?;
+    if !status.success() {
+        bail!("qemu-nbd --connect failed for {}", image.display());
+    }
+
+    // Use a closure so we can clean up the nbd connection on any error.
+    let result = (|| -> Result<()> {
+        // Wait for the kernel to scan partitions.
+        let status = Command::new("partprobe")
+            .arg(&nbd_dev)
+            .status();
+        // partprobe is optional; if missing, the kernel usually scans automatically.
+        if let Ok(s) = status {
+            if !s.success() && verbose {
+                eprintln!("partprobe failed (non-fatal)");
+            }
+        }
+
+        // Small delay for partition devices to appear.
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        // Find the root partition device.
+        let part_dev = find_root_partition(&nbd_dev, verbose)?;
+        if verbose {
+            eprintln!("mounting partition: {}", part_dev.display());
+        }
+
+        // Create a temporary mount point.
+        let mount_dir = staging_dir.with_file_name(
+            format!(
+                ".{}.qcow2-mount",
+                staging_dir.file_name().unwrap().to_string_lossy()
+            ),
+        );
+        fs::create_dir_all(&mount_dir)
+            .with_context(|| format!("failed to create mount point {}", mount_dir.display()))?;
+
+        // Mount the partition read-only.
+        let status = Command::new("mount")
+            .args(["-o", "ro"])
+            .arg(&part_dev)
+            .arg(&mount_dir)
+            .status()
+            .context("failed to run mount")?;
+        if !status.success() {
+            let _ = fs::remove_dir(&mount_dir);
+            bail!("mount failed for {}", part_dev.display());
+        }
+
+        // Copy the tree; unmount on any error.
+        let copy_result = do_import(&mount_dir, staging_dir, verbose);
+
+        // Always unmount.
+        let umount_status = Command::new("umount")
+            .arg(&mount_dir)
+            .status();
+        let _ = fs::remove_dir(&mount_dir);
+        if let Ok(s) = umount_status {
+            if !s.success() && verbose {
+                eprintln!("warning: umount {} failed", mount_dir.display());
+            }
+        }
+
+        copy_result
+    })();
+
+    // Always disconnect the nbd device.
+    let disconnect_status = Command::new("qemu-nbd")
+        .args(["--disconnect"])
+        .arg(&nbd_dev)
+        .status();
+    if let Ok(s) = disconnect_status {
+        if !s.success() && verbose {
+            eprintln!("warning: qemu-nbd --disconnect {} failed", nbd_dev.display());
+        }
+    }
+
+    result
+}
+
+/// Find a free `/dev/nbdN` device by checking which ones have zero size.
+fn find_free_nbd_device() -> Result<PathBuf> {
+    for i in 0..16 {
+        let dev = PathBuf::from(format!("/dev/nbd{i}"));
+        if !dev.exists() {
+            continue;
+        }
+        let size_path = PathBuf::from(format!("/sys/block/nbd{i}/size"));
+        if let Ok(content) = fs::read_to_string(&size_path) {
+            if content.trim() == "0" {
+                return Ok(dev);
+            }
+        }
+    }
+    bail!("no free nbd device found (all /dev/nbd0..15 are in use)")
+}
+
+/// Find the root partition on an nbd device.
+///
+/// Looks for partition devices (`/dev/nbdNpM`) and picks the largest one,
+/// which is typically the root filesystem. If no partitions are found,
+/// tries the whole device (for unpartitioned disk images).
+fn find_root_partition(nbd_dev: &Path, verbose: bool) -> Result<PathBuf> {
+    let dev_name = nbd_dev
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+
+    // Look for partition devices in /sys/block/nbdN/.
+    let sys_dir = PathBuf::from(format!("/sys/block/{dev_name}"));
+    let mut partitions: Vec<(PathBuf, u64)> = Vec::new();
+
+    if let Ok(entries) = fs::read_dir(&sys_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !name.starts_with(&format!("{dev_name}p")) {
+                continue;
+            }
+            let size_path = entry.path().join("size");
+            if let Ok(content) = fs::read_to_string(&size_path) {
+                if let Ok(size) = content.trim().parse::<u64>() {
+                    if size > 0 {
+                        let part_dev = PathBuf::from(format!("/dev/{name}"));
+                        if verbose {
+                            eprintln!(
+                                "found partition: {} ({} sectors)",
+                                part_dev.display(),
+                                size
+                            );
+                        }
+                        partitions.push((part_dev, size));
+                    }
+                }
+            }
+        }
+    }
+
+    if partitions.is_empty() {
+        // No partitions found — try the whole device (unpartitioned image).
+        if verbose {
+            eprintln!("no partitions found, trying whole device");
+        }
+        return Ok(nbd_dev.to_path_buf());
+    }
+
+    // Pick the largest partition (usually the root filesystem).
+    partitions.sort_by(|a, b| b.1.cmp(&a.1));
+    Ok(partitions[0].0.clone())
+}
+
 // --- Shared helpers ---
 
 /// Remove a leftover staging directory from a previous failed import.
@@ -776,17 +990,22 @@ fn lchown(path: &Path, uid: u32, gid: u32) -> Result<()> {
 
 // --- Public entry point ---
 
-/// Import a root filesystem from a directory, tarball, URL, or OCI image.
+/// Import a root filesystem from a directory, tarball, URL, OCI image, or QCOW2 disk image.
 ///
 /// The source can be:
 /// - A local directory (e.g. debootstrap output)
 /// - A tarball file (.tar, .tar.gz, .tar.bz2, .tar.xz, .tar.zst)
 /// - An HTTP/HTTPS URL pointing to a tarball
 /// - An OCI container image archive (.oci.tar, .oci.tar.xz, etc.)
+/// - A QCOW2 disk image (auto-detected by magic bytes; requires qemu-nbd)
 ///
 /// OCI images are auto-detected after tarball extraction by checking for
 /// an `oci-layout` file. The manifest chain is walked and filesystem layers
 /// are extracted in order, with whiteout markers handled.
+///
+/// QCOW2 images are detected by their magic bytes (`QFI\xfb`). The image
+/// is mounted read-only via qemu-nbd, the largest partition is selected as
+/// the root filesystem, and its contents are copied to the staging directory.
 ///
 /// The import is transactional: files are copied/extracted into a staging
 /// directory and atomically renamed into place on success.
@@ -823,6 +1042,7 @@ pub fn run(datadir: &Path, source: &str, name: &str, verbose: bool, force: bool)
     let result = match kind {
         SourceKind::Directory(ref dir) => do_import(dir, &staging_dir, verbose),
         SourceKind::Tarball(ref path) => import_tarball(path, &staging_dir, verbose),
+        SourceKind::QcowImage(ref path) => import_qcow2(path, &staging_dir, verbose),
         SourceKind::Url(ref url) => import_url(url, &staging_dir, &rootfs_dir, name, verbose),
     };
 
@@ -1314,6 +1534,50 @@ mod tests {
             SourceKind::Tarball(p) => assert_eq!(p, file_path),
             _ => panic!("expected Tarball"),
         }
+        let _ = fs::remove_file(&file_path);
+    }
+
+    #[test]
+    fn test_detect_source_kind_qcow2() {
+        let file_path = std::env::temp_dir().join(format!(
+            "sdme-test-detect-qcow2-{}-{:?}.qcow2",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        // Write a file with QCOW2 magic bytes.
+        let mut data = vec![0u8; 512];
+        data[0..4].copy_from_slice(&QCOW2_MAGIC);
+        fs::write(&file_path, &data).unwrap();
+        match detect_source_kind(file_path.to_str().unwrap()).unwrap() {
+            SourceKind::QcowImage(p) => assert_eq!(p, file_path),
+            other => panic!("expected QcowImage, got {other:?}"),
+        }
+        let _ = fs::remove_file(&file_path);
+    }
+
+    #[test]
+    fn test_is_qcow2_true() {
+        let file_path = std::env::temp_dir().join(format!(
+            "sdme-test-is-qcow2-true-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let mut data = vec![0u8; 512];
+        data[0..4].copy_from_slice(&QCOW2_MAGIC);
+        fs::write(&file_path, &data).unwrap();
+        assert!(is_qcow2(&file_path));
+        let _ = fs::remove_file(&file_path);
+    }
+
+    #[test]
+    fn test_is_qcow2_false() {
+        let file_path = std::env::temp_dir().join(format!(
+            "sdme-test-is-qcow2-false-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        fs::write(&file_path, "not a qcow2 file").unwrap();
+        assert!(!is_qcow2(&file_path));
         let _ = fs::remove_file(&file_path);
     }
 
