@@ -15,7 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
 
-use crate::{State, names, systemd, validate_name};
+use crate::{State, names, rootfs, systemd, validate_name};
 
 pub struct CreateOptions {
     pub name: Option<String>,
@@ -257,6 +257,7 @@ pub struct ContainerInfo {
     pub name: String,
     pub status: String,
     pub health: String,
+    pub os: String,
     pub shared: PathBuf,
 }
 
@@ -308,6 +309,20 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
             problems.join(", ")
         };
 
+        // OS detection from rootfs.
+        let os = match &state {
+            Ok(s) => {
+                let rootfs_name = s.get("ROOTFS").unwrap_or("");
+                if rootfs_name.is_empty() {
+                    String::new()
+                } else {
+                    let rootfs_path = datadir.join("fs").join(rootfs_name);
+                    rootfs::detect_distro(&rootfs_path)
+                }
+            }
+            Err(_) => String::new(),
+        };
+
         // Status (running/stopped).
         let status = if container_dir.exists() {
             match systemd::is_active(name) {
@@ -322,6 +337,7 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
             name: name.clone(),
             status: status.to_string(),
             health,
+            os,
             shared,
         });
     }

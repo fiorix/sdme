@@ -279,14 +279,15 @@ fn main() -> Result<()> {
                 let name_w = entries.iter().map(|e| e.name.len()).max().unwrap().max(4);
                 let status_w = entries.iter().map(|e| e.status.len()).max().unwrap().max(6);
                 let health_w = entries.iter().map(|e| e.health.len()).max().unwrap().max(6);
+                let os_w = entries.iter().map(|e| e.os.len()).max().unwrap().max(2);
                 println!(
-                    "{:<name_w$}  {:<status_w$}  {:<health_w$}  SHARED",
-                    "NAME", "STATUS", "HEALTH"
+                    "{:<name_w$}  {:<status_w$}  {:<health_w$}  {:<os_w$}  SHARED",
+                    "NAME", "STATUS", "HEALTH", "OS"
                 );
                 for e in &entries {
                     println!(
-                        "{:<name_w$}  {:<status_w$}  {:<health_w$}  {}",
-                        e.name, e.status, e.health, e.shared.display()
+                        "{:<name_w$}  {:<status_w$}  {:<health_w$}  {:<os_w$}  {}",
+                        e.name, e.status, e.health, e.os, e.shared.display()
                     );
                 }
             }
