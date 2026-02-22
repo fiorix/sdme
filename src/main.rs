@@ -93,10 +93,10 @@ enum Command {
         names: Vec<String>,
     },
 
-    /// Stop a running container
+    /// Stop one or more running containers
     Stop {
-        /// Container name
-        name: String,
+        /// Container names
+        names: Vec<String>,
     },
 
     /// Start a container
@@ -311,11 +311,30 @@ fn main() -> Result<()> {
                 bail!("some containers could not be removed");
             }
         }
-        Command::Stop { name } => {
-            validate_name(&name)?;
-            containers::ensure_exists(&cfg.datadir, &name)?;
-            eprintln!("stopping '{name}'");
-            containers::stop(&name, cli.verbose)?;
+        Command::Stop { names } => {
+            let mut failed = false;
+            for name in &names {
+                if let Err(e) = validate_name(name) {
+                    eprintln!("error: {name}: {e}");
+                    failed = true;
+                    continue;
+                }
+                if let Err(e) = containers::ensure_exists(&cfg.datadir, name) {
+                    eprintln!("error: {name}: {e}");
+                    failed = true;
+                    continue;
+                }
+                eprintln!("stopping '{name}'");
+                if let Err(e) = containers::stop(name, cli.verbose) {
+                    eprintln!("error: {name}: {e}");
+                    failed = true;
+                } else {
+                    println!("{name}");
+                }
+            }
+            if failed {
+                bail!("some containers could not be stopped");
+            }
         }
         Command::Fs(cmd) => match cmd {
             RootfsCommand::Import { source, name, force, install_packages } => {
