@@ -213,7 +213,7 @@ fn main() -> Result<()> {
             }
         },
         Command::Create { name, fs } => {
-            system_check::check_systemd_version(257)?;
+            system_check::check_systemd_version(252)?;
             let opts = containers::CreateOptions { name, rootfs: fs };
             let name = containers::create(&cfg.datadir, &opts, cli.verbose)?;
             eprintln!("creating '{name}'");
@@ -224,7 +224,7 @@ fn main() -> Result<()> {
             containers::exec(&cfg.datadir, &name, &command, cfg.join_as_sudo_user, cli.verbose)?;
         }
         Command::Start { name, timeout } => {
-            system_check::check_systemd_version(257)?;
+            system_check::check_systemd_version(252)?;
             let name = containers::resolve_name(&cfg.datadir, &name)?;
             containers::ensure_exists(&cfg.datadir, &name)?;
             eprintln!("starting '{name}'");
@@ -261,7 +261,7 @@ fn main() -> Result<()> {
             bail!("failed to exec journalctl: {err}");
         }
         Command::New { name, fs, timeout, command } => {
-            system_check::check_systemd_version(257)?;
+            system_check::check_systemd_version(252)?;
             let opts = containers::CreateOptions { name, rootfs: fs };
             let name = containers::create(&cfg.datadir, &opts, cli.verbose)?;
             eprintln!("creating '{name}'");
@@ -403,7 +403,7 @@ fn main() -> Result<()> {
         }
         Command::Fs(cmd) => match cmd {
             RootfsCommand::Import { source, name, force, install_packages } => {
-                system_check::check_systemd_version(257)?;
+                system_check::check_systemd_version(252)?;
                 rootfs::import(&cfg.datadir, &source, &name, cli.verbose, force, install_packages)?;
                 println!("{name}");
             }

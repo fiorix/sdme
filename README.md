@@ -10,7 +10,7 @@ Runs on Linux with systemd. Requires root for all operations. Uses kernel overla
 
 | Program | Package | Required for |
 |---------|---------|--------------|
-| `systemd` (>= 257) | `systemd` | All commands (D-Bus communication) |
+| `systemd` (>= 252) | `systemd` | All commands (D-Bus communication) |
 | `systemd-nspawn` | `systemd-container` | Running containers (`sdme start`) |
 | `machinectl` | `systemd-container` | `sdme join`, `sdme exec`, `sdme new` |
 | `journalctl` | `systemd` | `sdme logs` |
