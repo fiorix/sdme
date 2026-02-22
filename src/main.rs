@@ -107,9 +107,9 @@ enum Command {
 
 #[derive(Subcommand)]
 enum RootfsCommand {
-    /// Import a root filesystem from a directory
+    /// Import a root filesystem from a directory, tarball, or URL
     Import {
-        /// Path to rootfs directory
+        /// Source: directory path, tarball file (.tar, .tar.gz, .tar.bz2, .tar.xz), or URL
         source: String,
         /// Name for the imported rootfs
         #[arg(short, long)]
@@ -170,7 +170,11 @@ fn main() -> Result<()> {
                         _ => bail!("invalid value for interactive: {value} (expected yes or no)"),
                     },
                     "datadir" => {
-                        cfg.datadir = PathBuf::from(&value);
+                        let path = PathBuf::from(&value);
+                        if !path.is_absolute() {
+                            bail!("datadir must be an absolute path: {value}");
+                        }
+                        cfg.datadir = path;
                     }
                     _ => bail!("unknown config key: {key}"),
                 }
@@ -231,7 +235,11 @@ fn main() -> Result<()> {
                 eprintln!("started container '{name}'");
             }
 
-            containers::wait_for_boot(&name, cli.verbose)?;
+            systemd::wait_for_boot(
+                &name,
+                std::time::Duration::from_secs(30),
+                cli.verbose,
+            )?;
             containers::join(&cfg.datadir, &name, &command, cli.verbose)?;
         }
         Command::Ps => {
@@ -282,7 +290,6 @@ fn main() -> Result<()> {
         Command::Rootfs(cmd) => match cmd {
             RootfsCommand::Import { source, name, force } => {
                 system_check::check_systemd_version(257)?;
-                let source = PathBuf::from(&source);
                 rootfs::import(&cfg.datadir, &source, &name, cli.verbose, force)?;
                 println!("{name}");
             }

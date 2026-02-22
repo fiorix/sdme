@@ -44,7 +44,7 @@ The project is a single Rust binary (`src/main.rs`) backed by a shared library (
 | `sdme rm` | Remove containers (stops if running, deletes state + files) |
 | `sdme ps` | List containers with status, health, and shared directory |
 | `sdme logs` | View container logs (exec's `journalctl`) |
-| `sdme rootfs import` | Import a rootfs from a directory |
+| `sdme rootfs import` | Import a rootfs from a directory, tarball, or URL |
 | `sdme rootfs ls` | List imported root filesystems |
 | `sdme rootfs rm` | Remove imported root filesystems |
 | `sdme config get/set` | View or modify configuration |
@@ -68,6 +68,7 @@ The project is a single Rust binary (`src/main.rs`) backed by a shared library (
 - `libc` — syscalls for rootfs import (lchown, mknod, etc.)
 - `anyhow` — error handling
 - `serde`/`toml` — config file parsing
+- `ureq` — HTTP client for URL downloads (blocking, rustls TLS)
 
 ### External Dependencies
 
@@ -77,6 +78,7 @@ The project is a single Rust binary (`src/main.rs`) backed by a shared library (
 | `systemd-nspawn` | `systemd-container` | Running containers |
 | `machinectl` | `systemd-container` | `sdme join`, `sdme exec`, `sdme stop`, `sdme new` |
 | `journalctl` | `systemd` | `sdme logs` |
+| `tar` | `tar` | `sdme rootfs import` (tarball/URL sources) |
 
 Dependencies are checked at runtime before use via `system_check::check_dependencies()`, which resolves each binary in PATH and prints the resolved path with `-v`.
 
@@ -86,3 +88,4 @@ Dependencies are checked at runtime before use via `system_check::check_dependen
 - **Datadir**: always `/var/lib/sdme`.
 - **Container management**: `join` and `exec` use `machinectl shell`; `stop` uses `machinectl poweroff` for clean shutdown.
 - **D-Bus**: used for `start_unit`, `daemon_reload`, `is_unit_active`, `get_systemd_version`. Always system bus.
+- **Rootfs import sources**: `sdme rootfs import` auto-detects the source type: URL prefix (`http://`/`https://`) → download + tarball extraction; existing directory → directory copy; existing file → tarball extraction via `tar` CLI (GNU tar auto-detects compression).

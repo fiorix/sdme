@@ -9,11 +9,13 @@ use std::ffi::CString;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs as unix_fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 
 use crate::{State, validate_name};
+use crate::system_check;
 
 /// An entry returned by [`list`].
 pub struct RootfsEntry {
@@ -116,20 +118,110 @@ pub fn list(datadir: &Path) -> Result<Vec<RootfsEntry>> {
     Ok(entries)
 }
 
-/// Import a root filesystem from a source directory.
+/// Classifies the source argument for rootfs import.
+#[derive(Debug)]
+enum SourceKind {
+    Directory(PathBuf),
+    Tarball(PathBuf),
+    Url(String),
+}
+
+/// Detect whether the source is a URL, directory, tarball file, or invalid.
+fn detect_source_kind(source: &str) -> Result<SourceKind> {
+    if source.starts_with("http://") || source.starts_with("https://") {
+        return Ok(SourceKind::Url(source.to_string()));
+    }
+
+    let path = Path::new(source);
+    if path.is_dir() {
+        return Ok(SourceKind::Directory(path.to_path_buf()));
+    }
+    if path.is_file() {
+        return Ok(SourceKind::Tarball(path.to_path_buf()));
+    }
+    if !path.exists() {
+        bail!("source path does not exist: {source}");
+    }
+    bail!("source path is not a file or directory: {source}");
+}
+
+/// Extract a tarball into the staging directory using the `tar` CLI.
+fn import_tarball(tarball: &Path, staging_dir: &Path, verbose: bool) -> Result<()> {
+    let tar_bin = system_check::find_program("tar")
+        .context("tar is required for tarball import; install it with: apt install tar")?;
+
+    fs::create_dir_all(staging_dir)
+        .with_context(|| format!("failed to create staging dir {}", staging_dir.display()))?;
+
+    if verbose {
+        eprintln!("extracting {} -> {}", tarball.display(), staging_dir.display());
+    }
+
+    let output = Command::new(&tar_bin)
+        .args(["xf", &tarball.to_string_lossy(), "-C", &staging_dir.to_string_lossy()])
+        .output()
+        .with_context(|| format!("failed to run {}", tar_bin.display()))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("tar extraction failed: {}", stderr.trim());
+    }
+
+    Ok(())
+}
+
+/// Download a URL to a local file, streaming to constant memory.
+fn download_file(url: &str, dest: &Path, verbose: bool) -> Result<()> {
+    if verbose {
+        eprintln!("downloading {url}");
+    }
+
+    let response = ureq::get(url)
+        .call()
+        .with_context(|| format!("failed to download {url}"))?;
+
+    let mut reader = response.into_body().into_reader();
+    let mut file = fs::File::create(dest)
+        .with_context(|| format!("failed to create {}", dest.display()))?;
+
+    let bytes = std::io::copy(&mut reader, &mut file)
+        .with_context(|| format!("failed to write download to {}", dest.display()))?;
+
+    if verbose {
+        eprintln!("downloaded {} bytes to {}", bytes, dest.display());
+    }
+
+    Ok(())
+}
+
+/// Download a URL to a temp file and extract it as a tarball.
+fn import_url(url: &str, staging_dir: &Path, rootfs_dir: &Path, name: &str, verbose: bool) -> Result<()> {
+    let temp_file = rootfs_dir.join(format!(".{name}.download"));
+
+    let result = (|| -> Result<()> {
+        download_file(url, &temp_file, verbose)?;
+        import_tarball(&temp_file, staging_dir, verbose)
+    })();
+
+    // Clean up temp file on both success and failure.
+    let _ = fs::remove_file(&temp_file);
+
+    result
+}
+
+/// Import a root filesystem from a directory, tarball, or URL.
 ///
-/// The source must be an existing directory (e.g. debootstrap output).
-/// The import is transactional: files are copied into a staging directory
-/// and atomically renamed into place on success.
-pub fn import(datadir: &Path, source: &Path, name: &str, verbose: bool, force: bool) -> Result<()> {
+/// The source can be:
+/// - A local directory (e.g. debootstrap output)
+/// - A tarball file (.tar, .tar.gz, .tar.bz2, .tar.xz)
+/// - An HTTP/HTTPS URL pointing to a tarball
+///
+/// The import is transactional: files are copied/extracted into a staging
+/// directory and atomically renamed into place on success.
+pub fn import(datadir: &Path, source: &str, name: &str, verbose: bool, force: bool) -> Result<()> {
     validate_name(name)?;
 
-    if !source.is_dir() {
-        if !source.exists() {
-            bail!("source path does not exist: {}", source.display());
-        }
-        bail!("source path is not a directory: {}", source.display());
-    }
+    let kind = detect_source_kind(source)?;
 
     let rootfs_dir = datadir.join("rootfs");
     let final_dir = rootfs_dir.join(name);
@@ -156,7 +248,13 @@ pub fn import(datadir: &Path, source: &Path, name: &str, verbose: bool, force: b
     fs::create_dir_all(&rootfs_dir)
         .with_context(|| format!("failed to create {}", rootfs_dir.display()))?;
 
-    match do_import(source, &staging_dir, verbose) {
+    let result = match kind {
+        SourceKind::Directory(ref dir) => do_import(dir, &staging_dir, verbose),
+        SourceKind::Tarball(ref path) => import_tarball(path, &staging_dir, verbose),
+        SourceKind::Url(ref url) => import_url(url, &staging_dir, &rootfs_dir, name, verbose),
+    };
+
+    match result {
         Ok(()) => {
             fs::rename(&staging_dir, &final_dir).with_context(|| {
                 format!(
@@ -174,7 +272,7 @@ pub fn import(datadir: &Path, source: &Path, name: &str, verbose: bool, force: b
             meta.write_to(&meta_path)?;
 
             if verbose {
-                eprintln!("imported rootfs '{}' from {}", name, source.display());
+                eprintln!("imported rootfs '{name}' from {source}");
             }
             Ok(())
         }
@@ -508,6 +606,12 @@ fn copy_xattrs(src: &Path, dst: &Path) -> Result<()> {
 ///
 /// Validates the name, checks that no container references it, then removes
 /// the rootfs directory and its `.meta` sidecar.
+///
+/// To prevent a TOCTOU race where `sdme create --rootfs <name>` could
+/// reference the rootfs between the usage check and the deletion, we
+/// first rename the rootfs directory to a staging name (atomic on the same
+/// filesystem), then verify no container was created referencing it. If a
+/// reference appeared, we rename it back and bail.
 pub fn remove(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
     validate_name(name)?;
 
@@ -516,33 +620,32 @@ pub fn remove(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
         bail!("rootfs not found: {name}");
     }
 
-    // Check that no container is using this rootfs.
-    let state_dir = datadir.join("state");
-    if state_dir.is_dir() {
-        for entry in fs::read_dir(&state_dir)
-            .with_context(|| format!("failed to read {}", state_dir.display()))?
-        {
-            let entry = entry?;
-            let path = entry.path();
-            if let Ok(state) = State::read_from(&path) {
-                if state.get("ROOTFS") == Some(name) {
-                    let container = match state.get("NAME") {
-                        Some(n) => n.to_string(),
-                        None => entry
-                            .file_name()
-                            .to_str()
-                            .unwrap_or("unknown")
-                            .to_string(),
-                    };
-                    bail!("rootfs '{name}' is in use by container '{container}'");
-                }
-            }
-        }
+    // Check that no container is using this rootfs (first pass).
+    check_rootfs_in_use(datadir, name)?;
+
+    // Atomically rename the rootfs to a staging name so that any concurrent
+    // `sdme create --rootfs <name>` will fail with "rootfs not found" instead
+    // of creating a container with a dangling reference.
+    let removing_path = datadir.join("rootfs").join(format!(".{name}.removing"));
+    fs::rename(&rootfs_path, &removing_path).with_context(|| {
+        format!(
+            "failed to rename {} to {}",
+            rootfs_path.display(),
+            removing_path.display()
+        )
+    })?;
+
+    // Re-check after rename: if a container was created between the first check
+    // and the rename, we need to restore the rootfs.
+    if let Err(e) = check_rootfs_in_use(datadir, name) {
+        // Restore the rootfs directory.
+        let _ = fs::rename(&removing_path, &rootfs_path);
+        return Err(e);
     }
 
-    make_removable(&rootfs_path)?;
-    fs::remove_dir_all(&rootfs_path)
-        .with_context(|| format!("failed to remove {}", rootfs_path.display()))?;
+    make_removable(&removing_path)?;
+    fs::remove_dir_all(&removing_path)
+        .with_context(|| format!("failed to remove {}", removing_path.display()))?;
 
     let meta_path = datadir.join("rootfs").join(format!(".{name}.meta"));
     let _ = fs::remove_file(meta_path);
@@ -551,6 +654,33 @@ pub fn remove(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
         eprintln!("removed rootfs '{name}'");
     }
 
+    Ok(())
+}
+
+fn check_rootfs_in_use(datadir: &Path, name: &str) -> Result<()> {
+    let state_dir = datadir.join("state");
+    if !state_dir.is_dir() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(&state_dir)
+        .with_context(|| format!("failed to read {}", state_dir.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        if let Ok(state) = State::read_from(&path) {
+            if state.get("ROOTFS") == Some(name) {
+                let container = match state.get("NAME") {
+                    Some(n) => n.to_string(),
+                    None => entry
+                        .file_name()
+                        .to_str()
+                        .unwrap_or("unknown")
+                        .to_string(),
+                };
+                bail!("rootfs '{name}' is in use by container '{container}'");
+            }
+        }
+    }
     Ok(())
 }
 
@@ -667,7 +797,7 @@ mod tests {
         fs::create_dir(src.path().join("subdir")).unwrap();
         fs::write(src.path().join("subdir/nested.txt"), "nested\n").unwrap();
 
-        import(tmp.path(), src.path(), "test", false, false).unwrap();
+        import(tmp.path(), src.path().to_str().unwrap(), "test", false, false).unwrap();
 
         let rootfs = tmp.path().join("rootfs/test");
         assert!(rootfs.is_dir());
@@ -699,7 +829,7 @@ mod tests {
         fs::write(&suid_path, "suid\n").unwrap();
         fs::set_permissions(&suid_path, fs::Permissions::from_mode(0o4755)).unwrap();
 
-        import(tmp.path(), src.path(), "perms", false, false).unwrap();
+        import(tmp.path(), src.path().to_str().unwrap(), "perms", false, false).unwrap();
 
         let rootfs = tmp.path().join("rootfs/perms");
         let meta = fs::metadata(rootfs.join("script.sh")).unwrap();
@@ -724,7 +854,7 @@ mod tests {
         // Dangling symlink.
         unix_fs::symlink("/nonexistent", src.path().join("dangling")).unwrap();
 
-        import(tmp.path(), src.path(), "sym", false, false).unwrap();
+        import(tmp.path(), src.path().to_str().unwrap(), "sym", false, false).unwrap();
 
         let rootfs = tmp.path().join("rootfs/sym");
         let link_target = fs::read_link(rootfs.join("link.txt")).unwrap();
@@ -739,8 +869,8 @@ mod tests {
         let tmp = TempDataDir::new();
         let src = TempSourceDir::new("dup");
 
-        import(tmp.path(), src.path(), "dup", false, false).unwrap();
-        let err = import(tmp.path(), src.path(), "dup", false, false).unwrap_err();
+        import(tmp.path(), src.path().to_str().unwrap(), "dup", false, false).unwrap();
+        let err = import(tmp.path(), src.path().to_str().unwrap(), "dup", false, false).unwrap_err();
         assert!(
             err.to_string().contains("already exists"),
             "unexpected error: {err}"
@@ -752,7 +882,7 @@ mod tests {
         let tmp = TempDataDir::new();
         let src = TempSourceDir::new("invalid");
 
-        let err = import(tmp.path(), src.path(), "INVALID", false, false).unwrap_err();
+        let err = import(tmp.path(), src.path().to_str().unwrap(), "INVALID", false, false).unwrap_err();
         assert!(
             err.to_string().contains("lowercase"),
             "unexpected error: {err}"
@@ -769,9 +899,10 @@ mod tests {
         ));
         fs::write(&file_path, "not a dir").unwrap();
 
-        let err = import(tmp.path(), &file_path, "test", false, false).unwrap_err();
+        // A regular file is now treated as a tarball, so expect a tar error.
+        let err = import(tmp.path(), file_path.to_str().unwrap(), "test", false, false).unwrap_err();
         assert!(
-            err.to_string().contains("not a directory"),
+            err.to_string().contains("tar"),
             "unexpected error: {err}"
         );
 
@@ -783,7 +914,7 @@ mod tests {
         let tmp = TempDataDir::new();
         let missing = Path::new("/tmp/sdme-test-definitely-nonexistent");
 
-        let err = import(tmp.path(), missing, "test", false, false).unwrap_err();
+        let err = import(tmp.path(), missing.to_str().unwrap(), "test", false, false).unwrap_err();
         assert!(
             err.to_string().contains("does not exist"),
             "unexpected error: {err}"
@@ -801,7 +932,7 @@ mod tests {
         fs::write(unreadable.join("file.txt"), "data").unwrap();
         fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).unwrap();
 
-        let result = import(tmp.path(), src.path(), "fail", false, false);
+        let result = import(tmp.path(), src.path().to_str().unwrap(), "fail", false, false);
         assert!(result.is_err());
 
         // Staging dir should be cleaned up.
@@ -824,7 +955,7 @@ mod tests {
         fs::create_dir(src.path().join("empty")).unwrap();
         fs::create_dir(src.path().join("also-empty")).unwrap();
 
-        import(tmp.path(), src.path(), "empty", false, false).unwrap();
+        import(tmp.path(), src.path().to_str().unwrap(), "empty", false, false).unwrap();
 
         let rootfs = tmp.path().join("rootfs/empty");
         assert!(rootfs.join("empty").is_dir());
@@ -862,7 +993,7 @@ mod tests {
             );
         }
 
-        import(tmp.path(), src.path(), "ts", false, false).unwrap();
+        import(tmp.path(), src.path().to_str().unwrap(), "ts", false, false).unwrap();
 
         let dst_stat = lstat_entry(&tmp.path().join("rootfs/ts/file.txt")).unwrap();
         assert_eq!(dst_stat.st_mtime, 1000000000);
@@ -881,7 +1012,7 @@ mod tests {
         let ret = unsafe { libc::mknod(c_path.as_ptr(), libc::S_IFCHR | 0o666, dev) };
         assert_eq!(ret, 0, "mknod failed (need root)");
 
-        import(tmp.path(), src.path(), "dev", false, false).unwrap();
+        import(tmp.path(), src.path().to_str().unwrap(), "dev", false, false).unwrap();
 
         let dst_stat = lstat_entry(&tmp.path().join("rootfs/dev/null")).unwrap();
         assert_eq!(dst_stat.st_mode & libc::S_IFMT, libc::S_IFCHR);
@@ -900,7 +1031,7 @@ mod tests {
         )
         .unwrap();
 
-        import(tmp.path(), src.path(), "distro", false, false).unwrap();
+        import(tmp.path(), src.path().to_str().unwrap(), "distro", false, false).unwrap();
 
         let meta_path = tmp.path().join("rootfs/.distro.meta");
         assert!(meta_path.exists(), ".meta sidecar should exist");
@@ -915,7 +1046,7 @@ mod tests {
 
         fs::write(src.path().join("hello.txt"), "hi\n").unwrap();
 
-        import(tmp.path(), src.path(), "noos", false, false).unwrap();
+        import(tmp.path(), src.path().to_str().unwrap(), "noos", false, false).unwrap();
 
         let meta_path = tmp.path().join("rootfs/.noos.meta");
         assert!(meta_path.exists(), ".meta sidecar should exist");
@@ -987,8 +1118,8 @@ mod tests {
         )
         .unwrap();
 
-        import(tmp.path(), src_a.path(), "ubuntu", false, false).unwrap();
-        import(tmp.path(), src_b.path(), "debian", false, false).unwrap();
+        import(tmp.path(), src_a.path().to_str().unwrap(), "ubuntu", false, false).unwrap();
+        import(tmp.path(), src_b.path().to_str().unwrap(), "debian", false, false).unwrap();
 
         let entries = list(tmp.path()).unwrap();
         assert_eq!(entries.len(), 2);
@@ -1005,7 +1136,7 @@ mod tests {
 
         // Import a real rootfs.
         let src = TempSourceDir::new("staging");
-        import(tmp.path(), src.path(), "real", false, false).unwrap();
+        import(tmp.path(), src.path().to_str().unwrap(), "real", false, false).unwrap();
 
         // Create a fake staging dir that should be skipped.
         fs::create_dir_all(tmp.path().join("rootfs/.fake.importing")).unwrap();
@@ -1028,7 +1159,7 @@ mod tests {
             libc::chown(c_path.as_ptr(), 1000, 1000);
         }
 
-        import(tmp.path(), src.path(), "own", false, false).unwrap();
+        import(tmp.path(), src.path().to_str().unwrap(), "own", false, false).unwrap();
 
         let dst_stat = lstat_entry(&tmp.path().join("rootfs/own/owned.txt")).unwrap();
         assert_eq!(dst_stat.st_uid, 1000);
@@ -1041,7 +1172,7 @@ mod tests {
         let src = TempSourceDir::new("rm-basic");
         fs::write(src.path().join("file.txt"), "data\n").unwrap();
 
-        import(tmp.path(), src.path(), "rmme", false, false).unwrap();
+        import(tmp.path(), src.path().to_str().unwrap(), "rmme", false, false).unwrap();
         assert!(tmp.path().join("rootfs/rmme").is_dir());
         assert!(tmp.path().join("rootfs/.rmme.meta").exists());
 
@@ -1064,7 +1195,7 @@ mod tests {
     fn test_remove_in_use() {
         let tmp = TempDataDir::new();
         let src = TempSourceDir::new("rm-inuse");
-        import(tmp.path(), src.path(), "inuse", false, false).unwrap();
+        import(tmp.path(), src.path().to_str().unwrap(), "inuse", false, false).unwrap();
 
         // Create a container state file that references this rootfs.
         let state_dir = tmp.path().join("state");
@@ -1089,8 +1220,8 @@ mod tests {
         let src_a = TempSourceDir::new("rm-multi-a");
         let src_b = TempSourceDir::new("rm-multi-b");
 
-        import(tmp.path(), src_a.path(), "alpha", false, false).unwrap();
-        import(tmp.path(), src_b.path(), "beta", false, false).unwrap();
+        import(tmp.path(), src_a.path().to_str().unwrap(), "alpha", false, false).unwrap();
+        import(tmp.path(), src_b.path().to_str().unwrap(), "beta", false, false).unwrap();
         assert_eq!(list(tmp.path()).unwrap().len(), 2);
 
         remove(tmp.path(), "alpha", false).unwrap();
@@ -1099,5 +1230,140 @@ mod tests {
         assert!(list(tmp.path()).unwrap().is_empty());
         assert!(!tmp.path().join("rootfs/alpha").exists());
         assert!(!tmp.path().join("rootfs/beta").exists());
+    }
+
+    #[test]
+    fn test_detect_source_kind_url() {
+        match detect_source_kind("https://example.com/rootfs.tar.gz").unwrap() {
+            SourceKind::Url(u) => assert_eq!(u, "https://example.com/rootfs.tar.gz"),
+            _ => panic!("expected Url"),
+        }
+        match detect_source_kind("http://example.com/rootfs.tar").unwrap() {
+            SourceKind::Url(u) => assert_eq!(u, "http://example.com/rootfs.tar"),
+            _ => panic!("expected Url"),
+        }
+    }
+
+    #[test]
+    fn test_detect_source_kind_directory() {
+        let src = TempSourceDir::new("detect-dir");
+        match detect_source_kind(src.path().to_str().unwrap()).unwrap() {
+            SourceKind::Directory(p) => assert_eq!(p, src.path()),
+            _ => panic!("expected Directory"),
+        }
+    }
+
+    #[test]
+    fn test_detect_source_kind_file() {
+        let file_path = std::env::temp_dir().join(format!(
+            "sdme-test-detect-file-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        fs::write(&file_path, "data").unwrap();
+        match detect_source_kind(file_path.to_str().unwrap()).unwrap() {
+            SourceKind::Tarball(p) => assert_eq!(p, file_path),
+            _ => panic!("expected Tarball"),
+        }
+        let _ = fs::remove_file(&file_path);
+    }
+
+    #[test]
+    fn test_detect_source_kind_not_found() {
+        let err = detect_source_kind("/tmp/sdme-test-definitely-nonexistent").unwrap_err();
+        assert!(
+            err.to_string().contains("does not exist"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_import_tarball_basic() {
+        let tmp = TempDataDir::new();
+        let src = TempSourceDir::new("tarball-gz");
+
+        // Create source files.
+        fs::write(src.path().join("hello.txt"), "hello world\n").unwrap();
+        fs::create_dir(src.path().join("subdir")).unwrap();
+        fs::write(src.path().join("subdir/nested.txt"), "nested\n").unwrap();
+
+        // Create a tarball from the source directory.
+        let tarball = std::env::temp_dir().join(format!(
+            "sdme-test-tarball-{}-{:?}.tar.gz",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let output = Command::new("tar")
+            .args(["czf", tarball.to_str().unwrap(), "-C", src.path().to_str().unwrap(), "."])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "tar create failed");
+
+        import(tmp.path(), tarball.to_str().unwrap(), "tgz", false, false).unwrap();
+
+        let rootfs = tmp.path().join("rootfs/tgz");
+        assert!(rootfs.is_dir());
+        assert_eq!(
+            fs::read_to_string(rootfs.join("hello.txt")).unwrap(),
+            "hello world\n"
+        );
+        assert!(rootfs.join("subdir").is_dir());
+        assert_eq!(
+            fs::read_to_string(rootfs.join("subdir/nested.txt")).unwrap(),
+            "nested\n"
+        );
+
+        let _ = fs::remove_file(&tarball);
+    }
+
+    #[test]
+    fn test_import_tarball_uncompressed() {
+        let tmp = TempDataDir::new();
+        let src = TempSourceDir::new("tarball-plain");
+
+        fs::write(src.path().join("file.txt"), "content\n").unwrap();
+
+        let tarball = std::env::temp_dir().join(format!(
+            "sdme-test-tarball-plain-{}-{:?}.tar",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let output = Command::new("tar")
+            .args(["cf", tarball.to_str().unwrap(), "-C", src.path().to_str().unwrap(), "."])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "tar create failed");
+
+        import(tmp.path(), tarball.to_str().unwrap(), "plain", false, false).unwrap();
+
+        let rootfs = tmp.path().join("rootfs/plain");
+        assert_eq!(
+            fs::read_to_string(rootfs.join("file.txt")).unwrap(),
+            "content\n"
+        );
+
+        let _ = fs::remove_file(&tarball);
+    }
+
+    #[test]
+    fn test_import_tarball_invalid_file() {
+        let tmp = TempDataDir::new();
+        let file_path = std::env::temp_dir().join(format!(
+            "sdme-test-bad-tarball-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        fs::write(&file_path, "this is not a tarball").unwrap();
+
+        let err = import(tmp.path(), file_path.to_str().unwrap(), "bad", false, false).unwrap_err();
+        assert!(
+            err.to_string().contains("tar"),
+            "unexpected error: {err}"
+        );
+
+        // Staging dir should be cleaned up.
+        assert!(!tmp.path().join("rootfs/.bad.importing").exists());
+
+        let _ = fs::remove_file(&file_path);
     }
 }
