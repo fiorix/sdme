@@ -37,10 +37,10 @@ Path to config file.
 Default:
 .IR ~/.config/sdme/sdmerc .
 .SH COMMANDS
-.SS sdme new [\-n \fIname\fR] [\-r \fIfs\fR] [\-t \fIseconds\fR] [\-\-] [\fIcommand\fR...]
+.SS sdme new [\fIname\fR] [\-r \fIfs\fR] [\-t \fIseconds\fR] [\-\-] [\fIcommand\fR...]
 Create, start, and enter a new container.
 If
-.B \-n
+.I name
 is omitted, a name is generated automatically.
 If
 .B \-r
@@ -51,7 +51,7 @@ to override the boot timeout (default: 60 seconds or the
 .B boot_timeout
 config value).
 An optional command overrides the default login shell.
-.SS sdme create [\-n \fIname\fR] [\-r \fIfs\fR]
+.SS sdme create [\fIname\fR] [\-r \fIfs\fR]
 Create a new container without starting it.
 Sets up the overlayfs directories and state file.
 .SS sdme start \fIname\fR [\-t \fIseconds\fR]
@@ -73,13 +73,19 @@ An optional command overrides the default login shell.
 Run a one\-off command in a running container using
 .BR machinectl (1)
 shell.
-.SS sdme stop \fIname\fR...
+.SS sdme stop [\-a] \fIname\fR...
 Stop one or more running containers via D\-Bus (TerminateMachine)
 for a clean shutdown.
-.SS sdme rm \fIname\fR...
+Use
+.B \-a
+to stop all running containers (cannot be combined with names).
+.SS sdme rm [\-a] \fIname\fR...
 Remove one or more containers.
 Running containers are stopped first.
 Deletes the state file and all overlayfs directories.
+Use
+.B \-a
+to remove all containers (cannot be combined with names).
 .SS sdme ps
 List all containers with their status, health, detected OS, and shared directory path.
 Health checks detect broken containers (missing directories, missing rootfs).
@@ -275,7 +281,7 @@ Import an Ubuntu rootfs from a URL and create a container:
 .RS
 .nf
 sdme fs import https://example.com/ubuntu.tar.xz \-n ubuntu
-sdme new \-n mybox \-r ubuntu
+sdme new mybox \-r ubuntu
 .fi
 .RE
 .PP

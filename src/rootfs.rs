@@ -177,7 +177,7 @@ pub fn import(
 /// Validates the name, checks that no container references it, then removes
 /// the fs directory and its `.meta` sidecar.
 ///
-/// To prevent a TOCTOU race where `sdme create --rootfs <name>` could
+/// To prevent a TOCTOU race where `sdme create --fs <name>` could
 /// reference the rootfs between the usage check and the deletion, we
 /// first rename the fs directory to a staging name (atomic on the same
 /// filesystem), then verify no container was created referencing it. If a
@@ -194,7 +194,7 @@ pub fn remove(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
     check_rootfs_in_use(datadir, name)?;
 
     // Atomically rename the fs entry to a staging name so that any concurrent
-    // `sdme create --rootfs <name>` will fail with "fs not found" instead
+    // `sdme create --fs <name>` will fail with "fs not found" instead
     // of creating a container with a dangling reference.
     let removing_path = datadir.join("fs").join(format!(".{name}.removing"));
     fs::rename(&rootfs_path, &removing_path).with_context(|| {
