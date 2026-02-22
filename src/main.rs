@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 use sdme::import::InstallPackages;
-use sdme::{config, containers, rootfs, system_check, systemd, validate_name};
+use sdme::{config, containers, rootfs, system_check, systemd};
 
 #[derive(Parser)]
 #[command(name = "sdme", about = "Lightweight systemd-nspawn containers with overlayfs")]
@@ -30,7 +30,6 @@ enum Command {
     /// Create a new container
     Create {
         /// Container name (generated if not provided)
-        #[arg(short, long)]
         name: Option<String>,
 
         /// Root filesystem to use (host filesystem if not provided)
@@ -68,7 +67,6 @@ enum Command {
     /// Create, start, and enter a new container
     New {
         /// Container name (generated if not provided)
-        #[arg(short, long)]
         name: Option<String>,
 
         /// Root filesystem to use (host filesystem if not provided)
@@ -91,12 +89,20 @@ enum Command {
     Rm {
         /// Container names
         names: Vec<String>,
+
+        /// Remove all containers
+        #[arg(short, long)]
+        all: bool,
     },
 
     /// Stop one or more running containers
     Stop {
         /// Container names
         names: Vec<String>,
+
+        /// Stop all running containers
+        #[arg(short, long)]
+        all: bool,
     },
 
     /// Start a container
@@ -153,11 +159,11 @@ enum ConfigCommand {
 }
 
 fn main() -> Result<()> {
+    let cli = Cli::parse();
+
     if unsafe { libc::geteuid() } != 0 {
         bail!("sdme requires root privileges; run with sudo");
     }
-
-    let cli = Cli::parse();
 
     let config_path = cli.config.as_deref();
 
@@ -214,12 +220,12 @@ fn main() -> Result<()> {
             println!("{name}");
         }
         Command::Exec { name, command } => {
-            validate_name(&name)?;
+            let name = containers::resolve_name(&cfg.datadir, &name)?;
             containers::exec(&cfg.datadir, &name, &command, cfg.join_as_sudo_user, cli.verbose)?;
         }
         Command::Start { name, timeout } => {
             system_check::check_systemd_version(257)?;
-            validate_name(&name)?;
+            let name = containers::resolve_name(&cfg.datadir, &name)?;
             containers::ensure_exists(&cfg.datadir, &name)?;
             eprintln!("starting '{name}'");
             systemd::start(&cfg.datadir, &name, cli.verbose)?;
@@ -230,7 +236,7 @@ fn main() -> Result<()> {
             systemd::wait_for_dbus(&name, remaining, cli.verbose)?;
         }
         Command::Join { name, command } => {
-            validate_name(&name)?;
+            let name = containers::resolve_name(&cfg.datadir, &name)?;
             eprintln!("joining '{name}'");
             containers::join(&cfg.datadir, &name, &command, cfg.join_as_sudo_user, cli.verbose)?;
         }
@@ -238,7 +244,7 @@ fn main() -> Result<()> {
             system_check::check_dependencies(&[
                 ("journalctl", "apt install systemd"),
             ], cli.verbose)?;
-            validate_name(&name)?;
+            let name = containers::resolve_name(&cfg.datadir, &name)?;
             let unit = systemd::service_name(&name);
             let mut cmd = std::process::Command::new("journalctl");
             cmd.args(["-u", &unit]);
@@ -292,16 +298,52 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Command::Rm { names } => {
-            let mut failed = false;
-            for name in &names {
-                if let Err(e) = validate_name(name) {
-                    eprintln!("error: {name}: {e}");
-                    failed = true;
-                    continue;
+        Command::Rm { names, all } => {
+            if all && !names.is_empty() {
+                bail!("--all cannot be combined with container names");
+            }
+            if !all && names.is_empty() {
+                bail!("provide one or more container names, or use --all");
+            }
+            let targets: Vec<String> = if all {
+                let all_names: Vec<String> = containers::list(&cfg.datadir)?
+                    .into_iter()
+                    .map(|e| e.name)
+                    .collect();
+                if all_names.is_empty() {
+                    eprintln!("no containers to remove");
+                    return Ok(());
                 }
+                if unsafe { libc::isatty(libc::STDIN_FILENO) } != 0 {
+                    eprintln!(
+                        "this will remove {} container{}: {}",
+                        all_names.len(),
+                        if all_names.len() == 1 { "" } else { "s" },
+                        all_names.join(", "),
+                    );
+                    eprint!("are you sure? [y/N] ");
+                    let mut answer = String::new();
+                    std::io::stdin().read_line(&mut answer)?;
+                    if !answer.trim().eq_ignore_ascii_case("y") {
+                        bail!("aborted");
+                    }
+                }
+                all_names
+            } else {
+                names
+            };
+            let mut failed = false;
+            for input in &targets {
+                let name = match containers::resolve_name(&cfg.datadir, input) {
+                    Ok(n) => n,
+                    Err(e) => {
+                        eprintln!("error: {input}: {e}");
+                        failed = true;
+                        continue;
+                    }
+                };
                 eprintln!("removing '{name}'");
-                if let Err(e) = containers::remove(&cfg.datadir, name, cli.verbose) {
+                if let Err(e) = containers::remove(&cfg.datadir, &name, cli.verbose) {
                     eprintln!("error: {name}: {e}");
                     failed = true;
                 } else {
@@ -312,21 +354,43 @@ fn main() -> Result<()> {
                 bail!("some containers could not be removed");
             }
         }
-        Command::Stop { names } => {
+        Command::Stop { names, all } => {
+            if all && !names.is_empty() {
+                bail!("--all cannot be combined with container names");
+            }
+            if !all && names.is_empty() {
+                bail!("provide one or more container names, or use --all");
+            }
+            let targets: Vec<String> = if all {
+                containers::list(&cfg.datadir)?
+                    .into_iter()
+                    .filter(|e| e.status == "running")
+                    .map(|e| e.name)
+                    .collect()
+            } else {
+                names
+            };
+            if targets.is_empty() {
+                eprintln!("no running containers to stop");
+                return Ok(());
+            }
             let mut failed = false;
-            for name in &names {
-                if let Err(e) = validate_name(name) {
-                    eprintln!("error: {name}: {e}");
-                    failed = true;
-                    continue;
-                }
-                if let Err(e) = containers::ensure_exists(&cfg.datadir, name) {
+            for input in &targets {
+                let name = match containers::resolve_name(&cfg.datadir, input) {
+                    Ok(n) => n,
+                    Err(e) => {
+                        eprintln!("error: {input}: {e}");
+                        failed = true;
+                        continue;
+                    }
+                };
+                if let Err(e) = containers::ensure_exists(&cfg.datadir, &name) {
                     eprintln!("error: {name}: {e}");
                     failed = true;
                     continue;
                 }
                 eprintln!("stopping '{name}'");
-                if let Err(e) = containers::stop(name, cli.verbose) {
+                if let Err(e) = containers::stop(&name, cli.verbose) {
                     eprintln!("error: {name}: {e}");
                     failed = true;
                 } else {

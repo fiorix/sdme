@@ -208,6 +208,46 @@ fn resolve_rootfs(datadir: &Path, rootfs: Option<&str>) -> Result<PathBuf> {
     }
 }
 
+/// Resolve a (possibly abbreviated) container name to the full name.
+///
+/// Exact matches take priority. If `input` is not an exact match, all
+/// container names that start with `input` are collected. A single match
+/// is returned; zero or multiple matches produce an error.
+pub fn resolve_name(datadir: &Path, input: &str) -> Result<String> {
+    if input.is_empty() {
+        bail!("container name must not be empty");
+    }
+    let state_dir = datadir.join("state");
+    if !state_dir.is_dir() {
+        bail!("no container found matching '{input}'");
+    }
+    let mut names: Vec<String> = Vec::new();
+    for entry in fs::read_dir(&state_dir)
+        .with_context(|| format!("failed to read {}", state_dir.display()))?
+    {
+        let entry = entry?;
+        if entry.file_type()?.is_file() {
+            if let Some(name) = entry.file_name().to_str() {
+                names.push(name.to_string());
+            }
+        }
+    }
+    // Exact match — return immediately.
+    if names.iter().any(|n| n == input) {
+        return Ok(input.to_string());
+    }
+    let mut matches: Vec<&String> = names.iter().filter(|n| n.starts_with(input)).collect();
+    match matches.len() {
+        0 => bail!("no container found matching '{input}'"),
+        1 => Ok(matches.remove(0).clone()),
+        _ => {
+            matches.sort();
+            let list = matches.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ");
+            bail!("ambiguous name '{input}', could match: {list}");
+        }
+    }
+}
+
 pub fn ensure_exists(datadir: &Path, name: &str) -> Result<()> {
     let state_file = datadir.join("state").join(name);
     if !state_file.exists() {
@@ -665,6 +705,59 @@ mod tests {
             err.to_string().contains("does not exist"),
             "unexpected error: {err}"
         );
+    }
+
+    fn create_dummy_container(tmp: &TempDataDir, name: &str) {
+        let state_dir = tmp.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+        fs::write(state_dir.join(name), format!("NAME={name}\n")).unwrap();
+        let container_dir = tmp.path().join("containers").join(name);
+        fs::create_dir_all(container_dir.join("upper")).unwrap();
+        fs::create_dir_all(container_dir.join("work")).unwrap();
+        fs::create_dir_all(container_dir.join("merged")).unwrap();
+        fs::create_dir_all(container_dir.join("shared")).unwrap();
+    }
+
+    #[test]
+    fn test_resolve_name_exact_match() {
+        let tmp = TempDataDir::new();
+        create_dummy_container(&tmp, "foo");
+        create_dummy_container(&tmp, "foobar");
+        assert_eq!(resolve_name(tmp.path(), "foo").unwrap(), "foo");
+    }
+
+    #[test]
+    fn test_resolve_name_unique_prefix() {
+        let tmp = TempDataDir::new();
+        create_dummy_container(&tmp, "ubuntu-dev");
+        assert_eq!(resolve_name(tmp.path(), "ub").unwrap(), "ubuntu-dev");
+    }
+
+    #[test]
+    fn test_resolve_name_ambiguous() {
+        let tmp = TempDataDir::new();
+        create_dummy_container(&tmp, "ubuntu-dev");
+        create_dummy_container(&tmp, "ubuntu-prod");
+        let err = resolve_name(tmp.path(), "ub").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("ambiguous"), "unexpected error: {msg}");
+        assert!(msg.contains("ubuntu-dev"), "unexpected error: {msg}");
+        assert!(msg.contains("ubuntu-prod"), "unexpected error: {msg}");
+    }
+
+    #[test]
+    fn test_resolve_name_no_match() {
+        let tmp = TempDataDir::new();
+        create_dummy_container(&tmp, "foo");
+        let err = resolve_name(tmp.path(), "xyz").unwrap_err();
+        assert!(err.to_string().contains("no container found"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_resolve_name_empty() {
+        let tmp = TempDataDir::new();
+        let err = resolve_name(tmp.path(), "").unwrap_err();
+        assert!(err.to_string().contains("must not be empty"), "unexpected error: {err}");
     }
 
     #[test]
