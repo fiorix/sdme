@@ -300,6 +300,111 @@ mod dbus {
         MachineRemoved,
     }
 
+    /// Get the leader PID of a registered machine via org.freedesktop.machine1.
+    ///
+    /// Returns `None` if the machine is not registered.
+    fn get_machine_leader(conn: &Connection, name: &str) -> Result<Option<u32>> {
+        let manager = Proxy::new(
+            conn,
+            "org.freedesktop.machine1",
+            "/org/freedesktop/machine1",
+            "org.freedesktop.machine1.Manager",
+        )
+        .context("failed to create machine1 manager proxy")?;
+
+        let reply = match manager.call_method("GetMachine", &(name,)) {
+            Ok(r) => r,
+            Err(e) => {
+                let msg = format!("{e:#}");
+                if msg.contains("NoSuchMachine") || msg.contains("No machine") {
+                    return Ok(None);
+                }
+                return Err(e).context("failed to call GetMachine");
+            }
+        };
+
+        let machine_path: zbus::zvariant::OwnedObjectPath = reply
+            .body()
+            .deserialize()
+            .context("failed to deserialize machine path")?;
+
+        let machine_proxy = Proxy::new(
+            conn,
+            "org.freedesktop.machine1",
+            machine_path,
+            "org.freedesktop.machine1.Machine",
+        )
+        .context("failed to create machine proxy")?;
+
+        let leader: u32 = machine_proxy
+            .get_property("Leader")
+            .context("failed to read machine Leader property")?;
+
+        Ok(Some(leader))
+    }
+
+    /// Wait for the container's D-Bus socket to become available.
+    ///
+    /// After `wait_for_boot` returns, machined reports the container as
+    /// "running", but the container's internal systemd may still be
+    /// booting. `machinectl shell` requires the container's D-Bus
+    /// socket, so we poll by attempting to connect to the container's
+    /// system bus via `/proc/{leader}/root/run/dbus/system_bus_socket`
+    /// (the same mechanism `busctl --machine=` uses internally) until
+    /// the connection succeeds or the timeout expires.
+    pub fn wait_for_dbus(
+        name: &str,
+        timeout: std::time::Duration,
+        verbose: bool,
+    ) -> Result<()> {
+        let conn = connect()?;
+        let deadline = std::time::Instant::now() + timeout;
+        let poll_interval = std::time::Duration::from_millis(200);
+
+        let leader = get_machine_leader(&conn, name)?
+            .with_context(|| format!("machine '{name}' not found"))?;
+
+        let socket_path = format!("/proc/{leader}/root/run/dbus/system_bus_socket");
+        let address = format!("unix:path={socket_path}");
+
+        if verbose {
+            eprintln!("waiting for container D-Bus at {socket_path}");
+        }
+
+        loop {
+            match zbus::blocking::connection::Builder::address(address.as_str()) {
+                Ok(builder) => match builder.build() {
+                    Ok(_) => {
+                        if verbose {
+                            eprintln!("container '{name}' D-Bus is ready");
+                        }
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        if verbose {
+                            eprintln!("container D-Bus not ready: {e}");
+                        }
+                    }
+                },
+                Err(e) => {
+                    if verbose {
+                        eprintln!("invalid D-Bus address: {e}");
+                    }
+                }
+            }
+
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                bail!(
+                    "timed out waiting for D-Bus in container '{name}' ({}s)",
+                    timeout.as_secs()
+                );
+            }
+
+            std::thread::sleep(poll_interval.min(remaining));
+        }
+    }
+
     /// Terminate a machine via org.freedesktop.machine1.
     ///
     /// Calls `TerminateMachine(name)` on the machined Manager, which
@@ -553,6 +658,10 @@ pub fn is_active(name: &str) -> Result<bool> {
 
 pub fn wait_for_boot(name: &str, timeout: std::time::Duration, verbose: bool) -> Result<()> {
     dbus::wait_for_boot(name, timeout, verbose)
+}
+
+pub fn wait_for_dbus(name: &str, timeout: std::time::Duration, verbose: bool) -> Result<()> {
+    dbus::wait_for_dbus(name, timeout, verbose)
 }
 
 pub fn terminate_machine(name: &str) -> Result<()> {

@@ -218,12 +218,11 @@ fn main() -> Result<()> {
             containers::ensure_exists(&cfg.datadir, &name)?;
             eprintln!("starting '{name}'");
             systemd::start(&cfg.datadir, &name, cli.verbose)?;
-            let boot_timeout = timeout.unwrap_or(cfg.boot_timeout);
-            systemd::wait_for_boot(
-                &name,
-                std::time::Duration::from_secs(boot_timeout),
-                cli.verbose,
-            )?;
+            let boot_timeout = std::time::Duration::from_secs(timeout.unwrap_or(cfg.boot_timeout));
+            let boot_start = std::time::Instant::now();
+            systemd::wait_for_boot(&name, boot_timeout, cli.verbose)?;
+            let remaining = boot_timeout.saturating_sub(boot_start.elapsed());
+            systemd::wait_for_dbus(&name, remaining, cli.verbose)?;
         }
         Command::Join { name, command } => {
             validate_name(&name)?;
@@ -259,12 +258,11 @@ fn main() -> Result<()> {
             eprintln!("starting '{name}'");
             systemd::start(&cfg.datadir, &name, cli.verbose)?;
 
-            let boot_timeout = timeout.unwrap_or(cfg.boot_timeout);
-            systemd::wait_for_boot(
-                &name,
-                std::time::Duration::from_secs(boot_timeout),
-                cli.verbose,
-            )?;
+            let boot_timeout = std::time::Duration::from_secs(timeout.unwrap_or(cfg.boot_timeout));
+            let boot_start = std::time::Instant::now();
+            systemd::wait_for_boot(&name, boot_timeout, cli.verbose)?;
+            let remaining = boot_timeout.saturating_sub(boot_start.elapsed());
+            systemd::wait_for_dbus(&name, remaining, cli.verbose)?;
             eprintln!("joining '{name}'");
             containers::join(&cfg.datadir, &name, &command, cli.verbose)?;
         }
