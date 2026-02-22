@@ -134,6 +134,16 @@ fn do_create(datadir: &Path, name: &str, rootfs: &Path, verbose: bool) -> Result
     let systemd_unit_dir = etc_dir.join("systemd").join("system");
     fs::create_dir_all(&systemd_unit_dir)
         .with_context(|| format!("failed to create {}", systemd_unit_dir.display()))?;
+
+    // For host-rootfs containers, mask host-specific .mount and .swap
+    // units from /etc/systemd/system/ so they don't leak through overlayfs.
+    // These units reference block devices and paths (e.g. /data) that don't
+    // exist inside the container, causing "Failed to isolate default target"
+    // when systemd can't resolve their dependencies at boot.
+    if rootfs == Path::new("/") {
+        mask_host_mount_units(&systemd_unit_dir, verbose)?;
+    }
+
     let resolved_mask = systemd_unit_dir.join("systemd-resolved.service");
     symlink("/dev/null", &resolved_mask)
         .with_context(|| format!("failed to mask systemd-resolved at {}", resolved_mask.display()))?;
@@ -148,8 +158,28 @@ fn do_create(datadir: &Path, name: &str, rootfs: &Path, verbose: bool) -> Result
     fs::write(&resolv_path, "# placeholder — replaced by systemd-nspawn at boot\n")
         .with_context(|| format!("failed to write {}", resolv_path.display()))?;
 
+    // Write an empty /etc/machine-id so the container gets a unique
+    // transient machine ID at boot instead of inheriting the host's.
+    // When host and container share the same machine-id, systemd-nspawn
+    // refuses to link journals and systemd inside the container may
+    // behave unexpectedly. An empty file tells systemd to generate a
+    // transient ID during early boot (ConditionFirstBoot / systemd-machine-id-setup).
+    let machine_id_path = etc_dir.join("machine-id");
+    fs::write(&machine_id_path, "")
+        .with_context(|| format!("failed to write {}", machine_id_path.display()))?;
+
+    // Write a minimal /etc/fstab so systemd-fstab-generator inside the
+    // container does not create mount units from the host's fstab. When
+    // the lower layer is the host rootfs, the host's fstab entries (e.g.
+    // /data) leak through overlayfs and the container's systemd tries to
+    // mount them, failing with "Unit data.mount not found" and preventing
+    // boot.
+    let fstab_path = etc_dir.join("fstab");
+    fs::write(&fstab_path, "# empty — host mounts not applicable in container\n")
+        .with_context(|| format!("failed to write {}", fstab_path.display()))?;
+
     if verbose {
-        eprintln!("wrote hostname, hosts, and resolv.conf files; masked systemd-resolved");
+        eprintln!("wrote hostname, hosts, resolv.conf, machine-id, and fstab files; masked systemd-resolved");
     }
 
     let rootfs_value = if rootfs == Path::new("/") {
@@ -286,6 +316,47 @@ fn set_dir_permissions(path: &Path, mode: u32) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(mode))
         .with_context(|| format!("failed to set permissions on {}", path.display()))
+}
+
+/// Mask host-specific .mount and .swap units from `/etc/systemd/system/`
+/// by creating `/dev/null` symlinks in the overlayfs upper layer.
+///
+/// Scans the host's `/etc/systemd/system/` for regular files ending in
+/// `.mount`, `.swap`, or `.automount` and masks each one. Masking a unit
+/// makes systemd skip it even if it appears in a target's Wants/Requires.
+fn mask_host_mount_units(upper_systemd_dir: &Path, verbose: bool) -> Result<()> {
+    let host_dir = Path::new("/etc/systemd/system");
+    if !host_dir.is_dir() {
+        return Ok(());
+    }
+    let entries = fs::read_dir(host_dir)
+        .with_context(|| format!("failed to read {}", host_dir.display()))?;
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name_str = match name.to_str() {
+            Some(s) => s,
+            None => continue,
+        };
+        // Only mask mount/swap/automount unit files (not symlinks or directories).
+        let dominated = name_str.ends_with(".mount")
+            || name_str.ends_with(".swap")
+            || name_str.ends_with(".automount");
+        if !dominated {
+            continue;
+        }
+        let ft = entry.file_type()?;
+        if !ft.is_file() {
+            continue;
+        }
+        let mask_path = upper_systemd_dir.join(name_str);
+        symlink("/dev/null", &mask_path)
+            .with_context(|| format!("failed to mask {name_str}"))?;
+        if verbose {
+            eprintln!("masked host unit: {name_str}");
+        }
+    }
+    Ok(())
 }
 
 pub fn remove(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
