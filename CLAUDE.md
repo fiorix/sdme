@@ -44,7 +44,7 @@ The project is a single Rust binary (`src/main.rs`) backed by a shared library (
 | `sdme rm` | Remove containers (stops if running, deletes state + files) |
 | `sdme ps` | List containers with status, health, and shared directory |
 | `sdme logs` | View container logs (exec's `journalctl`) |
-| `sdme rootfs import` | Import a rootfs from a directory, tarball, or URL |
+| `sdme rootfs import` | Import a rootfs from a directory, tarball, URL, or OCI image |
 | `sdme rootfs ls` | List imported root filesystems |
 | `sdme rootfs rm` | Remove imported root filesystems |
 | `sdme config get/set` | View or modify configuration |
@@ -58,7 +58,8 @@ The project is a single Rust binary (`src/main.rs`) backed by a shared library (
 | `src/containers.rs` | Container create/remove/join/exec/stop/list, overlayfs directory management |
 | `src/systemd.rs` | D-Bus helpers (start/status), template unit generation, env files |
 | `src/system_check.rs` | Version checks (systemd), dependency checks (`find_program`) |
-| `src/rootfs.rs` | Rootfs import (directory copy), listing, removal |
+| `src/rootfs.rs` | Rootfs listing, removal, os-release parsing, distro detection |
+| `src/import.rs` | Rootfs import: directory copy, tarball extraction, URL download, OCI image extraction |
 | `src/config.rs` | Config file loading/saving (`~/.config/sdme/sdmerc`) |
 
 ### Rust Dependencies
@@ -72,7 +73,10 @@ The project is a single Rust binary (`src/main.rs`) backed by a shared library (
 - `flate2` — gzip decompression
 - `bzip2` — bzip2 decompression
 - `xz2` — xz/lzma decompression
+- `zstd` — zstd decompression
+- `serde_json` — JSON parsing (OCI image manifests)
 - `ureq` — HTTP client for URL downloads (blocking, rustls TLS)
+- `sha2` — SHA-256 hashing (dev-dependency, used in OCI tests)
 
 ### External Dependencies
 
@@ -91,4 +95,4 @@ Dependencies are checked at runtime before use via `system_check::check_dependen
 - **Datadir**: always `/var/lib/sdme`.
 - **Container management**: `join` and `exec` use `machinectl shell`; `stop` uses `machinectl poweroff` for clean shutdown.
 - **D-Bus**: used for `start_unit`, `daemon_reload`, `is_unit_active`, `get_systemd_version`. Always system bus.
-- **Rootfs import sources**: `sdme rootfs import` auto-detects the source type: URL prefix (`http://`/`https://`) → download + tarball extraction; existing directory → directory copy; existing file → tarball extraction via native Rust crates (`tar`, `flate2`, `bzip2`, `xz2`) with magic-byte compression detection.
+- **Rootfs import sources**: `sdme rootfs import` auto-detects the source type: URL prefix (`http://`/`https://`) → download + tarball extraction; existing directory → directory copy; existing file → tarball extraction via native Rust crates (`tar`, `flate2`, `bzip2`, `xz2`, `zstd`) with magic-byte compression detection. OCI container images (`.oci.tar.xz`, etc.) are auto-detected after tarball extraction by checking for an `oci-layout` file; the manifest chain is walked and filesystem layers are extracted in order with whiteout marker handling.
