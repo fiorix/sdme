@@ -52,6 +52,7 @@ enum SourceKind {
     Directory(PathBuf),
     Tarball(PathBuf),
     QcowImage(PathBuf),
+    RawImage(PathBuf),
     Url(String),
 }
 
@@ -70,7 +71,125 @@ fn is_qcow2(path: &Path) -> bool {
     false
 }
 
-/// Detect whether the source is a URL, directory, qcow2 image, tarball file, or invalid.
+/// Represents the meaningful file types for downloaded files.
+/// OCI is not applicable here — it is detected *after* tarball extraction.
+#[derive(Debug, PartialEq)]
+enum DownloadedFileKind {
+    Tarball,
+    QcowImage,
+    RawImage,
+}
+
+/// Detect file kind from the HTTP Content-Type header (tier 1).
+/// Returns `None` for unknown or overly generic types like `application/octet-stream`.
+fn detect_kind_from_content_type(ct: &str) -> Option<DownloadedFileKind> {
+    match ct {
+        "application/x-tar"
+        | "application/gzip"
+        | "application/x-gzip"
+        | "application/x-bzip2"
+        | "application/x-xz"
+        | "application/zstd"
+        | "application/x-zstd"
+        | "application/x-compressed-tar" => Some(DownloadedFileKind::Tarball),
+        "application/x-qemu-disk" => Some(DownloadedFileKind::QcowImage),
+        "application/x-raw-disk-image" => Some(DownloadedFileKind::RawImage),
+        _ => None,
+    }
+}
+
+/// Detect file kind from URL path extension (tier 2).
+/// Strips query string and fragment before inspecting extensions.
+fn detect_kind_from_url(url: &str) -> Option<DownloadedFileKind> {
+    // Strip query string and fragment.
+    let path = url.split('?').next().unwrap_or(url);
+    let path = path.split('#').next().unwrap_or(path);
+
+    // Extract the filename from the last path segment.
+    let filename = path.rsplit('/').next().unwrap_or(path).to_lowercase();
+
+    if filename.ends_with(".qcow2") {
+        return Some(DownloadedFileKind::QcowImage);
+    }
+
+    // Raw disk images, including compressed variants.
+    let raw_extensions = [
+        ".raw", ".raw.gz", ".raw.bz2", ".raw.xz", ".raw.zst",
+        ".img", ".img.gz", ".img.bz2", ".img.xz", ".img.zst",
+    ];
+    for ext in &raw_extensions {
+        if filename.ends_with(ext) {
+            return Some(DownloadedFileKind::RawImage);
+        }
+    }
+
+    let tarball_extensions = [
+        ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz", ".tar.zst", ".tzst",
+    ];
+    for ext in &tarball_extensions {
+        if filename.ends_with(ext) {
+            return Some(DownloadedFileKind::Tarball);
+        }
+    }
+
+    // Bare compression extensions — common for compressed tarballs named like `rootfs.gz`.
+    let compression_extensions = [".gz", ".bz2", ".xz", ".zst"];
+    for ext in &compression_extensions {
+        if filename.ends_with(ext) {
+            return Some(DownloadedFileKind::Tarball);
+        }
+    }
+
+    None
+}
+
+/// Check if a file looks like a raw disk image by reading the MBR boot signature
+/// (bytes 0x55, 0xAA at offset 510) or GPT magic ("EFI PART" at offset 512).
+fn is_raw_disk_image(path: &Path) -> bool {
+    let Ok(mut file) = File::open(path) else {
+        return false;
+    };
+    let mut buf = [0u8; 520];
+    let n = file.read(&mut buf).unwrap_or(0);
+    if n < 512 {
+        return false;
+    }
+    // MBR signature at offset 510-511.
+    if buf[510] == 0x55 && buf[511] == 0xAA {
+        return true;
+    }
+    // GPT magic "EFI PART" at offset 512 (start of LBA 1).
+    if n >= 520 && &buf[512..520] == b"EFI PART" {
+        return true;
+    }
+    false
+}
+
+/// Detect file kind from magic bytes (tier 3, fallback).
+/// Checks for QCOW2 magic, then raw disk image signatures; defaults to Tarball.
+fn detect_kind_from_magic(path: &Path) -> DownloadedFileKind {
+    if is_qcow2(path) {
+        DownloadedFileKind::QcowImage
+    } else if is_raw_disk_image(path) {
+        DownloadedFileKind::RawImage
+    } else {
+        DownloadedFileKind::Tarball
+    }
+}
+
+/// Raw disk image extensions (uncompressed and compressed variants).
+const RAW_IMAGE_EXTENSIONS: &[&str] = &[
+    ".raw", ".raw.gz", ".raw.bz2", ".raw.xz", ".raw.zst",
+    ".img", ".img.gz", ".img.bz2", ".img.xz", ".img.zst",
+];
+
+/// Check if a filename has a raw disk image extension.
+fn has_raw_image_extension(filename: &str) -> bool {
+    let lower = filename.to_lowercase();
+    RAW_IMAGE_EXTENSIONS.iter().any(|ext| lower.ends_with(ext))
+}
+
+/// Detect whether the source is a URL, directory, qcow2 image, raw image, tarball file, or invalid.
 fn detect_source_kind(source: &str) -> Result<SourceKind> {
     if source.starts_with("http://") || source.starts_with("https://") {
         return Ok(SourceKind::Url(source.to_string()));
@@ -84,6 +203,16 @@ fn detect_source_kind(source: &str) -> Result<SourceKind> {
         if is_qcow2(path) {
             return Ok(SourceKind::QcowImage(path.to_path_buf()));
         }
+        // Detect raw images by extension (magic byte detection doesn't work for
+        // compressed raw images, and uncompressed raw images share boot sector
+        // signatures with many file types).
+        if has_raw_image_extension(source) {
+            return Ok(SourceKind::RawImage(path.to_path_buf()));
+        }
+        // Fall back to magic-byte detection for raw images without a known extension.
+        if is_raw_disk_image(path) {
+            return Ok(SourceKind::RawImage(path.to_path_buf()));
+        }
         return Ok(SourceKind::Tarball(path.to_path_buf()));
     }
     if !path.exists() {
@@ -94,6 +223,7 @@ fn detect_source_kind(source: &str) -> Result<SourceKind> {
 
 // --- Compression ---
 
+#[derive(Debug)]
 enum Compression {
     None,
     Gzip,
@@ -751,7 +881,8 @@ fn build_http_agent(verbose: bool) -> Result<ureq::Agent> {
 }
 
 /// Download a URL to a local file, streaming to constant memory.
-fn download_file(url: &str, dest: &Path, verbose: bool) -> Result<()> {
+/// Returns the Content-Type mime type from the response, if present.
+fn download_file(url: &str, dest: &Path, verbose: bool) -> Result<Option<String>> {
     if verbose {
         eprintln!("downloading {url}");
     }
@@ -762,6 +893,7 @@ fn download_file(url: &str, dest: &Path, verbose: bool) -> Result<()> {
         .call()
         .with_context(|| format!("failed to download {url}"))?;
 
+    let content_type = response.body().mime_type().map(|s| s.to_string());
     let mut reader = response.into_body().into_reader();
     let mut file =
         fs::File::create(dest).with_context(|| format!("failed to create {}", dest.display()))?;
@@ -785,10 +917,13 @@ fn download_file(url: &str, dest: &Path, verbose: bool) -> Result<()> {
         eprintln!("downloaded {} bytes to {}", total, dest.display());
     }
 
-    Ok(())
+    Ok(content_type)
 }
 
-/// Download a URL to a temp file and extract it as a tarball.
+/// Download a URL to a temp file and import it using 3-tier file type detection:
+/// 1. Content-Type header (highest priority)
+/// 2. URL filename extension
+/// 3. Magic bytes (fallback)
 fn import_url(
     url: &str,
     staging_dir: &Path,
@@ -799,8 +934,31 @@ fn import_url(
     let temp_file = rootfs_dir.join(format!(".{name}.download"));
 
     let result = (|| -> Result<()> {
-        download_file(url, &temp_file, verbose)?;
-        import_tarball(&temp_file, staging_dir, verbose)
+        let content_type = download_file(url, &temp_file, verbose)?;
+
+        // Tier 1: Content-Type header.
+        let kind = content_type
+            .as_deref()
+            .and_then(detect_kind_from_content_type);
+
+        // Tier 2: URL filename extension.
+        let kind = kind.or_else(|| detect_kind_from_url(url));
+
+        // Tier 3: Magic bytes (fallback).
+        let kind = kind.unwrap_or_else(|| detect_kind_from_magic(&temp_file));
+
+        if verbose {
+            eprintln!(
+                "detected file type: {:?} (content-type: {:?})",
+                kind, content_type
+            );
+        }
+
+        match kind {
+            DownloadedFileKind::QcowImage => import_qcow2(&temp_file, staging_dir, verbose),
+            DownloadedFileKind::RawImage => import_raw(&temp_file, staging_dir, verbose),
+            DownloadedFileKind::Tarball => import_tarball(&temp_file, staging_dir, verbose),
+        }
     })();
 
     // Clean up temp file on both success and failure.
@@ -1006,13 +1164,13 @@ fn find_free_nbd_device() -> Result<PathBuf> {
     bail!("no free nbd device found (all /dev/nbd0..15 are in use)")
 }
 
-/// Find the root partition on an nbd device.
+/// Find the root partition on a block device (nbd or loop).
 ///
-/// Looks for partition devices (`/dev/nbdNpM`) and picks the largest one,
+/// Looks for partition devices (`/dev/{dev}pM`) and picks the largest one,
 /// which is typically the root filesystem. If no partitions are found,
 /// tries the whole device (for unpartitioned disk images).
-fn find_root_partition(nbd_dev: &Path, verbose: bool) -> Result<PathBuf> {
-    let dev_name = nbd_dev
+fn find_root_partition(block_dev: &Path, verbose: bool) -> Result<PathBuf> {
+    let dev_name = block_dev
         .file_name()
         .unwrap()
         .to_string_lossy()
@@ -1052,12 +1210,206 @@ fn find_root_partition(nbd_dev: &Path, verbose: bool) -> Result<PathBuf> {
         if verbose {
             eprintln!("no partitions found, trying whole device");
         }
-        return Ok(nbd_dev.to_path_buf());
+        return Ok(block_dev.to_path_buf());
     }
 
     // Pick the largest partition (usually the root filesystem).
     partitions.sort_by(|a, b| b.1.cmp(&a.1));
     Ok(partitions[0].0.clone())
+}
+
+// --- Raw disk image import ---
+
+/// RAII guard for a loop device. Detaches on drop.
+struct LoopGuard {
+    device: PathBuf,
+    active: bool,
+}
+
+impl LoopGuard {
+    fn new() -> Self {
+        Self {
+            device: PathBuf::new(),
+            active: false,
+        }
+    }
+
+    fn set_active(&mut self, device: PathBuf) {
+        self.device = device;
+        self.active = true;
+    }
+
+    fn detach(&mut self) {
+        if self.active {
+            let _ = Command::new("losetup")
+                .args(["--detach"])
+                .arg(&self.device)
+                .status();
+            self.active = false;
+        }
+    }
+}
+
+impl Drop for LoopGuard {
+    fn drop(&mut self) {
+        self.detach();
+    }
+}
+
+/// Decompress a file in-place if it is compressed, returning the path to the
+/// uncompressed file. For uncompressed files, returns the original path unchanged.
+/// For compressed files, decompresses to a `.decompressed` sibling file and returns
+/// that path.
+fn decompress_if_needed(path: &Path, verbose: bool) -> Result<PathBuf> {
+    let compression = detect_compression(path)?;
+    match compression {
+        Compression::None => Ok(path.to_path_buf()),
+        _ => {
+            let decompressed = path.with_extension("decompressed");
+            if verbose {
+                eprintln!(
+                    "decompressing {} ({:?})",
+                    path.display(),
+                    compression,
+                );
+            }
+            let input = File::open(path)
+                .with_context(|| format!("failed to open {}", path.display()))?;
+            let mut output = File::create(&decompressed)
+                .with_context(|| format!("failed to create {}", decompressed.display()))?;
+
+            let mut reader: Box<dyn std::io::Read> = match compression {
+                Compression::Gzip => {
+                    Box::new(flate2::read::GzDecoder::new(input))
+                }
+                Compression::Bzip2 => {
+                    Box::new(bzip2::read::BzDecoder::new(input))
+                }
+                Compression::Xz => {
+                    Box::new(xz2::read::XzDecoder::new(input))
+                }
+                Compression::Zstd => {
+                    Box::new(
+                        zstd::stream::read::Decoder::new(input)
+                            .context("failed to create zstd decoder")?,
+                    )
+                }
+                Compression::None => unreachable!(),
+            };
+
+            let mut buf = [0u8; 65536];
+            loop {
+                check_interrupted()?;
+                let n = reader.read(&mut buf)
+                    .context("failed to read during decompression")?;
+                if n == 0 {
+                    break;
+                }
+                std::io::Write::write_all(&mut output, &buf[..n])
+                    .context("failed to write during decompression")?;
+            }
+
+            if verbose {
+                let meta = fs::metadata(&decompressed)?;
+                eprintln!("decompressed to {} ({} bytes)", decompressed.display(), meta.len());
+            }
+            Ok(decompressed)
+        }
+    }
+}
+
+/// Import a raw disk image by mounting it via a loop device and copying the filesystem tree.
+///
+/// Steps:
+/// 1. Decompress the image if compressed
+/// 2. Attach via `losetup --partscan --read-only --find --show`
+/// 3. Discover and mount the root partition
+/// 4. Copy the mounted tree to the staging directory
+/// 5. Clean up (unmount, detach loop, remove temp files)
+fn import_raw(image: &Path, staging_dir: &Path, verbose: bool) -> Result<()> {
+    if !verbose {
+        eprintln!("warning: raw image imports can be slow; use -v to see progress");
+    } else {
+        eprintln!("importing raw disk image: {}", image.display());
+    }
+
+    // Decompress if needed.
+    let decompressed = decompress_if_needed(image, verbose)?;
+    let cleanup_decompressed = decompressed != image;
+
+    let result = (|| -> Result<()> {
+        // Attach the image as a loop device.
+        let output = Command::new("losetup")
+            .args(["--partscan", "--read-only", "--find", "--show"])
+            .arg(&decompressed)
+            .output()
+            .context("failed to run losetup")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("losetup failed: {stderr}");
+        }
+        let loop_dev = PathBuf::from(
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        );
+
+        let mut loop_guard = LoopGuard::new();
+        loop_guard.set_active(loop_dev.clone());
+
+        if verbose {
+            eprintln!("attached loop device: {}", loop_dev.display());
+        }
+
+        check_interrupted()?;
+
+        // Small delay for partition devices to appear.
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        check_interrupted()?;
+
+        // Find the root partition device.
+        let part_dev = find_root_partition(&loop_dev, verbose)?;
+        if verbose {
+            eprintln!("mounting partition: {}", part_dev.display());
+        }
+
+        // Create a temporary mount point.
+        let mut mount_guard = MountGuard::new();
+        let mount_dir = staging_dir.with_file_name(format!(
+            ".{}.raw-mount",
+            staging_dir.file_name().unwrap().to_string_lossy()
+        ));
+        fs::create_dir_all(&mount_dir)
+            .with_context(|| format!("failed to create mount point {}", mount_dir.display()))?;
+
+        // Mount the partition read-only.
+        let status = Command::new("mount")
+            .args(["-o", "ro"])
+            .arg(&part_dev)
+            .arg(&mount_dir)
+            .status()
+            .context("failed to run mount")?;
+        if !status.success() {
+            let _ = fs::remove_dir(&mount_dir);
+            bail!("mount failed for {}", part_dev.display());
+        }
+        mount_guard.set_mounted(mount_dir);
+
+        // Copy the tree. Guards handle cleanup on error or interruption.
+        let result = do_import(&mount_guard.path, staging_dir, verbose);
+
+        // Explicit cleanup in order (unmount before loop detach).
+        mount_guard.unmount();
+        loop_guard.detach();
+
+        result
+    })();
+
+    // Clean up decompressed temp file.
+    if cleanup_decompressed {
+        let _ = fs::remove_file(&decompressed);
+    }
+
+    result
 }
 
 // --- Shared helpers ---
@@ -1404,6 +1756,7 @@ pub fn run(
         SourceKind::Directory(ref dir) => do_import(dir, &staging_dir, verbose),
         SourceKind::Tarball(ref path) => import_tarball(path, &staging_dir, verbose),
         SourceKind::QcowImage(ref path) => import_qcow2(path, &staging_dir, verbose),
+        SourceKind::RawImage(ref path) => import_raw(path, &staging_dir, verbose),
         SourceKind::Url(ref url) => import_url(url, &staging_dir, &rootfs_dir, name, verbose),
     };
 
@@ -2779,5 +3132,304 @@ mod tests {
 
         let _ = fs::remove_dir_all(&dest);
         let _ = fs::remove_file(&tarball_path);
+    }
+
+    #[test]
+    fn test_detect_kind_from_content_type() {
+        // Known tarball types.
+        assert_eq!(
+            detect_kind_from_content_type("application/x-tar"),
+            Some(DownloadedFileKind::Tarball)
+        );
+        assert_eq!(
+            detect_kind_from_content_type("application/gzip"),
+            Some(DownloadedFileKind::Tarball)
+        );
+        assert_eq!(
+            detect_kind_from_content_type("application/x-gzip"),
+            Some(DownloadedFileKind::Tarball)
+        );
+        assert_eq!(
+            detect_kind_from_content_type("application/x-bzip2"),
+            Some(DownloadedFileKind::Tarball)
+        );
+        assert_eq!(
+            detect_kind_from_content_type("application/x-xz"),
+            Some(DownloadedFileKind::Tarball)
+        );
+        assert_eq!(
+            detect_kind_from_content_type("application/zstd"),
+            Some(DownloadedFileKind::Tarball)
+        );
+        assert_eq!(
+            detect_kind_from_content_type("application/x-zstd"),
+            Some(DownloadedFileKind::Tarball)
+        );
+        assert_eq!(
+            detect_kind_from_content_type("application/x-compressed-tar"),
+            Some(DownloadedFileKind::Tarball)
+        );
+
+        // QCOW2 type.
+        assert_eq!(
+            detect_kind_from_content_type("application/x-qemu-disk"),
+            Some(DownloadedFileKind::QcowImage)
+        );
+
+        // Raw disk image type.
+        assert_eq!(
+            detect_kind_from_content_type("application/x-raw-disk-image"),
+            Some(DownloadedFileKind::RawImage)
+        );
+
+        // Generic/unknown types return None.
+        assert_eq!(detect_kind_from_content_type("application/octet-stream"), None);
+        assert_eq!(detect_kind_from_content_type("text/html"), None);
+        assert_eq!(detect_kind_from_content_type(""), None);
+    }
+
+    #[test]
+    fn test_detect_kind_from_url() {
+        // Tarball URLs.
+        assert_eq!(
+            detect_kind_from_url("https://example.com/rootfs.tar"),
+            Some(DownloadedFileKind::Tarball)
+        );
+        assert_eq!(
+            detect_kind_from_url("https://example.com/rootfs.tar.gz"),
+            Some(DownloadedFileKind::Tarball)
+        );
+        assert_eq!(
+            detect_kind_from_url("https://example.com/rootfs.tgz"),
+            Some(DownloadedFileKind::Tarball)
+        );
+        assert_eq!(
+            detect_kind_from_url("https://example.com/rootfs.tar.bz2"),
+            Some(DownloadedFileKind::Tarball)
+        );
+        assert_eq!(
+            detect_kind_from_url("https://example.com/rootfs.tbz2"),
+            Some(DownloadedFileKind::Tarball)
+        );
+        assert_eq!(
+            detect_kind_from_url("https://example.com/rootfs.tar.xz"),
+            Some(DownloadedFileKind::Tarball)
+        );
+        assert_eq!(
+            detect_kind_from_url("https://example.com/rootfs.txz"),
+            Some(DownloadedFileKind::Tarball)
+        );
+        assert_eq!(
+            detect_kind_from_url("https://example.com/rootfs.tar.zst"),
+            Some(DownloadedFileKind::Tarball)
+        );
+        assert_eq!(
+            detect_kind_from_url("https://example.com/rootfs.tzst"),
+            Some(DownloadedFileKind::Tarball)
+        );
+
+        // Bare compression extensions.
+        assert_eq!(
+            detect_kind_from_url("https://example.com/rootfs.gz"),
+            Some(DownloadedFileKind::Tarball)
+        );
+        assert_eq!(
+            detect_kind_from_url("https://example.com/rootfs.xz"),
+            Some(DownloadedFileKind::Tarball)
+        );
+
+        // QCOW2 URLs.
+        assert_eq!(
+            detect_kind_from_url("https://example.com/disk.qcow2"),
+            Some(DownloadedFileKind::QcowImage)
+        );
+
+        // Raw disk image URLs.
+        assert_eq!(
+            detect_kind_from_url("https://example.com/disk.raw"),
+            Some(DownloadedFileKind::RawImage)
+        );
+        assert_eq!(
+            detect_kind_from_url("https://example.com/disk.img"),
+            Some(DownloadedFileKind::RawImage)
+        );
+
+        // Compressed raw disk image URLs.
+        assert_eq!(
+            detect_kind_from_url("https://example.com/disk.raw.xz"),
+            Some(DownloadedFileKind::RawImage)
+        );
+        assert_eq!(
+            detect_kind_from_url("https://example.com/disk.raw.gz"),
+            Some(DownloadedFileKind::RawImage)
+        );
+        assert_eq!(
+            detect_kind_from_url("https://example.com/disk.img.zst"),
+            Some(DownloadedFileKind::RawImage)
+        );
+
+        // URLs with query strings and fragments.
+        assert_eq!(
+            detect_kind_from_url("https://example.com/rootfs.tar.gz?token=abc"),
+            Some(DownloadedFileKind::Tarball)
+        );
+        assert_eq!(
+            detect_kind_from_url("https://example.com/disk.qcow2#section"),
+            Some(DownloadedFileKind::QcowImage)
+        );
+        assert_eq!(
+            detect_kind_from_url("https://example.com/disk.raw?token=abc"),
+            Some(DownloadedFileKind::RawImage)
+        );
+
+        // Case insensitivity.
+        assert_eq!(
+            detect_kind_from_url("https://example.com/ROOTFS.TAR.GZ"),
+            Some(DownloadedFileKind::Tarball)
+        );
+        assert_eq!(
+            detect_kind_from_url("https://example.com/DISK.QCOW2"),
+            Some(DownloadedFileKind::QcowImage)
+        );
+        assert_eq!(
+            detect_kind_from_url("https://example.com/DISK.RAW"),
+            Some(DownloadedFileKind::RawImage)
+        );
+
+        // Unknown extensions.
+        assert_eq!(detect_kind_from_url("https://example.com/file.zip"), None);
+        assert_eq!(detect_kind_from_url("https://example.com/file"), None);
+        assert_eq!(
+            detect_kind_from_url("https://example.com/download"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_detect_kind_from_magic_tarball() {
+        let path = std::env::temp_dir().join(format!(
+            "sdme-test-magic-tar-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        // Write non-QCOW2 content — should be detected as tarball.
+        fs::write(&path, b"not a qcow2 file").unwrap();
+        assert_eq!(detect_kind_from_magic(&path), DownloadedFileKind::Tarball);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_detect_kind_from_magic_qcow2() {
+        let path = std::env::temp_dir().join(format!(
+            "sdme-test-magic-qcow2-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        // Write QCOW2 magic bytes followed by some padding.
+        let mut data = vec![0x51, 0x46, 0x49, 0xfb];
+        data.extend_from_slice(&[0u8; 64]);
+        fs::write(&path, &data).unwrap();
+        assert_eq!(
+            detect_kind_from_magic(&path),
+            DownloadedFileKind::QcowImage
+        );
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_detect_kind_from_magic_raw_mbr() {
+        let path = std::env::temp_dir().join(format!(
+            "sdme-test-magic-raw-mbr-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        // Write a fake MBR: 512 bytes with boot signature 0x55AA at offset 510-511.
+        let mut data = vec![0u8; 512];
+        data[510] = 0x55;
+        data[511] = 0xAA;
+        fs::write(&path, &data).unwrap();
+        assert_eq!(
+            detect_kind_from_magic(&path),
+            DownloadedFileKind::RawImage
+        );
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_detect_kind_from_magic_raw_gpt() {
+        let path = std::env::temp_dir().join(format!(
+            "sdme-test-magic-raw-gpt-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        // Write a fake GPT: 520 bytes with "EFI PART" at offset 512.
+        let mut data = vec![0u8; 520];
+        data[512..520].copy_from_slice(b"EFI PART");
+        fs::write(&path, &data).unwrap();
+        assert_eq!(
+            detect_kind_from_magic(&path),
+            DownloadedFileKind::RawImage
+        );
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_is_raw_disk_image_false() {
+        let path = std::env::temp_dir().join(format!(
+            "sdme-test-not-raw-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        // Write a small non-disk-image file.
+        fs::write(&path, b"just some text data").unwrap();
+        assert!(!is_raw_disk_image(&path));
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_has_raw_image_extension() {
+        assert!(has_raw_image_extension("disk.raw"));
+        assert!(has_raw_image_extension("disk.img"));
+        assert!(has_raw_image_extension("disk.raw.xz"));
+        assert!(has_raw_image_extension("disk.raw.gz"));
+        assert!(has_raw_image_extension("disk.raw.bz2"));
+        assert!(has_raw_image_extension("disk.raw.zst"));
+        assert!(has_raw_image_extension("disk.img.xz"));
+        assert!(has_raw_image_extension("/path/to/DISK.RAW"));
+        assert!(!has_raw_image_extension("disk.qcow2"));
+        assert!(!has_raw_image_extension("disk.tar.gz"));
+        assert!(!has_raw_image_extension("disk.txt"));
+    }
+
+    #[test]
+    fn test_detect_source_kind_raw_image() {
+        let path = std::env::temp_dir().join(format!(
+            "sdme-test-src-{}-{:?}.raw",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        fs::write(&path, b"fake raw data").unwrap();
+        let kind = detect_source_kind(path.to_str().unwrap()).unwrap();
+        assert!(
+            matches!(kind, SourceKind::RawImage(_)),
+            "expected RawImage, got {kind:?}"
+        );
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_detect_source_kind_raw_image_compressed() {
+        let path = std::env::temp_dir().join(format!(
+            "sdme-test-src-{}-{:?}.raw.xz",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        fs::write(&path, b"fake compressed raw data").unwrap();
+        let kind = detect_source_kind(path.to_str().unwrap()).unwrap();
+        assert!(
+            matches!(kind, SourceKind::RawImage(_)),
+            "expected RawImage, got {kind:?}"
+        );
+        let _ = fs::remove_file(&path);
     }
 }
