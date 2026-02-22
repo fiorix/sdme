@@ -26,7 +26,7 @@ pub struct RootfsEntry {
 /// Reads `{rootfs}/etc/os-release`, falling back to
 /// `{rootfs}/usr/lib/os-release` per the freedesktop spec.
 /// Returns an empty map if neither file exists.
-fn parse_os_release(rootfs: &Path) -> HashMap<String, String> {
+pub(crate) fn parse_os_release(rootfs: &Path) -> HashMap<String, String> {
     let primary = rootfs.join("etc/os-release");
     let fallback = rootfs.join("usr/lib/os-release");
 
@@ -70,6 +70,48 @@ pub(crate) fn detect_distro(rootfs: &Path) -> String {
         return v.clone();
     }
     String::new()
+}
+
+/// Distro family classification for package manager selection.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum DistroFamily {
+    /// Debian, Ubuntu, and derivatives (uses apt-get).
+    Debian,
+    /// Fedora, CentOS, AlmaLinux, RHEL, Rocky (uses dnf).
+    Fedora,
+    /// NixOS (declarative; no imperative package install).
+    NixOS,
+    /// Unrecognized distribution.
+    Unknown,
+}
+
+/// Detect the distro family from `os-release` inside a rootfs.
+///
+/// Uses the `ID` and `ID_LIKE` fields to classify into a [`DistroFamily`].
+pub(crate) fn detect_distro_family(rootfs: &Path) -> DistroFamily {
+    let map = parse_os_release(rootfs);
+
+    let id = map.get("ID").map(|s| s.as_str()).unwrap_or("");
+    let id_like = map.get("ID_LIKE").map(|s| s.as_str()).unwrap_or("");
+
+    if id == "nixos" {
+        return DistroFamily::NixOS;
+    }
+
+    if id == "debian" || id == "ubuntu" || id_like.split_whitespace().any(|w| w == "debian") {
+        return DistroFamily::Debian;
+    }
+
+    const FEDORA_IDS: &[&str] = &["fedora", "centos", "almalinux", "rhel", "rocky"];
+    if FEDORA_IDS.contains(&id)
+        || id_like
+            .split_whitespace()
+            .any(|w| w == "fedora" || w == "rhel")
+    {
+        return DistroFamily::Fedora;
+    }
+
+    DistroFamily::Unknown
 }
 
 /// List all imported root filesystems under `{datadir}/fs/`.
@@ -119,8 +161,15 @@ pub fn list(datadir: &Path) -> Result<Vec<RootfsEntry>> {
 /// Import a root filesystem from a directory, tarball, URL, or OCI image.
 ///
 /// Delegates to [`crate::import::run`]. CLI command: `sdme fs import`.
-pub fn import(datadir: &Path, source: &str, name: &str, verbose: bool, force: bool) -> Result<()> {
-    crate::import::run(datadir, source, name, verbose, force)
+pub fn import(
+    datadir: &Path,
+    source: &str,
+    name: &str,
+    verbose: bool,
+    force: bool,
+    install_packages: crate::import::InstallPackages,
+) -> Result<()> {
+    crate::import::run(datadir, source, name, verbose, force, install_packages)
 }
 
 /// Remove an imported root filesystem.
@@ -226,6 +275,12 @@ fn make_removable(path: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::import::InstallPackages;
+
+    /// Helper to import a rootfs in tests, bypassing systemd checks.
+    fn test_import(datadir: &Path, source: &str, name: &str) -> Result<()> {
+        import(datadir, source, name, false, true, InstallPackages::No)
+    }
 
     struct TempDataDir {
         dir: std::path::PathBuf,
@@ -345,8 +400,8 @@ mod tests {
         )
         .unwrap();
 
-        import(tmp.path(), src_a.path().to_str().unwrap(), "ubuntu", false, false).unwrap();
-        import(tmp.path(), src_b.path().to_str().unwrap(), "debian", false, false).unwrap();
+        test_import(tmp.path(), src_a.path().to_str().unwrap(), "ubuntu").unwrap();
+        test_import(tmp.path(), src_b.path().to_str().unwrap(), "debian").unwrap();
 
         let entries = list(tmp.path()).unwrap();
         assert_eq!(entries.len(), 2);
@@ -363,7 +418,7 @@ mod tests {
 
         // Import a real rootfs.
         let src = TempSourceDir::new("staging");
-        import(tmp.path(), src.path().to_str().unwrap(), "real", false, false).unwrap();
+        test_import(tmp.path(), src.path().to_str().unwrap(), "real").unwrap();
 
         // Create a fake staging dir that should be skipped.
         fs::create_dir_all(tmp.path().join("fs/.fake.importing")).unwrap();
@@ -379,7 +434,7 @@ mod tests {
         let src = TempSourceDir::new("rm-basic");
         fs::write(src.path().join("file.txt"), "data\n").unwrap();
 
-        import(tmp.path(), src.path().to_str().unwrap(), "rmme", false, false).unwrap();
+        test_import(tmp.path(), src.path().to_str().unwrap(), "rmme").unwrap();
         assert!(tmp.path().join("fs/rmme").is_dir());
         assert!(tmp.path().join("fs/.rmme.meta").exists());
 
@@ -402,7 +457,7 @@ mod tests {
     fn test_remove_in_use() {
         let tmp = TempDataDir::new();
         let src = TempSourceDir::new("rm-inuse");
-        import(tmp.path(), src.path().to_str().unwrap(), "inuse", false, false).unwrap();
+        test_import(tmp.path(), src.path().to_str().unwrap(), "inuse").unwrap();
 
         // Create a container state file that references this rootfs.
         let state_dir = tmp.path().join("state");
@@ -427,8 +482,8 @@ mod tests {
         let src_a = TempSourceDir::new("rm-multi-a");
         let src_b = TempSourceDir::new("rm-multi-b");
 
-        import(tmp.path(), src_a.path().to_str().unwrap(), "alpha", false, false).unwrap();
-        import(tmp.path(), src_b.path().to_str().unwrap(), "beta", false, false).unwrap();
+        test_import(tmp.path(), src_a.path().to_str().unwrap(), "alpha").unwrap();
+        test_import(tmp.path(), src_b.path().to_str().unwrap(), "beta").unwrap();
         assert_eq!(list(tmp.path()).unwrap().len(), 2);
 
         remove(tmp.path(), "alpha", false).unwrap();
@@ -437,5 +492,107 @@ mod tests {
         assert!(list(tmp.path()).unwrap().is_empty());
         assert!(!tmp.path().join("fs/alpha").exists());
         assert!(!tmp.path().join("fs/beta").exists());
+    }
+
+    #[test]
+    fn test_detect_distro_family_debian() {
+        let tmp = TempSourceDir::new("family-debian");
+        fs::create_dir_all(tmp.path().join("etc")).unwrap();
+        fs::write(
+            tmp.path().join("etc/os-release"),
+            "ID=debian\nID_LIKE=\n",
+        )
+        .unwrap();
+        assert_eq!(detect_distro_family(tmp.path()), DistroFamily::Debian);
+    }
+
+    #[test]
+    fn test_detect_distro_family_ubuntu() {
+        let tmp = TempSourceDir::new("family-ubuntu");
+        fs::create_dir_all(tmp.path().join("etc")).unwrap();
+        fs::write(
+            tmp.path().join("etc/os-release"),
+            "ID=ubuntu\nID_LIKE=debian\n",
+        )
+        .unwrap();
+        assert_eq!(detect_distro_family(tmp.path()), DistroFamily::Debian);
+    }
+
+    #[test]
+    fn test_detect_distro_family_debian_derivative() {
+        let tmp = TempSourceDir::new("family-mint");
+        fs::create_dir_all(tmp.path().join("etc")).unwrap();
+        fs::write(
+            tmp.path().join("etc/os-release"),
+            "ID=linuxmint\nID_LIKE=\"ubuntu debian\"\n",
+        )
+        .unwrap();
+        assert_eq!(detect_distro_family(tmp.path()), DistroFamily::Debian);
+    }
+
+    #[test]
+    fn test_detect_distro_family_fedora() {
+        let tmp = TempSourceDir::new("family-fedora");
+        fs::create_dir_all(tmp.path().join("etc")).unwrap();
+        fs::write(
+            tmp.path().join("etc/os-release"),
+            "ID=fedora\n",
+        )
+        .unwrap();
+        assert_eq!(detect_distro_family(tmp.path()), DistroFamily::Fedora);
+    }
+
+    #[test]
+    fn test_detect_distro_family_almalinux() {
+        let tmp = TempSourceDir::new("family-alma");
+        fs::create_dir_all(tmp.path().join("etc")).unwrap();
+        fs::write(
+            tmp.path().join("etc/os-release"),
+            "ID=almalinux\nID_LIKE=\"rhel centos fedora\"\n",
+        )
+        .unwrap();
+        assert_eq!(detect_distro_family(tmp.path()), DistroFamily::Fedora);
+    }
+
+    #[test]
+    fn test_detect_distro_family_rhel_like() {
+        let tmp = TempSourceDir::new("family-rhel-like");
+        fs::create_dir_all(tmp.path().join("etc")).unwrap();
+        fs::write(
+            tmp.path().join("etc/os-release"),
+            "ID=custom\nID_LIKE=\"rhel fedora\"\n",
+        )
+        .unwrap();
+        assert_eq!(detect_distro_family(tmp.path()), DistroFamily::Fedora);
+    }
+
+    #[test]
+    fn test_detect_distro_family_nixos() {
+        let tmp = TempSourceDir::new("family-nixos");
+        fs::create_dir_all(tmp.path().join("etc")).unwrap();
+        fs::write(
+            tmp.path().join("etc/os-release"),
+            "ID=nixos\n",
+        )
+        .unwrap();
+        assert_eq!(detect_distro_family(tmp.path()), DistroFamily::NixOS);
+    }
+
+    #[test]
+    fn test_detect_distro_family_unknown() {
+        let tmp = TempSourceDir::new("family-unknown");
+        fs::create_dir_all(tmp.path().join("etc")).unwrap();
+        fs::write(
+            tmp.path().join("etc/os-release"),
+            "ID=gentoo\n",
+        )
+        .unwrap();
+        assert_eq!(detect_distro_family(tmp.path()), DistroFamily::Unknown);
+    }
+
+    #[test]
+    fn test_detect_distro_family_no_os_release() {
+        let tmp = TempSourceDir::new("family-none");
+        assert_eq!(detect_distro_family(tmp.path()), DistroFamily::Unknown);
     }
 }

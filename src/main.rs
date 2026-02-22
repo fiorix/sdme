@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
+use sdme::import::InstallPackages;
 use sdme::{config, containers, rootfs, system_check, systemd, validate_name};
 
 #[derive(Parser)]
@@ -117,6 +118,9 @@ enum RootfsCommand {
         /// Remove leftover staging directory from a previous failed import
         #[arg(short, long)]
         force: bool,
+        /// Whether to install systemd packages if missing (auto: prompt if interactive)
+        #[arg(long, value_enum, default_value_t = InstallPackages::Auto)]
+        install_packages: InstallPackages,
     },
     /// List imported root filesystems
     Ls,
@@ -196,6 +200,11 @@ fn main() -> Result<()> {
             validate_name(&name)?;
             containers::ensure_exists(&cfg.datadir, &name)?;
             systemd::start(&cfg.datadir, &name, cli.verbose)?;
+            systemd::wait_for_boot(
+                &name,
+                std::time::Duration::from_secs(30),
+                cli.verbose,
+            )?;
             println!("started container '{name}'");
         }
         Command::Join { name, command } => {
@@ -288,9 +297,9 @@ fn main() -> Result<()> {
             println!("stopped container '{name}'");
         }
         Command::Fs(cmd) => match cmd {
-            RootfsCommand::Import { source, name, force } => {
+            RootfsCommand::Import { source, name, force, install_packages } => {
                 system_check::check_systemd_version(257)?;
-                rootfs::import(&cfg.datadir, &source, &name, cli.verbose, force)?;
+                rootfs::import(&cfg.datadir, &source, &name, cli.verbose, force, install_packages)?;
                 println!("{name}");
             }
             RootfsCommand::Ls => {

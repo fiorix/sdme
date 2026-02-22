@@ -21,7 +21,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
+use crate::rootfs::DistroFamily;
 use crate::{State, validate_name};
+
+/// Controls whether systemd packages are installed during rootfs import.
+#[derive(Debug, Clone, Copy, PartialEq, clap::ValueEnum)]
+pub enum InstallPackages {
+    /// Prompt the user if on an interactive terminal; refuse otherwise.
+    Auto,
+    /// Install systemd packages via chroot if missing.
+    Yes,
+    /// Refuse to import if systemd is missing (unless --force).
+    No,
+}
 
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
@@ -1080,6 +1092,210 @@ fn lchown(path: &Path, uid: u32, gid: u32) -> Result<()> {
     Ok(())
 }
 
+// --- Systemd detection and package installation ---
+
+/// Check whether systemd is present inside a rootfs.
+fn has_systemd(rootfs: &Path, family: &DistroFamily) -> bool {
+    let common_paths = [
+        "usr/bin/systemd",
+        "usr/lib/systemd/systemd",
+        "lib/systemd/systemd",
+    ];
+    for p in &common_paths {
+        if rootfs.join(p).exists() {
+            return true;
+        }
+    }
+
+    if *family == DistroFamily::NixOS {
+        if rootfs.join("run/current-system/sw/bin/systemd").exists() {
+            return true;
+        }
+        // Scan nix store for systemd binary.
+        let store = rootfs.join("nix/store");
+        if let Ok(entries) = fs::read_dir(&store) {
+            for entry in entries.flatten() {
+                if entry.path().join("bin/systemd").exists() {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
+}
+
+/// RAII guard for bind mounts into a chroot environment.
+///
+/// Manages `/proc`, `/sys`, `/dev`, `/dev/pts` bind mounts and
+/// `/etc/resolv.conf` for DNS resolution during package installation.
+struct ChrootGuard {
+    rootfs: PathBuf,
+    mounts: Vec<PathBuf>,
+    resolv_backup: Option<PathBuf>,
+}
+
+impl ChrootGuard {
+    /// Set up bind mounts and resolv.conf for chroot package installation.
+    fn setup(rootfs: &Path) -> Result<Self> {
+        let mut guard = Self {
+            rootfs: rootfs.to_path_buf(),
+            mounts: Vec::new(),
+            resolv_backup: None,
+        };
+
+        let bind_targets = ["proc", "sys", "dev"];
+        for target in &bind_targets {
+            let mount_point = rootfs.join(target);
+            fs::create_dir_all(&mount_point).with_context(|| {
+                format!("failed to create mount point {}", mount_point.display())
+            })?;
+            let source = PathBuf::from("/").join(target);
+            let status = Command::new("mount")
+                .args(["--bind"])
+                .arg(&source)
+                .arg(&mount_point)
+                .status()
+                .with_context(|| format!("failed to bind mount {}", source.display()))?;
+            if !status.success() {
+                bail!("bind mount failed: {} -> {}", source.display(), mount_point.display());
+            }
+            guard.mounts.push(mount_point);
+        }
+
+        // Bind mount /dev/pts separately.
+        let devpts = rootfs.join("dev/pts");
+        fs::create_dir_all(&devpts)?;
+        let status = Command::new("mount")
+            .args(["--bind", "/dev/pts"])
+            .arg(&devpts)
+            .status()
+            .context("failed to bind mount /dev/pts")?;
+        if !status.success() {
+            bail!("bind mount failed: /dev/pts -> {}", devpts.display());
+        }
+        guard.mounts.push(devpts);
+
+        // Copy host resolv.conf for DNS resolution.
+        let resolv = rootfs.join("etc/resolv.conf");
+        let resolv_bak = rootfs.join("etc/resolv.conf.sdme-bak");
+        if resolv.exists() || resolv.symlink_metadata().is_ok() {
+            // Back up existing (could be a symlink in some distros).
+            let _ = fs::rename(&resolv, &resolv_bak);
+            guard.resolv_backup = Some(resolv_bak);
+        }
+        if let Err(e) = fs::copy("/etc/resolv.conf", &resolv) {
+            eprintln!("warning: could not copy /etc/resolv.conf to chroot: {e}");
+        }
+
+        Ok(guard)
+    }
+
+    fn cleanup(&mut self) {
+        // Unmount in reverse order.
+        for mount_point in self.mounts.drain(..).rev() {
+            let _ = Command::new("umount")
+                .arg(&mount_point)
+                .status();
+        }
+
+        // Restore original resolv.conf.
+        let resolv = self.rootfs.join("etc/resolv.conf");
+        if let Some(ref backup) = self.resolv_backup {
+            let _ = fs::remove_file(&resolv);
+            let _ = fs::rename(backup, &resolv);
+            self.resolv_backup = None;
+        } else {
+            // We created it; remove it.
+            let _ = fs::remove_file(&resolv);
+        }
+    }
+}
+
+impl Drop for ChrootGuard {
+    fn drop(&mut self) {
+        self.cleanup();
+    }
+}
+
+/// Return the shell commands that would be run to install systemd packages.
+fn install_commands(family: &DistroFamily) -> Vec<&'static str> {
+    match family {
+        DistroFamily::Debian => vec![
+            "apt-get update",
+            "DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC apt-get -y install tzdata",
+            "apt-get install -y dbus systemd && apt-get purge -y systemd-resolved; apt-get autoremove -y -f && apt-get clean",
+        ],
+        DistroFamily::Fedora => vec![
+            "dnf install -y systemd util-linux pam && dnf remove -y systemd-resolved; dnf clean all",
+        ],
+        _ => vec![],
+    }
+}
+
+/// Install systemd packages into a rootfs via chroot.
+fn install_systemd_packages(rootfs: &Path, family: &DistroFamily, verbose: bool) -> Result<()> {
+    let commands = install_commands(family);
+    if commands.is_empty() {
+        bail!("no package installation commands available for distro family {:?}", family);
+    }
+
+    if verbose {
+        eprintln!("setting up chroot environment for package installation");
+    }
+
+    let mut chroot_guard = ChrootGuard::setup(rootfs)?;
+
+    let result = (|| -> Result<()> {
+        for cmd_str in &commands {
+            check_interrupted()?;
+            if verbose {
+                eprintln!("chroot: {cmd_str}");
+            }
+            let status = Command::new("chroot")
+                .arg(rootfs)
+                .args(["/bin/sh", "-c", cmd_str])
+                .status()
+                .with_context(|| format!("failed to run chroot command: {cmd_str}"))?;
+            if !status.success() {
+                bail!("chroot command failed (exit {}): {cmd_str}",
+                    status.code().unwrap_or(-1));
+            }
+        }
+        Ok(())
+    })();
+
+    // Explicit cleanup before returning the result so errors propagate cleanly.
+    chroot_guard.cleanup();
+
+    result
+}
+
+/// Prompt the user interactively to install systemd packages.
+///
+/// Returns true if the user accepts, false otherwise.
+fn prompt_install_systemd(family: &DistroFamily, distro_name: &str) -> bool {
+    let commands = install_commands(family);
+    eprintln!("warning: systemd not found in rootfs (detected: {distro_name})");
+    eprintln!("Install systemd packages via chroot? The following commands will run:");
+    for cmd in &commands {
+        eprintln!("  {cmd}");
+    }
+    eprint!("\nProceed? [y/N]: ");
+    let _ = std::io::Write::flush(&mut std::io::stderr());
+
+    let mut input = String::new();
+    if std::io::stdin().read_line(&mut input).is_err() {
+        return false;
+    }
+    matches!(input.trim(), "y" | "Y")
+}
+
+/// Check if stdin is an interactive terminal.
+fn is_interactive_terminal() -> bool {
+    unsafe { libc::isatty(libc::STDIN_FILENO) != 0 }
+}
+
 // --- Public entry point ---
 
 /// Import a root filesystem from a directory, tarball, URL, OCI image, or QCOW2 disk image.
@@ -1101,7 +1317,14 @@ fn lchown(path: &Path, uid: u32, gid: u32) -> Result<()> {
 ///
 /// The import is transactional: files are copied/extracted into a staging
 /// directory and atomically renamed into place on success.
-pub fn run(datadir: &Path, source: &str, name: &str, verbose: bool, force: bool) -> Result<()> {
+pub fn run(
+    datadir: &Path,
+    source: &str,
+    name: &str,
+    verbose: bool,
+    force: bool,
+    install_packages: InstallPackages,
+) -> Result<()> {
     let _ = ctrlc::set_handler(|| {
         INTERRUPTED.store(true, Ordering::Relaxed);
     });
@@ -1142,34 +1365,133 @@ pub fn run(datadir: &Path, source: &str, name: &str, verbose: bool, force: bool)
         SourceKind::Url(ref url) => import_url(url, &staging_dir, &rootfs_dir, name, verbose),
     };
 
-    match result {
-        Ok(()) => {
-            fs::rename(&staging_dir, &final_dir).with_context(|| {
-                format!(
-                    "failed to rename {} to {}",
-                    staging_dir.display(),
-                    final_dir.display()
-                )
-            })?;
+    if let Err(e) = result {
+        let _ = make_removable(&staging_dir);
+        let _ = fs::remove_dir_all(&staging_dir);
+        return Err(e);
+    }
 
-            // Write distro metadata sidecar.
-            let distro = crate::rootfs::detect_distro(&final_dir);
-            let mut meta = State::new();
-            meta.set("DISTRO", &distro);
-            let meta_path = rootfs_dir.join(format!(".{name}.meta"));
-            meta.write_to(&meta_path)?;
+    // --- Systemd detection and optional package installation ---
+    // At this point, staging_dir contains the imported rootfs.
 
-            if verbose {
-                eprintln!("imported fs '{name}' from {source}");
+    let family = crate::rootfs::detect_distro_family(&staging_dir);
+    let distro_name = crate::rootfs::detect_distro(&staging_dir);
+
+    if verbose {
+        eprintln!(
+            "detected distro: {} (family: {:?})",
+            if distro_name.is_empty() { "unknown" } else { &distro_name },
+            family,
+        );
+    }
+
+    if !has_systemd(&staging_dir, &family) {
+        let install_result = (|| -> Result<()> {
+            match install_packages {
+                InstallPackages::Yes => {
+                    if family == DistroFamily::Unknown || family == DistroFamily::NixOS {
+                        if force {
+                            eprintln!(
+                                "warning: cannot install systemd for {:?} distro; \
+                                 importing anyway (forced)",
+                                family
+                            );
+                            return Ok(());
+                        }
+                        bail!(
+                            "systemd not found and cannot install packages for {:?} distro",
+                            family
+                        );
+                    }
+                    install_systemd_packages(&staging_dir, &family, verbose)?;
+                }
+                InstallPackages::Auto => {
+                    if family == DistroFamily::Unknown || family == DistroFamily::NixOS {
+                        if force {
+                            eprintln!(
+                                "warning: systemd not found in rootfs; \
+                                 importing anyway (forced)"
+                            );
+                            return Ok(());
+                        }
+                        bail!(
+                            "systemd not found in rootfs and distro family is {:?}; \
+                             cannot install packages automatically\n\
+                             re-run with -f to import anyway",
+                            family
+                        );
+                    }
+                    if is_interactive_terminal() {
+                        if prompt_install_systemd(&family, &distro_name) {
+                            install_systemd_packages(&staging_dir, &family, verbose)?;
+                        } else {
+                            bail!("systemd not found in rootfs; import aborted by user");
+                        }
+                    } else {
+                        if force {
+                            eprintln!(
+                                "warning: systemd not found in rootfs; \
+                                 importing anyway (forced)"
+                            );
+                            return Ok(());
+                        }
+                        bail!(
+                            "systemd not found in rootfs and running non-interactively; \
+                             re-run with --install-packages=yes or -f to override"
+                        );
+                    }
+                }
+                InstallPackages::No => {
+                    if force {
+                        eprintln!(
+                            "warning: systemd not found in rootfs; importing anyway (forced)"
+                        );
+                        return Ok(());
+                    }
+                    bail!(
+                        "systemd not found in rootfs; \
+                         re-run with --install-packages=yes or -f to override"
+                    );
+                }
             }
             Ok(())
-        }
-        Err(e) => {
+        })();
+
+        if let Err(e) = install_result {
             let _ = make_removable(&staging_dir);
             let _ = fs::remove_dir_all(&staging_dir);
-            Err(e)
+            return Err(e);
+        }
+
+        // Verify systemd is present after installation.
+        if !has_systemd(&staging_dir, &family) && !force {
+            let _ = make_removable(&staging_dir);
+            let _ = fs::remove_dir_all(&staging_dir);
+            bail!("systemd still not found after package installation");
         }
     }
+
+    // --- Atomic rename to final location ---
+
+    fs::rename(&staging_dir, &final_dir).with_context(|| {
+        format!(
+            "failed to rename {} to {}",
+            staging_dir.display(),
+            final_dir.display()
+        )
+    })?;
+
+    // Write distro metadata sidecar.
+    let distro = crate::rootfs::detect_distro(&final_dir);
+    let mut meta = State::new();
+    meta.set("DISTRO", &distro);
+    let meta_path = rootfs_dir.join(format!(".{name}.meta"));
+    meta.write_to(&meta_path)?;
+
+    if verbose {
+        eprintln!("imported fs '{name}' from {source}");
+    }
+    Ok(())
 }
 
 // --- Tests ---
@@ -1178,6 +1500,17 @@ pub fn run(datadir: &Path, source: &str, name: &str, verbose: bool, force: bool)
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    /// Helper to run import in tests, bypassing systemd checks.
+    fn test_run(
+        datadir: &Path,
+        source: &str,
+        name: &str,
+        verbose: bool,
+        force: bool,
+    ) -> Result<()> {
+        run(datadir, source, name, verbose, force, InstallPackages::No)
+    }
 
     struct TempDataDir {
         dir: std::path::PathBuf,
@@ -1243,12 +1576,12 @@ mod tests {
         fs::create_dir(src.path().join("subdir")).unwrap();
         fs::write(src.path().join("subdir/nested.txt"), "nested\n").unwrap();
 
-        run(
+        test_run(
             tmp.path(),
             src.path().to_str().unwrap(),
             "test",
             false,
-            false,
+            true,
         )
         .unwrap();
 
@@ -1282,12 +1615,12 @@ mod tests {
         fs::write(&suid_path, "suid\n").unwrap();
         fs::set_permissions(&suid_path, fs::Permissions::from_mode(0o4755)).unwrap();
 
-        run(
+        test_run(
             tmp.path(),
             src.path().to_str().unwrap(),
             "perms",
             false,
-            false,
+            true,
         )
         .unwrap();
 
@@ -1314,12 +1647,12 @@ mod tests {
         // Dangling symlink.
         unix_fs::symlink("/nonexistent", src.path().join("dangling")).unwrap();
 
-        run(
+        test_run(
             tmp.path(),
             src.path().to_str().unwrap(),
             "sym",
             false,
-            false,
+            true,
         )
         .unwrap();
 
@@ -1336,15 +1669,15 @@ mod tests {
         let tmp = TempDataDir::new();
         let src = TempSourceDir::new("dup");
 
-        run(
+        test_run(
             tmp.path(),
             src.path().to_str().unwrap(),
             "dup",
             false,
-            false,
+            true,
         )
         .unwrap();
-        let err = run(
+        let err = test_run(
             tmp.path(),
             src.path().to_str().unwrap(),
             "dup",
@@ -1363,7 +1696,7 @@ mod tests {
         let tmp = TempDataDir::new();
         let src = TempSourceDir::new("invalid");
 
-        let err = run(
+        let err = test_run(
             tmp.path(),
             src.path().to_str().unwrap(),
             "INVALID",
@@ -1388,7 +1721,7 @@ mod tests {
         fs::write(&file_path, "not a dir").unwrap();
 
         // A regular file is now treated as a tarball, so expect an extraction error.
-        let err = run(
+        let err = test_run(
             tmp.path(),
             file_path.to_str().unwrap(),
             "test",
@@ -1409,7 +1742,7 @@ mod tests {
         let tmp = TempDataDir::new();
         let missing = Path::new("/tmp/sdme-test-definitely-nonexistent");
 
-        let err = run(
+        let err = test_run(
             tmp.path(),
             missing.to_str().unwrap(),
             "test",
@@ -1434,7 +1767,7 @@ mod tests {
         fs::write(unreadable.join("file.txt"), "data").unwrap();
         fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).unwrap();
 
-        let result = run(
+        let result = test_run(
             tmp.path(),
             src.path().to_str().unwrap(),
             "fail",
@@ -1463,12 +1796,12 @@ mod tests {
         fs::create_dir(src.path().join("empty")).unwrap();
         fs::create_dir(src.path().join("also-empty")).unwrap();
 
-        run(
+        test_run(
             tmp.path(),
             src.path().to_str().unwrap(),
             "empty",
             false,
-            false,
+            true,
         )
         .unwrap();
 
@@ -1508,12 +1841,12 @@ mod tests {
             );
         }
 
-        run(
+        test_run(
             tmp.path(),
             src.path().to_str().unwrap(),
             "ts",
             false,
-            false,
+            true,
         )
         .unwrap();
 
@@ -1534,12 +1867,12 @@ mod tests {
         let ret = unsafe { libc::mknod(c_path.as_ptr(), libc::S_IFCHR | 0o666, dev) };
         assert_eq!(ret, 0, "mknod failed (need root)");
 
-        run(
+        test_run(
             tmp.path(),
             src.path().to_str().unwrap(),
             "dev",
             false,
-            false,
+            true,
         )
         .unwrap();
 
@@ -1560,12 +1893,12 @@ mod tests {
         )
         .unwrap();
 
-        run(
+        test_run(
             tmp.path(),
             src.path().to_str().unwrap(),
             "distro",
             false,
-            false,
+            true,
         )
         .unwrap();
 
@@ -1582,12 +1915,12 @@ mod tests {
 
         fs::write(src.path().join("hello.txt"), "hi\n").unwrap();
 
-        run(
+        test_run(
             tmp.path(),
             src.path().to_str().unwrap(),
             "noos",
             false,
-            false,
+            true,
         )
         .unwrap();
 
@@ -1709,12 +2042,12 @@ mod tests {
         let encoder = builder.into_inner().unwrap();
         encoder.finish().unwrap();
 
-        run(
+        test_run(
             tmp.path(),
             tarball.to_str().unwrap(),
             "tgz",
             false,
-            false,
+            true,
         )
         .unwrap();
 
@@ -1751,12 +2084,12 @@ mod tests {
         builder.append_dir_all(".", src.path()).unwrap();
         builder.finish().unwrap();
 
-        run(
+        test_run(
             tmp.path(),
             tarball.to_str().unwrap(),
             "plain",
             false,
-            false,
+            true,
         )
         .unwrap();
 
@@ -1779,7 +2112,7 @@ mod tests {
         ));
         fs::write(&file_path, "this is not a tarball").unwrap();
 
-        let err = run(
+        let err = test_run(
             tmp.path(),
             file_path.to_str().unwrap(),
             "bad",
@@ -1811,12 +2144,12 @@ mod tests {
             libc::chown(c_path.as_ptr(), 1000, 1000);
         }
 
-        run(
+        test_run(
             tmp.path(),
             src.path().to_str().unwrap(),
             "own",
             false,
-            false,
+            true,
         )
         .unwrap();
 
@@ -2176,12 +2509,12 @@ mod tests {
             false,
         );
 
-        run(
+        test_run(
             tmp.path(),
             tarball.to_str().unwrap(),
             "ocibasic",
             false,
-            false,
+            true,
         )
         .unwrap();
 
@@ -2217,12 +2550,12 @@ mod tests {
             false,
         );
 
-        run(
+        test_run(
             tmp.path(),
             tarball.to_str().unwrap(),
             "ocimulti",
             false,
-            false,
+            true,
         )
         .unwrap();
 
@@ -2258,12 +2591,12 @@ mod tests {
             vec![".wh.delete-me.txt", "subdir/.wh.also-delete.txt"],
         );
 
-        run(
+        test_run(
             tmp.path(),
             tarball.to_str().unwrap(),
             "ociwhiteout",
             false,
-            false,
+            true,
         )
         .unwrap();
 
@@ -2297,12 +2630,12 @@ mod tests {
             true, // Use manifest index indirection.
         );
 
-        run(
+        test_run(
             tmp.path(),
             tarball.to_str().unwrap(),
             "ociindex",
             false,
-            false,
+            true,
         )
         .unwrap();
 
