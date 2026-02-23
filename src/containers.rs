@@ -247,6 +247,8 @@ fn resolve_rootfs(datadir: &Path, rootfs: Option<&str>) -> Result<PathBuf> {
     match rootfs {
         None => Ok(PathBuf::from("/")),
         Some(name) => {
+            validate_name(name)
+                .context("invalid rootfs name")?;
             let path = datadir.join("fs").join(name);
             if !path.exists() {
                 bail!("fs not found: {}", path.display());

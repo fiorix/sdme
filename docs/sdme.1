@@ -375,6 +375,39 @@ the just\-created container is removed automatically.
 For
 .BR "sdme start" ,
 the container is stopped but preserved on disk.
+.SH SECURITY
+.B sdme
+runs as root and processes untrusted input (tarballs, OCI images, disk images,
+URLs).
+The following hardening measures are in place:
+.SS Path traversal protection
+OCI layer tar paths are sanitized before whiteout marker handling:
+entries containing
+.B ..
+components are rejected, and leading
+.B /
+is stripped.
+OCI digest fields in manifests are validated to contain only alphanumeric
+and hex characters before being used to resolve blob paths.
+The
+.B \-\-rootfs
+parameter is validated against the same naming rules as container names,
+preventing directory traversal via crafted values like
+.IR ../state .
+.SS Download size limit
+URL downloads during
+.B sdme fs import
+are limited to 50\ GiB to prevent disk exhaustion from malicious or
+misbehaving servers.
+Downloads exceeding this limit are aborted with an error.
+.SS File permissions
+The configuration file is written with mode
+.B 0600
+and its parent directories with mode
+.BR 0700 ,
+regardless of the process umask.
+State files are created atomically with
+.BR O_CREAT|O_EXCL .
 .SH SEE ALSO
 .BR systemd\-nspawn (1),
 .BR machinectl (1),

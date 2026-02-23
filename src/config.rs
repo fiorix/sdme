@@ -4,6 +4,8 @@
 //! (default: `~/.config/sdme/sdmerc`, TOML format). Provides the
 //! [`Config`] struct and functions for reading/writing it to disk.
 
+use std::io::Write;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -105,12 +107,22 @@ pub fn load(path: Option<&Path>) -> Result<Config> {
 pub fn save(config: &Config, path: Option<&Path>) -> Result<()> {
     let path = resolve_path(path)?;
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
     let contents =
         toml::to_string(config).with_context(|| format!("failed to serialize config"))?;
-    std::fs::write(&path, contents)
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&path)
+        .with_context(|| format!("failed to open {}", path.display()))?;
+    file.write_all(contents.as_bytes())
         .with_context(|| format!("failed to write {}", path.display()))?;
     Ok(())
 }

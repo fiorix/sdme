@@ -366,6 +366,20 @@ fn resolve_blob(oci_dir: &Path, digest: &str) -> Result<PathBuf> {
     let (algo, hash) = digest
         .split_once(':')
         .with_context(|| format!("invalid OCI digest format: {digest}"))?;
+    // Validate algo and hash contain only safe characters to prevent path traversal.
+    // OCI spec: algorithm is alphanumeric+separator, digest is hex. We allow
+    // [a-zA-Z0-9_-] for algo and [a-fA-F0-9] for hash (the latter covers all
+    // standard digest algorithms including sha256 and sha512).
+    if algo.is_empty()
+        || !algo
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        bail!("invalid OCI digest algorithm: {algo}");
+    }
+    if hash.is_empty() || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
+        bail!("invalid OCI digest hash: {hash}");
+    }
     let blob_path = oci_dir.join("blobs").join(algo).join(hash);
     if !blob_path.exists() {
         bail!("OCI blob not found: {}", blob_path.display());
@@ -463,6 +477,37 @@ fn import_oci_layout(oci_dir: &Path, staging_dir: &Path, verbose: bool) -> Resul
     Ok(())
 }
 
+/// Sanitize a tar entry path: strip leading `/` and reject `..` components.
+///
+/// This mirrors what `tar::Archive::unpack_in()` does internally but is needed
+/// here because OCI whiteout handling operates on the path before `unpack_in()`
+/// is called. Without this, a malicious entry like `../../etc/.wh..wh..opq`
+/// could escape the destination directory.
+fn sanitize_tar_path(path: &Path) -> Result<PathBuf> {
+    use std::path::Component;
+    let mut clean = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                bail!(
+                    "refusing tar entry with '..' component: {}",
+                    path.display()
+                );
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                // Strip leading '/' and Windows prefixes.
+            }
+            Component::CurDir => {
+                // Skip '.' components.
+            }
+            Component::Normal(c) => {
+                clean.push(c);
+            }
+        }
+    }
+    Ok(clean)
+}
+
 /// Unpack an OCI layer tar archive, handling OCI whiteout markers.
 ///
 /// OCI whiteouts:
@@ -477,7 +522,11 @@ fn unpack_oci_layer<R: Read>(reader: R, dest: &Path) -> Result<()> {
     for entry in archive.entries().context("failed to read tar entries")? {
         check_interrupted()?;
         let mut entry = entry.context("failed to read tar entry")?;
-        let path = entry.path().context("failed to read entry path")?.into_owned();
+        let raw_path = entry.path().context("failed to read entry path")?.into_owned();
+
+        // Sanitize: strip leading '/' and reject paths with '..' components
+        // to prevent path traversal in whiteout handling below.
+        let path = sanitize_tar_path(&raw_path)?;
 
         let file_name = match path.file_name() {
             Some(name) => name.to_string_lossy().into_owned(),
@@ -870,6 +919,9 @@ fn build_http_agent(verbose: bool) -> Result<ureq::Agent> {
     Ok(config.build().into())
 }
 
+/// Maximum download size (50 GiB) to prevent disk exhaustion from malicious URLs.
+const MAX_DOWNLOAD_SIZE: u64 = 50 * 1024 * 1024 * 1024;
+
 /// Download a URL to a local file, streaming to constant memory.
 /// Returns the Content-Type mime type from the response, if present.
 fn download_file(url: &str, dest: &Path, verbose: bool) -> Result<Option<String>> {
@@ -901,6 +953,12 @@ fn download_file(url: &str, dest: &Path, verbose: bool) -> Result<Option<String>
         std::io::Write::write_all(&mut file, &buf[..n])
             .with_context(|| format!("failed to write download to {}", dest.display()))?;
         total += n as u64;
+        if total > MAX_DOWNLOAD_SIZE {
+            bail!(
+                "download from {url} exceeds maximum size of {} bytes",
+                MAX_DOWNLOAD_SIZE
+            );
+        }
     }
 
     if verbose {
