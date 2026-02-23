@@ -235,6 +235,8 @@ mod dbus {
         let poll_interval = std::time::Duration::from_millis(500);
 
         loop {
+            crate::check_interrupted()?;
+
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             if remaining.is_zero() {
                 bail!(
@@ -372,6 +374,8 @@ mod dbus {
         }
 
         loop {
+            crate::check_interrupted()?;
+
             match zbus::blocking::connection::Builder::address(address.as_str()) {
                 Ok(builder) => match builder.build() {
                     Ok(_) => {

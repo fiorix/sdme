@@ -22,7 +22,25 @@ pub struct CreateOptions {
     pub rootfs: Option<String>,
 }
 
+/// Read the current process umask. There is no "get umask" syscall, so
+/// we set it to 0, read the old value, and restore it immediately.
+fn get_umask() -> u32 {
+    let old = unsafe { libc::umask(0) };
+    unsafe { libc::umask(old) };
+    old as u32
+}
+
 pub fn create(datadir: &Path, opts: &CreateOptions, verbose: bool) -> Result<String> {
+    let umask = get_umask();
+    if umask & 0o005 != 0 {
+        bail!(
+            "current umask ({:04o}) strips read/execute from 'other', which would \
+             prevent services inside the container from accessing the filesystem. \
+             Set a more permissive umask (e.g. umask 022) before running this command."
+            , umask
+        );
+    }
+
     let name = match &opts.name {
         Some(n) => n.clone(),
         None => names::generate_name(datadir)?,
@@ -841,6 +859,25 @@ mod tests {
         let err = ensure_exists(tmp.path(), "orphan").unwrap_err();
         assert!(
             err.to_string().contains("directory is missing"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_create_rejects_restrictive_umask() {
+        // Set a restrictive umask, attempt create, then restore.
+        let old = unsafe { libc::umask(0o077) };
+        let tmp = TempDataDir::new();
+        let opts = CreateOptions {
+            name: Some("umasktest".to_string()),
+            rootfs: None,
+        };
+        let err = create(tmp.path(), &opts, false);
+        unsafe { libc::umask(old) };
+
+        let err = err.unwrap_err();
+        assert!(
+            err.to_string().contains("umask"),
             "unexpected error: {err}"
         );
     }

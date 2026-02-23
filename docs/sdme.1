@@ -1,4 +1,4 @@
-.TH SDME 1 "2026-02-22" "sdme" "User Commands"
+.TH SDME 1 "2026-02-23" "sdme" "User Commands"
 .SH NAME
 sdme \- lightweight systemd\-nspawn containers with overlayfs
 .SH SYNOPSIS
@@ -51,9 +51,15 @@ to override the boot timeout (default: 60 seconds or the
 .B boot_timeout
 config value).
 An optional command overrides the default login shell.
+.PP
+If boot fails or is interrupted (Ctrl+C), the just\-created container is
+automatically removed.
 .SS sdme create [\fIname\fR] [\-r \fIfs\fR]
 Create a new container without starting it.
 Sets up the overlayfs directories and state file.
+Requires a permissive umask (see
+.B NOTES
+below).
 .SS sdme start \fIname\fR [\-t \fIseconds\fR]
 Start a stopped container.
 Installs or updates the
@@ -64,6 +70,9 @@ Use
 to override the boot timeout (default: 60 seconds or the
 .B boot_timeout
 config value).
+.PP
+If boot fails or is interrupted (Ctrl+C), the container is stopped but
+preserved on disk for debugging.
 .SS sdme join \fIname\fR [\-\-] [\fIcommand\fR...]
 Enter a running container using
 .BR machinectl (1)
@@ -333,6 +342,39 @@ Or pass the proxy variable inline:
 sudo https_proxy=http://proxy:3128 sdme fs import https://example.com/ubuntu.tar.xz \-n ubuntu
 .fi
 .RE
+.SH NOTES
+.SS Umask
+.B sdme create
+and
+.B sdme new
+require a umask that does not strip read or execute from "other".
+If the current umask has bits
+.B 005
+set (e.g.\&
+.BR 007 ", " 027 ", " 077 ),
+creation is refused with a diagnostic message.
+.PP
+This is because files written to the overlayfs upper layer inherit the
+process umask, and non\-root services inside the container (such as
+.I dbus\-daemon
+running as
+.IR messagebus )
+need to traverse the filesystem.
+The default umask
+.RB ( 022 )
+is sufficient.
+.SS Ctrl+C during boot
+Pressing Ctrl+C while
+.B sdme new
+or
+.B sdme start
+is waiting for the container to boot will cancel the wait.
+For
+.BR "sdme new" ,
+the just\-created container is removed automatically.
+For
+.BR "sdme start" ,
+the container is stopped but preserved on disk.
 .SH SEE ALSO
 .BR systemd\-nspawn (1),
 .BR machinectl (1),

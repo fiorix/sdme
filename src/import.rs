@@ -17,12 +17,11 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
 use crate::rootfs::DistroFamily;
-use crate::{State, validate_name};
+use crate::{State, validate_name, check_interrupted};
 
 /// Controls whether systemd packages are installed during rootfs import.
 #[derive(Debug, Clone, Copy, PartialEq, clap::ValueEnum)]
@@ -33,15 +32,6 @@ pub enum InstallPackages {
     Yes,
     /// Refuse to import if systemd is missing (unless --force).
     No,
-}
-
-static INTERRUPTED: AtomicBool = AtomicBool::new(false);
-
-fn check_interrupted() -> Result<()> {
-    if INTERRUPTED.load(Ordering::Relaxed) {
-        bail!("interrupted");
-    }
-    Ok(())
 }
 
 // --- Source detection ---
@@ -1719,10 +1709,6 @@ pub fn run(
     force: bool,
     install_packages: InstallPackages,
 ) -> Result<()> {
-    let _ = ctrlc::set_handler(|| {
-        INTERRUPTED.store(true, Ordering::Relaxed);
-    });
-
     validate_name(name)?;
 
     let kind = detect_source_kind(source)?;
@@ -1896,6 +1882,10 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
+    /// Mutex that serializes all tests touching the global INTERRUPTED flag
+    /// so they don't poison concurrent tests that call check_interrupted().
+    static INTERRUPT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// Helper to run import in tests, bypassing systemd checks.
     fn test_run(
         datadir: &Path,
@@ -1904,6 +1894,9 @@ mod tests {
         verbose: bool,
         force: bool,
     ) -> Result<()> {
+        // Acquire the interrupt lock to prevent concurrent InterruptGuard
+        // tests from poisoning check_interrupted() calls inside run().
+        let _lock = INTERRUPT_LOCK.lock().unwrap();
         run(datadir, source, name, verbose, force, InstallPackages::No)
     }
 
@@ -3045,34 +3038,51 @@ mod tests {
 
     // --- Interrupt tests ---
 
-    /// RAII guard that sets INTERRUPTED to true on creation and resets it on drop.
-    struct InterruptGuard;
+    /// RAII guard that acquires INTERRUPT_LOCK, sets INTERRUPTED to true,
+    /// and resets it on drop.
+    struct InterruptGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
 
     impl InterruptGuard {
         fn new() -> Self {
-            INTERRUPTED.store(true, Ordering::Relaxed);
-            Self
+            use std::sync::atomic::Ordering;
+            let lock = INTERRUPT_LOCK.lock().unwrap();
+            crate::INTERRUPTED.store(true, Ordering::Relaxed);
+            Self { _lock: lock }
         }
     }
 
     impl Drop for InterruptGuard {
         fn drop(&mut self) {
-            INTERRUPTED.store(false, Ordering::Relaxed);
+            use std::sync::atomic::Ordering;
+            crate::INTERRUPTED.store(false, Ordering::Relaxed);
         }
     }
 
     #[test]
     fn test_check_interrupted() {
+        let _lock = INTERRUPT_LOCK.lock().unwrap();
+
         // Not interrupted — should be Ok.
-        assert!(check_interrupted().is_ok());
+        assert!(crate::check_interrupted().is_ok());
 
         // Set interrupted — should bail.
-        let _guard = InterruptGuard::new();
-        let err = check_interrupted().unwrap_err();
+        {
+            use std::sync::atomic::Ordering;
+            crate::INTERRUPTED.store(true, Ordering::Relaxed);
+        }
+        let err = crate::check_interrupted().unwrap_err();
         assert!(
             err.to_string().contains("interrupted"),
             "unexpected error: {err}"
         );
+
+        // Reset for other tests.
+        {
+            use std::sync::atomic::Ordering;
+            crate::INTERRUPTED.store(false, Ordering::Relaxed);
+        }
     }
 
     #[test]

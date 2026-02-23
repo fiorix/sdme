@@ -90,6 +90,10 @@ sudo https_proxy=http://proxy:3128 sdme fs import --name ubuntu https://example.
 
 The standard proxy environment variables are supported: `https_proxy`, `HTTPS_PROXY`, `http_proxy`, `HTTP_PROXY`, `all_proxy`, `ALL_PROXY`, `no_proxy`, `NO_PROXY`.
 
+Pressing Ctrl+C during boot will cleanly cancel and remove the container (`sdme new`) or stop it (`sdme start`).
+
+Note: sdme requires a permissive umask (e.g. `umask 022`, the default). If your umask strips read/execute from "other" (e.g. `umask 077`), container creation will be refused because non-root services inside the container would be unable to access the filesystem.
+
 All other commands:
 
 ```bash

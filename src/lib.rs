@@ -10,8 +10,24 @@ use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{bail, Context, Result};
+
+pub static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+pub fn check_interrupted() -> Result<()> {
+    if INTERRUPTED.load(Ordering::Relaxed) {
+        bail!("interrupted");
+    }
+    Ok(())
+}
+
+pub fn install_interrupt_handler() {
+    let _ = ctrlc::set_handler(|| {
+        INTERRUPTED.store(true, Ordering::Relaxed);
+    });
+}
 
 pub struct SudoUser {
     pub name: String,

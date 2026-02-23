@@ -165,6 +165,8 @@ fn main() -> Result<()> {
         bail!("sdme requires root privileges; run with sudo");
     }
 
+    sdme::install_interrupt_handler();
+
     let config_path = cli.config.as_deref();
 
     if cli.verbose {
@@ -231,9 +233,18 @@ fn main() -> Result<()> {
             systemd::start(&cfg.datadir, &name, cli.verbose)?;
             let boot_timeout = std::time::Duration::from_secs(timeout.unwrap_or(cfg.boot_timeout));
             let boot_start = std::time::Instant::now();
-            systemd::wait_for_boot(&name, boot_timeout, cli.verbose)?;
-            let remaining = boot_timeout.saturating_sub(boot_start.elapsed());
-            systemd::wait_for_dbus(&name, remaining, cli.verbose)?;
+            let boot_result = (|| -> Result<()> {
+                systemd::wait_for_boot(&name, boot_timeout, cli.verbose)?;
+                let remaining = boot_timeout.saturating_sub(boot_start.elapsed());
+                systemd::wait_for_dbus(&name, remaining, cli.verbose)?;
+                Ok(())
+            })();
+
+            if let Err(e) = boot_result {
+                eprintln!("boot failed, stopping '{name}'");
+                let _ = containers::stop(&name, cli.verbose);
+                return Err(e);
+            }
         }
         Command::Join { name, command } => {
             let name = containers::resolve_name(&cfg.datadir, &name)?;
@@ -267,13 +278,22 @@ fn main() -> Result<()> {
             eprintln!("creating '{name}'");
 
             eprintln!("starting '{name}'");
-            systemd::start(&cfg.datadir, &name, cli.verbose)?;
+            let boot_result = (|| -> Result<()> {
+                systemd::start(&cfg.datadir, &name, cli.verbose)?;
+                let boot_timeout = std::time::Duration::from_secs(timeout.unwrap_or(cfg.boot_timeout));
+                let boot_start = std::time::Instant::now();
+                systemd::wait_for_boot(&name, boot_timeout, cli.verbose)?;
+                let remaining = boot_timeout.saturating_sub(boot_start.elapsed());
+                systemd::wait_for_dbus(&name, remaining, cli.verbose)?;
+                Ok(())
+            })();
 
-            let boot_timeout = std::time::Duration::from_secs(timeout.unwrap_or(cfg.boot_timeout));
-            let boot_start = std::time::Instant::now();
-            systemd::wait_for_boot(&name, boot_timeout, cli.verbose)?;
-            let remaining = boot_timeout.saturating_sub(boot_start.elapsed());
-            systemd::wait_for_dbus(&name, remaining, cli.verbose)?;
+            if let Err(e) = boot_result {
+                eprintln!("boot failed, removing '{name}'");
+                let _ = containers::remove(&cfg.datadir, &name, cli.verbose);
+                return Err(e);
+            }
+
             eprintln!("joining '{name}'");
             containers::join(&cfg.datadir, &name, &command, cfg.join_as_sudo_user, cli.verbose)?;
         }
