@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
-use crate::{ResourceLimits, State};
+use crate::{NetworkConfig, ResourceLimits, State};
 
 mod dbus {
     use anyhow::{bail, Context, Result};
@@ -699,7 +699,7 @@ ExecStart={nspawn} \
     --directory={datadir}/containers/%i/merged \
     --machine=%i \
     --bind={datadir}/containers/%i/shared:/shared \
-    --resolv-conf=auto \
+    ${{NETWORK_OPTS}} \
     --boot
 ExecStopPost=-{umount} {datadir}/containers/%i/merged
 KillMode=mixed
@@ -769,8 +769,16 @@ pub fn write_env_file(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
     if verbose {
         eprintln!("lowerdir: {lowerdir}");
     }
+
+    // Generate network options from state.
+    let network = NetworkConfig::from_state(&state);
+    let network_opts = network.to_nspawn_args();
+    if verbose && !network.is_empty() {
+        eprintln!("network_opts: {network_opts}");
+    }
+
     let env_path = datadir.join("containers").join(name).join("env");
-    fs::write(&env_path, format!("LOWERDIR={lowerdir}\n"))
+    fs::write(&env_path, format!("LOWERDIR={lowerdir}\nNETWORK_OPTS={network_opts}\n"))
         .with_context(|| format!("failed to write {}", env_path.display()))?;
     // Ensure env file is not world-readable regardless of umask.
     {
@@ -921,7 +929,7 @@ mod tests {
         assert!(template.contains("/var/lib/sdme/containers/%i/merged"));
         assert!(template.contains("--machine=%i"));
         assert!(template.contains("--bind=/var/lib/sdme/containers/%i/shared:/shared"));
-        assert!(template.contains("--resolv-conf=auto"));
+        assert!(template.contains("${NETWORK_OPTS}"));
         assert!(template.contains("--boot"));
         assert!(template.contains("Delegate=yes"));
         assert!(template.contains("/usr/bin/systemd-nspawn"));
@@ -947,6 +955,7 @@ mod tests {
             name: Some("hostbox".to_string()),
             rootfs: None,
             limits: Default::default(),
+            network: Default::default(),
         };
         create(tmp.path(), &opts, false).unwrap();
 
@@ -954,7 +963,7 @@ mod tests {
 
         let env_path = tmp.path().join("containers/hostbox/env");
         let content = fs::read_to_string(&env_path).unwrap();
-        assert_eq!(content, "LOWERDIR=/\n");
+        assert_eq!(content, "LOWERDIR=/\nNETWORK_OPTS=--resolv-conf=auto\n");
     }
 
     #[test]
@@ -967,6 +976,7 @@ mod tests {
             name: Some("ubox".to_string()),
             rootfs: Some("ubuntu".to_string()),
             limits: Default::default(),
+            network: Default::default(),
         };
         create(tmp.path(), &opts, false).unwrap();
 
@@ -974,7 +984,7 @@ mod tests {
 
         let env_path = tmp.path().join("containers/ubox/env");
         let content = fs::read_to_string(&env_path).unwrap();
-        let expected = format!("LOWERDIR={}/fs/ubuntu\n", tmp.path().display());
+        let expected = format!("LOWERDIR={}/fs/ubuntu\nNETWORK_OPTS=--resolv-conf=auto\n", tmp.path().display());
         assert_eq!(content, expected);
     }
 
@@ -999,6 +1009,7 @@ mod tests {
             name: Some("limitbox".to_string()),
             rootfs: None,
             limits,
+            network: Default::default(),
         };
         create(tmp.path(), &opts, false).unwrap();
 

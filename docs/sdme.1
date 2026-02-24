@@ -37,7 +37,7 @@ Path to config file.
 Default:
 .IR ~/.config/sdme/sdmerc .
 .SH COMMANDS
-.SS sdme new [\fIname\fR] [\-r \fIfs\fR] [\-t \fIseconds\fR] [\-\-memory \fIsize\fR] [\-\-cpus \fIn\fR] [\-\-cpu\-weight \fIw\fR] [\-\-] [\fIcommand\fR...]
+.SS sdme new [\fIname\fR] [\-r \fIfs\fR] [\-t \fIseconds\fR] [\fIlimits\fR] [\fInetwork\fR] [\-\-] [\fIcommand\fR...]
 Create, start, and enter a new container.
 If
 .I name
@@ -61,9 +61,20 @@ see
 .B RESOURCE LIMITS
 below.
 .PP
+Network options can be set with
+.BR \-\-private\-network ,
+.BR \-\-network\-veth ,
+.BR \-\-network\-bridge ,
+.BR \-\-network\-zone ,
+and
+.BR \-\-port ;
+see
+.B NETWORKING
+below.
+.PP
 If boot fails or is interrupted (Ctrl+C), the just\-created container is
 automatically removed.
-.SS sdme create [\fIname\fR] [\-r \fIfs\fR] [\-\-memory \fIsize\fR] [\-\-cpus \fIn\fR] [\-\-cpu\-weight \fIw\fR]
+.SS sdme create [\fIname\fR] [\-r \fIfs\fR] [\fIlimits\fR] [\fInetwork\fR]
 Create a new container without starting it.
 Sets up the overlayfs directories and state file.
 Resource limits can be set with
@@ -73,6 +84,16 @@ and
 .BR \-\-cpu\-weight ;
 see
 .B RESOURCE LIMITS
+below.
+Network options can be set with
+.BR \-\-private\-network ,
+.BR \-\-network\-veth ,
+.BR \-\-network\-bridge ,
+.BR \-\-network\-zone ,
+and
+.BR \-\-port ;
+see
+.B NETWORKING
 below.
 Requires a permissive umask (see
 .B NOTES
@@ -269,6 +290,11 @@ Imported root filesystems (lower layers).
 .TP
 .I /var/lib/sdme/state/\fIname\fR
 Container state files (KEY=VALUE format).
+Contains container metadata including creation timestamp, rootfs name,
+resource limits
+.RB ( MEMORY ", " CPUS ", " CPU_WEIGHT ),
+and network configuration
+.RB ( PRIVATE_NETWORK ", " NETWORK_VETH ", " NETWORK_BRIDGE ", " NETWORK_ZONE ", " PORTS ).
 .TP
 .I /var/lib/sdme/containers/\fIname\fR/upper/
 Per\-container overlayfs upper layer (copy\-on\-write modifications).
@@ -388,6 +414,24 @@ Or pass the proxy variable inline:
 sudo https_proxy=http://proxy:3128 sdme fs import https://example.com/ubuntu.tar.xz \-n ubuntu
 .fi
 .RE
+.PP
+Create a container with a private network and port forwarding:
+.PP
+.RS
+.nf
+sdme new \-\-private\-network \-\-port 8080:80 webserver \-r ubuntu
+.fi
+.RE
+.PP
+Create containers in a shared network zone:
+.PP
+.RS
+.nf
+sdme new \-\-network\-zone myzone db \-r ubuntu
+sdme new \-\-network\-zone myzone app \-r ubuntu
+# app and db can now communicate over the shared zone network
+.fi
+.RE
 .SH RESOURCE LIMITS
 Containers can have per\-container resource limits applied via systemd cgroup
 controls.
@@ -426,6 +470,58 @@ Maps to the systemd
 directive.
 Range: 1\(en10000 (default kernel weight is 100).
 Lower values get proportionally less CPU time under contention.
+.SH NETWORKING
+By default, containers share the host's network namespace and have full network
+access.
+Network options control network isolation and connectivity.
+These options are set at container creation time and cannot be changed afterward.
+.TP
+.B \-\-private\-network
+Run the container in its own private network namespace, isolated from the host.
+Without additional options, the container will only have a loopback interface.
+.TP
+.B \-\-network\-veth
+Create a virtual ethernet pair connecting the container to the host.
+Implies
+.BR \-\-private\-network .
+The host side of the veth is named
+.IR ve\-<name> .
+Requires network configuration inside the container (DHCP or static IP) and
+NAT/routing on the host for external connectivity.
+.TP
+.BI \-\-network\-bridge " name"
+Connect the container's veth interface to the specified host bridge.
+Implies
+.BR \-\-private\-network .
+The bridge must already exist on the host.
+Example:
+.BR br0 .
+.TP
+.BI \-\-network\-zone " name"
+Join a named network zone for inter\-container networking.
+Implies
+.BR \-\-private\-network .
+Containers in the same zone can communicate via a virtual bridge that
+.BR systemd\-nspawn (1)
+creates automatically.
+Example:
+.BR myzone .
+.TP
+.BI \-\-port ", " \-p " " host:container[/proto]
+Forward a port from the host to the container.
+Implies
+.BR \-\-private\-network .
+The protocol is
+.B tcp
+(default) or
+.BR udp .
+Can be specified multiple times for multiple ports.
+Example:
+.BR 8080:80 ,
+.BR 53:53/udp .
+.PP
+Network configuration is stored in the container's state file and applied at
+start time via environment variables in the systemd unit.
 .SH NOTES
 .SS Umask
 .B sdme create
