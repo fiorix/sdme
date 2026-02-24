@@ -196,11 +196,10 @@ enum Command {
 enum RootfsCommand {
     /// Import a root filesystem from a directory, tarball, URL, OCI image, or QCOW2 disk image
     Import {
+        /// Name for the imported rootfs
+        name: String,
         /// Source: directory path, tarball (.tar, .tar.gz, .tar.bz2, .tar.xz, .tar.zst), URL, OCI image (.oci.tar.xz, etc.), or QCOW2 disk image
         source: String,
-        /// Name for the imported rootfs
-        #[arg(short, long)]
-        name: String,
         /// Remove leftover staging directory from a previous failed import
         #[arg(short, long)]
         force: bool,
@@ -214,6 +213,17 @@ enum RootfsCommand {
     Rm {
         /// Names of the rootfs entries to remove
         names: Vec<String>,
+    },
+    /// Build a root filesystem from a build config
+    Build {
+        /// Name for the new rootfs
+        name: String,
+        /// Path to the build config file
+        #[arg(name = "build.conf")]
+        config: PathBuf,
+        /// Boot timeout in seconds (overrides config, default: 60)
+        #[arg(short, long)]
+        timeout: Option<u64>,
     },
 }
 
@@ -566,6 +576,12 @@ fn main() -> Result<()> {
                 if failed {
                     bail!("some fs entries could not be removed");
                 }
+            }
+            RootfsCommand::Build { name, config, timeout } => {
+                system_check::check_systemd_version(252)?;
+                let boot_timeout = timeout.unwrap_or(cfg.boot_timeout);
+                sdme::build::build(&cfg.datadir, &name, &config, boot_timeout, cli.verbose)?;
+                println!("{name}");
             }
         },
     }

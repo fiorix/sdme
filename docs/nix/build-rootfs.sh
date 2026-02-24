@@ -8,7 +8,7 @@
 #
 # The script builds the NixOS system closure from container.nix, then
 # assembles a rootfs directory that systemd-nspawn can boot. The result
-# can be imported directly with: sdme fs import --name nixos -f <output-dir>
+# can be imported directly with: sdme fs import nixos -f <output-dir>
 #
 set -euo pipefail
 
@@ -71,4 +71,4 @@ chmod 1777 "$OUTPUT/tmp"
 echo "Rootfs ready at $OUTPUT"
 echo ""
 echo "Import with:"
-echo "  sdme fs import --name nixos -f $OUTPUT"
+echo "  sdme fs import nixos -f $OUTPUT"

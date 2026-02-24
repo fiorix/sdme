@@ -154,7 +154,7 @@ Extra arguments are passed through to journalctl
 (e.g.\&
 .BR \-f ,
 .BR "\-n 100" ).
-.SS sdme fs import \fIsource\fR \-n \fIname\fR [\-f] [\-\-install\-packages \fImode\fR]
+.SS sdme fs import \fIname\fR \fIsource\fR [\-f] [\-\-install\-packages \fImode\fR]
 Import a root filesystem.
 After import, systemd is detected in the rootfs; if missing, distro\-specific
 packages can be installed via chroot.
@@ -362,7 +362,7 @@ Import an Ubuntu rootfs from a URL and create a container:
 .PP
 .RS
 .nf
-sdme fs import https://example.com/ubuntu.tar.xz \-n ubuntu
+sdme fs import ubuntu https://example.com/ubuntu.tar.xz
 sdme new mybox \-r ubuntu
 .fi
 .RE
@@ -403,7 +403,7 @@ Import a rootfs through an HTTP proxy:
 .PP
 .RS
 .nf
-sudo \-E sdme fs import https://example.com/ubuntu.tar.xz \-n ubuntu
+sudo \-E sdme fs import ubuntu https://example.com/ubuntu.tar.xz
 .fi
 .RE
 .PP
@@ -411,7 +411,7 @@ Or pass the proxy variable inline:
 .PP
 .RS
 .nf
-sudo https_proxy=http://proxy:3128 sdme fs import https://example.com/ubuntu.tar.xz \-n ubuntu
+sudo https_proxy=http://proxy:3128 sdme fs import ubuntu https://example.com/ubuntu.tar.xz
 .fi
 .RE
 .PP

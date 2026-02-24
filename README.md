@@ -62,30 +62,30 @@ Creating a rootfs (imported rootfs needs systemd and dbus):
 
 ```bash
 debootstrap --include=dbus,systemd noble /tmp/noble
-sudo sdme fs import --name ubuntu /tmp/noble
+sudo sdme fs import ubuntu /tmp/noble
 sudo sdme new -r ubuntu
 ```
 
 Importing Fedora 43 container image (OCI):
 
 ```bash
-sudo sdme fs import --name fedora43 https://download.fedoraproject.org/pub/fedora/linux/releases/43/Container/x86_64/images/Fedora-Container-Base-Generic-Minimal-43-1.6.x86_64.oci.tar.xz
+sudo sdme fs import fedora43 https://download.fedoraproject.org/pub/fedora/linux/releases/43/Container/x86_64/images/Fedora-Container-Base-Generic-Minimal-43-1.6.x86_64.oci.tar.xz
 sudo sdme new -r fedora43
 ```
 
 Importing Debian Sid:
 
 ```bash
-sudo sdme fs import --name debian-sid https://cdimage.debian.org/images/cloud/sid/daily/latest/debian-sid-generic-amd64-daily.qcow2
+sudo sdme fs import debian-sid https://cdimage.debian.org/images/cloud/sid/daily/latest/debian-sid-generic-amd64-daily.qcow2
 sudo sdme new -r debian-sid
 ```
 
 Importing a rootfs through an HTTP proxy:
 
 ```bash
-sudo -E sdme fs import --name ubuntu https://example.com/ubuntu.tar.xz
+sudo -E sdme fs import ubuntu https://example.com/ubuntu.tar.xz
 # or
-sudo https_proxy=http://proxy:3128 sdme fs import --name ubuntu https://example.com/ubuntu.tar.xz
+sudo https_proxy=http://proxy:3128 sdme fs import ubuntu https://example.com/ubuntu.tar.xz
 ```
 
 The standard proxy environment variables are supported: `https_proxy`, `HTTPS_PROXY`, `http_proxy`, `HTTP_PROXY`, `all_proxy`, `ALL_PROXY`, `no_proxy`, `NO_PROXY`.
@@ -97,7 +97,7 @@ Note: sdme requires a permissive umask (e.g. `umask 022`, the default). If your 
 All other commands:
 
 ```bash
-sudo sdme fs import --name ubuntu /path/to/rootfs       # import a rootfs (dir, tarball, URL, OCI, QCOW2)
+sudo sdme fs import ubuntu /path/to/rootfs               # import a rootfs (dir, tarball, URL, OCI, QCOW2)
 sudo sdme fs ls                                         # list imported rootfs
 sudo sdme new mybox --fs ubuntu                         # create + start + join
 sudo sdme create mybox --fs ubuntu                      # create a container

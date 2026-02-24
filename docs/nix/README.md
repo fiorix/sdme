@@ -14,7 +14,7 @@ sh <(curl -L https://nixos.org/nix/install) --daemon --yes
 
 ```bash
 sudo ./build-rootfs.sh
-sudo sdme fs import --name nixos -f docs/nix/nixos-rootfs
+sudo sdme fs import nixos -f docs/nix/nixos-rootfs
 ```
 
 The build script runs `nix-build` on `container.nix` to produce the NixOS
@@ -61,7 +61,7 @@ Then rebuild and re-import:
 ```bash
 sudo ./build-rootfs.sh
 sudo sdme fs rm nixos
-sudo sdme fs import --name nixos -f docs/nix/nixos-rootfs
+sudo sdme fs import nixos -f docs/nix/nixos-rootfs
 ```
 
 ## What's inside
