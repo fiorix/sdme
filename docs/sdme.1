@@ -37,7 +37,7 @@ Path to config file.
 Default:
 .IR ~/.config/sdme/sdmerc .
 .SH COMMANDS
-.SS sdme new [\fIname\fR] [\-r \fIfs\fR] [\-t \fIseconds\fR] [\-\-] [\fIcommand\fR...]
+.SS sdme new [\fIname\fR] [\-r \fIfs\fR] [\-t \fIseconds\fR] [\-\-memory \fIsize\fR] [\-\-cpus \fIn\fR] [\-\-cpu\-weight \fIw\fR] [\-\-] [\fIcommand\fR...]
 Create, start, and enter a new container.
 If
 .I name
@@ -52,11 +52,28 @@ to override the boot timeout (default: 60 seconds or the
 config value).
 An optional command overrides the default login shell.
 .PP
+Resource limits can be set with
+.BR \-\-memory ,
+.BR \-\-cpus ,
+and
+.BR \-\-cpu\-weight ;
+see
+.B RESOURCE LIMITS
+below.
+.PP
 If boot fails or is interrupted (Ctrl+C), the just\-created container is
 automatically removed.
-.SS sdme create [\fIname\fR] [\-r \fIfs\fR]
+.SS sdme create [\fIname\fR] [\-r \fIfs\fR] [\-\-memory \fIsize\fR] [\-\-cpus \fIn\fR] [\-\-cpu\-weight \fIw\fR]
 Create a new container without starting it.
 Sets up the overlayfs directories and state file.
+Resource limits can be set with
+.BR \-\-memory ,
+.BR \-\-cpus ,
+and
+.BR \-\-cpu\-weight ;
+see
+.B RESOURCE LIMITS
+below.
 Requires a permissive umask (see
 .B NOTES
 below).
@@ -73,6 +90,15 @@ config value).
 .PP
 If boot fails or is interrupted (Ctrl+C), the container is stopped but
 preserved on disk for debugging.
+.SS sdme set \fIname\fR [\-\-memory \fIsize\fR] [\-\-cpus \fIn\fR] [\-\-cpu\-weight \fIw\fR]
+Set resource limits on an existing container, replacing all current limits.
+Flags that are not provided are cleared.
+See
+.B RESOURCE LIMITS
+below for details on each flag.
+.PP
+If the container is running, a note is printed advising a restart for the
+changes to take effect.
 .SS sdme join \fIname\fR [\-\-] [\fIcommand\fR...]
 Enter a running container using
 .BR machinectl (1)
@@ -259,6 +285,10 @@ Per\-container shared directory (accessible from host and container).
 .I /etc/systemd/system/sdme@.service
 Systemd template unit (auto\-installed and auto\-updated).
 .TP
+.I /etc/systemd/system/sdme@\fIname\fR.service.d/limits.conf
+Per\-container resource limits drop\-in (created when limits are set,
+removed when limits are cleared or the container is deleted).
+.TP
 .I ~/.config/sdme/sdmerc
 User configuration file (TOML format).
 .SH ENVIRONMENT
@@ -319,6 +349,22 @@ sdme exec mybox cat /etc/os\-release
 .fi
 .RE
 .PP
+Create a container with resource limits:
+.PP
+.RS
+.nf
+sdme new \-\-memory 2G \-\-cpus 2 mybox \-r ubuntu
+.fi
+.RE
+.PP
+Update limits on an existing container:
+.PP
+.RS
+.nf
+sdme set mybox \-\-memory 4G
+.fi
+.RE
+.PP
 Follow logs for a container:
 .PP
 .RS
@@ -342,6 +388,44 @@ Or pass the proxy variable inline:
 sudo https_proxy=http://proxy:3128 sdme fs import https://example.com/ubuntu.tar.xz \-n ubuntu
 .fi
 .RE
+.SH RESOURCE LIMITS
+Containers can have per\-container resource limits applied via systemd cgroup
+controls.
+Limits are stored in the container's state file and applied at start time
+through a systemd drop\-in file at
+.IR /etc/systemd/system/sdme@ name .service.d/limits.conf .
+.PP
+If no limits are set, no drop\-in is written.
+.TP
+.BI \-\-memory " size"
+Maximum memory the container may use.
+Maps to the systemd
+.B MemoryMax=
+directive.
+Accepts a number with an optional suffix:
+.BR K ", " M ", " G ", " T .
+Example:
+.BR 512M ", " 2G .
+.TP
+.BI \-\-cpus " n"
+CPU time limit expressed as a number of CPUs.
+Converted to the systemd
+.B CPUQuota=
+directive (e.g.\&
+.B 2
+becomes
+.BR 200% ).
+Accepts integers or decimals.
+Example:
+.BR 2 ", " 0.5 .
+.TP
+.BI \-\-cpu\-weight " w"
+Relative CPU scheduling weight.
+Maps to the systemd
+.B CPUWeight=
+directive.
+Range: 1\(en10000 (default kernel weight is 100).
+Lower values get proportionally less CPU time under contention.
 .SH NOTES
 .SS Umask
 .B sdme create

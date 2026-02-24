@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
-use crate::State;
+use crate::{ResourceLimits, State};
 
 mod dbus {
     use anyhow::{bail, Context, Result};
@@ -784,6 +784,60 @@ pub fn write_env_file(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
     Ok(())
 }
 
+fn dropin_dir(name: &str) -> PathBuf {
+    PathBuf::from(format!(
+        "/etc/systemd/system/sdme@{name}.service.d"
+    ))
+}
+
+/// Write or remove the resource-limits drop-in for a container.
+///
+/// If `limits` has any values set, writes a `limits.conf` drop-in under
+/// `/etc/systemd/system/sdme@{name}.service.d/`. If no limits are set,
+/// removes the drop-in (and its parent directory if empty).
+/// Triggers a daemon-reload when the drop-in changes.
+pub fn write_limits_dropin(name: &str, limits: &ResourceLimits, verbose: bool) -> Result<()> {
+    let dir = dropin_dir(name);
+    let dropin_path = dir.join("limits.conf");
+
+    match limits.dropin_content() {
+        Some(content) => {
+            fs::create_dir_all(&dir)
+                .with_context(|| format!("failed to create {}", dir.display()))?;
+            if write_unit_if_changed(&dropin_path, &content, verbose)? {
+                dbus::daemon_reload()?;
+            }
+        }
+        None => {
+            if dropin_path.exists() {
+                fs::remove_file(&dropin_path)
+                    .with_context(|| format!("failed to remove {}", dropin_path.display()))?;
+                // Remove parent dir if empty.
+                let _ = fs::remove_dir(&dir);
+                if verbose {
+                    eprintln!("removed limits drop-in: {}", dropin_path.display());
+                }
+                dbus::daemon_reload()?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Remove the drop-in directory for a container (used during `rm`).
+pub fn remove_limits_dropin(name: &str, verbose: bool) -> Result<()> {
+    let dir = dropin_dir(name);
+    if dir.exists() {
+        fs::remove_dir_all(&dir)
+            .with_context(|| format!("failed to remove {}", dir.display()))?;
+        if verbose {
+            eprintln!("removed drop-in dir: {}", dir.display());
+        }
+        dbus::daemon_reload()?;
+    }
+    Ok(())
+}
+
 pub fn start(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
     ensure_template_unit(datadir, verbose)?;
 
@@ -791,6 +845,12 @@ pub fn start(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
 
     let env_path = datadir.join("containers").join(name).join("env");
     write_env_file(datadir, name, verbose)?;
+
+    // Read limits from state and write/remove the drop-in file.
+    let state_path = datadir.join("state").join(name);
+    let state = State::read_from(&state_path)?;
+    let limits = ResourceLimits::from_state(&state);
+    write_limits_dropin(name, &limits, verbose)?;
 
     if verbose {
         eprintln!("starting unit: {}", service_name(name));
@@ -886,6 +946,7 @@ mod tests {
         let opts = CreateOptions {
             name: Some("hostbox".to_string()),
             rootfs: None,
+            limits: Default::default(),
         };
         create(tmp.path(), &opts, false).unwrap();
 
@@ -905,6 +966,7 @@ mod tests {
         let opts = CreateOptions {
             name: Some("ubox".to_string()),
             rootfs: Some("ubuntu".to_string()),
+            limits: Default::default(),
         };
         create(tmp.path(), &opts, false).unwrap();
 
@@ -914,5 +976,37 @@ mod tests {
         let content = fs::read_to_string(&env_path).unwrap();
         let expected = format!("LOWERDIR={}/fs/ubuntu\n", tmp.path().display());
         assert_eq!(content, expected);
+    }
+
+    #[test]
+    fn test_dropin_dir_path() {
+        let dir = dropin_dir("mybox");
+        assert_eq!(
+            dir,
+            PathBuf::from("/etc/systemd/system/sdme@mybox.service.d")
+        );
+    }
+
+    #[test]
+    fn test_create_with_limits_state() {
+        let tmp = TempDataDir::new();
+        let limits = crate::ResourceLimits {
+            memory: Some("1G".to_string()),
+            cpus: Some("2".to_string()),
+            cpu_weight: Some("50".to_string()),
+        };
+        let opts = CreateOptions {
+            name: Some("limitbox".to_string()),
+            rootfs: None,
+            limits,
+        };
+        create(tmp.path(), &opts, false).unwrap();
+
+        // Verify limits are persisted in state file.
+        let state = crate::State::read_from(&tmp.path().join("state/limitbox")).unwrap();
+        let restored = crate::ResourceLimits::from_state(&state);
+        assert_eq!(restored.memory.as_deref(), Some("1G"));
+        assert_eq!(restored.cpus.as_deref(), Some("2"));
+        assert_eq!(restored.cpu_weight.as_deref(), Some("50"));
     }
 }
