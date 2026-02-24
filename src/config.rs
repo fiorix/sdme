@@ -4,8 +4,7 @@
 //! (default: `~/.config/sdme/sdmerc`, TOML format). Provides the
 //! [`Config`] struct and functions for reading/writing it to disk.
 
-use std::io::Write;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -115,15 +114,11 @@ pub fn save(config: &Config, path: Option<&Path>) -> Result<()> {
     }
     let contents =
         toml::to_string(config).with_context(|| format!("failed to serialize config"))?;
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&path)
-        .with_context(|| format!("failed to open {}", path.display()))?;
-    file.write_all(contents.as_bytes())
-        .with_context(|| format!("failed to write {}", path.display()))?;
+    crate::atomic_write(&path, contents.as_bytes())
+        .with_context(|| format!("failed to write config {}", path.display()))?;
+    // Ensure restrictive permissions (atomic_write creates with default umask).
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("failed to set permissions on {}", path.display()))?;
     Ok(())
 }
 

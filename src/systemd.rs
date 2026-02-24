@@ -643,6 +643,17 @@ pub fn wait_for_dbus(name: &str, timeout: std::time::Duration, verbose: bool) ->
     dbus::wait_for_dbus(name, timeout, verbose)
 }
 
+/// Wait for a container to complete boot and D-Bus readiness.
+///
+/// Combines `wait_for_boot` and `wait_for_dbus` with shared timeout tracking.
+pub fn await_boot(name: &str, timeout: std::time::Duration, verbose: bool) -> Result<()> {
+    let boot_start = std::time::Instant::now();
+    wait_for_boot(name, timeout, verbose)?;
+    let remaining = timeout.saturating_sub(boot_start.elapsed());
+    wait_for_dbus(name, remaining, verbose)?;
+    Ok(())
+}
+
 pub fn terminate_machine(name: &str) -> Result<()> {
     dbus::terminate_machine(name)
 }

@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 
 use crate::{State, check_interrupted, containers, copy, rootfs, systemd, validate_name};
+use crate::copy::sanitize_dest_path;
 
 // --- Config types ---
 
@@ -57,6 +58,9 @@ fn parse_build_config(path: &Path) -> Result<BuildConfig> {
                         lineno + 1
                     );
                 }
+                validate_name(rest).with_context(|| {
+                    format!("{}:{}: invalid FROM rootfs name", path.display(), lineno + 1)
+                })?;
                 rootfs = Some(rest.to_string());
             }
             "COPY" => {
@@ -142,32 +146,6 @@ fn run_in_container(name: &str, command: &str, verbose: bool) -> Result<()> {
     Ok(())
 }
 
-/// Sanitize a COPY destination path: strip leading `/` and reject `..` components
-/// to prevent path traversal that could escape the overlayfs upper directory.
-fn sanitize_copy_dst(dst: &Path) -> Result<PathBuf> {
-    use std::path::Component;
-    let mut clean = PathBuf::new();
-    for component in dst.components() {
-        match component {
-            Component::ParentDir => {
-                bail!(
-                    "refusing COPY destination with '..' component: {}",
-                    dst.display()
-                );
-            }
-            Component::RootDir | Component::Prefix(_) => {
-                // Strip leading '/' and Windows prefixes.
-            }
-            Component::CurDir => {
-                // Skip '.' components.
-            }
-            Component::Normal(c) => {
-                clean.push(c);
-            }
-        }
-    }
-    Ok(clean)
-}
 
 fn do_copy(
     upper_dir: &Path,
@@ -176,7 +154,7 @@ fn do_copy(
     dst: &Path,
     verbose: bool,
 ) -> Result<()> {
-    let rel_dst = sanitize_copy_dst(dst)?;
+    let rel_dst = sanitize_dest_path(dst)?;
     let mut target = upper_dir.join(&rel_dst);
 
     let meta = fs::symlink_metadata(src)
@@ -248,10 +226,7 @@ fn execute_build(
                 if !container_running {
                     eprintln!("starting build container '{container_name}'");
                     systemd::start(datadir, container_name, verbose)?;
-                    let boot_start = std::time::Instant::now();
-                    systemd::wait_for_boot(container_name, timeout, verbose)?;
-                    let remaining = timeout.saturating_sub(boot_start.elapsed());
-                    systemd::wait_for_dbus(container_name, remaining, verbose)?;
+                    systemd::await_boot(container_name, timeout, verbose)?;
                     container_running = true;
                 }
                 run_in_container(container_name, command, verbose)?;
@@ -392,13 +367,18 @@ pub fn build(
     }
 
     // Atomic rename to final location.
-    fs::rename(&staging_rootfs, &final_dir).with_context(|| {
-        format!(
-            "failed to rename {} to {}",
-            staging_rootfs.display(),
-            final_dir.display()
-        )
-    })?;
+    if let Err(e) = fs::rename(&staging_rootfs, &final_dir) {
+        let _ = copy::make_removable(&staging_rootfs);
+        let _ = fs::remove_dir_all(&staging_rootfs);
+        let _ = containers::remove(datadir, &staging_name, verbose);
+        return Err(e).with_context(|| {
+            format!(
+                "failed to rename {} to {}",
+                staging_rootfs.display(),
+                final_dir.display()
+            )
+        });
+    }
 
     // Write distro metadata sidecar.
     let distro = rootfs::detect_distro(&final_dir);

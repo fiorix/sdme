@@ -530,6 +530,8 @@ pub fn exec(
     join_as_sudo_user: bool,
     verbose: bool,
 ) -> Result<()> {
+    ensure_exists(datadir, name)?;
+
     if !systemd::is_active(name)? {
         bail!("container '{name}' is not running");
     }

@@ -8,9 +8,9 @@ use std::ffi::CString;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs as unix_fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 
 use crate::check_interrupted;
 
@@ -321,6 +321,33 @@ pub(crate) fn lstat_entry(path: &Path) -> Result<libc::stat> {
             .with_context(|| format!("lstat failed for {}", path.display()));
     }
     Ok(stat)
+}
+
+/// Sanitize a destination path: strip leading `/` and reject `..` components
+/// to prevent path traversal that could escape a target directory.
+pub(crate) fn sanitize_dest_path(path: &Path) -> Result<PathBuf> {
+    use std::path::Component;
+    let mut clean = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                bail!(
+                    "refusing path with '..' component: {}",
+                    path.display()
+                );
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                // Strip leading '/' and Windows prefixes.
+            }
+            Component::CurDir => {
+                // Skip '.' components.
+            }
+            Component::Normal(c) => {
+                clean.push(c);
+            }
+        }
+    }
+    Ok(clean)
 }
 
 pub(crate) fn path_to_cstring(path: &Path) -> Result<CString> {

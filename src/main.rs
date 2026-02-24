@@ -316,11 +316,7 @@ fn for_each_container(
 }
 
 fn await_boot(name: &str, timeout: std::time::Duration, verbose: bool) -> Result<()> {
-    let boot_start = std::time::Instant::now();
-    systemd::wait_for_boot(name, timeout, verbose)?;
-    let remaining = timeout.saturating_sub(boot_start.elapsed());
-    systemd::wait_for_dbus(name, remaining, verbose)?;
-    Ok(())
+    systemd::await_boot(name, timeout, verbose)
 }
 
 /// Build a `ResourceLimits` from CLI flags (for `create` / `new`).

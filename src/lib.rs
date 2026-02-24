@@ -14,6 +14,7 @@ pub use network::NetworkConfig;
 use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -122,7 +123,8 @@ impl State {
 
     pub fn write_to(&self, path: &Path) -> Result<()> {
         let content = self.serialize();
-        fs::write(path, content).with_context(|| format!("failed to write {}", path.display()))
+        atomic_write(path, content.as_bytes())
+            .with_context(|| format!("failed to write {}", path.display()))
     }
 
     pub fn read_from(path: &Path) -> Result<Self> {
@@ -268,6 +270,30 @@ fn validate_cpu_weight(s: &str) -> Result<()> {
     if !(1..=10000).contains(&v) {
         bail!("--cpu-weight must be 1–10000, got {v}");
     }
+    Ok(())
+}
+
+/// Write data to a file atomically via a temporary file and rename.
+///
+/// Creates a sibling temp file, writes all data, flushes, then renames
+/// over the target path. This prevents partial reads on crash or power loss.
+pub fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
+    let parent = path.parent().unwrap_or(Path::new("."));
+    let tmp_path = parent.join(format!(
+        ".{}.tmp",
+        path.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    ));
+    let mut file = fs::File::create(&tmp_path)
+        .with_context(|| format!("failed to create temp file {}", tmp_path.display()))?;
+    file.write_all(data)
+        .with_context(|| format!("failed to write temp file {}", tmp_path.display()))?;
+    file.flush()?;
+    fs::rename(&tmp_path, path).with_context(|| {
+        let _ = fs::remove_file(&tmp_path);
+        format!("failed to rename {} to {}", tmp_path.display(), path.display())
+    })?;
     Ok(())
 }
 

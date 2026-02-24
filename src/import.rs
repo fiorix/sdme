@@ -103,11 +103,7 @@ fn detect_kind_from_url(url: &str) -> Option<DownloadedFileKind> {
     }
 
     // Raw disk images, including compressed variants.
-    let raw_extensions = [
-        ".raw", ".raw.gz", ".raw.bz2", ".raw.xz", ".raw.zst",
-        ".img", ".img.gz", ".img.bz2", ".img.xz", ".img.zst",
-    ];
-    for ext in &raw_extensions {
+    for ext in RAW_IMAGE_EXTENSIONS {
         if filename.ends_with(ext) {
             return Some(DownloadedFileKind::RawImage);
         }
@@ -472,36 +468,6 @@ fn import_oci_layout(oci_dir: &Path, staging_dir: &Path, verbose: bool) -> Resul
     Ok(())
 }
 
-/// Sanitize a tar entry path: strip leading `/` and reject `..` components.
-///
-/// This mirrors what `tar::Archive::unpack_in()` does internally but is needed
-/// here because OCI whiteout handling operates on the path before `unpack_in()`
-/// is called. Without this, a malicious entry like `../../etc/.wh..wh..opq`
-/// could escape the destination directory.
-fn sanitize_tar_path(path: &Path) -> Result<PathBuf> {
-    use std::path::Component;
-    let mut clean = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::ParentDir => {
-                bail!(
-                    "refusing tar entry with '..' component: {}",
-                    path.display()
-                );
-            }
-            Component::RootDir | Component::Prefix(_) => {
-                // Strip leading '/' and Windows prefixes.
-            }
-            Component::CurDir => {
-                // Skip '.' components.
-            }
-            Component::Normal(c) => {
-                clean.push(c);
-            }
-        }
-    }
-    Ok(clean)
-}
 
 /// Check whether a path resolves to a location inside `dest` after following symlinks.
 /// Returns `false` if the canonical path escapes `dest` or canonicalization fails.
@@ -533,9 +499,9 @@ fn unpack_oci_layer<R: Read>(reader: R, dest: &Path) -> Result<()> {
 
         // Sanitize: strip leading '/' and reject paths with '..' components
         // to prevent path traversal in whiteout handling below.
-        let path = sanitize_tar_path(&raw_path)?;
+        let path = sanitize_dest_path(&raw_path)?;
 
-        let file_name = match path.file_name() {
+        let file_name: String = match path.file_name() {
             Some(name) => name.to_string_lossy().into_owned(),
             None => {
                 // Root directory entry — just ensure it exists.
