@@ -15,11 +15,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
 
-use crate::{State, names, rootfs, systemd, validate_name};
+use crate::{ResourceLimits, State, names, rootfs, systemd, validate_name};
 
 pub struct CreateOptions {
     pub name: Option<String>,
     pub rootfs: Option<String>,
+    pub limits: ResourceLimits,
 }
 
 /// Read the current process umask. There is no "get umask" syscall, so
@@ -86,7 +87,7 @@ pub fn create(datadir: &Path, opts: &CreateOptions, verbose: bool) -> Result<Str
         eprintln!("claimed state file: {}", state_path.display());
     }
 
-    match do_create(datadir, &name, &rootfs, verbose) {
+    match do_create(datadir, &name, &rootfs, &opts.limits, verbose) {
         Ok(()) => Ok(name),
         Err(e) => {
             let container_dir = datadir.join("containers").join(&name);
@@ -97,7 +98,7 @@ pub fn create(datadir: &Path, opts: &CreateOptions, verbose: bool) -> Result<Str
     }
 }
 
-fn do_create(datadir: &Path, name: &str, rootfs: &Path, verbose: bool) -> Result<()> {
+fn do_create(datadir: &Path, name: &str, rootfs: &Path, limits: &ResourceLimits, verbose: bool) -> Result<()> {
     let container_dir = datadir.join("containers").join(name);
     let containers_dir = datadir.join("containers");
     fs::create_dir_all(&containers_dir)
@@ -213,6 +214,7 @@ fn do_create(datadir: &Path, name: &str, rootfs: &Path, verbose: bool) -> Result
     state.set("CREATED", unix_timestamp().to_string());
     state.set("NAME", name);
     state.set("ROOTFS", rootfs_value);
+    limits.write_to_state(&mut state);
 
     // State file was already created atomically by create(); write content to it.
     let state_path = datadir.join("state").join(name);
@@ -407,6 +409,8 @@ pub fn remove(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
         }
     }
 
+    systemd::remove_limits_dropin(name, verbose)?;
+
     Ok(())
 }
 
@@ -573,6 +577,32 @@ fn machinectl_shell(
     bail!("failed to exec machinectl: {err}");
 }
 
+/// Update resource limits on an existing container.
+///
+/// Reads the current state file, merges the new limits, writes it back,
+/// and regenerates the systemd drop-in. If the container is running,
+/// prints a note that a restart is needed.
+pub fn set_limits(datadir: &Path, name: &str, limits: &ResourceLimits, verbose: bool) -> Result<()> {
+    ensure_exists(datadir, name)?;
+
+    let state_path = datadir.join("state").join(name);
+    let mut state = State::read_from(&state_path)?;
+    limits.write_to_state(&mut state);
+    state.write_to(&state_path)?;
+
+    if verbose {
+        eprintln!("updated state file: {}", state_path.display());
+    }
+
+    systemd::write_limits_dropin(name, limits, verbose)?;
+
+    if systemd::is_active(name)? {
+        eprintln!("note: container '{name}' is running; restart for limits to take effect");
+    }
+
+    Ok(())
+}
+
 pub fn stop(name: &str, verbose: bool) -> Result<()> {
     if verbose {
         eprintln!("terminating machine '{name}'");
@@ -659,6 +689,7 @@ mod tests {
         let opts = CreateOptions {
             name: None,
             rootfs: None,
+            limits: Default::default(),
         };
         let name = create(tmp.path(), &opts, false).unwrap();
         assert!(validate_name(&name).is_ok());
@@ -691,6 +722,7 @@ mod tests {
         let opts = CreateOptions {
             name: Some("hello".to_string()),
             rootfs: None,
+            limits: Default::default(),
         };
         let name = create(tmp.path(), &opts, false).unwrap();
         assert_eq!(name, "hello");
@@ -719,6 +751,7 @@ mod tests {
         let opts = CreateOptions {
             name: Some("dup".to_string()),
             rootfs: None,
+            limits: Default::default(),
         };
         create(tmp.path(), &opts, false).unwrap();
         let err = create(tmp.path(), &opts, false).unwrap_err();
@@ -734,6 +767,7 @@ mod tests {
         let opts = CreateOptions {
             name: Some("test".to_string()),
             rootfs: Some("nonexistent".to_string()),
+            limits: Default::default(),
         };
         let err = create(tmp.path(), &opts, false).unwrap_err();
         assert!(
@@ -751,6 +785,7 @@ mod tests {
         let opts = CreateOptions {
             name: Some("test".to_string()),
             rootfs: Some("myroot".to_string()),
+            limits: Default::default(),
         };
         let name = create(tmp.path(), &opts, false).unwrap();
         assert_eq!(name, "test");
@@ -769,6 +804,7 @@ mod tests {
         let opts = CreateOptions {
             name: Some("fail".to_string()),
             rootfs: None,
+            limits: Default::default(),
         };
         let err = create(tmp.path(), &opts, false);
         assert!(err.is_err());
@@ -783,6 +819,7 @@ mod tests {
         let opts = CreateOptions {
             name: Some("mybox".to_string()),
             rootfs: None,
+            limits: Default::default(),
         };
         create(tmp.path(), &opts, false).unwrap();
         assert!(ensure_exists(tmp.path(), "mybox").is_ok());
@@ -866,6 +903,28 @@ mod tests {
     }
 
     #[test]
+    fn test_create_with_limits() {
+        let tmp = TempDataDir::new();
+        let limits = crate::ResourceLimits {
+            memory: Some("2G".to_string()),
+            cpus: Some("4".to_string()),
+            cpu_weight: None,
+        };
+        let opts = CreateOptions {
+            name: Some("limited".to_string()),
+            rootfs: None,
+            limits,
+        };
+        let name = create(tmp.path(), &opts, false).unwrap();
+        assert_eq!(name, "limited");
+
+        let state = State::read_from(&tmp.path().join("state/limited")).unwrap();
+        assert_eq!(state.get("MEMORY"), Some("2G"));
+        assert_eq!(state.get("CPUS"), Some("4"));
+        assert_eq!(state.get("CPU_WEIGHT"), None);
+    }
+
+    #[test]
     fn test_create_rejects_restrictive_umask() {
         // Set a restrictive umask, attempt create, then restore.
         let old = unsafe { libc::umask(0o077) };
@@ -873,6 +932,7 @@ mod tests {
         let opts = CreateOptions {
             name: Some("umasktest".to_string()),
             rootfs: None,
+            limits: Default::default(),
         };
         let err = create(tmp.path(), &opts, false);
         unsafe { libc::umask(old) };

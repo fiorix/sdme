@@ -80,6 +80,10 @@ impl State {
         self.entries.get(key).map(|s| s.as_str())
     }
 
+    pub fn remove(&mut self, key: &str) {
+        self.entries.remove(key);
+    }
+
     pub fn parse(content: &str) -> Result<Self> {
         let mut entries = BTreeMap::new();
         for line in content.lines() {
@@ -116,6 +120,145 @@ impl State {
             fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
         Self::parse(&content)
     }
+}
+
+/// Resource limits that map to systemd cgroup directives.
+///
+/// Each field is `None` when the limit is not set. Values are stored in the
+/// container's state file and converted to a systemd drop-in at start time.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct ResourceLimits {
+    /// `MemoryMax=` — e.g. "512M", "2G"
+    pub memory: Option<String>,
+    /// `CPUQuota=` — stored as a number of CPUs (e.g. "2" → 200%)
+    pub cpus: Option<String>,
+    /// `CPUWeight=` — integer 1–10000
+    pub cpu_weight: Option<String>,
+}
+
+impl ResourceLimits {
+    /// Returns true if no limits are set.
+    pub fn is_empty(&self) -> bool {
+        self.memory.is_none()
+            && self.cpus.is_none()
+            && self.cpu_weight.is_none()
+    }
+
+    /// Read limits from a state file's key-value pairs.
+    pub fn from_state(state: &State) -> Self {
+        Self {
+            memory: state.get("MEMORY").filter(|s| !s.is_empty()).map(String::from),
+            cpus: state.get("CPUS").filter(|s| !s.is_empty()).map(String::from),
+            cpu_weight: state.get("CPU_WEIGHT").filter(|s| !s.is_empty()).map(String::from),
+        }
+    }
+
+    /// Write limits into a state's key-value pairs.
+    ///
+    /// Set fields are written; unset fields are removed from the state.
+    pub fn write_to_state(&self, state: &mut State) {
+        for (key, val) in [
+            ("MEMORY", &self.memory),
+            ("CPUS", &self.cpus),
+            ("CPU_WEIGHT", &self.cpu_weight),
+        ] {
+            match val {
+                Some(v) => state.set(key, v.as_str()),
+                None => state.remove(key),
+            }
+        }
+    }
+
+    /// Generate the content of a systemd drop-in `[Service]` section.
+    ///
+    /// Returns `None` if no limits are set.
+    pub fn dropin_content(&self) -> Option<String> {
+        let mut lines = vec!["[Service]".to_string()];
+        let mut has_any = false;
+
+        if let Some(mem) = &self.memory {
+            lines.push(format!("MemoryMax={mem}"));
+            has_any = true;
+        }
+        if let Some(cpus) = &self.cpus {
+            let pct = cpus_to_quota(cpus);
+            lines.push(format!("CPUQuota={pct}%"));
+            has_any = true;
+        }
+        if let Some(w) = &self.cpu_weight {
+            lines.push(format!("CPUWeight={w}"));
+            has_any = true;
+        }
+
+        if has_any {
+            lines.push(String::new()); // trailing newline
+            Some(lines.join("\n"))
+        } else {
+            None
+        }
+    }
+
+    /// Validate all set fields. Returns an error describing the first invalid value.
+    pub fn validate(&self) -> Result<()> {
+        if let Some(mem) = &self.memory {
+            validate_memory(mem)?;
+        }
+        if let Some(cpus) = &self.cpus {
+            validate_cpus(cpus)?;
+        }
+        if let Some(w) = &self.cpu_weight {
+            validate_cpu_weight(w)?;
+        }
+        Ok(())
+    }
+}
+
+/// Validate a memory value (systemd size: `<number>[K|M|G|T]`).
+fn validate_memory(s: &str) -> Result<()> {
+    if s.is_empty() {
+        bail!("--memory value cannot be empty");
+    }
+    let (num, suffix) = if s.ends_with(|c: char| c.is_ascii_alphabetic()) {
+        let (n, s) = s.split_at(s.len() - 1);
+        (n, s)
+    } else {
+        (s, "")
+    };
+    let _: u64 = num.parse().map_err(|_| {
+        anyhow::anyhow!("invalid --memory value '{s}': expected <number>[K|M|G|T]")
+    })?;
+    match suffix {
+        "" | "K" | "M" | "G" | "T" => Ok(()),
+        _ => bail!("invalid --memory suffix '{suffix}': expected K, M, G, or T"),
+    }
+}
+
+/// Validate a cpus value (positive number, integer or decimal).
+fn validate_cpus(s: &str) -> Result<()> {
+    let v: f64 = s.parse().map_err(|_| {
+        anyhow::anyhow!("invalid --cpus value '{s}': expected a positive number")
+    })?;
+    if v <= 0.0 {
+        bail!("--cpus must be positive, got '{s}'");
+    }
+    Ok(())
+}
+
+/// Convert a cpus string to a percentage for CPUQuota.
+fn cpus_to_quota(s: &str) -> u64 {
+    let v: f64 = s.parse().unwrap_or(1.0);
+    (v * 100.0).round() as u64
+}
+
+/// Validate a cpu-weight value (integer 1–10000).
+fn validate_cpu_weight(s: &str) -> Result<()> {
+    let v: u64 = s.parse().map_err(|_| {
+        anyhow::anyhow!("invalid --cpu-weight value '{s}': expected integer 1–10000")
+    })?;
+    if !(1..=10000).contains(&v) {
+        bail!("--cpu-weight must be 1–10000, got {v}");
+    }
+    Ok(())
 }
 
 pub fn validate_name(name: &str) -> Result<()> {
@@ -166,5 +309,129 @@ mod tests {
         std::env::set_var("SUDO_USER", "root");
         assert!(sudo_user().is_none());
         std::env::remove_var("SUDO_USER");
+    }
+
+    // --- ResourceLimits tests ---
+
+    #[test]
+    fn test_limits_default_is_empty() {
+        let limits = ResourceLimits::default();
+        assert!(limits.is_empty());
+        assert_eq!(limits.dropin_content(), None);
+    }
+
+    #[test]
+    fn test_limits_validate_memory_ok() {
+        for v in &["512M", "2G", "1T", "4096K", "1073741824"] {
+            let limits = ResourceLimits { memory: Some(v.to_string()), ..Default::default() };
+            assert!(limits.validate().is_ok(), "should accept memory={v}");
+        }
+    }
+
+    #[test]
+    fn test_limits_validate_memory_bad() {
+        for v in &["abc", "2X", "M", ""] {
+            let limits = ResourceLimits { memory: Some(v.to_string()), ..Default::default() };
+            assert!(limits.validate().is_err(), "should reject memory={v}");
+        }
+    }
+
+    #[test]
+    fn test_limits_validate_cpus_ok() {
+        for v in &["1", "2", "0.5", "4.0"] {
+            let limits = ResourceLimits { cpus: Some(v.to_string()), ..Default::default() };
+            assert!(limits.validate().is_ok(), "should accept cpus={v}");
+        }
+    }
+
+    #[test]
+    fn test_limits_validate_cpus_bad() {
+        for v in &["0", "-1", "abc"] {
+            let limits = ResourceLimits { cpus: Some(v.to_string()), ..Default::default() };
+            assert!(limits.validate().is_err(), "should reject cpus={v}");
+        }
+    }
+
+    #[test]
+    fn test_limits_validate_cpu_weight_ok() {
+        for v in &["1", "100", "10000"] {
+            let limits = ResourceLimits { cpu_weight: Some(v.to_string()), ..Default::default() };
+            assert!(limits.validate().is_ok(), "should accept cpu_weight={v}");
+        }
+    }
+
+    #[test]
+    fn test_limits_validate_cpu_weight_bad() {
+        for v in &["0", "10001", "-1", "abc"] {
+            let limits = ResourceLimits { cpu_weight: Some(v.to_string()), ..Default::default() };
+            assert!(limits.validate().is_err(), "should reject cpu_weight={v}");
+        }
+    }
+
+    #[test]
+    fn test_limits_dropin_content_memory_only() {
+        let limits = ResourceLimits { memory: Some("2G".to_string()), ..Default::default() };
+        let content = limits.dropin_content().unwrap();
+        assert_eq!(content, "[Service]\nMemoryMax=2G\n");
+    }
+
+    #[test]
+    fn test_limits_dropin_content_cpus() {
+        let limits = ResourceLimits { cpus: Some("2".to_string()), ..Default::default() };
+        let content = limits.dropin_content().unwrap();
+        assert!(content.contains("CPUQuota=200%"));
+    }
+
+    #[test]
+    fn test_limits_dropin_content_fractional_cpus() {
+        let limits = ResourceLimits { cpus: Some("0.5".to_string()), ..Default::default() };
+        let content = limits.dropin_content().unwrap();
+        assert!(content.contains("CPUQuota=50%"));
+    }
+
+    #[test]
+    fn test_limits_dropin_content_all() {
+        let limits = ResourceLimits {
+            memory: Some("1G".to_string()),
+            cpus: Some("4".to_string()),
+            cpu_weight: Some("50".to_string()),
+        };
+        let content = limits.dropin_content().unwrap();
+        assert!(content.contains("MemoryMax=1G"));
+        assert!(content.contains("CPUQuota=400%"));
+        assert!(content.contains("CPUWeight=50"));
+    }
+
+    #[test]
+    fn test_limits_state_roundtrip() {
+        let limits = ResourceLimits {
+            memory: Some("2G".to_string()),
+            cpus: Some("1.5".to_string()),
+            cpu_weight: None,
+        };
+        let mut state = State::new();
+        state.set("NAME", "test");
+        limits.write_to_state(&mut state);
+
+        let serialized = state.serialize();
+        let parsed = State::parse(&serialized).unwrap();
+        let restored = ResourceLimits::from_state(&parsed);
+
+        assert_eq!(restored.memory, Some("2G".to_string()));
+        assert_eq!(restored.cpus, Some("1.5".to_string()));
+        assert_eq!(restored.cpu_weight, None);
+    }
+
+    #[test]
+    fn test_limits_state_remove() {
+        let mut state = State::new();
+        state.set("MEMORY", "1G");
+        state.set("CPUS", "2");
+
+        let limits = ResourceLimits { memory: Some("4G".to_string()), ..Default::default() };
+        limits.write_to_state(&mut state);
+
+        assert_eq!(state.get("MEMORY"), Some("4G"));
+        assert_eq!(state.get("CPUS"), None); // removed
     }
 }

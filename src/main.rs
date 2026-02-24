@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 use sdme::import::InstallPackages;
-use sdme::{config, containers, rootfs, system_check, systemd};
+use sdme::{ResourceLimits, config, containers, rootfs, system_check, systemd};
 
 #[derive(Parser)]
 #[command(name = "sdme", about = "Lightweight systemd-nspawn containers with overlayfs")]
@@ -35,6 +35,18 @@ enum Command {
         /// Root filesystem to use (host filesystem if not provided)
         #[arg(short = 'r', long = "fs")]
         fs: Option<String>,
+
+        /// Memory limit (e.g. 512M, 2G)
+        #[arg(long)]
+        memory: Option<String>,
+
+        /// CPU limit as number of CPUs (e.g. 2, 0.5)
+        #[arg(long)]
+        cpus: Option<String>,
+
+        /// CPU weight 1–10000 (default: 100)
+        #[arg(long)]
+        cpu_weight: Option<String>,
     },
 
     /// Run a command in a running container
@@ -77,6 +89,18 @@ enum Command {
         #[arg(short, long)]
         timeout: Option<u64>,
 
+        /// Memory limit (e.g. 512M, 2G)
+        #[arg(long)]
+        memory: Option<String>,
+
+        /// CPU limit as number of CPUs (e.g. 2, 0.5)
+        #[arg(long)]
+        cpus: Option<String>,
+
+        /// CPU weight 1–10000 (default: 100)
+        #[arg(long)]
+        cpu_weight: Option<String>,
+
         /// Command to run inside the container (default: login shell)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
@@ -103,6 +127,24 @@ enum Command {
         /// Stop all running containers
         #[arg(short, long)]
         all: bool,
+    },
+
+    /// Set resource limits on a container (replaces all limits)
+    Set {
+        /// Container name
+        name: String,
+
+        /// Memory limit (e.g. 512M, 2G)
+        #[arg(long)]
+        memory: Option<String>,
+
+        /// CPU limit as number of CPUs (e.g. 2, 0.5)
+        #[arg(long)]
+        cpus: Option<String>,
+
+        /// CPU weight 1–10000 (default: 100)
+        #[arg(long)]
+        cpu_weight: Option<String>,
     },
 
     /// Start a container
@@ -197,6 +239,24 @@ fn await_boot(name: &str, timeout: std::time::Duration, verbose: bool) -> Result
     Ok(())
 }
 
+/// Build a `ResourceLimits` from CLI flags (for `create` / `new`).
+///
+/// `None` means the flag was not provided; the limit is left unset.
+fn parse_limits(
+    memory: Option<String>,
+    cpus: Option<String>,
+    cpu_weight: Option<String>,
+) -> Result<ResourceLimits> {
+    let limits = ResourceLimits {
+        memory,
+        cpus,
+        cpu_weight,
+    };
+    limits.validate()?;
+    Ok(limits)
+}
+
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -253,9 +313,10 @@ fn main() -> Result<()> {
                 config::save(&cfg, config_path)?;
             }
         },
-        Command::Create { name, fs } => {
+        Command::Create { name, fs, memory, cpus, cpu_weight } => {
             system_check::check_systemd_version(252)?;
-            let opts = containers::CreateOptions { name, rootfs: fs };
+            let limits = parse_limits(memory, cpus, cpu_weight)?;
+            let opts = containers::CreateOptions { name, rootfs: fs, limits };
             let name = containers::create(&cfg.datadir, &opts, cli.verbose)?;
             eprintln!("creating '{name}'");
             println!("{name}");
@@ -263,6 +324,11 @@ fn main() -> Result<()> {
         Command::Exec { name, command } => {
             let name = containers::resolve_name(&cfg.datadir, &name)?;
             containers::exec(&cfg.datadir, &name, &command, cfg.join_as_sudo_user, cli.verbose)?;
+        }
+        Command::Set { name, memory, cpus, cpu_weight } => {
+            let name = containers::resolve_name(&cfg.datadir, &name)?;
+            let limits = parse_limits(memory, cpus, cpu_weight)?;
+            containers::set_limits(&cfg.datadir, &name, &limits, cli.verbose)?;
         }
         Command::Start { name, timeout } => {
             system_check::check_systemd_version(252)?;
@@ -302,9 +368,10 @@ fn main() -> Result<()> {
             let err = cmd.exec();
             bail!("failed to exec journalctl: {err}");
         }
-        Command::New { name, fs, timeout, command } => {
+        Command::New { name, fs, timeout, memory, cpus, cpu_weight, command } => {
             system_check::check_systemd_version(252)?;
-            let opts = containers::CreateOptions { name, rootfs: fs };
+            let limits = parse_limits(memory, cpus, cpu_weight)?;
+            let opts = containers::CreateOptions { name, rootfs: fs, limits };
             let name = containers::create(&cfg.datadir, &opts, cli.verbose)?;
             eprintln!("creating '{name}'");
 
