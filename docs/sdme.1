@@ -197,6 +197,58 @@ to remove a leftover staging directory from a previous failed import.
 List imported root filesystems with distro detection and paths.
 .SS sdme fs rm \fIname\fR...
 Remove one or more imported root filesystems.
+.SS sdme fs build \fIname\fR \fIbuild.conf\fR [\-t \fIseconds\fR] [\-f]
+Build a root filesystem from a build config file.
+Creates a temporary staging container from the base rootfs specified by
+.BR FROM ,
+executes
+.B RUN
+and
+.B COPY
+directives sequentially, then captures the resulting merged
+filesystem as a new rootfs named
+.IR name .
+.PP
+Use
+.B \-t
+to override the boot timeout (default: 60 seconds or the
+.B boot_timeout
+config value).
+Use
+.B \-f
+to replace an existing rootfs with the same name.
+.PP
+The staging container is automatically removed after the build completes
+or on failure/Ctrl+C.
+.PP
+The build config is a line\-oriented text file with three directives:
+.RS
+.TP
+.BI FROM " rootfs"
+Base rootfs to build on (must be first directive, required, only once).
+Must refer to a rootfs previously imported with
+.BR "sdme fs import" .
+.TP
+.BI RUN " command"
+Run a shell command inside the container via
+.BR /bin/sh\ \-c .
+Supports pipes, redirects, and compound commands.
+The container is started automatically if not already running.
+.TP
+.BI COPY " src dst"
+Copy a host file or directory into the rootfs.
+The container is stopped before copying (overlayfs constraint).
+If
+.I dst
+is an existing directory, the source is placed inside it.
+Destination paths with
+.B ..
+components are rejected.
+.RE
+.PP
+Lines starting with
+.B #
+and blank lines are ignored.
 .SS sdme config get
 Show current configuration values.
 .SS sdme config set \fIkey\fR \fIvalue\fR
@@ -430,6 +482,28 @@ Create containers in a shared network zone:
 sdme new \-\-network\-zone myzone db \-r ubuntu
 sdme new \-\-network\-zone myzone app \-r ubuntu
 # app and db can now communicate over the shared zone network
+.fi
+.RE
+.PP
+Build a custom rootfs from an imported base:
+.PP
+.RS
+.nf
+# Import a base rootfs
+debootstrap \-\-include=dbus,systemd noble /tmp/ubuntu
+sdme fs import ubuntu /tmp/ubuntu
+
+# Create a build config
+cat << EOF > examplefs.conf
+FROM ubuntu
+RUN apt\-get update
+RUN apt\-get install \-y systemd\-container
+COPY ./target/release/sdme /usr/local/bin/sdme
+EOF
+
+# Build the new rootfs and create a container
+sdme fs build examplefs examplefs.conf
+sdme new \-r examplefs
 .fi
 .RE
 .SH RESOURCE LIMITS

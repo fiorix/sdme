@@ -227,6 +227,35 @@ enum RootfsCommand {
         force: bool,
     },
     /// Build a root filesystem from a build config
+    #[command(after_long_help = "\
+BUILD CONFIG FORMAT:
+    The build config is a line-oriented text file with three directives:
+
+        FROM <rootfs>       Base rootfs (must be first, required, only once)
+        RUN <command>       Run a shell command inside the container
+        COPY <src> <dst>    Copy a host file or directory into the rootfs
+
+    Lines starting with # and blank lines are ignored.
+    RUN commands execute via /bin/sh -c and support pipes, &&, etc.
+    COPY stops the container (if running) and writes directly to the
+    overlayfs upper layer. Paths with '..' components are rejected.
+
+EXAMPLE:
+    # Import a base rootfs
+    sudo debootstrap --include=dbus,systemd noble /tmp/ubuntu
+    sudo sdme fs import ubuntu /tmp/ubuntu
+
+    # Create a build config
+    cat << EOF > examplefs.conf
+    FROM ubuntu
+    RUN apt-get update
+    RUN apt-get install -y systemd-container
+    COPY ./target/release/sdme /usr/local/bin/sdme
+    EOF
+
+    # Build and use
+    sudo sdme fs build examplefs examplefs.conf
+    sudo sdme new -r examplefs")]
     Build {
         /// Name for the new rootfs
         name: String,
