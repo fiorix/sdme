@@ -503,6 +503,18 @@ fn sanitize_tar_path(path: &Path) -> Result<PathBuf> {
     Ok(clean)
 }
 
+/// Check whether a path resolves to a location inside `dest` after following symlinks.
+/// Returns `false` if the canonical path escapes `dest` or canonicalization fails.
+fn is_inside_dest(path: &Path, dest: &Path) -> bool {
+    let Ok(canonical) = fs::canonicalize(path) else {
+        return false;
+    };
+    let Ok(canonical_dest) = fs::canonicalize(dest) else {
+        return false;
+    };
+    canonical.starts_with(&canonical_dest)
+}
+
 /// Unpack an OCI layer tar archive, handling OCI whiteout markers.
 ///
 /// OCI whiteouts:
@@ -539,6 +551,14 @@ fn unpack_oci_layer<R: Read>(reader: R, dest: &Path) -> Result<()> {
             let parent = path.parent().unwrap_or(Path::new(""));
             let abs_parent = dest.join(parent);
             if abs_parent.is_dir() {
+                // Verify the parent resolves inside dest after following symlinks.
+                if !is_inside_dest(&abs_parent, dest) {
+                    eprintln!(
+                        "warning: skipping opaque whiteout that escapes destination: {}",
+                        path.display()
+                    );
+                    continue;
+                }
                 for child in fs::read_dir(&abs_parent)
                     .with_context(|| format!("failed to read dir {}", abs_parent.display()))?
                 {
@@ -559,6 +579,14 @@ fn unpack_oci_layer<R: Read>(reader: R, dest: &Path) -> Result<()> {
             // Regular whiteout: delete the target file/dir.
             let parent = path.parent().unwrap_or(Path::new(""));
             let target = dest.join(parent).join(target_name);
+            // Verify the target resolves inside dest after following symlinks.
+            if !is_inside_dest(&target, dest) {
+                eprintln!(
+                    "warning: skipping whiteout that escapes destination: {}",
+                    path.display()
+                );
+                continue;
+            }
             if target.is_dir() {
                 let _ = make_removable(&target);
                 fs::remove_dir_all(&target).ok();
@@ -1612,31 +1640,10 @@ mod tests {
         run(datadir, source, name, verbose, force, InstallPackages::No)
     }
 
-    struct TempDataDir {
-        dir: std::path::PathBuf,
-    }
+    use crate::testutil::TempDataDir;
 
-    impl TempDataDir {
-        fn new() -> Self {
-            let dir = std::env::temp_dir().join(format!(
-                "sdme-test-import-{}-{:?}",
-                std::process::id(),
-                std::thread::current().id()
-            ));
-            let _ = fs::remove_dir_all(&dir);
-            fs::create_dir_all(&dir).unwrap();
-            Self { dir }
-        }
-
-        fn path(&self) -> &Path {
-            &self.dir
-        }
-    }
-
-    impl Drop for TempDataDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.dir);
-        }
+    fn tmp() -> TempDataDir {
+        TempDataDir::new("import")
     }
 
     struct TempSourceDir {
@@ -1668,7 +1675,7 @@ mod tests {
 
     #[test]
     fn test_import_basic_directory() {
-        let tmp = TempDataDir::new();
+        let tmp = tmp();
         let src = TempSourceDir::new("basic");
 
         // Create source structure.
@@ -1700,7 +1707,7 @@ mod tests {
 
     #[test]
     fn test_import_preserves_permissions() {
-        let tmp = TempDataDir::new();
+        let tmp = tmp();
         let src = TempSourceDir::new("perms");
 
         let file_path = src.path().join("script.sh");
@@ -1739,7 +1746,7 @@ mod tests {
 
     #[test]
     fn test_import_preserves_symlinks() {
-        let tmp = TempDataDir::new();
+        let tmp = tmp();
         let src = TempSourceDir::new("symlinks");
 
         fs::write(src.path().join("target.txt"), "target\n").unwrap();
@@ -1766,7 +1773,7 @@ mod tests {
 
     #[test]
     fn test_import_duplicate_name() {
-        let tmp = TempDataDir::new();
+        let tmp = tmp();
         let src = TempSourceDir::new("dup");
 
         test_run(
@@ -1793,7 +1800,7 @@ mod tests {
 
     #[test]
     fn test_import_invalid_name() {
-        let tmp = TempDataDir::new();
+        let tmp = tmp();
         let src = TempSourceDir::new("invalid");
 
         let err = test_run(
@@ -1812,7 +1819,7 @@ mod tests {
 
     #[test]
     fn test_import_source_not_directory() {
-        let tmp = TempDataDir::new();
+        let tmp = tmp();
         let file_path = std::env::temp_dir().join(format!(
             "sdme-test-import-notdir-{}-{:?}",
             std::process::id(),
@@ -1839,7 +1846,7 @@ mod tests {
 
     #[test]
     fn test_import_source_not_found() {
-        let tmp = TempDataDir::new();
+        let tmp = tmp();
         let missing = Path::new("/tmp/sdme-test-definitely-nonexistent");
 
         let err = test_run(
@@ -1858,7 +1865,7 @@ mod tests {
 
     #[test]
     fn test_import_cleanup_on_failure() {
-        let tmp = TempDataDir::new();
+        let tmp = tmp();
         let src = TempSourceDir::new("cleanup");
 
         // Create a subdirectory that can't be read.
@@ -1890,7 +1897,7 @@ mod tests {
 
     #[test]
     fn test_import_preserves_empty_directories() {
-        let tmp = TempDataDir::new();
+        let tmp = tmp();
         let src = TempSourceDir::new("emptydir");
 
         fs::create_dir(src.path().join("empty")).unwrap();
@@ -1914,7 +1921,7 @@ mod tests {
 
     #[test]
     fn test_import_preserves_timestamps() {
-        let tmp = TempDataDir::new();
+        let tmp = tmp();
         let src = TempSourceDir::new("timestamps");
 
         let file_path = src.path().join("file.txt");
@@ -1957,7 +1964,7 @@ mod tests {
     #[test]
     #[ignore] // Requires CAP_MKNOD (root).
     fn test_import_preserves_devices() {
-        let tmp = TempDataDir::new();
+        let tmp = tmp();
         let src = TempSourceDir::new("devices");
 
         // Create a character device (null-like).
@@ -1983,7 +1990,7 @@ mod tests {
 
     #[test]
     fn test_import_stores_distro_metadata() {
-        let tmp = TempDataDir::new();
+        let tmp = tmp();
         let src = TempSourceDir::new("distro");
 
         fs::create_dir_all(src.path().join("etc")).unwrap();
@@ -2010,7 +2017,7 @@ mod tests {
 
     #[test]
     fn test_import_no_os_release() {
-        let tmp = TempDataDir::new();
+        let tmp = tmp();
         let src = TempSourceDir::new("no-os-release");
 
         fs::write(src.path().join("hello.txt"), "hi\n").unwrap();
@@ -2121,7 +2128,7 @@ mod tests {
 
     #[test]
     fn test_import_tarball_basic() {
-        let tmp = TempDataDir::new();
+        let tmp = tmp();
         let src = TempSourceDir::new("tarball-gz");
 
         // Create source files.
@@ -2168,7 +2175,7 @@ mod tests {
 
     #[test]
     fn test_import_tarball_uncompressed() {
-        let tmp = TempDataDir::new();
+        let tmp = tmp();
         let src = TempSourceDir::new("tarball-plain");
 
         fs::write(src.path().join("file.txt"), "content\n").unwrap();
@@ -2204,7 +2211,7 @@ mod tests {
 
     #[test]
     fn test_import_tarball_invalid_file() {
-        let tmp = TempDataDir::new();
+        let tmp = tmp();
         let file_path = std::env::temp_dir().join(format!(
             "sdme-test-bad-tarball-{}-{:?}",
             std::process::id(),
@@ -2234,7 +2241,7 @@ mod tests {
     #[test]
     #[ignore] // Requires CAP_CHOWN (root).
     fn test_import_preserves_ownership() {
-        let tmp = TempDataDir::new();
+        let tmp = tmp();
         let src = TempSourceDir::new("ownership");
 
         let file_path = src.path().join("owned.txt");
@@ -2599,7 +2606,7 @@ mod tests {
 
     #[test]
     fn test_import_oci_basic() {
-        let tmp = TempDataDir::new();
+        let tmp = tmp();
         let tarball = build_oci_tarball(
             "basic",
             &[vec![
@@ -2634,7 +2641,7 @@ mod tests {
 
     #[test]
     fn test_import_oci_multilayer() {
-        let tmp = TempDataDir::new();
+        let tmp = tmp();
         let tarball = build_oci_tarball(
             "multi",
             &[
@@ -2679,7 +2686,7 @@ mod tests {
 
     #[test]
     fn test_import_oci_whiteout() {
-        let tmp = TempDataDir::new();
+        let tmp = tmp();
         let tarball = build_oci_tarball_with_whiteouts(
             "whiteout",
             vec![
@@ -2722,8 +2729,65 @@ mod tests {
     }
 
     #[test]
+    fn test_oci_whiteout_symlink_escape() {
+        // Layer 1: a symlink "escape" pointing outside dest.
+        // Layer 2: a whiteout "escape/.wh.target" that should NOT follow the symlink.
+        let dest = std::env::temp_dir().join(format!(
+            "sdme-test-wh-escape-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let outside = std::env::temp_dir().join(format!(
+            "sdme-test-wh-outside-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&dest);
+        let _ = fs::remove_dir_all(&outside);
+        fs::create_dir_all(&dest).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+
+        // Create a file outside dest that should survive.
+        fs::write(outside.join("target"), "do not delete\n").unwrap();
+
+        // Create a symlink inside dest that points outside.
+        unix_fs::symlink(&outside, dest.join("escape")).unwrap();
+
+        // Build a tar with a regular whiteout targeting escape/target.
+        let mut layer_tar = Vec::new();
+        {
+            let encoder =
+                flate2::write::GzEncoder::new(&mut layer_tar, flate2::Compression::default());
+            let mut builder = tar::Builder::new(encoder);
+            // Whiteout entry: escape/.wh.target
+            let mut header = tar::Header::new_ustar();
+            header.set_path("escape/.wh.target").unwrap();
+            header.set_size(0);
+            header.set_mode(0o644);
+            header.set_uid(0);
+            header.set_gid(0);
+            header.set_cksum();
+            builder.append(&header, &b""[..]).unwrap();
+            let encoder = builder.into_inner().unwrap();
+            encoder.finish().unwrap();
+        }
+
+        let reader = flate2::read::GzDecoder::new(&layer_tar[..]);
+        unpack_oci_layer(reader, &dest).unwrap();
+
+        // The file outside dest must NOT have been deleted.
+        assert!(
+            outside.join("target").exists(),
+            "whiteout should not follow symlink outside dest"
+        );
+
+        let _ = fs::remove_dir_all(&dest);
+        let _ = fs::remove_dir_all(&outside);
+    }
+
+    #[test]
     fn test_import_oci_manifest_index() {
-        let tmp = TempDataDir::new();
+        let tmp = tmp();
         let tarball = build_oci_tarball(
             "index",
             &[vec![("from-index.txt", b"via manifest index\n")]],

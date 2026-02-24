@@ -1,5 +1,7 @@
+pub mod build;
 pub mod config;
 pub mod containers;
+pub mod copy;
 pub mod import;
 pub mod names;
 pub mod network;
@@ -81,6 +83,11 @@ impl State {
 
     pub fn get(&self, key: &str) -> Option<&str> {
         self.entries.get(key).map(|s| s.as_str())
+    }
+
+    /// Shorthand for `self.get("ROOTFS").unwrap_or("")`.
+    pub fn rootfs(&self) -> &str {
+        self.get("ROOTFS").unwrap_or("")
     }
 
     pub fn remove(&mut self, key: &str) {
@@ -436,5 +443,41 @@ mod tests {
 
         assert_eq!(state.get("MEMORY"), Some("4G"));
         assert_eq!(state.get("CPUS"), None); // removed
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod testutil {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    /// Temporary directory for tests. Creates a unique directory on construction
+    /// and removes it on drop. The `prefix` identifies the test module to avoid
+    /// collisions between parallel tests.
+    pub(crate) struct TempDataDir {
+        dir: PathBuf,
+    }
+
+    impl TempDataDir {
+        pub(crate) fn new(prefix: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "sdme-test-{prefix}-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            Self { dir }
+        }
+
+        pub(crate) fn path(&self) -> &Path {
+            &self.dir
+        }
+    }
+
+    impl Drop for TempDataDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.dir);
+        }
     }
 }

@@ -13,6 +13,7 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 
+use crate::copy::make_removable;
 use crate::{State, validate_name};
 
 /// An entry returned by [`list`].
@@ -253,59 +254,19 @@ fn check_rootfs_in_use(datadir: &Path, name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Recursively restore directory permissions so `remove_dir_all` can succeed.
-fn make_removable(path: &Path) -> std::io::Result<()> {
-    let meta = fs::symlink_metadata(path)?;
-    if meta.is_dir() {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = meta.permissions().mode();
-        if mode & 0o700 != 0o700 {
-            fs::set_permissions(path, fs::Permissions::from_mode(mode | 0o700))?;
-        }
-        if let Ok(entries) = fs::read_dir(path) {
-            for entry in entries.flatten() {
-                let _ = make_removable(&entry.path());
-            }
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::import::InstallPackages;
+    use crate::testutil::TempDataDir;
 
     /// Helper to import a rootfs in tests, bypassing systemd checks.
     fn test_import(datadir: &Path, source: &str, name: &str) -> Result<()> {
         import(datadir, source, name, false, true, InstallPackages::No)
     }
 
-    struct TempDataDir {
-        dir: std::path::PathBuf,
-    }
-
-    impl TempDataDir {
-        fn new() -> Self {
-            let dir = std::env::temp_dir().join(format!(
-                "sdme-test-rootfs-{}-{:?}",
-                std::process::id(),
-                std::thread::current().id()
-            ));
-            let _ = fs::remove_dir_all(&dir);
-            fs::create_dir_all(&dir).unwrap();
-            Self { dir }
-        }
-
-        fn path(&self) -> &Path {
-            &self.dir
-        }
-    }
-
-    impl Drop for TempDataDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.dir);
-        }
+    fn tmp() -> TempDataDir {
+        TempDataDir::new("rootfs")
     }
 
     struct TempSourceDir {
@@ -373,14 +334,14 @@ mod tests {
 
     #[test]
     fn test_list_empty() {
-        let tmp = TempDataDir::new();
+        let tmp = tmp();
         let entries = list(tmp.path()).unwrap();
         assert!(entries.is_empty());
     }
 
     #[test]
     fn test_list_entries() {
-        let tmp = TempDataDir::new();
+        let tmp = tmp();
 
         // Import two rootfs with different distros.
         let src_a = TempSourceDir::new("list-a");
@@ -413,7 +374,7 @@ mod tests {
 
     #[test]
     fn test_list_skips_staging_dirs() {
-        let tmp = TempDataDir::new();
+        let tmp = tmp();
 
         // Import a real rootfs.
         let src = TempSourceDir::new("staging");
@@ -429,7 +390,7 @@ mod tests {
 
     #[test]
     fn test_remove_basic() {
-        let tmp = TempDataDir::new();
+        let tmp = tmp();
         let src = TempSourceDir::new("rm-basic");
         fs::write(src.path().join("file.txt"), "data\n").unwrap();
 
@@ -444,7 +405,7 @@ mod tests {
 
     #[test]
     fn test_remove_not_found() {
-        let tmp = TempDataDir::new();
+        let tmp = tmp();
         let err = remove(tmp.path(), "nonexistent", false).unwrap_err();
         assert!(
             err.to_string().contains("not found"),
@@ -454,7 +415,7 @@ mod tests {
 
     #[test]
     fn test_remove_in_use() {
-        let tmp = TempDataDir::new();
+        let tmp = tmp();
         let src = TempSourceDir::new("rm-inuse");
         test_import(tmp.path(), src.path().to_str().unwrap(), "inuse").unwrap();
 
@@ -477,7 +438,7 @@ mod tests {
 
     #[test]
     fn test_remove_multiple() {
-        let tmp = TempDataDir::new();
+        let tmp = tmp();
         let src_a = TempSourceDir::new("rm-multi-a");
         let src_b = TempSourceDir::new("rm-multi-b");
 

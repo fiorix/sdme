@@ -753,7 +753,7 @@ fn ensure_template_unit(datadir: &Path, verbose: bool) -> Result<()> {
 pub fn write_env_file(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
     let state_path = datadir.join("state").join(name);
     let state = State::read_from(&state_path)?;
-    let rootfs = state.get("ROOTFS").unwrap_or("");
+    let rootfs = state.rootfs();
     let lowerdir = if rootfs.is_empty() {
         "/".to_string()
     } else {
@@ -875,33 +875,10 @@ pub fn start(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
 mod tests {
     use super::*;
     use crate::containers::{create, CreateOptions};
-    use std::path::PathBuf;
+    use crate::testutil::TempDataDir;
 
-    struct TempDataDir {
-        dir: PathBuf,
-    }
-
-    impl TempDataDir {
-        fn new() -> Self {
-            let dir = std::env::temp_dir().join(format!(
-                "sdme-test-systemd-{}-{:?}",
-                std::process::id(),
-                std::thread::current().id()
-            ));
-            let _ = fs::remove_dir_all(&dir);
-            fs::create_dir_all(&dir).unwrap();
-            Self { dir }
-        }
-
-        fn path(&self) -> &Path {
-            &self.dir
-        }
-    }
-
-    impl Drop for TempDataDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.dir);
-        }
+    fn tmp() -> TempDataDir {
+        TempDataDir::new("systemd")
     }
 
     #[test]
@@ -950,7 +927,7 @@ mod tests {
 
     #[test]
     fn test_write_env_file_host_rootfs() {
-        let tmp = TempDataDir::new();
+        let tmp = tmp();
         let opts = CreateOptions {
             name: Some("hostbox".to_string()),
             rootfs: None,
@@ -968,7 +945,7 @@ mod tests {
 
     #[test]
     fn test_write_env_file_explicit_rootfs() {
-        let tmp = TempDataDir::new();
+        let tmp = tmp();
         let rootfs_dir = tmp.path().join("fs/ubuntu");
         fs::create_dir_all(&rootfs_dir).unwrap();
 
@@ -999,7 +976,7 @@ mod tests {
 
     #[test]
     fn test_create_with_limits_state() {
-        let tmp = TempDataDir::new();
+        let tmp = tmp();
         let limits = crate::ResourceLimits {
             memory: Some("1G".to_string()),
             cpus: Some("2".to_string()),

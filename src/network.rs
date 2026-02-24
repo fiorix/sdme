@@ -93,6 +93,13 @@ impl NetworkConfig {
     ///
     /// Returns the arguments as a space-separated string suitable for
     /// inclusion in an environment file.
+    ///
+    /// Safety: the output is written raw into a systemd `EnvironmentFile` and
+    /// expanded via `${NETWORK_OPTS}` in the unit template. This is safe because
+    /// `validate_network_name()` and `validate_port()` restrict all user-supplied
+    /// values to `[a-zA-Z0-9_-]` and digits, preventing injection of systemd
+    /// directives or shell metacharacters. If validation is ever relaxed, this
+    /// becomes an injection vector.
     pub fn to_nspawn_args(&self) -> String {
         let mut args = Vec::new();
 

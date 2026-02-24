@@ -456,7 +456,7 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
         let state = State::read_from(&state_path);
         match &state {
             Ok(s) => {
-                let rootfs_name = s.get("ROOTFS").unwrap_or("");
+                let rootfs_name = s.rootfs();
                 if !rootfs_name.is_empty() && !datadir.join("fs").join(rootfs_name).exists() {
                     problems.push("missing fs");
                 }
@@ -475,7 +475,7 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
         // OS detection from rootfs.
         let os = match &state {
             Ok(s) => {
-                let rootfs_name = s.get("ROOTFS").unwrap_or("");
+                let rootfs_name = s.rootfs();
                 if rootfs_name.is_empty() {
                     String::new()
                 } else {
@@ -552,9 +552,7 @@ fn machinectl_shell(
         if let Ok(state) = State::read_from(&state_path) {
             if state.get("ROOTFS") == Some("") {
                 if let Some(su) = crate::sudo_user() {
-                    if verbose {
-                        eprintln!("host rootfs container: joining as user '{}'", su.name);
-                    }
+                    eprintln!("host rootfs container: joining as user '{}'", su.name);
                     cmd.args(["--uid", &su.name]);
                 } else if verbose {
                     eprintln!("host rootfs container but no sudo user detected; joining as root");
@@ -618,32 +616,10 @@ pub fn stop(name: &str, verbose: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::TempDataDir;
 
-    struct TempDataDir {
-        dir: PathBuf,
-    }
-
-    impl TempDataDir {
-        fn new() -> Self {
-            let dir = std::env::temp_dir().join(format!(
-                "sdme-test-containers-{}-{:?}",
-                std::process::id(),
-                std::thread::current().id()
-            ));
-            let _ = fs::remove_dir_all(&dir);
-            fs::create_dir_all(&dir).unwrap();
-            Self { dir }
-        }
-
-        fn path(&self) -> &Path {
-            &self.dir
-        }
-    }
-
-    impl Drop for TempDataDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.dir);
-        }
+    fn tmp() -> TempDataDir {
+        TempDataDir::new("containers")
     }
 
     #[test]
@@ -687,7 +663,7 @@ mod tests {
 
     #[test]
     fn test_create_default() {
-        let tmp = TempDataDir::new();
+        let tmp = tmp();
         let opts = CreateOptions {
             name: None,
             rootfs: None,
@@ -721,7 +697,7 @@ mod tests {
 
     #[test]
     fn test_create_with_name() {
-        let tmp = TempDataDir::new();
+        let tmp = tmp();
         let opts = CreateOptions {
             name: Some("hello".to_string()),
             rootfs: None,
@@ -751,7 +727,7 @@ mod tests {
 
     #[test]
     fn test_create_duplicate_name() {
-        let tmp = TempDataDir::new();
+        let tmp = tmp();
         let opts = CreateOptions {
             name: Some("dup".to_string()),
             rootfs: None,
@@ -768,7 +744,7 @@ mod tests {
 
     #[test]
     fn test_create_with_rootfs_missing() {
-        let tmp = TempDataDir::new();
+        let tmp = tmp();
         let opts = CreateOptions {
             name: Some("test".to_string()),
             rootfs: Some("nonexistent".to_string()),
@@ -784,7 +760,7 @@ mod tests {
 
     #[test]
     fn test_create_with_rootfs_exists() {
-        let tmp = TempDataDir::new();
+        let tmp = tmp();
         let rootfs_dir = tmp.path().join("fs/myroot");
         fs::create_dir_all(&rootfs_dir).unwrap();
 
@@ -803,7 +779,7 @@ mod tests {
 
     #[test]
     fn test_create_cleanup_on_failure() {
-        let tmp = TempDataDir::new();
+        let tmp = tmp();
         // Block state dir by placing a file where the directory should be created.
         let state_path = tmp.path().join("state");
         fs::write(&state_path, "blocker").unwrap();
@@ -823,7 +799,7 @@ mod tests {
 
     #[test]
     fn test_ensure_exists_ok() {
-        let tmp = TempDataDir::new();
+        let tmp = tmp();
         let opts = CreateOptions {
             name: Some("mybox".to_string()),
             rootfs: None,
@@ -836,7 +812,7 @@ mod tests {
 
     #[test]
     fn test_ensure_exists_missing() {
-        let tmp = TempDataDir::new();
+        let tmp = tmp();
         let err = ensure_exists(tmp.path(), "nonexistent").unwrap_err();
         assert!(
             err.to_string().contains("does not exist"),
@@ -857,7 +833,7 @@ mod tests {
 
     #[test]
     fn test_resolve_name_exact_match() {
-        let tmp = TempDataDir::new();
+        let tmp = tmp();
         create_dummy_container(&tmp, "foo");
         create_dummy_container(&tmp, "foobar");
         assert_eq!(resolve_name(tmp.path(), "foo").unwrap(), "foo");
@@ -865,14 +841,14 @@ mod tests {
 
     #[test]
     fn test_resolve_name_unique_prefix() {
-        let tmp = TempDataDir::new();
+        let tmp = tmp();
         create_dummy_container(&tmp, "ubuntu-dev");
         assert_eq!(resolve_name(tmp.path(), "ub").unwrap(), "ubuntu-dev");
     }
 
     #[test]
     fn test_resolve_name_ambiguous() {
-        let tmp = TempDataDir::new();
+        let tmp = tmp();
         create_dummy_container(&tmp, "ubuntu-dev");
         create_dummy_container(&tmp, "ubuntu-prod");
         let err = resolve_name(tmp.path(), "ub").unwrap_err();
@@ -884,7 +860,7 @@ mod tests {
 
     #[test]
     fn test_resolve_name_no_match() {
-        let tmp = TempDataDir::new();
+        let tmp = tmp();
         create_dummy_container(&tmp, "foo");
         let err = resolve_name(tmp.path(), "xyz").unwrap_err();
         assert!(err.to_string().contains("no container found"), "unexpected error: {err}");
@@ -892,14 +868,14 @@ mod tests {
 
     #[test]
     fn test_resolve_name_empty() {
-        let tmp = TempDataDir::new();
+        let tmp = tmp();
         let err = resolve_name(tmp.path(), "").unwrap_err();
         assert!(err.to_string().contains("must not be empty"), "unexpected error: {err}");
     }
 
     #[test]
     fn test_ensure_exists_orphan_state() {
-        let tmp = TempDataDir::new();
+        let tmp = tmp();
         let state_dir = tmp.path().join("state");
         fs::create_dir_all(&state_dir).unwrap();
         fs::write(state_dir.join("orphan"), "NAME=orphan\n").unwrap();
@@ -913,7 +889,7 @@ mod tests {
 
     #[test]
     fn test_create_with_limits() {
-        let tmp = TempDataDir::new();
+        let tmp = tmp();
         let limits = crate::ResourceLimits {
             memory: Some("2G".to_string()),
             cpus: Some("4".to_string()),
@@ -938,7 +914,7 @@ mod tests {
     fn test_create_rejects_restrictive_umask() {
         // Set a restrictive umask, attempt create, then restore.
         let old = unsafe { libc::umask(0o077) };
-        let tmp = TempDataDir::new();
+        let tmp = tmp();
         let opts = CreateOptions {
             name: Some("umasktest".to_string()),
             rootfs: None,
