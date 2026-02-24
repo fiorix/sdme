@@ -216,8 +216,15 @@ enum RootfsCommand {
     /// Remove one or more imported root filesystems
     Rm {
         /// Names of the rootfs entries to remove
-        #[arg(required = true)]
         names: Vec<String>,
+
+        /// Remove all imported root filesystems
+        #[arg(short, long)]
+        all: bool,
+
+        /// Skip confirmation prompts
+        #[arg(short, long)]
+        force: bool,
     },
     /// Build a root filesystem from a build config
     Build {
@@ -229,6 +236,9 @@ enum RootfsCommand {
         /// Boot timeout in seconds (overrides config, default: 60)
         #[arg(short, long)]
         timeout: Option<u64>,
+        /// Remove existing rootfs with the same name before building
+        #[arg(short, long)]
+        force: bool,
     },
 }
 
@@ -573,9 +583,47 @@ fn main() -> Result<()> {
                     }
                 }
             }
-            RootfsCommand::Rm { names } => {
+            RootfsCommand::Rm { names, all, force } => {
+                if all && !names.is_empty() {
+                    bail!("--all cannot be combined with fs names");
+                }
+                if !all && names.is_empty() {
+                    bail!("provide one or more fs names, or use --all");
+                }
+                let targets: Vec<String> = if all {
+                    let all_names: Vec<String> = rootfs::list(&cfg.datadir)?
+                        .into_iter()
+                        .map(|e| e.name)
+                        .collect();
+                    if all_names.is_empty() {
+                        eprintln!("no fs entries to remove");
+                        return Ok(());
+                    }
+                    if !force {
+                        if cli.verbose {
+                            bail!("use -f to confirm removal in verbose (non-interactive) mode");
+                        }
+                        if unsafe { libc::isatty(libc::STDIN_FILENO) } != 0 {
+                            eprintln!(
+                                "this will remove {} fs entr{}: {}",
+                                all_names.len(),
+                                if all_names.len() == 1 { "y" } else { "ies" },
+                                all_names.join(", "),
+                            );
+                            eprint!("are you sure? [y/N] ");
+                            let mut answer = String::new();
+                            std::io::stdin().read_line(&mut answer)?;
+                            if !answer.trim().eq_ignore_ascii_case("y") {
+                                bail!("aborted");
+                            }
+                        }
+                    }
+                    all_names
+                } else {
+                    names
+                };
                 let mut failed = false;
-                for name in &names {
+                for name in &targets {
                     if let Err(e) = rootfs::remove(&cfg.datadir, name, cli.verbose) {
                         eprintln!("error: {name}: {e}");
                         failed = true;
@@ -587,10 +635,10 @@ fn main() -> Result<()> {
                     bail!("some fs entries could not be removed");
                 }
             }
-            RootfsCommand::Build { name, config, timeout } => {
+            RootfsCommand::Build { name, config, timeout, force } => {
                 system_check::check_systemd_version(252)?;
                 let boot_timeout = timeout.unwrap_or(cfg.boot_timeout);
-                sdme::build::build(&cfg.datadir, &name, &config, boot_timeout, cli.verbose)?;
+                sdme::build::build(&cfg.datadir, &name, &config, boot_timeout, force, cli.verbose)?;
                 println!("{name}");
             }
         },
