@@ -147,6 +147,10 @@ enum Command {
         /// Remove all containers
         #[arg(short, long)]
         all: bool,
+
+        /// Skip confirmation prompts
+        #[arg(short, long)]
+        force: bool,
     },
 
     /// Stop one or more running containers
@@ -212,6 +216,7 @@ enum RootfsCommand {
     /// Remove one or more imported root filesystems
     Rm {
         /// Names of the rootfs entries to remove
+        #[arg(required = true)]
         names: Vec<String>,
     },
     /// Build a root filesystem from a build config
@@ -476,7 +481,7 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Command::Rm { names, all } => {
+        Command::Rm { names, all, force } => {
             if all && !names.is_empty() {
                 bail!("--all cannot be combined with container names");
             }
@@ -492,18 +497,23 @@ fn main() -> Result<()> {
                     eprintln!("no containers to remove");
                     return Ok(());
                 }
-                if unsafe { libc::isatty(libc::STDIN_FILENO) } != 0 {
-                    eprintln!(
-                        "this will remove {} container{}: {}",
-                        all_names.len(),
-                        if all_names.len() == 1 { "" } else { "s" },
-                        all_names.join(", "),
-                    );
-                    eprint!("are you sure? [y/N] ");
-                    let mut answer = String::new();
-                    std::io::stdin().read_line(&mut answer)?;
-                    if !answer.trim().eq_ignore_ascii_case("y") {
-                        bail!("aborted");
+                if !force {
+                    if cli.verbose {
+                        bail!("use -f to confirm removal in verbose (non-interactive) mode");
+                    }
+                    if unsafe { libc::isatty(libc::STDIN_FILENO) } != 0 {
+                        eprintln!(
+                            "this will remove {} container{}: {}",
+                            all_names.len(),
+                            if all_names.len() == 1 { "" } else { "s" },
+                            all_names.join(", "),
+                        );
+                        eprint!("are you sure? [y/N] ");
+                        let mut answer = String::new();
+                        std::io::stdin().read_line(&mut answer)?;
+                        if !answer.trim().eq_ignore_ascii_case("y") {
+                            bail!("aborted");
+                        }
                     }
                 }
                 all_names
