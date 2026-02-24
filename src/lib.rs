@@ -2,9 +2,12 @@ pub mod config;
 pub mod containers;
 pub mod import;
 pub mod names;
+pub mod network;
 pub mod rootfs;
 pub mod system_check;
 pub mod systemd;
+
+pub use network::NetworkConfig;
 
 use std::collections::BTreeMap;
 use std::ffi::CString;

@@ -15,12 +15,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
 
-use crate::{ResourceLimits, State, names, rootfs, systemd, validate_name};
+use crate::{NetworkConfig, ResourceLimits, State, names, rootfs, systemd, validate_name};
 
 pub struct CreateOptions {
     pub name: Option<String>,
     pub rootfs: Option<String>,
     pub limits: ResourceLimits,
+    pub network: NetworkConfig,
 }
 
 /// Read the current process umask. There is no "get umask" syscall, so
@@ -87,7 +88,7 @@ pub fn create(datadir: &Path, opts: &CreateOptions, verbose: bool) -> Result<Str
         eprintln!("claimed state file: {}", state_path.display());
     }
 
-    match do_create(datadir, &name, &rootfs, &opts.limits, verbose) {
+    match do_create(datadir, &name, &rootfs, &opts.limits, &opts.network, verbose) {
         Ok(()) => Ok(name),
         Err(e) => {
             let container_dir = datadir.join("containers").join(&name);
@@ -98,7 +99,7 @@ pub fn create(datadir: &Path, opts: &CreateOptions, verbose: bool) -> Result<Str
     }
 }
 
-fn do_create(datadir: &Path, name: &str, rootfs: &Path, limits: &ResourceLimits, verbose: bool) -> Result<()> {
+fn do_create(datadir: &Path, name: &str, rootfs: &Path, limits: &ResourceLimits, network: &NetworkConfig, verbose: bool) -> Result<()> {
     let container_dir = datadir.join("containers").join(name);
     let containers_dir = datadir.join("containers");
     fs::create_dir_all(&containers_dir)
@@ -215,6 +216,7 @@ fn do_create(datadir: &Path, name: &str, rootfs: &Path, limits: &ResourceLimits,
     state.set("NAME", name);
     state.set("ROOTFS", rootfs_value);
     limits.write_to_state(&mut state);
+    network.write_to_state(&mut state);
 
     // State file was already created atomically by create(); write content to it.
     let state_path = datadir.join("state").join(name);
@@ -690,6 +692,7 @@ mod tests {
             name: None,
             rootfs: None,
             limits: Default::default(),
+            network: Default::default(),
         };
         let name = create(tmp.path(), &opts, false).unwrap();
         assert!(validate_name(&name).is_ok());
@@ -723,6 +726,7 @@ mod tests {
             name: Some("hello".to_string()),
             rootfs: None,
             limits: Default::default(),
+            network: Default::default(),
         };
         let name = create(tmp.path(), &opts, false).unwrap();
         assert_eq!(name, "hello");
@@ -752,6 +756,7 @@ mod tests {
             name: Some("dup".to_string()),
             rootfs: None,
             limits: Default::default(),
+            network: Default::default(),
         };
         create(tmp.path(), &opts, false).unwrap();
         let err = create(tmp.path(), &opts, false).unwrap_err();
@@ -768,6 +773,7 @@ mod tests {
             name: Some("test".to_string()),
             rootfs: Some("nonexistent".to_string()),
             limits: Default::default(),
+            network: Default::default(),
         };
         let err = create(tmp.path(), &opts, false).unwrap_err();
         assert!(
@@ -786,6 +792,7 @@ mod tests {
             name: Some("test".to_string()),
             rootfs: Some("myroot".to_string()),
             limits: Default::default(),
+            network: Default::default(),
         };
         let name = create(tmp.path(), &opts, false).unwrap();
         assert_eq!(name, "test");
@@ -805,6 +812,7 @@ mod tests {
             name: Some("fail".to_string()),
             rootfs: None,
             limits: Default::default(),
+            network: Default::default(),
         };
         let err = create(tmp.path(), &opts, false);
         assert!(err.is_err());
@@ -820,6 +828,7 @@ mod tests {
             name: Some("mybox".to_string()),
             rootfs: None,
             limits: Default::default(),
+            network: Default::default(),
         };
         create(tmp.path(), &opts, false).unwrap();
         assert!(ensure_exists(tmp.path(), "mybox").is_ok());
@@ -914,6 +923,7 @@ mod tests {
             name: Some("limited".to_string()),
             rootfs: None,
             limits,
+            network: Default::default(),
         };
         let name = create(tmp.path(), &opts, false).unwrap();
         assert_eq!(name, "limited");
@@ -933,6 +943,7 @@ mod tests {
             name: Some("umasktest".to_string()),
             rootfs: None,
             limits: Default::default(),
+            network: Default::default(),
         };
         let err = create(tmp.path(), &opts, false);
         unsafe { libc::umask(old) };

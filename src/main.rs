@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 use sdme::import::InstallPackages;
-use sdme::{ResourceLimits, config, containers, rootfs, system_check, systemd};
+use sdme::{NetworkConfig, ResourceLimits, config, containers, rootfs, system_check, systemd};
 
 #[derive(Parser)]
 #[command(name = "sdme", about = "Lightweight systemd-nspawn containers with overlayfs")]
@@ -19,6 +19,30 @@ struct Cli {
 
     #[command(subcommand)]
     command: Command,
+}
+
+/// Network configuration CLI arguments (shared by create/new).
+#[derive(clap::Args, Default)]
+struct NetworkArgs {
+    /// Use private network namespace (isolated from host)
+    #[arg(long)]
+    private_network: bool,
+
+    /// Create virtual ethernet link (implies --private-network)
+    #[arg(long)]
+    network_veth: bool,
+
+    /// Connect to host bridge (implies --private-network)
+    #[arg(long)]
+    network_bridge: Option<String>,
+
+    /// Join named network zone for inter-container networking (implies --private-network)
+    #[arg(long)]
+    network_zone: Option<String>,
+
+    /// Forward port HOST:CONTAINER[/PROTO] (implies --private-network, repeatable)
+    #[arg(long = "port", short = 'p')]
+    ports: Vec<String>,
 }
 
 #[derive(Subcommand)]
@@ -47,6 +71,9 @@ enum Command {
         /// CPU weight 1–10000 (default: 100)
         #[arg(long)]
         cpu_weight: Option<String>,
+
+        #[command(flatten)]
+        network: NetworkArgs,
     },
 
     /// Run a command in a running container
@@ -100,6 +127,9 @@ enum Command {
         /// CPU weight 1–10000 (default: 100)
         #[arg(long)]
         cpu_weight: Option<String>,
+
+        #[command(flatten)]
+        network: NetworkArgs,
 
         /// Command to run inside the container (default: login shell)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -256,6 +286,27 @@ fn parse_limits(
     Ok(limits)
 }
 
+/// Build a `NetworkConfig` from CLI flags (for `create` / `new`).
+///
+/// Options that imply `--private-network` automatically enable it.
+fn parse_network(args: NetworkArgs) -> Result<NetworkConfig> {
+    // Auto-enable private_network if any option that requires it is set
+    let private_network = args.private_network
+        || args.network_veth
+        || args.network_bridge.is_some()
+        || args.network_zone.is_some()
+        || !args.ports.is_empty();
+
+    let network = NetworkConfig {
+        private_network,
+        network_veth: args.network_veth,
+        network_bridge: args.network_bridge,
+        network_zone: args.network_zone,
+        ports: args.ports,
+    };
+    network.validate()?;
+    Ok(network)
+}
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -313,10 +364,11 @@ fn main() -> Result<()> {
                 config::save(&cfg, config_path)?;
             }
         },
-        Command::Create { name, fs, memory, cpus, cpu_weight } => {
+        Command::Create { name, fs, memory, cpus, cpu_weight, network } => {
             system_check::check_systemd_version(252)?;
             let limits = parse_limits(memory, cpus, cpu_weight)?;
-            let opts = containers::CreateOptions { name, rootfs: fs, limits };
+            let network = parse_network(network)?;
+            let opts = containers::CreateOptions { name, rootfs: fs, limits, network };
             let name = containers::create(&cfg.datadir, &opts, cli.verbose)?;
             eprintln!("creating '{name}'");
             println!("{name}");
@@ -368,10 +420,11 @@ fn main() -> Result<()> {
             let err = cmd.exec();
             bail!("failed to exec journalctl: {err}");
         }
-        Command::New { name, fs, timeout, memory, cpus, cpu_weight, command } => {
+        Command::New { name, fs, timeout, memory, cpus, cpu_weight, network, command } => {
             system_check::check_systemd_version(252)?;
             let limits = parse_limits(memory, cpus, cpu_weight)?;
-            let opts = containers::CreateOptions { name, rootfs: fs, limits };
+            let network = parse_network(network)?;
+            let opts = containers::CreateOptions { name, rootfs: fs, limits, network };
             let name = containers::create(&cfg.datadir, &opts, cli.verbose)?;
             eprintln!("creating '{name}'");
 
