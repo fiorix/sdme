@@ -295,6 +295,8 @@ pub fn build(
         limits: crate::ResourceLimits::default(),
         network: crate::NetworkConfig::default(),
         opaque_dirs: vec![],
+        binds: crate::BindConfig::default(),
+        envs: crate::EnvConfig::default(),
     };
     containers::create(datadir, &create_opts, verbose)?;
 

@@ -3,12 +3,14 @@ pub mod config;
 pub mod containers;
 pub mod copy;
 pub mod import;
+pub mod mounts;
 pub mod names;
 pub mod network;
 pub mod rootfs;
 pub mod system_check;
 pub mod systemd;
 
+pub use mounts::{BindConfig, EnvConfig};
 pub use network::NetworkConfig;
 
 use std::collections::BTreeMap;

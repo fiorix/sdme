@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 use sdme::import::InstallPackages;
-use sdme::{NetworkConfig, ResourceLimits, config, containers, rootfs, system_check, systemd};
+use sdme::{BindConfig, EnvConfig, NetworkConfig, ResourceLimits, config, containers, rootfs, system_check, systemd};
 
 #[derive(Parser)]
 #[command(name = "sdme", about = "Lightweight systemd-nspawn containers with overlayfs")]
@@ -45,6 +45,18 @@ struct NetworkArgs {
     ports: Vec<String>,
 }
 
+/// Bind mount and environment variable CLI arguments (shared by create/new).
+#[derive(clap::Args, Default)]
+struct MountArgs {
+    /// Bind mount HOST:CONTAINER[:ro] (repeatable)
+    #[arg(long = "bind", short = 'b')]
+    binds: Vec<String>,
+
+    /// Set environment variable KEY=VALUE (repeatable)
+    #[arg(long = "env", short = 'e')]
+    envs: Vec<String>,
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// Manage configuration
@@ -78,6 +90,9 @@ enum Command {
 
         #[command(flatten)]
         network: NetworkArgs,
+
+        #[command(flatten)]
+        mounts: MountArgs,
     },
 
     /// Run a command in a running container
@@ -138,6 +153,9 @@ enum Command {
 
         #[command(flatten)]
         network: NetworkArgs,
+
+        #[command(flatten)]
+        mounts: MountArgs,
 
         /// Command to run inside the container (default: login shell)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -366,6 +384,15 @@ fn parse_network(args: NetworkArgs) -> Result<NetworkConfig> {
     Ok(network)
 }
 
+/// Build `BindConfig` and `EnvConfig` from CLI flags (for `create` / `new`).
+fn parse_mounts(args: MountArgs) -> Result<(BindConfig, EnvConfig)> {
+    let binds = BindConfig::from_cli_args(args.binds)?;
+    binds.validate()?;
+    let envs = EnvConfig { vars: args.envs };
+    envs.validate()?;
+    Ok((binds, envs))
+}
+
 /// Parse the comma-separated `host_rootfs_opaque_dirs` config value into a Vec.
 fn parse_opaque_dirs_config(s: &str) -> Vec<String> {
     if s.is_empty() {
@@ -454,12 +481,13 @@ fn main() -> Result<()> {
                 config::save(&cfg, config_path)?;
             }
         },
-        Command::Create { name, fs, memory, cpus, cpu_weight, opaque_dirs, network } => {
+        Command::Create { name, fs, memory, cpus, cpu_weight, opaque_dirs, network, mounts } => {
             system_check::check_systemd_version(252)?;
             let limits = parse_limits(memory, cpus, cpu_weight)?;
             let network = parse_network(network)?;
+            let (binds, envs) = parse_mounts(mounts)?;
             let opaque_dirs = resolve_opaque_dirs(opaque_dirs, fs.is_none(), &cfg);
-            let opts = containers::CreateOptions { name, rootfs: fs, limits, network, opaque_dirs };
+            let opts = containers::CreateOptions { name, rootfs: fs, limits, network, opaque_dirs, binds, envs };
             let name = containers::create(&cfg.datadir, &opts, cli.verbose)?;
             eprintln!("creating '{name}'");
             println!("{name}");
@@ -511,12 +539,13 @@ fn main() -> Result<()> {
             let err = cmd.exec();
             bail!("failed to exec journalctl: {err}");
         }
-        Command::New { name, fs, timeout, memory, cpus, cpu_weight, opaque_dirs, network, command } => {
+        Command::New { name, fs, timeout, memory, cpus, cpu_weight, opaque_dirs, network, mounts, command } => {
             system_check::check_systemd_version(252)?;
             let limits = parse_limits(memory, cpus, cpu_weight)?;
             let network = parse_network(network)?;
+            let (binds, envs) = parse_mounts(mounts)?;
             let opaque_dirs = resolve_opaque_dirs(opaque_dirs, fs.is_none(), &cfg);
-            let opts = containers::CreateOptions { name, rootfs: fs, limits, network, opaque_dirs };
+            let opts = containers::CreateOptions { name, rootfs: fs, limits, network, opaque_dirs, binds, envs };
             let name = containers::create(&cfg.datadir, &opts, cli.verbose)?;
             eprintln!("creating '{name}'");
 

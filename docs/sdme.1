@@ -37,7 +37,7 @@ Path to config file.
 Default:
 .IR ~/.config/sdme/sdmerc .
 .SH COMMANDS
-.SS sdme new [\fIname\fR] [\-r \fIfs\fR] [\-t \fIseconds\fR] [\fIlimits\fR] [\fInetwork\fR] [\-o \fIdir\fR]... [\-\-] [\fIcommand\fR...]
+.SS sdme new [\fIname\fR] [\-r \fIfs\fR] [\-t \fIseconds\fR] [\fIlimits\fR] [\fInetwork\fR] [\-b \fIbind\fR]... [\-e \fIenv\fR]... [\-o \fIdir\fR]... [\-\-] [\fIcommand\fR...]
 Create, start, and enter a new container.
 If
 .I name
@@ -72,6 +72,18 @@ see
 .B NETWORKING
 below.
 .PP
+Bind mounts can be added with
+.BR \-b / \-\-bind ;
+see
+.B BIND MOUNTS
+below.
+.PP
+Environment variables can be set with
+.BR \-e / \-\-env ;
+see
+.B ENVIRONMENT VARIABLES
+below.
+.PP
 Use
 .B \-o
 to make directories opaque in the overlayfs upper layer (hides lower layer
@@ -81,7 +93,7 @@ below.
 .PP
 If boot fails or is interrupted (Ctrl+C), the just\-created container is
 automatically removed.
-.SS sdme create [\fIname\fR] [\-r \fIfs\fR] [\fIlimits\fR] [\fInetwork\fR] [\-o \fIdir\fR]...
+.SS sdme create [\fIname\fR] [\-r \fIfs\fR] [\fIlimits\fR] [\fInetwork\fR] [\-b \fIbind\fR]... [\-e \fIenv\fR]... [\-o \fIdir\fR]...
 Create a new container without starting it.
 Sets up the overlayfs directories and state file.
 Resource limits can be set with
@@ -101,6 +113,16 @@ and
 .BR \-\-port ;
 see
 .B NETWORKING
+below.
+Bind mounts can be added with
+.BR \-b / \-\-bind ;
+see
+.B BIND MOUNTS
+below.
+Environment variables can be set with
+.BR \-e / \-\-env ;
+see
+.B ENVIRONMENT VARIABLES
 below.
 Use
 .B \-o
@@ -395,8 +417,12 @@ resource limits
 .RB ( MEMORY ", " CPUS ", " CPU_WEIGHT ),
 network configuration
 .RB ( PRIVATE_NETWORK ", " NETWORK_VETH ", " NETWORK_BRIDGE ", " NETWORK_ZONE ", " PORTS ),
-and opaque directories
-.RB ( OPAQUE_DIRS ).
+opaque directories
+.RB ( OPAQUE_DIRS ),
+bind mounts
+.RB ( BINDS ),
+and environment variables
+.RB ( ENVS ).
 .TP
 .I /var/lib/sdme/containers/\fIname\fR/upper/
 Per\-container overlayfs upper layer (copy\-on\-write modifications).
@@ -556,6 +582,30 @@ sdme fs build examplefs examplefs.conf
 sdme new \-r examplefs
 .fi
 .RE
+.PP
+Create a container with bind mounts:
+.PP
+.RS
+.nf
+# Mount a host directory into the container
+sdme new \-\-bind /data:/mnt mycontainer \-r ubuntu
+
+# Mount multiple directories, one read\-only
+sdme new \-b /data:/mnt \-b /config:/etc/app:ro mycontainer \-r ubuntu
+.fi
+.RE
+.PP
+Create a container with environment variables:
+.PP
+.RS
+.nf
+# Set environment variables
+sdme new \-e MY_VAR=hello \-e DEBUG=1 mycontainer \-r ubuntu
+
+# Combine bind mounts and environment variables
+sdme new \-\-bind /data:/mnt \-\-env DATA_DIR=/mnt mycontainer \-r ubuntu
+.fi
+.RE
 .SH RESOURCE LIMITS
 Containers can have per\-container resource limits applied via systemd cgroup
 controls.
@@ -646,6 +696,55 @@ Example:
 .PP
 Network configuration is stored in the container's state file and applied at
 start time via environment variables in the systemd unit.
+.SH BIND MOUNTS
+Custom bind mounts allow mounting host directories into the container.
+These are set at container creation time and cannot be changed afterward.
+.TP
+.BI \-b ", " \-\-bind " " HOST:CONTAINER[:ro]
+Bind mount a host path into the container.
+The
+.I HOST
+path must be absolute and must exist.
+The
+.I CONTAINER
+path must be absolute.
+Append
+.B :ro
+to make the mount read\-only.
+Can be specified multiple times.
+Example:
+.BR /data:/mnt ,
+.BR /config:/etc/myapp:ro .
+.PP
+Both paths must not contain
+.B ..
+components (path traversal prevention).
+.PP
+Bind mount configuration is stored in the container's state file and applied at
+start time via systemd\-nspawn
+.B \-\-bind
+and
+.B \-\-bind\-ro
+options.
+.SH ENVIRONMENT VARIABLES
+Custom environment variables can be passed into the container at start time.
+These are set at container creation time and cannot be changed afterward.
+.TP
+.BI \-e ", " \-\-env " " KEY=VALUE
+Set an environment variable inside the container.
+The
+.I KEY
+must be a valid environment variable name (alphanumeric and underscores,
+not starting with a digit).
+Can be specified multiple times.
+Example:
+.BR MY_VAR=hello ,
+.BR "DEBUG=1" .
+.PP
+Environment variable configuration is stored in the container's state file and
+applied at start time via systemd\-nspawn
+.B \-\-setenv
+options.
 .SH OVERLAYFS OPAQUE DIRS
 Directories listed with
 .B \-o

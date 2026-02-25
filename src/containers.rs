@@ -16,7 +16,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
 
-use crate::{NetworkConfig, ResourceLimits, State, names, rootfs, systemd, validate_name};
+use crate::{BindConfig, EnvConfig, NetworkConfig, ResourceLimits, State, names, rootfs, systemd, validate_name};
 
 pub struct CreateOptions {
     pub name: Option<String>,
@@ -24,6 +24,8 @@ pub struct CreateOptions {
     pub limits: ResourceLimits,
     pub network: NetworkConfig,
     pub opaque_dirs: Vec<String>,
+    pub binds: BindConfig,
+    pub envs: EnvConfig,
 }
 
 /// Read the current process umask. There is no "get umask" syscall, so
@@ -92,7 +94,7 @@ pub fn create(datadir: &Path, opts: &CreateOptions, verbose: bool) -> Result<Str
         eprintln!("claimed state file: {}", state_path.display());
     }
 
-    match do_create(datadir, &name, &rootfs, &opts.limits, &opts.network, &opaque_dirs, verbose) {
+    match do_create(datadir, &name, &rootfs, &opts.limits, &opts.network, &opaque_dirs, &opts.binds, &opts.envs, verbose) {
         Ok(()) => Ok(name),
         Err(e) => {
             let container_dir = datadir.join("containers").join(&name);
@@ -103,7 +105,7 @@ pub fn create(datadir: &Path, opts: &CreateOptions, verbose: bool) -> Result<Str
     }
 }
 
-fn do_create(datadir: &Path, name: &str, rootfs: &Path, limits: &ResourceLimits, network: &NetworkConfig, opaque_dirs: &[String], verbose: bool) -> Result<()> {
+fn do_create(datadir: &Path, name: &str, rootfs: &Path, limits: &ResourceLimits, network: &NetworkConfig, opaque_dirs: &[String], binds: &BindConfig, envs: &EnvConfig, verbose: bool) -> Result<()> {
     let container_dir = datadir.join("containers").join(name);
     let containers_dir = datadir.join("containers");
     fs::create_dir_all(&containers_dir)
@@ -239,6 +241,8 @@ fn do_create(datadir: &Path, name: &str, rootfs: &Path, limits: &ResourceLimits,
     state.set("ROOTFS", rootfs_value);
     limits.write_to_state(&mut state);
     network.write_to_state(&mut state);
+    binds.write_to_state(&mut state);
+    envs.write_to_state(&mut state);
     if !opaque_dirs.is_empty() {
         state.set("OPAQUE_DIRS", opaque_dirs.join(","));
     }
@@ -756,6 +760,8 @@ mod tests {
             limits: Default::default(),
             network: Default::default(),
             opaque_dirs: vec![],
+            binds: Default::default(),
+            envs: Default::default(),
         };
         let name = create(tmp.path(), &opts, false).unwrap();
         assert!(validate_name(&name).is_ok());
@@ -791,6 +797,8 @@ mod tests {
             limits: Default::default(),
             network: Default::default(),
             opaque_dirs: vec![],
+            binds: Default::default(),
+            envs: Default::default(),
         };
         let name = create(tmp.path(), &opts, false).unwrap();
         assert_eq!(name, "hello");
@@ -822,6 +830,8 @@ mod tests {
             limits: Default::default(),
             network: Default::default(),
             opaque_dirs: vec![],
+            binds: Default::default(),
+            envs: Default::default(),
         };
         create(tmp.path(), &opts, false).unwrap();
         let err = create(tmp.path(), &opts, false).unwrap_err();
@@ -840,6 +850,8 @@ mod tests {
             limits: Default::default(),
             network: Default::default(),
             opaque_dirs: vec![],
+            binds: Default::default(),
+            envs: Default::default(),
         };
         let err = create(tmp.path(), &opts, false).unwrap_err();
         assert!(
@@ -860,6 +872,8 @@ mod tests {
             limits: Default::default(),
             network: Default::default(),
             opaque_dirs: vec![],
+            binds: Default::default(),
+            envs: Default::default(),
         };
         let name = create(tmp.path(), &opts, false).unwrap();
         assert_eq!(name, "test");
@@ -881,6 +895,8 @@ mod tests {
             limits: Default::default(),
             network: Default::default(),
             opaque_dirs: vec![],
+            binds: Default::default(),
+            envs: Default::default(),
         };
         let err = create(tmp.path(), &opts, false);
         assert!(err.is_err());
@@ -898,6 +914,8 @@ mod tests {
             limits: Default::default(),
             network: Default::default(),
             opaque_dirs: vec![],
+            binds: Default::default(),
+            envs: Default::default(),
         };
         create(tmp.path(), &opts, false).unwrap();
         assert!(ensure_exists(tmp.path(), "mybox").is_ok());
@@ -994,6 +1012,8 @@ mod tests {
             limits,
             network: Default::default(),
             opaque_dirs: vec![],
+            binds: Default::default(),
+            envs: Default::default(),
         };
         let name = create(tmp.path(), &opts, false).unwrap();
         assert_eq!(name, "limited");
@@ -1015,6 +1035,8 @@ mod tests {
             limits: Default::default(),
             network: Default::default(),
             opaque_dirs: vec![],
+            binds: Default::default(),
+            envs: Default::default(),
         };
         let err = create(tmp.path(), &opts, false);
         unsafe { libc::umask(old) };
@@ -1091,6 +1113,8 @@ mod tests {
             limits: Default::default(),
             network: Default::default(),
             opaque_dirs: vec!["/var".to_string(), "/opt/data".to_string()],
+            binds: Default::default(),
+            envs: Default::default(),
         };
         let name = create(tmp.path(), &opts, false).unwrap();
         assert_eq!(name, "opaquebox");
@@ -1133,6 +1157,8 @@ mod tests {
             limits: Default::default(),
             network: Default::default(),
             opaque_dirs: vec!["/var".to_string(), "/opt".to_string()],
+            binds: Default::default(),
+            envs: Default::default(),
         };
         create(tmp.path(), &opts, false).unwrap();
 

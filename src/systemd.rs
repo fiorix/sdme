@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
-use crate::{NetworkConfig, ResourceLimits, State};
+use crate::{BindConfig, EnvConfig, NetworkConfig, ResourceLimits, State};
 
 mod dbus {
     use anyhow::{bail, Context, Result};
@@ -711,6 +711,8 @@ ExecStart={nspawn} \
     --machine=%i \
     --bind={datadir}/containers/%i/shared:/shared \
     ${{NETWORK_OPTS}} \
+    ${{BIND_OPTS}} \
+    ${{ENV_OPTS}} \
     --boot
 ExecStopPost=-{umount} {datadir}/containers/%i/merged
 KillMode=mixed
@@ -788,9 +790,26 @@ pub fn write_env_file(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
         eprintln!("network_opts: {network_opts}");
     }
 
+    // Generate bind mount options from state.
+    let binds = BindConfig::from_state(&state);
+    let bind_opts = binds.to_nspawn_args();
+    if verbose && !binds.is_empty() {
+        eprintln!("bind_opts: {bind_opts}");
+    }
+
+    // Generate environment variable options from state.
+    let envs = EnvConfig::from_state(&state);
+    let env_opts = envs.to_nspawn_args();
+    if verbose && !envs.is_empty() {
+        eprintln!("env_opts: {env_opts}");
+    }
+
     let env_path = datadir.join("containers").join(name).join("env");
-    fs::write(&env_path, format!("LOWERDIR={lowerdir}\nNETWORK_OPTS={network_opts}\n"))
-        .with_context(|| format!("failed to write {}", env_path.display()))?;
+    fs::write(
+        &env_path,
+        format!("LOWERDIR={lowerdir}\nNETWORK_OPTS={network_opts}\nBIND_OPTS={bind_opts}\nENV_OPTS={env_opts}\n"),
+    )
+    .with_context(|| format!("failed to write {}", env_path.display()))?;
     // Ensure env file is not world-readable regardless of umask.
     {
         use std::os::unix::fs::PermissionsExt;
@@ -918,6 +937,8 @@ mod tests {
         assert!(template.contains("--machine=%i"));
         assert!(template.contains("--bind=/var/lib/sdme/containers/%i/shared:/shared"));
         assert!(template.contains("${NETWORK_OPTS}"));
+        assert!(template.contains("${BIND_OPTS}"));
+        assert!(template.contains("${ENV_OPTS}"));
         assert!(template.contains("--boot"));
         assert!(template.contains("Delegate=yes"));
         assert!(template.contains("/usr/bin/systemd-nspawn"));
@@ -945,6 +966,8 @@ mod tests {
             limits: Default::default(),
             network: Default::default(),
             opaque_dirs: vec![],
+            binds: Default::default(),
+            envs: Default::default(),
         };
         create(tmp.path(), &opts, false).unwrap();
 
@@ -952,7 +975,7 @@ mod tests {
 
         let env_path = tmp.path().join("containers/hostbox/env");
         let content = fs::read_to_string(&env_path).unwrap();
-        assert_eq!(content, "LOWERDIR=/\nNETWORK_OPTS=--resolv-conf=auto\n");
+        assert_eq!(content, "LOWERDIR=/\nNETWORK_OPTS=--resolv-conf=auto\nBIND_OPTS=\nENV_OPTS=\n");
     }
 
     #[test]
@@ -967,6 +990,8 @@ mod tests {
             limits: Default::default(),
             network: Default::default(),
             opaque_dirs: vec![],
+            binds: Default::default(),
+            envs: Default::default(),
         };
         create(tmp.path(), &opts, false).unwrap();
 
@@ -974,7 +999,7 @@ mod tests {
 
         let env_path = tmp.path().join("containers/ubox/env");
         let content = fs::read_to_string(&env_path).unwrap();
-        let expected = format!("LOWERDIR={}/fs/ubuntu\nNETWORK_OPTS=--resolv-conf=auto\n", tmp.path().display());
+        let expected = format!("LOWERDIR={}/fs/ubuntu\nNETWORK_OPTS=--resolv-conf=auto\nBIND_OPTS=\nENV_OPTS=\n", tmp.path().display());
         assert_eq!(content, expected);
     }
 
@@ -1001,6 +1026,8 @@ mod tests {
             limits,
             network: Default::default(),
             opaque_dirs: vec![],
+            binds: Default::default(),
+            envs: Default::default(),
         };
         create(tmp.path(), &opts, false).unwrap();
 
