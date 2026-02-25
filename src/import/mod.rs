@@ -729,6 +729,55 @@ fn is_interactive_terminal() -> bool {
 
 // --- OCI application image support ---
 
+/// Recursively remove symlinks that target `/dev/stdout`, `/dev/stderr`,
+/// `/dev/stdin`, or `/dev/fd/*` under `root`.
+///
+/// Docker images commonly create these (e.g. nginx links `/var/log/nginx/access.log`
+/// to `/dev/stdout`). They don't work under systemd's `RootDirectory=` +
+/// `MountAPIVFS=yes` because FDs 1/2 are journal sockets — `open()` on
+/// `/proc/self/fd/2` returns ENXIO.  Removing the symlinks lets apps create
+/// real log files instead.
+fn remove_dev_symlinks(root: &Path, verbose: bool) -> Result<()> {
+    fn walk(dir: &Path, verbose: bool) -> Result<()> {
+        let entries = match fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return Ok(()),
+            Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
+        };
+        for entry in entries {
+            let entry = entry?;
+            let ft = entry
+                .file_type()
+                .with_context(|| format!("stat {}", entry.path().display()))?;
+            if ft.is_symlink() {
+                let target = fs::read_link(entry.path())
+                    .with_context(|| format!("readlink {}", entry.path().display()))?;
+                let t = target.to_string_lossy();
+                if t == "/dev/stdout"
+                    || t == "/dev/stderr"
+                    || t == "/dev/stdin"
+                    || t.starts_with("/dev/fd/")
+                {
+                    if verbose {
+                        eprintln!(
+                            "removing symlink {} -> {} (incompatible with systemd chroot)",
+                            entry.path().display(),
+                            t
+                        );
+                    }
+                    fs::remove_file(entry.path()).with_context(|| {
+                        format!("failed to remove symlink {}", entry.path().display())
+                    })?;
+                }
+            } else if ft.is_dir() {
+                walk(&entry.path(), verbose)?;
+            }
+        }
+        Ok(())
+    }
+    walk(root, verbose)
+}
+
 /// Set up an application image by combining a base rootfs with the OCI rootfs.
 ///
 /// The OCI rootfs (already extracted in staging_dir) is moved to `/oci/root`
@@ -810,6 +859,38 @@ fn setup_app_image(
         })?;
     }
 
+    // 3b. Ensure essential runtime directories exist in OCI root.
+    // Docker provides /tmp, /run, /var/run, /var/tmp as tmpfs mounts at runtime,
+    // so they may not exist in the extracted image layers. The chrooted service
+    // needs them.
+    //
+    // Use DirBuilder with explicit mode on the leaf directory so it's created
+    // with the right permissions atomically (no umask-stripped window).
+    for (dir, mode) in [
+        ("tmp", 0o1777),
+        ("run", 0o755),
+        ("var/run", 0o755),
+        ("var/tmp", 0o1777),
+    ] {
+        use std::os::unix::fs::DirBuilderExt;
+        let path = oci_root.join(dir);
+        if !path.exists() {
+            // Ensure parents exist (inherits umask — fine for /var etc.).
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("failed to create {}", parent.display()))?;
+            }
+            fs::DirBuilder::new()
+                .mode(mode)
+                .create(&path)
+                .with_context(|| format!("failed to create {}", path.display()))?;
+        }
+    }
+
+    // 3c. Remove symlinks to /dev/stdout, /dev/stderr, etc. that break
+    // under systemd's RootDirectory chroot (see remove_dev_symlinks doc).
+    remove_dev_symlinks(&oci_root, verbose)?;
+
     // 4. Write OCI env file.
     if let Some(ref env_vars) = config.env {
         if !env_vars.is_empty() {
@@ -864,13 +945,6 @@ fn setup_app_image(
 #   /oci/env     — environment variables
 #   /oci/ports   — exposed ports (if any)
 #   /oci/volumes — declared volumes (if any)
-#
-# TODO: Port forwarding is not yet configured. Exposed ports:
-#   {port_comment}
-# To forward ports, use: sdme create --port HOST:CONTAINER -r <this-rootfs>
-#
-# TODO: Volume mounts are not yet configured. Declared volumes:
-#   {volume_comment}
 
 [Unit]
 Description=OCI application (image: {image_ref})
@@ -879,11 +953,20 @@ After=network.target
 [Service]
 Type=exec
 RootDirectory=/oci/root
+MountAPIVFS=yes
 ExecStart={exec_start}
 WorkingDirectory={working_dir}
 EnvironmentFile=-/oci/env
 User={user}
 {stop_signal_line}
+# TODO(sdme): bind-mount declared volumes into the chroot.
+# OCI volumes: {volume_comment}
+# Example: BindPaths=/var/lib/sdme/containers/%i/shared/data:/data
+
+# TODO(sdme): wire up port forwarding from host to container.
+# OCI ports: {port_comment}
+# Use: sdme create --port HOST:CONTAINER -r <this-rootfs>
+
 [Install]
 WantedBy=multi-user.target
 "#
