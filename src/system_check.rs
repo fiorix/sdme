@@ -20,9 +20,7 @@ pub fn check_systemd_version(min_version: u32) -> Result<()> {
     let version_str = systemd::systemd_version()?;
     let version = parse_systemd_version(&version_str)?;
     if version < min_version {
-        bail!(
-            "systemd {min_version} or later is required (found {version})"
-        );
+        bail!("systemd {min_version} or later is required (found {version})");
     }
     Ok(())
 }

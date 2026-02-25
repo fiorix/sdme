@@ -46,8 +46,7 @@ pub(crate) fn copy_entry(src: &Path, dst: &Path, verbose: bool) -> Result<()> {
             copy_tree(src, dst, verbose)?;
         }
         libc::S_IFREG => {
-            fs::copy(src, dst)
-                .with_context(|| format!("failed to copy file {}", src.display()))?;
+            fs::copy(src, dst).with_context(|| format!("failed to copy file {}", src.display()))?;
             copy_metadata_from_stat(dst, &stat)?;
             copy_xattrs(src, dst)?;
         }
@@ -193,8 +192,7 @@ pub(crate) fn copy_xattrs(src: &Path, dst: &Path) -> Result<()> {
     let size = unsafe { libc::llistxattr(c_src.as_ptr(), std::ptr::null_mut(), 0) };
     if size < 0 {
         let err = std::io::Error::last_os_error();
-        if err.raw_os_error() == Some(libc::ENOTSUP) || err.raw_os_error() == Some(libc::ENODATA)
-        {
+        if err.raw_os_error() == Some(libc::ENOTSUP) || err.raw_os_error() == Some(libc::ENODATA) {
             return Ok(());
         }
         return Err(err).with_context(|| format!("llistxattr failed for {}", src.display()));
@@ -331,10 +329,7 @@ pub(crate) fn sanitize_dest_path(path: &Path) -> Result<PathBuf> {
     for component in path.components() {
         match component {
             Component::ParentDir => {
-                bail!(
-                    "refusing path with '..' component: {}",
-                    path.display()
-                );
+                bail!("refusing path with '..' component: {}", path.display());
             }
             Component::RootDir | Component::Prefix(_) => {
                 // Strip leading '/' and Windows prefixes.

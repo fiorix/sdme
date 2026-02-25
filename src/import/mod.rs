@@ -17,27 +17,32 @@ mod oci;
 mod registry;
 mod tar;
 
+use anyhow::{bail, Context, Result};
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use anyhow::{bail, Context, Result};
 
 use crate::copy::make_removable;
 use crate::rootfs::DistroFamily;
-use crate::{State, validate_name, check_interrupted};
+use crate::{check_interrupted, validate_name, State};
 
 use std::process::Command;
 use std::time::Duration;
 
 /// Collect sorted keys from a HashMap and join them with a separator.
-fn sorted_keys_joined(map: &std::collections::HashMap<String, serde_json::Value>, sep: &str) -> String {
+fn sorted_keys_joined(
+    map: &std::collections::HashMap<String, serde_json::Value>,
+    sep: &str,
+) -> String {
     let mut keys: Vec<&str> = map.keys().map(|s| s.as_str()).collect();
     keys.sort();
     keys.join(sep)
 }
 
 /// Collect sorted keys from a HashMap as a comma-separated string.
-pub(super) fn sorted_keys_csv(map: &std::collections::HashMap<String, serde_json::Value>) -> String {
+pub(super) fn sorted_keys_csv(
+    map: &std::collections::HashMap<String, serde_json::Value>,
+) -> String {
     sorted_keys_joined(map, ", ")
 }
 
@@ -50,7 +55,10 @@ fn shell_join(args: &[String]) -> String {
         .map(|arg| {
             if arg.is_empty() {
                 "''".to_string()
-            } else if arg.chars().all(|c| c.is_ascii_alphanumeric() || "-_./=:@".contains(c)) {
+            } else if arg
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-_./=:@".contains(c))
+            {
                 arg.clone()
             } else {
                 format!("'{}'", arg.replace('\'', "'\\''"))
@@ -225,8 +233,8 @@ fn detect_kind_from_magic(path: &Path) -> DownloadedFileKind {
 
 /// Raw disk image extensions (uncompressed and compressed variants).
 const RAW_IMAGE_EXTENSIONS: &[&str] = &[
-    ".raw", ".raw.gz", ".raw.bz2", ".raw.xz", ".raw.zst",
-    ".img", ".img.gz", ".img.bz2", ".img.xz", ".img.zst",
+    ".raw", ".raw.gz", ".raw.bz2", ".raw.xz", ".raw.zst", ".img", ".img.gz", ".img.bz2", ".img.xz",
+    ".img.zst",
 ];
 
 /// Check if a filename has a raw disk image extension.
@@ -338,7 +346,11 @@ fn redact_proxy_credentials(uri: &str) -> String {
     if let Some(scheme_end) = uri.find("://") {
         let after_scheme = &uri[scheme_end + 3..];
         if let Some(at_pos) = after_scheme.find('@') {
-            return format!("{}://***@{}", &uri[..scheme_end], &after_scheme[at_pos + 1..]);
+            return format!(
+                "{}://***@{}",
+                &uri[..scheme_end],
+                &after_scheme[at_pos + 1..]
+            );
         }
     }
     uri.to_string()
@@ -368,15 +380,10 @@ pub(super) fn proxy_from_env() -> Option<String> {
 
 /// Build a ureq agent, configuring proxy from environment if available.
 ///
-/// Note on interrupt handling: the `ctrlc` crate installs signal handlers with
-/// `SA_RESTART`, which means a blocked `read()` syscall is automatically restarted
-/// after SIGINT rather than returning `EINTR`. If the remote server stalls during a
-/// download, Ctrl+C will set `INTERRUPTED` but the read loop won't cycle to check it
-/// until the `read()` returns. This is a pre-existing limitation shared with
-/// `download_file()` and is inherent to the `SA_RESTART` signal handling model.
-/// For metadata requests (auth, manifests), this is mitigated by response size limits
-/// (`read_to_string`). For blob downloads, stalled connections will eventually hit
-/// the `timeout_recv_body` timeout (5 minutes).
+/// Note on interrupt handling: the SIGINT handler does NOT set `SA_RESTART`, so
+/// blocked `read()` syscalls return `EINTR` immediately on Ctrl+C. The download
+/// loops in `download_file()` and `download_blob()` call `check_interrupted()` on
+/// each iteration, which will catch the flag set by the signal handler.
 pub(super) fn build_http_agent(verbose: bool) -> Result<ureq::Agent> {
     let mut config = ureq::Agent::config_builder()
         .user_agent("sdme/0.1")
@@ -518,8 +525,12 @@ fn cleanup_staging(staging_dir: &Path, force: bool, verbose: bool) -> Result<()>
         );
     }
     let _ = make_removable(staging_dir);
-    fs::remove_dir_all(staging_dir)
-        .with_context(|| format!("failed to remove staging directory {}", staging_dir.display()))?;
+    fs::remove_dir_all(staging_dir).with_context(|| {
+        format!(
+            "failed to remove staging directory {}",
+            staging_dir.display()
+        )
+    })?;
     Ok(())
 }
 
@@ -589,7 +600,11 @@ impl ChrootGuard {
                 .status()
                 .with_context(|| format!("failed to bind mount {}", source.display()))?;
             if !status.success() {
-                bail!("bind mount failed: {} -> {}", source.display(), mount_point.display());
+                bail!(
+                    "bind mount failed: {} -> {}",
+                    source.display(),
+                    mount_point.display()
+                );
             }
             guard.mounts.push(mount_point);
         }
@@ -625,9 +640,7 @@ impl ChrootGuard {
     fn cleanup(&mut self) {
         // Unmount in reverse order.
         for mount_point in self.mounts.drain(..).rev() {
-            let _ = Command::new("umount")
-                .arg(&mount_point)
-                .status();
+            let _ = Command::new("umount").arg(&mount_point).status();
         }
 
         // Restore original resolv.conf.
@@ -657,9 +670,7 @@ fn install_commands(family: &DistroFamily) -> Vec<&'static str> {
             "DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC apt-get -y install tzdata",
             "apt-get install -y dbus systemd; apt-get autoremove -y -f && apt-get clean",
         ],
-        DistroFamily::Fedora => vec![
-            "dnf install -y systemd util-linux pam; dnf clean all",
-        ],
+        DistroFamily::Fedora => vec!["dnf install -y systemd util-linux pam; dnf clean all"],
         _ => vec![],
     }
 }
@@ -668,7 +679,10 @@ fn install_commands(family: &DistroFamily) -> Vec<&'static str> {
 fn install_systemd_packages(rootfs: &Path, family: &DistroFamily, verbose: bool) -> Result<()> {
     let commands = install_commands(family);
     if commands.is_empty() {
-        bail!("no package installation commands available for distro family {:?}", family);
+        bail!(
+            "no package installation commands available for distro family {:?}",
+            family
+        );
     }
 
     if verbose {
@@ -689,8 +703,10 @@ fn install_systemd_packages(rootfs: &Path, family: &DistroFamily, verbose: bool)
                 .status()
                 .with_context(|| format!("failed to run chroot command: {cmd_str}"))?;
             if !status.success() {
-                bail!("chroot command failed (exit {}): {cmd_str}",
-                    status.code().unwrap_or(-1));
+                bail!(
+                    "chroot command failed (exit {}): {cmd_str}",
+                    status.code().unwrap_or(-1)
+                );
             }
         }
         Ok(())
@@ -704,22 +720,16 @@ fn install_systemd_packages(rootfs: &Path, family: &DistroFamily, verbose: bool)
 
 /// Prompt the user interactively to install systemd packages.
 ///
-/// Returns true if the user accepts, false otherwise.
-fn prompt_install_systemd(family: &DistroFamily, distro_name: &str) -> bool {
+/// Returns `Ok(true)` if the user accepts, `Ok(false)` if declined,
+/// or `Err` if interrupted by a signal.
+fn prompt_install_systemd(family: &DistroFamily, distro_name: &str) -> Result<bool> {
     let commands = install_commands(family);
     eprintln!("warning: systemd not found in rootfs (detected: {distro_name})");
     eprintln!("Install systemd packages via chroot? The following commands will run:");
     for cmd in &commands {
         eprintln!("  {cmd}");
     }
-    eprint!("\nProceed? [y/N]: ");
-    let _ = std::io::Write::flush(&mut std::io::stderr());
-
-    let mut input = String::new();
-    if std::io::stdin().read_line(&mut input).is_err() {
-        return false;
-    }
-    matches!(input.trim(), "y" | "Y")
+    crate::confirm("\nProceed? [y/N]: ")
 }
 
 /// Check if stdin is an interactive terminal.
@@ -829,7 +839,11 @@ fn setup_app_image(
             .with_context(|| format!("failed to remove {}", oci_tmp.display()))?;
     }
     fs::rename(staging_dir, &oci_tmp).with_context(|| {
-        format!("failed to rename {} to {}", staging_dir.display(), oci_tmp.display())
+        format!(
+            "failed to rename {} to {}",
+            staging_dir.display(),
+            oci_tmp.display()
+        )
     })?;
 
     // 2. Copy the base rootfs to staging_dir.
@@ -849,13 +863,17 @@ fn setup_app_image(
     if verbose {
         eprintln!("moving OCI rootfs to {}", oci_root.display());
     }
-    for entry in fs::read_dir(&oci_tmp)
-        .with_context(|| format!("failed to read {}", oci_tmp.display()))?
+    for entry in
+        fs::read_dir(&oci_tmp).with_context(|| format!("failed to read {}", oci_tmp.display()))?
     {
         let entry = entry?;
         let dest = oci_root.join(entry.file_name());
         fs::rename(entry.path(), &dest).with_context(|| {
-            format!("failed to move {} to {}", entry.path().display(), dest.display())
+            format!(
+                "failed to move {} to {}",
+                entry.path().display(),
+                dest.display()
+            )
         })?;
     }
 
@@ -924,17 +942,23 @@ fn setup_app_image(
     fs::create_dir_all(&unit_dir)
         .with_context(|| format!("failed to create {}", unit_dir.display()))?;
 
-    let port_comment = config.exposed_ports.as_ref()
+    let port_comment = config
+        .exposed_ports
+        .as_ref()
         .filter(|p| !p.is_empty())
         .map(sorted_keys_csv)
         .unwrap_or_else(|| "none".to_string());
 
-    let volume_comment = config.volumes.as_ref()
+    let volume_comment = config
+        .volumes
+        .as_ref()
         .filter(|v| !v.is_empty())
         .map(sorted_keys_csv)
         .unwrap_or_else(|| "none".to_string());
 
-    let stop_signal_line = config.stop_signal.as_ref()
+    let stop_signal_line = config
+        .stop_signal
+        .as_ref()
         .map(|sig| format!("KillSignal={sig}\n"))
         .unwrap_or_default();
 
@@ -1017,7 +1041,15 @@ WantedBy=multi-user.target
 /// The import is transactional: files are copied/extracted into a staging
 /// directory and atomically renamed into place on success.
 pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
-    let ImportOptions { source, name, verbose, force, install_packages, oci_base, oci_base_fs } = *opts;
+    let ImportOptions {
+        source,
+        name,
+        verbose,
+        force,
+        install_packages,
+        oci_base,
+        oci_base_fs,
+    } = *opts;
 
     validate_name(name)?;
 
@@ -1084,7 +1116,10 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
             OciBase::Auto => cc.is_base_os_image(),
         };
 
-        eprintln!("OCI image: {}", if is_base { "base OS" } else { "application" });
+        eprintln!(
+            "OCI image: {}",
+            if is_base { "base OS" } else { "application" }
+        );
         if oci_base == OciBase::Auto {
             eprintln!("  (auto-detected; override with --oci-base=yes or --oci-base=no)");
         }
@@ -1099,8 +1134,14 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
             match oci_base_fs {
                 Some(base_name) => {
                     if let Err(e) = setup_app_image(
-                        datadir, &staging_dir, &rootfs_dir, name, base_name,
-                        cc, source, verbose,
+                        datadir,
+                        &staging_dir,
+                        &rootfs_dir,
+                        name,
+                        base_name,
+                        cc,
+                        source,
+                        verbose,
                     ) {
                         let _ = make_removable(&staging_dir);
                         let _ = fs::remove_dir_all(&staging_dir);
@@ -1116,10 +1157,14 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
                         );
                         false
                     } else {
-                        let ep_str = cc.entrypoint.as_ref()
+                        let ep_str = cc
+                            .entrypoint
+                            .as_ref()
                             .map(|v| shell_join(v))
                             .unwrap_or_else(|| "(none)".to_string());
-                        let cmd_str = cc.cmd.as_ref()
+                        let cmd_str = cc
+                            .cmd
+                            .as_ref()
                             .map(|v| shell_join(v))
                             .unwrap_or_else(|| "(none)".to_string());
                         let _ = make_removable(&staging_dir);
@@ -1150,7 +1195,11 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
     if verbose {
         eprintln!(
             "detected distro: {} (family: {:?})",
-            if distro_name.is_empty() { "unknown" } else { &distro_name },
+            if distro_name.is_empty() {
+                "unknown"
+            } else {
+                &distro_name
+            },
             family,
         );
     }
@@ -1192,7 +1241,7 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
                         );
                     }
                     if !verbose && is_interactive_terminal() {
-                        if prompt_install_systemd(&family, &distro_name) {
+                        if prompt_install_systemd(&family, &distro_name)? {
                             install_systemd_packages(&staging_dir, &family, verbose)?;
                         } else {
                             bail!("systemd not found in rootfs; import aborted by user");
@@ -1351,12 +1400,18 @@ pub(crate) mod tests {
         // Acquire the interrupt lock to prevent concurrent InterruptGuard
         // tests from poisoning check_interrupted() calls inside run().
         let _lock = INTERRUPT_LOCK.lock().unwrap();
-        run(datadir, &ImportOptions {
-            source, name, verbose, force,
-            install_packages: InstallPackages::No,
-            oci_base: OciBase::Auto,
-            oci_base_fs: None,
-        })
+        run(
+            datadir,
+            &ImportOptions {
+                source,
+                name,
+                verbose,
+                force,
+                install_packages: InstallPackages::No,
+                oci_base: OciBase::Auto,
+                oci_base_fs: None,
+            },
+        )
     }
 
     use crate::testutil::TempDataDir;
@@ -1495,14 +1550,7 @@ pub(crate) mod tests {
         // Dangling symlink.
         unix_fs::symlink("/nonexistent", src.path().join("dangling")).unwrap();
 
-        test_run(
-            tmp.path(),
-            src.path().to_str().unwrap(),
-            "sym",
-            false,
-            true,
-        )
-        .unwrap();
+        test_run(tmp.path(), src.path().to_str().unwrap(), "sym", false, true).unwrap();
 
         let rootfs = tmp.path().join("fs/sym");
         let link_target = fs::read_link(rootfs.join("link.txt")).unwrap();
@@ -1517,14 +1565,7 @@ pub(crate) mod tests {
         let tmp = tmp();
         let src = TempSourceDir::new("dup");
 
-        test_run(
-            tmp.path(),
-            src.path().to_str().unwrap(),
-            "dup",
-            false,
-            true,
-        )
-        .unwrap();
+        test_run(tmp.path(), src.path().to_str().unwrap(), "dup", false, true).unwrap();
         let err = test_run(
             tmp.path(),
             src.path().to_str().unwrap(),
@@ -1590,14 +1631,8 @@ pub(crate) mod tests {
         let tmp = tmp();
         let missing = Path::new("/tmp/sdme-test-definitely-nonexistent");
 
-        let err = test_run(
-            tmp.path(),
-            missing.to_str().unwrap(),
-            "test",
-            false,
-            false,
-        )
-        .unwrap_err();
+        let err =
+            test_run(tmp.path(), missing.to_str().unwrap(), "test", false, false).unwrap_err();
         assert!(
             err.to_string().contains("does not exist"),
             "unexpected error: {err}"
@@ -1681,22 +1716,10 @@ pub(crate) mod tests {
         ];
         let c_path = path_to_cstring(&file_path).unwrap();
         unsafe {
-            libc::utimensat(
-                libc::AT_FDCWD,
-                c_path.as_ptr(),
-                times.as_ptr(),
-                0,
-            );
+            libc::utimensat(libc::AT_FDCWD, c_path.as_ptr(), times.as_ptr(), 0);
         }
 
-        test_run(
-            tmp.path(),
-            src.path().to_str().unwrap(),
-            "ts",
-            false,
-            true,
-        )
-        .unwrap();
+        test_run(tmp.path(), src.path().to_str().unwrap(), "ts", false, true).unwrap();
 
         let dst_stat = lstat_entry(&tmp.path().join("fs/ts/file.txt")).unwrap();
         assert_eq!(dst_stat.st_mtime, 1000000000);
@@ -1715,14 +1738,7 @@ pub(crate) mod tests {
         let ret = unsafe { libc::mknod(c_path.as_ptr(), libc::S_IFCHR | 0o666, dev) };
         assert_eq!(ret, 0, "mknod failed (need root)");
 
-        test_run(
-            tmp.path(),
-            src.path().to_str().unwrap(),
-            "dev",
-            false,
-            true,
-        )
-        .unwrap();
+        test_run(tmp.path(), src.path().to_str().unwrap(), "dev", false, true).unwrap();
 
         let dst_stat = lstat_entry(&tmp.path().join("fs/dev/null")).unwrap();
         assert_eq!(dst_stat.st_mode & libc::S_IFMT, libc::S_IFCHR);
@@ -1904,14 +1920,7 @@ pub(crate) mod tests {
             libc::chown(c_path.as_ptr(), 1000, 1000);
         }
 
-        test_run(
-            tmp.path(),
-            src.path().to_str().unwrap(),
-            "own",
-            false,
-            true,
-        )
-        .unwrap();
+        test_run(tmp.path(), src.path().to_str().unwrap(), "own", false, true).unwrap();
 
         let dst_stat = lstat_entry(&tmp.path().join("fs/own/owned.txt")).unwrap();
         assert_eq!(dst_stat.st_uid, 1000);
@@ -2017,7 +2026,10 @@ pub(crate) mod tests {
         );
 
         // Generic/unknown types return None.
-        assert_eq!(detect_kind_from_content_type("application/octet-stream"), None);
+        assert_eq!(
+            detect_kind_from_content_type("application/octet-stream"),
+            None
+        );
         assert_eq!(detect_kind_from_content_type("text/html"), None);
         assert_eq!(detect_kind_from_content_type(""), None);
     }
@@ -2133,10 +2145,7 @@ pub(crate) mod tests {
         // Unknown extensions.
         assert_eq!(detect_kind_from_url("https://example.com/file.zip"), None);
         assert_eq!(detect_kind_from_url("https://example.com/file"), None);
-        assert_eq!(
-            detect_kind_from_url("https://example.com/download"),
-            None
-        );
+        assert_eq!(detect_kind_from_url("https://example.com/download"), None);
     }
 
     #[test]
@@ -2163,10 +2172,7 @@ pub(crate) mod tests {
         let mut data = vec![0x51, 0x46, 0x49, 0xfb];
         data.extend_from_slice(&[0u8; 64]);
         fs::write(&path, &data).unwrap();
-        assert_eq!(
-            detect_kind_from_magic(&path),
-            DownloadedFileKind::QcowImage
-        );
+        assert_eq!(detect_kind_from_magic(&path), DownloadedFileKind::QcowImage);
         let _ = fs::remove_file(&path);
     }
 
@@ -2182,10 +2188,7 @@ pub(crate) mod tests {
         data[510] = 0x55;
         data[511] = 0xAA;
         fs::write(&path, &data).unwrap();
-        assert_eq!(
-            detect_kind_from_magic(&path),
-            DownloadedFileKind::RawImage
-        );
+        assert_eq!(detect_kind_from_magic(&path), DownloadedFileKind::RawImage);
         let _ = fs::remove_file(&path);
     }
 
@@ -2200,10 +2203,7 @@ pub(crate) mod tests {
         let mut data = vec![0u8; 520];
         data[512..520].copy_from_slice(b"EFI PART");
         fs::write(&path, &data).unwrap();
-        assert_eq!(
-            detect_kind_from_magic(&path),
-            DownloadedFileKind::RawImage
-        );
+        assert_eq!(detect_kind_from_magic(&path), DownloadedFileKind::RawImage);
         let _ = fs::remove_file(&path);
     }
 

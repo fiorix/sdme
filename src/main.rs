@@ -5,10 +5,16 @@ use anyhow::{bail, Result};
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 use sdme::import::{ImportOptions, InstallPackages, OciBase};
-use sdme::{BindConfig, EnvConfig, NetworkConfig, ResourceLimits, config, containers, rootfs, system_check, systemd};
+use sdme::{
+    config, confirm, containers, rootfs, system_check, systemd, BindConfig, EnvConfig,
+    NetworkConfig, ResourceLimits,
+};
 
 #[derive(Parser)]
-#[command(name = "sdme", about = "Lightweight systemd-nspawn containers with overlayfs")]
+#[command(
+    name = "sdme",
+    about = "Lightweight systemd-nspawn containers with overlayfs"
+)]
 struct Cli {
     /// Enable verbose output (implies non-interactive mode at runtime)
     #[arg(short, long, global = true)]
@@ -450,7 +456,11 @@ fn parse_opaque_dirs_config(s: &str) -> Vec<String> {
 /// If the user passed explicit `-o` flags, those take priority.
 /// Otherwise, for host-rootfs containers (no `-r`), apply the config defaults.
 /// For imported-rootfs containers, return an empty vec.
-fn resolve_opaque_dirs(cli_dirs: Vec<String>, is_host_rootfs: bool, cfg: &config::Config) -> Vec<String> {
+fn resolve_opaque_dirs(
+    cli_dirs: Vec<String>,
+    is_host_rootfs: bool,
+    cfg: &config::Config,
+) -> Vec<String> {
     if !cli_dirs.is_empty() {
         cli_dirs
     } else if is_host_rootfs {
@@ -505,8 +515,9 @@ fn main() -> Result<()> {
                         cfg.datadir = path;
                     }
                     "boot_timeout" => {
-                        let secs: u64 = value.parse()
-                            .map_err(|_| anyhow::anyhow!("boot_timeout must be a positive integer (seconds)"))?;
+                        let secs: u64 = value.parse().map_err(|_| {
+                            anyhow::anyhow!("boot_timeout must be a positive integer (seconds)")
+                        })?;
                         if secs == 0 {
                             bail!("boot_timeout must be greater than 0");
                         }
@@ -515,7 +526,9 @@ fn main() -> Result<()> {
                     "join_as_sudo_user" => match value.as_str() {
                         "yes" => cfg.join_as_sudo_user = true,
                         "no" => cfg.join_as_sudo_user = false,
-                        _ => bail!("invalid value for join_as_sudo_user: {value} (expected yes or no)"),
+                        _ => bail!(
+                            "invalid value for join_as_sudo_user: {value} (expected yes or no)"
+                        ),
                     },
                     "host_rootfs_opaque_dirs" => {
                         if value.is_empty() {
@@ -531,22 +544,50 @@ fn main() -> Result<()> {
                 config::save(&cfg, config_path)?;
             }
         },
-        Command::Create { name, fs, memory, cpus, cpu_weight, opaque_dirs, network, mounts } => {
+        Command::Create {
+            name,
+            fs,
+            memory,
+            cpus,
+            cpu_weight,
+            opaque_dirs,
+            network,
+            mounts,
+        } => {
             system_check::check_systemd_version(252)?;
             let limits = parse_limits(memory, cpus, cpu_weight)?;
             let network = parse_network(network)?;
             let (binds, envs) = parse_mounts(mounts)?;
             let opaque_dirs = resolve_opaque_dirs(opaque_dirs, fs.is_none(), &cfg);
-            let opts = containers::CreateOptions { name, rootfs: fs, limits, network, opaque_dirs, binds, envs };
+            let opts = containers::CreateOptions {
+                name,
+                rootfs: fs,
+                limits,
+                network,
+                opaque_dirs,
+                binds,
+                envs,
+            };
             let name = containers::create(&cfg.datadir, &opts, cli.verbose)?;
             eprintln!("creating '{name}'");
             println!("{name}");
         }
         Command::Exec { name, command } => {
             let name = containers::resolve_name(&cfg.datadir, &name)?;
-            containers::exec(&cfg.datadir, &name, &command, cfg.join_as_sudo_user, cli.verbose)?;
+            containers::exec(
+                &cfg.datadir,
+                &name,
+                &command,
+                cfg.join_as_sudo_user,
+                cli.verbose,
+            )?;
         }
-        Command::Set { name, memory, cpus, cpu_weight } => {
+        Command::Set {
+            name,
+            memory,
+            cpus,
+            cpu_weight,
+        } => {
             let name = containers::resolve_name(&cfg.datadir, &name)?;
             let limits = parse_limits(memory, cpus, cpu_weight)?;
             containers::set_limits(&cfg.datadir, &name, &limits, cli.verbose)?;
@@ -567,19 +608,27 @@ fn main() -> Result<()> {
         Command::Join { name, command } => {
             let name = containers::resolve_name(&cfg.datadir, &name)?;
             eprintln!("joining '{name}'");
-            containers::join(&cfg.datadir, &name, &command, cfg.join_as_sudo_user, cli.verbose)?;
+            containers::join(
+                &cfg.datadir,
+                &name,
+                &command,
+                cfg.join_as_sudo_user,
+                cli.verbose,
+            )?;
         }
         Command::Logs { name, args } => {
-            system_check::check_dependencies(&[
-                ("journalctl", "apt install systemd"),
-            ], cli.verbose)?;
+            system_check::check_dependencies(
+                &[("journalctl", "apt install systemd")],
+                cli.verbose,
+            )?;
             let name = containers::resolve_name(&cfg.datadir, &name)?;
             let unit = systemd::service_name(&name);
             let mut cmd = std::process::Command::new("journalctl");
             cmd.args(["-u", &unit]);
             cmd.args(&args);
             if cli.verbose {
-                eprintln!("exec: journalctl {}",
+                eprintln!(
+                    "exec: journalctl {}",
                     cmd.get_args()
                         .map(|a| a.to_string_lossy())
                         .collect::<Vec<_>>()
@@ -589,20 +638,40 @@ fn main() -> Result<()> {
             let err = cmd.exec();
             bail!("failed to exec journalctl: {err}");
         }
-        Command::New { name, fs, timeout, memory, cpus, cpu_weight, opaque_dirs, network, mounts, command } => {
+        Command::New {
+            name,
+            fs,
+            timeout,
+            memory,
+            cpus,
+            cpu_weight,
+            opaque_dirs,
+            network,
+            mounts,
+            command,
+        } => {
             system_check::check_systemd_version(252)?;
             let limits = parse_limits(memory, cpus, cpu_weight)?;
             let network = parse_network(network)?;
             let (binds, envs) = parse_mounts(mounts)?;
             let opaque_dirs = resolve_opaque_dirs(opaque_dirs, fs.is_none(), &cfg);
-            let opts = containers::CreateOptions { name, rootfs: fs, limits, network, opaque_dirs, binds, envs };
+            let opts = containers::CreateOptions {
+                name,
+                rootfs: fs,
+                limits,
+                network,
+                opaque_dirs,
+                binds,
+                envs,
+            };
             let name = containers::create(&cfg.datadir, &opts, cli.verbose)?;
             eprintln!("creating '{name}'");
 
             eprintln!("starting '{name}'");
             let boot_result = (|| -> Result<()> {
                 systemd::start(&cfg.datadir, &name, cli.verbose)?;
-                let boot_timeout = std::time::Duration::from_secs(timeout.unwrap_or(cfg.boot_timeout));
+                let boot_timeout =
+                    std::time::Duration::from_secs(timeout.unwrap_or(cfg.boot_timeout));
                 await_boot(&name, boot_timeout, cli.verbose)?;
                 Ok(())
             })();
@@ -614,7 +683,13 @@ fn main() -> Result<()> {
             }
 
             eprintln!("joining '{name}'");
-            containers::join(&cfg.datadir, &name, &command, cfg.join_as_sudo_user, cli.verbose)?;
+            containers::join(
+                &cfg.datadir,
+                &name,
+                &command,
+                cfg.join_as_sudo_user,
+                cli.verbose,
+            )?;
         }
         Command::Ps => {
             let entries = containers::list(&cfg.datadir)?;
@@ -632,7 +707,11 @@ fn main() -> Result<()> {
                 for e in &entries {
                     println!(
                         "{:<name_w$}  {:<status_w$}  {:<health_w$}  {:<os_w$}  {}",
-                        e.name, e.status, e.health, e.os, e.shared.display()
+                        e.name,
+                        e.status,
+                        e.health,
+                        e.os,
+                        e.shared.display()
                     );
                 }
             }
@@ -664,10 +743,7 @@ fn main() -> Result<()> {
                             if all_names.len() == 1 { "" } else { "s" },
                             all_names.join(", "),
                         );
-                        eprint!("are you sure? [y/N] ");
-                        let mut answer = String::new();
-                        std::io::stdin().read_line(&mut answer)?;
-                        if !answer.trim().eq_ignore_ascii_case("y") {
+                        if !confirm("are you sure? [y/N] ")? {
                             bail!("aborted");
                         }
                     }
@@ -712,20 +788,30 @@ fn main() -> Result<()> {
         // Handled before root check above.
         Command::Completions { .. } => unreachable!(),
         Command::Fs(cmd) => match cmd {
-            RootfsCommand::Import { source, name, force, install_packages, oci_base, oci_base_fs } => {
+            RootfsCommand::Import {
+                source,
+                name,
+                force,
+                install_packages,
+                oci_base,
+                oci_base_fs,
+            } => {
                 system_check::check_systemd_version(252)?;
                 if oci_base_fs.is_some() && oci_base == OciBase::Yes {
                     bail!("--oci-base-fs cannot be used with --oci-base=yes");
                 }
-                rootfs::import(&cfg.datadir, &ImportOptions {
-                    source: &source,
-                    name: &name,
-                    verbose: cli.verbose,
-                    force,
-                    install_packages,
-                    oci_base,
-                    oci_base_fs: oci_base_fs.as_deref(),
-                })?;
+                rootfs::import(
+                    &cfg.datadir,
+                    &ImportOptions {
+                        source: &source,
+                        name: &name,
+                        verbose: cli.verbose,
+                        force,
+                        install_packages,
+                        oci_base,
+                        oci_base_fs: oci_base_fs.as_deref(),
+                    },
+                )?;
                 println!("{name}");
             }
             RootfsCommand::Ls => {
@@ -738,7 +824,12 @@ fn main() -> Result<()> {
                     println!("{:<name_w$}  {:<distro_w$}  PATH", "NAME", "DISTRO");
                     for entry in &entries {
                         let path = cfg.datadir.join("fs").join(&entry.name);
-                        println!("{:<name_w$}  {:<distro_w$}  {}", entry.name, entry.distro, path.display());
+                        println!(
+                            "{:<name_w$}  {:<distro_w$}  {}",
+                            entry.name,
+                            entry.distro,
+                            path.display()
+                        );
                     }
                 }
             }
@@ -769,10 +860,7 @@ fn main() -> Result<()> {
                                 if all_names.len() == 1 { "y" } else { "ies" },
                                 all_names.join(", "),
                             );
-                            eprint!("are you sure? [y/N] ");
-                            let mut answer = String::new();
-                            std::io::stdin().read_line(&mut answer)?;
-                            if !answer.trim().eq_ignore_ascii_case("y") {
+                            if !confirm("are you sure? [y/N] ")? {
                                 bail!("aborted");
                             }
                         }
@@ -794,10 +882,22 @@ fn main() -> Result<()> {
                     bail!("some fs entries could not be removed");
                 }
             }
-            RootfsCommand::Build { name, config, timeout, force } => {
+            RootfsCommand::Build {
+                name,
+                config,
+                timeout,
+                force,
+            } => {
                 system_check::check_systemd_version(252)?;
                 let boot_timeout = timeout.unwrap_or(cfg.boot_timeout);
-                sdme::build::build(&cfg.datadir, &name, &config, boot_timeout, force, cli.verbose)?;
+                sdme::build::build(
+                    &cfg.datadir,
+                    &name,
+                    &config,
+                    boot_timeout,
+                    force,
+                    cli.verbose,
+                )?;
                 println!("{name}");
             }
         },

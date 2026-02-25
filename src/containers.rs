@@ -9,14 +9,17 @@
 
 use std::ffi::CString;
 use std::fs::{self, OpenOptions};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt, symlink};
+use std::os::unix::fs::{symlink, OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
 
-use crate::{BindConfig, EnvConfig, NetworkConfig, ResourceLimits, State, names, rootfs, systemd, validate_name};
+use crate::{
+    names, rootfs, systemd, validate_name, BindConfig, EnvConfig, NetworkConfig, ResourceLimits,
+    State,
+};
 
 pub struct CreateOptions {
     pub name: Option<String>,
@@ -42,8 +45,8 @@ pub fn create(datadir: &Path, opts: &CreateOptions, verbose: bool) -> Result<Str
         bail!(
             "current umask ({:04o}) strips read/execute from 'other', which would \
              prevent services inside the container from accessing the filesystem. \
-             Set a more permissive umask (e.g. umask 022) before running this command."
-            , umask
+             Set a more permissive umask (e.g. umask 022) before running this command.",
+            umask
         );
     }
 
@@ -105,7 +108,14 @@ pub fn create(datadir: &Path, opts: &CreateOptions, verbose: bool) -> Result<Str
     }
 }
 
-fn do_create(datadir: &Path, name: &str, rootfs: &Path, opts: &CreateOptions, opaque_dirs: &[String], verbose: bool) -> Result<()> {
+fn do_create(
+    datadir: &Path,
+    name: &str,
+    rootfs: &Path,
+    opts: &CreateOptions,
+    opaque_dirs: &[String],
+    verbose: bool,
+) -> Result<()> {
     let container_dir = datadir.join("containers").join(name);
     let containers_dir = datadir.join("containers");
     fs::create_dir_all(&containers_dir)
@@ -124,8 +134,7 @@ fn do_create(datadir: &Path, name: &str, rootfs: &Path, opts: &CreateOptions, op
         ("shared", 0o755),
     ] {
         let dir = container_dir.join(sub);
-        fs::create_dir_all(&dir)
-            .with_context(|| format!("failed to create {}", dir.display()))?;
+        fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
         set_dir_permissions(&dir, *mode)?;
     }
 
@@ -189,8 +198,12 @@ fn do_create(datadir: &Path, name: &str, rootfs: &Path, opts: &CreateOptions, op
     }
 
     let resolved_mask = systemd_unit_dir.join("systemd-resolved.service");
-    symlink("/dev/null", &resolved_mask)
-        .with_context(|| format!("failed to mask systemd-resolved at {}", resolved_mask.display()))?;
+    symlink("/dev/null", &resolved_mask).with_context(|| {
+        format!(
+            "failed to mask systemd-resolved at {}",
+            resolved_mask.display()
+        )
+    })?;
 
     // Write a placeholder /etc/resolv.conf as a regular file so that
     // systemd-nspawn's --resolv-conf=auto can overwrite it with the host's
@@ -199,8 +212,11 @@ fn do_create(datadir: &Path, name: &str, rootfs: &Path, opts: &CreateOptions, op
     // copy variant won't overwrite a symlink, leaving DNS broken. A regular
     // file in the overlayfs upper layer shadows the lower layer's symlink.
     let resolv_path = etc_dir.join("resolv.conf");
-    fs::write(&resolv_path, "# placeholder — replaced by systemd-nspawn at boot\n")
-        .with_context(|| format!("failed to write {}", resolv_path.display()))?;
+    fs::write(
+        &resolv_path,
+        "# placeholder — replaced by systemd-nspawn at boot\n",
+    )
+    .with_context(|| format!("failed to write {}", resolv_path.display()))?;
 
     // Write an empty /etc/machine-id so the container gets a unique
     // transient machine ID at boot instead of inheriting the host's.
@@ -219,8 +235,11 @@ fn do_create(datadir: &Path, name: &str, rootfs: &Path, opts: &CreateOptions, op
     // mount them, failing with "Unit data.mount not found" and preventing
     // boot.
     let fstab_path = etc_dir.join("fstab");
-    fs::write(&fstab_path, "# empty — host mounts not applicable in container\n")
-        .with_context(|| format!("failed to write {}", fstab_path.display()))?;
+    fs::write(
+        &fstab_path,
+        "# empty — host mounts not applicable in container\n",
+    )
+    .with_context(|| format!("failed to write {}", fstab_path.display()))?;
 
     if verbose {
         eprintln!("wrote hostname, hosts, resolv.conf, machine-id, and fstab files; masked systemd-resolved");
@@ -291,8 +310,8 @@ pub fn validate_opaque_dirs(dirs: &[String]) -> Result<Vec<String>> {
 
 /// Set the `trusted.overlay.opaque` extended attribute on a directory.
 fn set_opaque_xattr(path: &Path) -> Result<()> {
-    let c_path = CString::new(path.as_os_str().as_encoded_bytes())
-        .context("path contains null byte")?;
+    let c_path =
+        CString::new(path.as_os_str().as_encoded_bytes()).context("path contains null byte")?;
     let c_name = CString::new("trusted.overlay.opaque").unwrap();
     let value = b"y";
     let ret = unsafe {
@@ -305,8 +324,7 @@ fn set_opaque_xattr(path: &Path) -> Result<()> {
         )
     };
     if ret != 0 {
-        return Err(std::io::Error::last_os_error())
-            .context("lsetxattr failed");
+        return Err(std::io::Error::last_os_error()).context("lsetxattr failed");
     }
     Ok(())
 }
@@ -333,8 +351,7 @@ fn resolve_rootfs(datadir: &Path, rootfs: Option<&str>) -> Result<PathBuf> {
     match rootfs {
         None => Ok(PathBuf::from("/")),
         Some(name) => {
-            validate_name(name)
-                .context("invalid rootfs name")?;
+            validate_name(name).context("invalid rootfs name")?;
             let path = datadir.join("fs").join(name);
             if !path.exists() {
                 bail!("fs not found: {}", path.display());
@@ -378,7 +395,11 @@ pub fn resolve_name(datadir: &Path, input: &str) -> Result<String> {
         1 => Ok(matches.remove(0).clone()),
         _ => {
             matches.sort();
-            let list = matches.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ");
+            let list = matches
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
             bail!("ambiguous name '{input}', could match: {list}");
         }
     }
@@ -435,8 +456,8 @@ fn mask_host_mount_units(upper_systemd_dir: &Path, verbose: bool) -> Result<()> 
     if !host_dir.is_dir() {
         return Ok(());
     }
-    let entries = fs::read_dir(host_dir)
-        .with_context(|| format!("failed to read {}", host_dir.display()))?;
+    let entries =
+        fs::read_dir(host_dir).with_context(|| format!("failed to read {}", host_dir.display()))?;
     for entry in entries {
         let entry = entry?;
         let name = entry.file_name();
@@ -456,8 +477,7 @@ fn mask_host_mount_units(upper_systemd_dir: &Path, verbose: bool) -> Result<()> 
             continue;
         }
         let mask_path = upper_systemd_dir.join(name_str);
-        symlink("/dev/null", &mask_path)
-            .with_context(|| format!("failed to mask {name_str}"))?;
+        symlink("/dev/null", &mask_path).with_context(|| format!("failed to mask {name_str}"))?;
         if verbose {
             eprintln!("masked host unit: {name_str}");
         }
@@ -641,7 +661,10 @@ fn machinectl_shell(
                         eprintln!("host rootfs container: joining as user '{}'", su.name);
                     } else {
                         let dirs = opaque.split(',').collect::<Vec<_>>().join(", ");
-                        eprintln!("host rootfs container: joining as user '{}' with opaque dirs {dirs}", su.name);
+                        eprintln!(
+                            "host rootfs container: joining as user '{}' with opaque dirs {dirs}",
+                            su.name
+                        );
                     }
                     cmd.args(["--uid", &su.name]);
                 } else if verbose {
@@ -656,7 +679,8 @@ fn machinectl_shell(
         cmd.args(command);
     }
     if verbose {
-        eprintln!("exec: machinectl {}",
+        eprintln!(
+            "exec: machinectl {}",
             cmd.get_args()
                 .map(|a| a.to_string_lossy())
                 .collect::<Vec<_>>()
@@ -672,7 +696,12 @@ fn machinectl_shell(
 /// Reads the current state file, merges the new limits, writes it back,
 /// and regenerates the systemd drop-in. If the container is running,
 /// prints a note that a restart is needed.
-pub fn set_limits(datadir: &Path, name: &str, limits: &ResourceLimits, verbose: bool) -> Result<()> {
+pub fn set_limits(
+    datadir: &Path,
+    name: &str,
+    limits: &ResourceLimits,
+    verbose: bool,
+) -> Result<()> {
     ensure_exists(datadir, name)?;
 
     let state_path = datadir.join("state").join(name);
@@ -700,8 +729,6 @@ pub fn stop(name: &str, verbose: bool) -> Result<()> {
     systemd::terminate_machine(name)?;
     systemd::wait_for_shutdown(name, std::time::Duration::from_secs(30), verbose)
 }
-
-
 
 #[cfg(test)]
 mod tests {
@@ -779,7 +806,10 @@ mod tests {
 
         // Verify hosts.
         let hosts = fs::read_to_string(container_dir.join("upper/etc/hosts")).unwrap();
-        assert_eq!(hosts, format!("127.0.0.1 localhost {name}\n::1 localhost\n"));
+        assert_eq!(
+            hosts,
+            format!("127.0.0.1 localhost {name}\n::1 localhost\n")
+        );
 
         // Verify state file.
         let state = State::read_from(&tmp.path().join("state").join(&name)).unwrap();
@@ -803,18 +833,12 @@ mod tests {
         let name = create(tmp.path(), &opts, false).unwrap();
         assert_eq!(name, "hello");
 
-        let hostname = fs::read_to_string(
-            tmp.path()
-                .join("containers/hello/upper/etc/hostname"),
-        )
-        .unwrap();
+        let hostname =
+            fs::read_to_string(tmp.path().join("containers/hello/upper/etc/hostname")).unwrap();
         assert_eq!(hostname, "hello\n");
 
-        let hosts = fs::read_to_string(
-            tmp.path()
-                .join("containers/hello/upper/etc/hosts"),
-        )
-        .unwrap();
+        let hosts =
+            fs::read_to_string(tmp.path().join("containers/hello/upper/etc/hosts")).unwrap();
         assert_eq!(hosts, "127.0.0.1 localhost hello\n::1 localhost\n");
 
         let state = State::read_from(&tmp.path().join("state/hello")).unwrap();
@@ -974,14 +998,20 @@ mod tests {
         let tmp = tmp();
         create_dummy_container(&tmp, "foo");
         let err = resolve_name(tmp.path(), "xyz").unwrap_err();
-        assert!(err.to_string().contains("no container found"), "unexpected error: {err}");
+        assert!(
+            err.to_string().contains("no container found"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
     fn test_resolve_name_empty() {
         let tmp = tmp();
         let err = resolve_name(tmp.path(), "").unwrap_err();
-        assert!(err.to_string().contains("must not be empty"), "unexpected error: {err}");
+        assert!(
+            err.to_string().contains("must not be empty"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -1042,10 +1072,7 @@ mod tests {
         unsafe { libc::umask(old) };
 
         let err = err.unwrap_err();
-        assert!(
-            err.to_string().contains("umask"),
-            "unexpected error: {err}"
-        );
+        assert!(err.to_string().contains("umask"), "unexpected error: {err}");
     }
 
     // --- validate_opaque_dirs tests ---
@@ -1061,7 +1088,10 @@ mod tests {
     fn test_validate_opaque_dirs_rejects_relative() {
         let dirs = vec!["var/log".to_string()];
         let err = validate_opaque_dirs(&dirs).unwrap_err();
-        assert!(err.to_string().contains("absolute"), "unexpected error: {err}");
+        assert!(
+            err.to_string().contains("absolute"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -1082,7 +1112,10 @@ mod tests {
     fn test_validate_opaque_dirs_rejects_duplicates() {
         let dirs = vec!["/var".to_string(), "/var/".to_string()];
         let err = validate_opaque_dirs(&dirs).unwrap_err();
-        assert!(err.to_string().contains("duplicate"), "unexpected error: {err}");
+        assert!(
+            err.to_string().contains("duplicate"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -1139,7 +1172,11 @@ mod tests {
                 )
             };
             assert!(size > 0, "lgetxattr failed for {}", path.display());
-            assert_eq!(&buf[..size as usize], b"y", "xattr value mismatch for {dir}");
+            assert_eq!(
+                &buf[..size as usize],
+                b"y",
+                "xattr value mismatch for {dir}"
+            );
         }
     }
 

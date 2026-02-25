@@ -1,10 +1,10 @@
 //! OCI container image import.
 
+use anyhow::{bail, Context, Result};
+use serde::Deserialize;
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use anyhow::{bail, Context, Result};
-use serde::Deserialize;
 
 use crate::check_interrupted;
 use crate::copy::{make_removable, sanitize_dest_path};
@@ -70,10 +70,16 @@ fn resolve_blob(oci_dir: &Path, digest: &str) -> Result<PathBuf> {
     // Validate hash length per OCI spec (sha256 = 64 hex chars, sha512 = 128).
     match algo {
         "sha256" if hash.len() != 64 => {
-            bail!("invalid sha256 digest length: expected 64 hex chars, got {}", hash.len());
+            bail!(
+                "invalid sha256 digest length: expected 64 hex chars, got {}",
+                hash.len()
+            );
         }
         "sha512" if hash.len() != 128 => {
-            bail!("invalid sha512 digest length: expected 128 hex chars, got {}", hash.len());
+            bail!(
+                "invalid sha512 digest length: expected 128 hex chars, got {}",
+                hash.len()
+            );
         }
         _ => {}
     }
@@ -109,12 +115,11 @@ pub(super) fn import_oci_layout(oci_dir: &Path, staging_dir: &Path, verbose: boo
 
     let manifest: OciManifest = if manifest_value.get("layers").is_some() {
         // Direct image manifest.
-        serde_json::from_value(manifest_value)
-            .context("failed to parse OCI image manifest")?
+        serde_json::from_value(manifest_value).context("failed to parse OCI image manifest")?
     } else if manifest_value.get("manifests").is_some() {
         // Manifest index — follow one level of indirection.
-        let sub_index: OciIndex = serde_json::from_value(manifest_value)
-            .context("failed to parse OCI manifest index")?;
+        let sub_index: OciIndex =
+            serde_json::from_value(manifest_value).context("failed to parse OCI manifest index")?;
         if sub_index.manifests.is_empty() {
             bail!("OCI manifest index contains no manifests");
         }
@@ -160,7 +165,6 @@ pub(super) fn import_oci_layout(oci_dir: &Path, staging_dir: &Path, verbose: boo
     Ok(())
 }
 
-
 /// Check whether a path resolves to a location inside `dest` after following symlinks.
 /// Returns `false` if the canonical path escapes `dest` or canonicalization fails.
 fn is_inside_dest(path: &Path, dest: &Path) -> bool {
@@ -187,7 +191,10 @@ pub(super) fn unpack_oci_layer<R: Read>(reader: R, dest: &Path) -> Result<()> {
     for entry in archive.entries().context("failed to read tar entries")? {
         check_interrupted()?;
         let mut entry = entry.context("failed to read tar entry")?;
-        let raw_path = entry.path().context("failed to read entry path")?.into_owned();
+        let raw_path = entry
+            .path()
+            .context("failed to read entry path")?
+            .into_owned();
 
         // Sanitize: strip leading '/' and reject paths with '..' components
         // to prevent path traversal in whiteout handling below.
@@ -197,9 +204,9 @@ pub(super) fn unpack_oci_layer<R: Read>(reader: R, dest: &Path) -> Result<()> {
             Some(name) => name.to_string_lossy().into_owned(),
             None => {
                 // Root directory entry — just ensure it exists.
-                entry.unpack_in(dest).with_context(|| {
-                    format!("failed to unpack entry {}", path.display())
-                })?;
+                entry
+                    .unpack_in(dest)
+                    .with_context(|| format!("failed to unpack entry {}", path.display()))?;
                 continue;
             }
         };
@@ -268,7 +275,7 @@ mod tests {
     use super::*;
     use std::os::unix::fs as unix_fs;
 
-    use crate::import::tests::{INTERRUPT_LOCK, test_run, tmp};
+    use crate::import::tests::{test_run, tmp, INTERRUPT_LOCK};
 
     /// Helper to build an OCI image tarball programmatically.
     ///
@@ -281,7 +288,6 @@ mod tests {
         use_manifest_index: bool,
     ) -> PathBuf {
         use sha2::{Digest, Sha256};
-
 
         let work_dir = std::env::temp_dir().join(format!(
             "sdme-test-oci-build-{}-{:?}-{name}",
@@ -438,7 +444,6 @@ mod tests {
         whiteout_entries: Vec<&str>,
     ) -> PathBuf {
         use sha2::{Digest, Sha256};
-
 
         let work_dir = std::env::temp_dir().join(format!(
             "sdme-test-oci-wh-build-{}-{:?}-{name}",

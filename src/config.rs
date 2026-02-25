@@ -121,8 +121,7 @@ pub fn save(config: &Config, path: Option<&Path>) -> Result<()> {
             .create(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
-    let contents =
-        toml::to_string(config).context("failed to serialize config")?;
+    let contents = toml::to_string(config).context("failed to serialize config")?;
     crate::atomic_write(&path, contents.as_bytes())
         .with_context(|| format!("failed to write config {}", path.display()))?;
     // Ensure restrictive permissions (atomic_write creates with default umask).
@@ -157,10 +156,7 @@ mod tests {
             let _ = fs::remove_dir_all(&dir);
             fs::create_dir_all(&dir).unwrap();
             std::env::set_var("XDG_CONFIG_HOME", &dir);
-            Self {
-                dir,
-                _guard: guard,
-            }
+            Self { dir, _guard: guard }
         }
     }
 
@@ -261,7 +257,10 @@ mod tests {
     #[test]
     fn test_default_host_rootfs_opaque_dirs() {
         let config = Config::default();
-        assert_eq!(config.host_rootfs_opaque_dirs, "/etc/systemd/system,/var/log");
+        assert_eq!(
+            config.host_rootfs_opaque_dirs,
+            "/etc/systemd/system,/var/log"
+        );
     }
 
     #[test]

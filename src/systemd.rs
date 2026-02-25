@@ -190,11 +190,7 @@ mod dbus {
     /// subscription on a different path, we fall back to periodic D-Bus
     /// property reads (sub-millisecond IPC, no process spawning) until the
     /// state transitions to "running" or a terminal state.
-    pub fn wait_for_boot(
-        name: &str,
-        timeout: std::time::Duration,
-        verbose: bool,
-    ) -> Result<()> {
+    pub fn wait_for_boot(name: &str, timeout: std::time::Duration, verbose: bool) -> Result<()> {
         let conn = connect()?;
 
         // Subscribe to manager signals BEFORE checking current state to
@@ -227,12 +223,11 @@ mod dbus {
                     None => continue,
                 };
                 let body = msg.body();
-                let sig_name: String = match body
-                    .deserialize::<(String, zbus::zvariant::OwnedObjectPath)>()
-                {
-                    Ok((n, _)) => n,
-                    Err(_) => continue,
-                };
+                let sig_name: String =
+                    match body.deserialize::<(String, zbus::zvariant::OwnedObjectPath)>() {
+                        Ok((n, _)) => n,
+                        Err(_) => continue,
+                    };
                 if sig_name != name_owned {
                     continue;
                 }
@@ -296,9 +291,7 @@ mod dbus {
                     }
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                    bail!(
-                        "signal watcher exited unexpectedly for container '{name}'"
-                    );
+                    bail!("signal watcher exited unexpectedly for container '{name}'");
                 }
             }
         }
@@ -354,11 +347,7 @@ mod dbus {
     /// system bus via `/proc/{leader}/root/run/dbus/system_bus_socket`
     /// (the same mechanism `busctl --machine=` uses internally) until
     /// the connection succeeds or the timeout expires.
-    pub fn wait_for_dbus(
-        name: &str,
-        timeout: std::time::Duration,
-        verbose: bool,
-    ) -> Result<()> {
+    pub fn wait_for_dbus(name: &str, timeout: std::time::Duration, verbose: bool) -> Result<()> {
         let conn = connect()?;
         let deadline = std::time::Instant::now() + timeout;
         let poll_interval = std::time::Duration::from_millis(200);
@@ -448,8 +437,7 @@ mod dbus {
     fn get_unit_active_state(conn: &Connection, unit: &str) -> Option<String> {
         let manager = systemd_manager(conn).ok()?;
         let reply = manager.call_method("GetUnit", &(unit,)).ok()?;
-        let unit_path: zbus::zvariant::OwnedObjectPath =
-            reply.body().deserialize().ok()?;
+        let unit_path: zbus::zvariant::OwnedObjectPath = reply.body().deserialize().ok()?;
         let unit_proxy = Proxy::new(
             conn,
             "org.freedesktop.systemd1",
@@ -487,12 +475,7 @@ mod dbus {
             if verbose {
                 eprintln!("machine '{name}' already removed");
             }
-            return wait_for_unit_inactive(
-                &conn,
-                &super::service_name(name),
-                timeout,
-                verbose,
-            );
+            return wait_for_unit_inactive(&conn, &super::service_name(name), timeout, verbose);
         }
 
         if verbose {
@@ -534,8 +517,7 @@ mod dbus {
         loop {
             crate::check_interrupted()?;
 
-            let remaining =
-                deadline.saturating_duration_since(std::time::Instant::now());
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             if remaining.is_zero() {
                 bail!(
                     "timed out waiting for container '{name}' to shut down ({}s)",
@@ -561,23 +543,15 @@ mod dbus {
                     }
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                    bail!(
-                        "signal watcher exited unexpectedly for '{name}'"
-                    );
+                    bail!("signal watcher exited unexpectedly for '{name}'");
                 }
             }
         }
 
         // Phase 2: wait for the systemd unit to become inactive.
         // ExecStopPost (overlayfs unmount) runs after nspawn exits.
-        let remaining =
-            deadline.saturating_duration_since(std::time::Instant::now());
-        wait_for_unit_inactive(
-            &conn,
-            &super::service_name(name),
-            remaining,
-            verbose,
-        )
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        wait_for_unit_inactive(&conn, &super::service_name(name), remaining, verbose)
     }
 
     /// Poll a systemd unit's ActiveState until it reaches "inactive" or "failed".
@@ -606,12 +580,9 @@ mod dbus {
                 }
             }
 
-            let remaining =
-                deadline.saturating_duration_since(std::time::Instant::now());
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             if remaining.is_zero() {
-                bail!(
-                    "timed out waiting for unit '{unit}' to become inactive"
-                );
+                bail!("timed out waiting for unit '{unit}' to become inactive");
             }
 
             std::thread::sleep(poll_interval.min(remaining));
@@ -660,11 +631,7 @@ pub fn terminate_machine(name: &str) -> Result<()> {
     dbus::terminate_machine(name)
 }
 
-pub fn wait_for_shutdown(
-    name: &str,
-    timeout: std::time::Duration,
-    verbose: bool,
-) -> Result<()> {
+pub fn wait_for_shutdown(name: &str, timeout: std::time::Duration, verbose: bool) -> Result<()> {
     dbus::wait_for_shutdown(name, timeout, verbose)
 }
 
@@ -686,11 +653,13 @@ pub fn resolve_paths() -> Result<UnitPaths> {
     use crate::system_check::find_program;
     let nspawn = find_program("systemd-nspawn")
         .context("systemd-nspawn not found; install systemd-container")?;
-    let mount = find_program("mount")
-        .context("mount not found")?;
-    let umount = find_program("umount")
-        .context("umount not found")?;
-    Ok(UnitPaths { nspawn, mount, umount })
+    let mount = find_program("mount").context("mount not found")?;
+    let umount = find_program("umount").context("umount not found")?;
+    Ok(UnitPaths {
+        nspawn,
+        mount,
+        umount,
+    })
 }
 
 /// Generate the thin template unit for `sdme@.service`.
@@ -744,24 +713,16 @@ pub fn nspawn_dropin(
     let mut lines = Vec::new();
     lines.push("[Service]".to_string());
     lines.push("ExecStart=".to_string());
-    lines.push(format!(
-        "ExecStartPre={mount} -t overlay overlay \\",
-    ));
+    lines.push(format!("ExecStartPre={mount} -t overlay overlay \\",));
     lines.push(format!(
         "    -o lowerdir={lowerdir},upperdir={datadir}/containers/{name}/upper,workdir={datadir}/containers/{name}/work \\",
     ));
-    lines.push(format!(
-        "    {datadir}/containers/{name}/merged",
-    ));
-    lines.push(format!(
-        "ExecStart={nspawn} \\",
-    ));
+    lines.push(format!("    {datadir}/containers/{name}/merged",));
+    lines.push(format!("ExecStart={nspawn} \\",));
     lines.push(format!(
         "    --directory={datadir}/containers/{name}/merged \\",
     ));
-    lines.push(format!(
-        "    --machine={name} \\",
-    ));
+    lines.push(format!("    --machine={name} \\",));
     lines.push(format!(
         "    --bind={datadir}/containers/{name}/shared:/shared \\",
     ));
@@ -796,9 +757,8 @@ fn write_unit_if_changed(unit_path: &Path, content: &str, verbose: bool) -> Resu
     } else if verbose {
         eprintln!("installing template unit: {}", unit_path.display());
     }
-    fs::write(unit_path, content).with_context(|| {
-        format!("failed to write template unit {}", unit_path.display())
-    })?;
+    fs::write(unit_path, content)
+        .with_context(|| format!("failed to write template unit {}", unit_path.display()))?;
     Ok(true)
 }
 
@@ -834,9 +794,8 @@ pub fn write_nspawn_dropin(datadir: &Path, name: &str, verbose: bool) -> Result<
     let lowerdir = if rootfs.is_empty() {
         "/".to_string()
     } else {
-        crate::validate_name(rootfs).with_context(|| {
-            format!("invalid ROOTFS value in state file: {rootfs:?}")
-        })?;
+        crate::validate_name(rootfs)
+            .with_context(|| format!("invalid ROOTFS value in state file: {rootfs:?}"))?;
         let path = datadir.join("fs").join(rootfs);
         path.to_str()
             .context("rootfs path is not valid UTF-8")?
@@ -867,8 +826,7 @@ pub fn write_nspawn_dropin(datadir: &Path, name: &str, verbose: bool) -> Result<
     let content = nspawn_dropin(datadir_str, name, &lowerdir, &paths, &nspawn_args);
 
     let dir = dropin_dir(name);
-    fs::create_dir_all(&dir)
-        .with_context(|| format!("failed to create {}", dir.display()))?;
+    fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
 
     let dropin_path = dir.join("nspawn.conf");
     if write_unit_if_changed(&dropin_path, &content, verbose)? {
@@ -878,9 +836,7 @@ pub fn write_nspawn_dropin(datadir: &Path, name: &str, verbose: bool) -> Result<
 }
 
 fn dropin_dir(name: &str) -> PathBuf {
-    PathBuf::from(format!(
-        "/etc/systemd/system/sdme@{name}.service.d"
-    ))
+    PathBuf::from(format!("/etc/systemd/system/sdme@{name}.service.d"))
 }
 
 /// Write or remove the resource-limits drop-in for a container.
@@ -921,8 +877,7 @@ pub fn write_limits_dropin(name: &str, limits: &ResourceLimits, verbose: bool) -
 pub fn remove_limits_dropin(name: &str, verbose: bool) -> Result<()> {
     let dir = dropin_dir(name);
     if dir.exists() {
-        fs::remove_dir_all(&dir)
-            .with_context(|| format!("failed to remove {}", dir.display()))?;
+        fs::remove_dir_all(&dir).with_context(|| format!("failed to remove {}", dir.display()))?;
         if verbose {
             eprintln!("removed drop-in dir: {}", dir.display());
         }
@@ -1026,7 +981,9 @@ mod tests {
             &paths,
             &["--resolv-conf=auto".to_string()],
         );
-        assert!(content.contains("lowerdir=/var/lib/sdme/fs/ubuntu,upperdir=/var/lib/sdme/containers/ubox/upper"));
+        assert!(content.contains(
+            "lowerdir=/var/lib/sdme/fs/ubuntu,upperdir=/var/lib/sdme/containers/ubox/upper"
+        ));
     }
 
     #[test]

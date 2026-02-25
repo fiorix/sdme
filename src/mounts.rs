@@ -114,9 +114,7 @@ fn parse_bind_arg(arg: &str) -> Result<String> {
 
     // Split host:container
     let (host, container) = spec.split_once(':').ok_or_else(|| {
-        anyhow::anyhow!(
-            "invalid bind format '{arg}': expected HOST:CONTAINER[:ro]"
-        )
+        anyhow::anyhow!("invalid bind format '{arg}': expected HOST:CONTAINER[:ro]")
     })?;
 
     if host.is_empty() {
@@ -247,9 +245,7 @@ impl EnvConfig {
 /// Validate a single environment variable specification.
 fn validate_env(spec: &str) -> Result<()> {
     let (key, value) = spec.split_once('=').ok_or_else(|| {
-        anyhow::anyhow!(
-            "invalid environment variable '{spec}': expected KEY=VALUE"
-        )
+        anyhow::anyhow!("invalid environment variable '{spec}': expected KEY=VALUE")
     })?;
 
     if key.is_empty() {
@@ -259,9 +255,7 @@ fn validate_env(spec: &str) -> Result<()> {
     // Key must be valid: alphanumeric + underscore, not starting with digit
     let first = key.chars().next().unwrap();
     if first.is_ascii_digit() {
-        bail!(
-            "invalid environment variable key '{key}': cannot start with a digit"
-        );
+        bail!("invalid environment variable key '{key}': cannot start with a digit");
     }
 
     for ch in key.chars() {
@@ -332,7 +326,10 @@ mod tests {
             ],
         };
         let args = binds.to_nspawn_args();
-        assert_eq!(args, vec!["--bind=/host:/container", "--bind-ro=/data:/mnt"]);
+        assert_eq!(
+            args,
+            vec!["--bind=/host:/container", "--bind-ro=/data:/mnt"]
+        );
     }
 
     #[test]
@@ -357,7 +354,10 @@ mod tests {
             binds: vec!["relative:/container:rw".to_string()],
         };
         let err = binds.validate().unwrap_err();
-        assert!(err.to_string().contains("absolute"), "unexpected error: {err}");
+        assert!(
+            err.to_string().contains("absolute"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -367,7 +367,10 @@ mod tests {
             binds: vec![format!("{}:relative:rw", tmp.display())],
         };
         let err = binds.validate().unwrap_err();
-        assert!(err.to_string().contains("absolute"), "unexpected error: {err}");
+        assert!(
+            err.to_string().contains("absolute"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -395,7 +398,10 @@ mod tests {
             binds: vec!["/nonexistent/path/xyz:/container:rw".to_string()],
         };
         let err = binds.validate().unwrap_err();
-        assert!(err.to_string().contains("does not exist"), "unexpected error: {err}");
+        assert!(
+            err.to_string().contains("does not exist"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -464,7 +470,10 @@ mod tests {
             vars: vec!["NOEQUALS".to_string()],
         };
         let err = envs.validate().unwrap_err();
-        assert!(err.to_string().contains("KEY=VALUE"), "unexpected error: {err}");
+        assert!(
+            err.to_string().contains("KEY=VALUE"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -491,7 +500,10 @@ mod tests {
             vars: vec!["MY-VAR=value".to_string()],
         };
         let err = envs.validate().unwrap_err();
-        assert!(err.to_string().contains("letters, digits, and underscores"), "unexpected error: {err}");
+        assert!(
+            err.to_string().contains("letters, digits, and underscores"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -500,19 +512,22 @@ mod tests {
             vars: vec!["MY_VAR=hello|world".to_string()],
         };
         let err = envs.validate().unwrap_err();
-        assert!(err.to_string().contains("reserved separator"), "unexpected error: {err}");
+        assert!(
+            err.to_string().contains("reserved separator"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
     fn test_env_to_nspawn_args() {
         let envs = EnvConfig {
-            vars: vec![
-                "MY_VAR=hello".to_string(),
-                "ANOTHER=world".to_string(),
-            ],
+            vars: vec!["MY_VAR=hello".to_string(), "ANOTHER=world".to_string()],
         };
         let args = envs.to_nspawn_args();
-        assert_eq!(args, vec!["--setenv=MY_VAR=hello", "--setenv=ANOTHER=world"]);
+        assert_eq!(
+            args,
+            vec!["--setenv=MY_VAR=hello", "--setenv=ANOTHER=world"]
+        );
     }
 
     #[test]
@@ -533,10 +548,7 @@ mod tests {
     #[test]
     fn test_env_state_roundtrip() {
         let envs = EnvConfig {
-            vars: vec![
-                "MY_VAR=hello".to_string(),
-                "ANOTHER=world".to_string(),
-            ],
+            vars: vec!["MY_VAR=hello".to_string(), "ANOTHER=world".to_string()],
         };
 
         let mut state = State::new();

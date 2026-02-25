@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
-use crate::{State, check_interrupted, containers, copy, rootfs, systemd, validate_name};
 use crate::copy::sanitize_dest_path;
+use crate::{check_interrupted, containers, copy, rootfs, systemd, validate_name, State};
 
 // --- Config types ---
 
@@ -49,7 +49,11 @@ fn parse_build_config(path: &Path) -> Result<BuildConfig> {
         match directive {
             "FROM" => {
                 if rootfs.is_some() {
-                    bail!("{}:{}: duplicate FROM directive", path.display(), lineno + 1);
+                    bail!(
+                        "{}:{}: duplicate FROM directive",
+                        path.display(),
+                        lineno + 1
+                    );
                 }
                 if rest.is_empty() {
                     bail!(
@@ -59,7 +63,11 @@ fn parse_build_config(path: &Path) -> Result<BuildConfig> {
                     );
                 }
                 validate_name(rest).with_context(|| {
-                    format!("{}:{}: invalid FROM rootfs name", path.display(), lineno + 1)
+                    format!(
+                        "{}:{}: invalid FROM rootfs name",
+                        path.display(),
+                        lineno + 1
+                    )
                 })?;
                 rootfs = Some(rest.to_string());
             }
@@ -100,11 +108,7 @@ fn parse_build_config(path: &Path) -> Result<BuildConfig> {
                     );
                 }
                 if rest.is_empty() {
-                    bail!(
-                        "{}:{}: RUN requires a command",
-                        path.display(),
-                        lineno + 1
-                    );
+                    bail!("{}:{}: RUN requires a command", path.display(), lineno + 1);
                 }
                 ops.push(BuildOp::Run {
                     command: rest.to_string(),
@@ -120,9 +124,8 @@ fn parse_build_config(path: &Path) -> Result<BuildConfig> {
         }
     }
 
-    let rootfs = rootfs.ok_or_else(|| {
-        anyhow::anyhow!("{}: missing FROM directive", path.display())
-    })?;
+    let rootfs =
+        rootfs.ok_or_else(|| anyhow::anyhow!("{}: missing FROM directive", path.display()))?;
 
     Ok(BuildConfig { rootfs, ops })
 }
@@ -146,7 +149,6 @@ fn run_in_container(name: &str, command: &str, verbose: bool) -> Result<()> {
     Ok(())
 }
 
-
 fn do_copy(
     upper_dir: &Path,
     lower_dir: &Path,
@@ -157,8 +159,8 @@ fn do_copy(
     let rel_dst = sanitize_dest_path(dst)?;
     let mut target = upper_dir.join(&rel_dst);
 
-    let meta = fs::symlink_metadata(src)
-        .with_context(|| format!("failed to stat {}", src.display()))?;
+    let meta =
+        fs::symlink_metadata(src).with_context(|| format!("failed to stat {}", src.display()))?;
 
     // Check whether dst resolves to a directory in either layer.
     let dst_is_dir = target.is_dir() || lower_dir.join(&rel_dst).is_dir();
@@ -301,7 +303,14 @@ pub fn build(
     containers::create(datadir, &create_opts, verbose)?;
 
     // Execute all build operations — clean up on failure.
-    if let Err(e) = execute_build(datadir, &staging_name, &config.rootfs, &config.ops, boot_timeout, verbose) {
+    if let Err(e) = execute_build(
+        datadir,
+        &staging_name,
+        &config.rootfs,
+        &config.ops,
+        boot_timeout,
+        verbose,
+    ) {
         eprintln!("build failed, removing '{staging_name}'");
         let _ = containers::remove(datadir, &staging_name, verbose);
         return Err(e);
@@ -314,14 +323,8 @@ pub fn build(
         .join("merged");
 
     // Mount overlayfs to get the merged view (container is stopped, so we mount manually).
-    let upper_dir = datadir
-        .join("containers")
-        .join(&staging_name)
-        .join("upper");
-    let work_dir = datadir
-        .join("containers")
-        .join(&staging_name)
-        .join("work");
+    let upper_dir = datadir.join("containers").join(&staging_name).join("upper");
+    let work_dir = datadir.join("containers").join(&staging_name).join("work");
 
     let mount_opts = format!(
         "lowerdir={},upperdir={},workdir={}",
@@ -360,7 +363,9 @@ pub fn build(
     })();
 
     // Unmount regardless of copy result.
-    let _ = std::process::Command::new("umount").arg(&merged_dir).status();
+    let _ = std::process::Command::new("umount")
+        .arg(&merged_dir)
+        .status();
 
     if let Err(e) = copy_result {
         let _ = copy::make_removable(&staging_rootfs);
@@ -488,10 +493,7 @@ mod tests {
         let tmp = TempDir::new("dup-from");
         let path = write_config(tmp.path(), "FROM ubuntu\nFROM debian\n");
         let err = parse_build_config(&path).unwrap_err();
-        assert!(
-            err.to_string().contains("duplicate FROM"),
-            "got: {err}"
-        );
+        assert!(err.to_string().contains("duplicate FROM"), "got: {err}");
     }
 
     #[test]
@@ -611,7 +613,14 @@ mod tests {
         let src_file = src_dir.join("sdme");
         fs::write(&src_file, "binary").unwrap();
 
-        do_copy(&upper, &lower, &src_file, Path::new("/usr/local/bin"), false).unwrap();
+        do_copy(
+            &upper,
+            &lower,
+            &src_file,
+            Path::new("/usr/local/bin"),
+            false,
+        )
+        .unwrap();
         assert!(upper.join("usr/local/bin/sdme").is_file());
         assert_eq!(
             fs::read_to_string(upper.join("usr/local/bin/sdme")).unwrap(),
@@ -630,7 +639,14 @@ mod tests {
         let src_file = src_dir.join("sdme");
         fs::write(&src_file, "binary").unwrap();
 
-        do_copy(&upper, &lower, &src_file, Path::new("/usr/local/bin"), false).unwrap();
+        do_copy(
+            &upper,
+            &lower,
+            &src_file,
+            Path::new("/usr/local/bin"),
+            false,
+        )
+        .unwrap();
         assert!(upper.join("usr/local/bin/sdme").is_file());
         assert_eq!(
             fs::read_to_string(upper.join("usr/local/bin/sdme")).unwrap(),
@@ -648,14 +664,7 @@ mod tests {
         fs::write(&src_file, "content").unwrap();
 
         // dst doesn't exist in either layer — file created at exact path.
-        do_copy(
-            &upper,
-            &lower,
-            &src_file,
-            Path::new("/opt/mybin"),
-            false,
-        )
-        .unwrap();
+        do_copy(&upper, &lower, &src_file, Path::new("/opt/mybin"), false).unwrap();
         assert!(upper.join("opt/mybin").is_file());
     }
 
@@ -773,17 +782,21 @@ mod tests {
         fs::write(&src_file, "payload").unwrap();
 
         // Absolute path with .. components.
-        let err =
-            do_copy(&upper, &lower, &src_file, Path::new("/opt/../../etc/shadow"), false)
-                .unwrap_err();
+        let err = do_copy(
+            &upper,
+            &lower,
+            &src_file,
+            Path::new("/opt/../../etc/shadow"),
+            false,
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains(".."),
             "should reject '..' in dst path, got: {err}"
         );
 
         // Relative path with .. components.
-        let err =
-            do_copy(&upper, &lower, &src_file, Path::new("../escape"), false).unwrap_err();
+        let err = do_copy(&upper, &lower, &src_file, Path::new("../escape"), false).unwrap_err();
         assert!(
             err.to_string().contains(".."),
             "should reject '..' in dst path, got: {err}"

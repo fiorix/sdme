@@ -204,9 +204,7 @@ fn validate_port(port: &str) -> Result<()> {
 
     // Split host:container
     let (host, container) = port_part.split_once(':').ok_or_else(|| {
-        anyhow::anyhow!(
-            "invalid port format '{port}': expected <host>:<container>[/<proto>]"
-        )
+        anyhow::anyhow!("invalid port format '{port}': expected <host>:<container>[/<proto>]")
     })?;
 
     // Validate port numbers
@@ -218,11 +216,9 @@ fn validate_port(port: &str) -> Result<()> {
 
 /// Validate a port number string.
 fn validate_port_number(s: &str, full: &str, which: &str) -> Result<()> {
-    let n: u16 = s.parse().map_err(|_| {
-        anyhow::anyhow!(
-            "invalid {which} port '{s}' in '{full}': expected 1–65535"
-        )
-    })?;
+    let n: u16 = s
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid {which} port '{s}' in '{full}': expected 1–65535"))?;
     if n == 0 {
         bail!("invalid {which} port '{s}' in '{full}': port 0 is not allowed");
     }

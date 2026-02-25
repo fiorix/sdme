@@ -24,6 +24,35 @@ use anyhow::{bail, Context, Result};
 
 pub static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
+/// Read a line from stdin, returning `ErrorKind::Interrupted` if a signal
+/// interrupts the read.
+///
+/// Unlike `BufRead::read_line()`, this does NOT retry on `EINTR` — it
+/// surfaces the interruption to the caller so Ctrl+C works during
+/// interactive prompts.
+pub fn read_line_interruptible(buf: &mut String) -> std::io::Result<usize> {
+    let mut bytes = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        let n = unsafe { libc::read(libc::STDIN_FILENO, byte.as_mut_ptr().cast(), 1) };
+        if n < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if n == 0 {
+            break;
+        }
+        bytes.push(byte[0]);
+        if byte[0] == b'\n' {
+            break;
+        }
+    }
+    let s = String::from_utf8(bytes)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let len = s.len();
+    buf.push_str(&s);
+    Ok(len)
+}
+
 pub fn check_interrupted() -> Result<()> {
     if INTERRUPTED.load(Ordering::Relaxed) {
         bail!("interrupted");
@@ -32,9 +61,36 @@ pub fn check_interrupted() -> Result<()> {
 }
 
 pub fn install_interrupt_handler() {
-    let _ = ctrlc::set_handler(|| {
-        INTERRUPTED.store(true, Ordering::Relaxed);
-    });
+    unsafe {
+        let mut sa: libc::sigaction = std::mem::zeroed();
+        sa.sa_sigaction = signal_handler as *const () as usize;
+        libc::sigemptyset(&mut sa.sa_mask);
+        // Deliberately NOT setting SA_RESTART so that blocking syscalls
+        // (e.g. read() during interactive prompts) return EINTR on Ctrl+C
+        // instead of silently restarting.
+        sa.sa_flags = 0;
+        libc::sigaction(libc::SIGINT, &sa, std::ptr::null_mut());
+    }
+}
+
+extern "C" fn signal_handler(_sig: libc::c_int) {
+    INTERRUPTED.store(true, Ordering::Relaxed);
+}
+
+/// Prompt the user for yes/no confirmation, returning `Ok(true)` for "y".
+///
+/// Returns `Err` if the read is interrupted by a signal.
+pub fn confirm(prompt: &str) -> Result<bool> {
+    eprint!("{prompt}");
+    let _ = std::io::stderr().flush();
+    let mut answer = String::new();
+    if let Err(e) = read_line_interruptible(&mut answer) {
+        if e.kind() == std::io::ErrorKind::Interrupted {
+            eprintln!();
+        }
+        bail!("interrupted");
+    }
+    Ok(answer.trim().eq_ignore_ascii_case("y"))
 }
 
 pub struct SudoUser {
@@ -129,8 +185,8 @@ impl State {
     }
 
     pub fn read_from(path: &Path) -> Result<Self> {
-        let content =
-            fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+        let content = fs::read_to_string(path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
         Self::parse(&content)
     }
 }
@@ -152,17 +208,24 @@ pub struct ResourceLimits {
 impl ResourceLimits {
     /// Returns true if no limits are set.
     pub fn is_empty(&self) -> bool {
-        self.memory.is_none()
-            && self.cpus.is_none()
-            && self.cpu_weight.is_none()
+        self.memory.is_none() && self.cpus.is_none() && self.cpu_weight.is_none()
     }
 
     /// Read limits from a state file's key-value pairs.
     pub fn from_state(state: &State) -> Self {
         Self {
-            memory: state.get("MEMORY").filter(|s| !s.is_empty()).map(String::from),
-            cpus: state.get("CPUS").filter(|s| !s.is_empty()).map(String::from),
-            cpu_weight: state.get("CPU_WEIGHT").filter(|s| !s.is_empty()).map(String::from),
+            memory: state
+                .get("MEMORY")
+                .filter(|s| !s.is_empty())
+                .map(String::from),
+            cpus: state
+                .get("CPUS")
+                .filter(|s| !s.is_empty())
+                .map(String::from),
+            cpu_weight: state
+                .get("CPU_WEIGHT")
+                .filter(|s| !s.is_empty())
+                .map(String::from),
         }
     }
 
@@ -237,9 +300,9 @@ fn validate_memory(s: &str) -> Result<()> {
     } else {
         (s, "")
     };
-    let _: u64 = num.parse().map_err(|_| {
-        anyhow::anyhow!("invalid --memory value '{s}': expected <number>[K|M|G|T]")
-    })?;
+    let _: u64 = num
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid --memory value '{s}': expected <number>[K|M|G|T]"))?;
     match suffix {
         "" | "K" | "M" | "G" | "T" => Ok(()),
         _ => bail!("invalid --memory suffix '{suffix}': expected K, M, G, or T"),
@@ -248,9 +311,9 @@ fn validate_memory(s: &str) -> Result<()> {
 
 /// Validate a cpus value (positive number, integer or decimal).
 fn validate_cpus(s: &str) -> Result<()> {
-    let v: f64 = s.parse().map_err(|_| {
-        anyhow::anyhow!("invalid --cpus value '{s}': expected a positive number")
-    })?;
+    let v: f64 = s
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid --cpus value '{s}': expected a positive number"))?;
     if v <= 0.0 {
         bail!("--cpus must be positive, got '{s}'");
     }
@@ -293,7 +356,11 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
     file.flush()?;
     fs::rename(&tmp_path, path).with_context(|| {
         let _ = fs::remove_file(&tmp_path);
-        format!("failed to rename {} to {}", tmp_path.display(), path.display())
+        format!(
+            "failed to rename {} to {}",
+            tmp_path.display(),
+            path.display()
+        )
     })?;
     Ok(())
 }
@@ -360,7 +427,10 @@ mod tests {
     #[test]
     fn test_limits_validate_memory_ok() {
         for v in &["512M", "2G", "1T", "4096K", "1073741824"] {
-            let limits = ResourceLimits { memory: Some(v.to_string()), ..Default::default() };
+            let limits = ResourceLimits {
+                memory: Some(v.to_string()),
+                ..Default::default()
+            };
             assert!(limits.validate().is_ok(), "should accept memory={v}");
         }
     }
@@ -368,7 +438,10 @@ mod tests {
     #[test]
     fn test_limits_validate_memory_bad() {
         for v in &["abc", "2X", "M", ""] {
-            let limits = ResourceLimits { memory: Some(v.to_string()), ..Default::default() };
+            let limits = ResourceLimits {
+                memory: Some(v.to_string()),
+                ..Default::default()
+            };
             assert!(limits.validate().is_err(), "should reject memory={v}");
         }
     }
@@ -376,7 +449,10 @@ mod tests {
     #[test]
     fn test_limits_validate_cpus_ok() {
         for v in &["1", "2", "0.5", "4.0"] {
-            let limits = ResourceLimits { cpus: Some(v.to_string()), ..Default::default() };
+            let limits = ResourceLimits {
+                cpus: Some(v.to_string()),
+                ..Default::default()
+            };
             assert!(limits.validate().is_ok(), "should accept cpus={v}");
         }
     }
@@ -384,7 +460,10 @@ mod tests {
     #[test]
     fn test_limits_validate_cpus_bad() {
         for v in &["0", "-1", "abc"] {
-            let limits = ResourceLimits { cpus: Some(v.to_string()), ..Default::default() };
+            let limits = ResourceLimits {
+                cpus: Some(v.to_string()),
+                ..Default::default()
+            };
             assert!(limits.validate().is_err(), "should reject cpus={v}");
         }
     }
@@ -392,7 +471,10 @@ mod tests {
     #[test]
     fn test_limits_validate_cpu_weight_ok() {
         for v in &["1", "100", "10000"] {
-            let limits = ResourceLimits { cpu_weight: Some(v.to_string()), ..Default::default() };
+            let limits = ResourceLimits {
+                cpu_weight: Some(v.to_string()),
+                ..Default::default()
+            };
             assert!(limits.validate().is_ok(), "should accept cpu_weight={v}");
         }
     }
@@ -400,28 +482,40 @@ mod tests {
     #[test]
     fn test_limits_validate_cpu_weight_bad() {
         for v in &["0", "10001", "-1", "abc"] {
-            let limits = ResourceLimits { cpu_weight: Some(v.to_string()), ..Default::default() };
+            let limits = ResourceLimits {
+                cpu_weight: Some(v.to_string()),
+                ..Default::default()
+            };
             assert!(limits.validate().is_err(), "should reject cpu_weight={v}");
         }
     }
 
     #[test]
     fn test_limits_dropin_content_memory_only() {
-        let limits = ResourceLimits { memory: Some("2G".to_string()), ..Default::default() };
+        let limits = ResourceLimits {
+            memory: Some("2G".to_string()),
+            ..Default::default()
+        };
         let content = limits.dropin_content().unwrap();
         assert_eq!(content, "[Service]\nMemoryMax=2G\n");
     }
 
     #[test]
     fn test_limits_dropin_content_cpus() {
-        let limits = ResourceLimits { cpus: Some("2".to_string()), ..Default::default() };
+        let limits = ResourceLimits {
+            cpus: Some("2".to_string()),
+            ..Default::default()
+        };
         let content = limits.dropin_content().unwrap();
         assert!(content.contains("CPUQuota=200%"));
     }
 
     #[test]
     fn test_limits_dropin_content_fractional_cpus() {
-        let limits = ResourceLimits { cpus: Some("0.5".to_string()), ..Default::default() };
+        let limits = ResourceLimits {
+            cpus: Some("0.5".to_string()),
+            ..Default::default()
+        };
         let content = limits.dropin_content().unwrap();
         assert!(content.contains("CPUQuota=50%"));
     }
@@ -465,7 +559,10 @@ mod tests {
         state.set("MEMORY", "1G");
         state.set("CPUS", "2");
 
-        let limits = ResourceLimits { memory: Some("4G".to_string()), ..Default::default() };
+        let limits = ResourceLimits {
+            memory: Some("4G".to_string()),
+            ..Default::default()
+        };
         limits.write_to_state(&mut state);
 
         assert_eq!(state.get("MEMORY"), Some("4G"));

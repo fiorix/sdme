@@ -1,15 +1,15 @@
 //! QCOW2 and raw disk image import.
 
+use anyhow::{bail, Context, Result};
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use anyhow::{bail, Context, Result};
 
 use crate::check_interrupted;
 
-use super::{Compression, detect_compression, get_decoder};
 use super::dir::do_import;
+use super::{detect_compression, get_decoder, Compression};
 
 /// RAII guard for an NBD device connection. Disconnects on drop.
 struct NbdGuard {
@@ -91,10 +91,7 @@ impl Drop for MountGuard {
 /// 5. Copy the mounted tree to the staging directory
 /// 6. Clean up (unmount, disconnect)
 pub(super) fn import_qcow2(image: &Path, staging_dir: &Path, verbose: bool) -> Result<()> {
-    crate::system_check::check_dependencies(
-        &[("qemu-nbd", "apt install qemu-utils")],
-        verbose,
-    )?;
+    crate::system_check::check_dependencies(&[("qemu-nbd", "apt install qemu-utils")], verbose)?;
 
     if !verbose {
         eprintln!("warning: qcow2 imports can be slow; use -v to see progress");
@@ -135,9 +132,7 @@ pub(super) fn import_qcow2(image: &Path, staging_dir: &Path, verbose: bool) -> R
     check_interrupted()?;
 
     // Wait for the kernel to scan partitions.
-    let status = Command::new("partprobe")
-        .arg(&nbd_dev)
-        .status();
+    let status = Command::new("partprobe").arg(&nbd_dev).status();
     // partprobe is optional; if missing, the kernel usually scans automatically.
     if let Ok(s) = status {
         if !s.success() && verbose {
@@ -157,12 +152,10 @@ pub(super) fn import_qcow2(image: &Path, staging_dir: &Path, verbose: bool) -> R
     }
 
     // Create a temporary mount point.
-    let mount_dir = staging_dir.with_file_name(
-        format!(
-            ".{}.qcow2-mount",
-            staging_dir.file_name().unwrap().to_string_lossy()
-        ),
-    );
+    let mount_dir = staging_dir.with_file_name(format!(
+        ".{}.qcow2-mount",
+        staging_dir.file_name().unwrap().to_string_lossy()
+    ));
     fs::create_dir_all(&mount_dir)
         .with_context(|| format!("failed to create mount point {}", mount_dir.display()))?;
 
@@ -234,11 +227,7 @@ fn find_root_partition(block_dev: &Path, verbose: bool) -> Result<PathBuf> {
                     if size > 0 {
                         let part_dev = PathBuf::from(format!("/dev/{name}"));
                         if verbose {
-                            eprintln!(
-                                "found partition: {} ({} sectors)",
-                                part_dev.display(),
-                                size
-                            );
+                            eprintln!("found partition: {} ({} sectors)", part_dev.display(), size);
                         }
                         partitions.push((part_dev, size));
                     }
@@ -307,14 +296,10 @@ fn decompress_if_needed(path: &Path, verbose: bool) -> Result<PathBuf> {
         _ => {
             let decompressed = path.with_extension("decompressed");
             if verbose {
-                eprintln!(
-                    "decompressing {} ({:?})",
-                    path.display(),
-                    compression,
-                );
+                eprintln!("decompressing {} ({:?})", path.display(), compression,);
             }
-            let input = File::open(path)
-                .with_context(|| format!("failed to open {}", path.display()))?;
+            let input =
+                File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
             let mut output = File::create(&decompressed)
                 .with_context(|| format!("failed to create {}", decompressed.display()))?;
 
@@ -323,7 +308,8 @@ fn decompress_if_needed(path: &Path, verbose: bool) -> Result<PathBuf> {
             let mut buf = [0u8; 65536];
             loop {
                 check_interrupted()?;
-                let n = reader.read(&mut buf)
+                let n = reader
+                    .read(&mut buf)
                     .context("failed to read during decompression")?;
                 if n == 0 {
                     break;
@@ -334,7 +320,11 @@ fn decompress_if_needed(path: &Path, verbose: bool) -> Result<PathBuf> {
 
             if verbose {
                 let meta = fs::metadata(&decompressed)?;
-                eprintln!("decompressed to {} ({} bytes)", decompressed.display(), meta.len());
+                eprintln!(
+                    "decompressed to {} ({} bytes)",
+                    decompressed.display(),
+                    meta.len()
+                );
             }
             Ok(decompressed)
         }
@@ -371,9 +361,7 @@ pub(super) fn import_raw(image: &Path, staging_dir: &Path, verbose: bool) -> Res
             let stderr = String::from_utf8_lossy(&output.stderr);
             bail!("losetup failed: {stderr}");
         }
-        let loop_dev = PathBuf::from(
-            String::from_utf8_lossy(&output.stdout).trim().to_string()
-        );
+        let loop_dev = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim().to_string());
 
         let mut loop_guard = LoopGuard::new();
         loop_guard.set_active(loop_dev.clone());

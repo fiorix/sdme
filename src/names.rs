@@ -334,7 +334,10 @@ mod tests {
 
         let name = generate_name(&tmp).unwrap();
         assert!(crate::validate_name(&name).is_ok());
-        assert!(WORDLIST.contains(&name.as_str()), "name should be from wordlist");
+        assert!(
+            WORDLIST.contains(&name.as_str()),
+            "name should be from wordlist"
+        );
 
         let _ = fs::remove_dir_all(&tmp);
     }

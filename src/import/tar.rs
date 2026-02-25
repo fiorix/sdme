@@ -1,15 +1,15 @@
 //! Tarball extraction and OCI detection.
 
+use anyhow::{Context, Result};
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::Path;
-use anyhow::{Context, Result};
 
 use crate::check_interrupted;
 use crate::copy::make_removable;
 
+use super::oci::{import_oci_layout, is_oci_layout};
 use super::{detect_compression, get_decoder};
-use super::oci::{is_oci_layout, import_oci_layout};
 
 /// Unpack a tar archive from a reader into a destination directory.
 pub(super) fn unpack_tar<R: Read>(reader: R, dest: &Path) -> Result<()> {
@@ -17,16 +17,16 @@ pub(super) fn unpack_tar<R: Read>(reader: R, dest: &Path) -> Result<()> {
     archive.set_preserve_permissions(true);
     archive.set_preserve_ownerships(true);
     archive.set_unpack_xattrs(true);
-    for entry in archive.entries().with_context(|| {
-        format!("failed to extract tarball to {}", dest.display())
-    })? {
+    for entry in archive
+        .entries()
+        .with_context(|| format!("failed to extract tarball to {}", dest.display()))?
+    {
         check_interrupted()?;
-        let mut entry = entry.with_context(|| {
-            format!("failed to extract tarball to {}", dest.display())
-        })?;
-        entry.unpack_in(dest).with_context(|| {
-            format!("failed to extract tarball to {}", dest.display())
-        })?;
+        let mut entry =
+            entry.with_context(|| format!("failed to extract tarball to {}", dest.display()))?;
+        entry
+            .unpack_in(dest)
+            .with_context(|| format!("failed to extract tarball to {}", dest.display()))?;
     }
     Ok(())
 }
@@ -59,10 +59,7 @@ pub(super) fn import_tarball(tarball: &Path, staging_dir: &Path, verbose: bool) 
         if verbose {
             eprintln!("detected OCI image layout");
         }
-        let mut oci_name = staging_dir
-            .file_name()
-            .unwrap()
-            .to_os_string();
+        let mut oci_name = staging_dir.file_name().unwrap().to_os_string();
         oci_name.push(".oci");
         let oci_dir = staging_dir.with_file_name(oci_name);
         fs::rename(staging_dir, &oci_dir)?;
@@ -80,7 +77,7 @@ mod tests {
     use super::*;
     use std::fs::File;
 
-    use crate::import::tests::{TempSourceDir, InterruptGuard, test_run, tmp};
+    use crate::import::tests::{test_run, tmp, InterruptGuard, TempSourceDir};
 
     #[test]
     fn test_import_tarball_basic() {
@@ -105,14 +102,7 @@ mod tests {
         let encoder = builder.into_inner().unwrap();
         encoder.finish().unwrap();
 
-        test_run(
-            tmp.path(),
-            tarball.to_str().unwrap(),
-            "tgz",
-            false,
-            true,
-        )
-        .unwrap();
+        test_run(tmp.path(), tarball.to_str().unwrap(), "tgz", false, true).unwrap();
 
         let rootfs = tmp.path().join("fs/tgz");
         assert!(rootfs.is_dir());
@@ -147,14 +137,7 @@ mod tests {
         builder.append_dir_all(".", src.path()).unwrap();
         builder.finish().unwrap();
 
-        test_run(
-            tmp.path(),
-            tarball.to_str().unwrap(),
-            "plain",
-            false,
-            true,
-        )
-        .unwrap();
+        test_run(tmp.path(), tarball.to_str().unwrap(), "plain", false, true).unwrap();
 
         let rootfs = tmp.path().join("fs/plain");
         assert_eq!(
@@ -175,14 +158,8 @@ mod tests {
         ));
         fs::write(&file_path, "this is not a tarball").unwrap();
 
-        let err = test_run(
-            tmp.path(),
-            file_path.to_str().unwrap(),
-            "bad",
-            false,
-            false,
-        )
-        .unwrap_err();
+        let err =
+            test_run(tmp.path(), file_path.to_str().unwrap(), "bad", false, false).unwrap_err();
         assert!(
             err.to_string().contains("extract"),
             "unexpected error: {err}"

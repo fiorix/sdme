@@ -15,7 +15,10 @@ use sha2::{Digest, Sha256};
 use crate::check_interrupted;
 
 use super::oci::unpack_oci_layer;
-use super::{build_http_agent, detect_compression_magic, get_decoder, proxy_from_env, sorted_keys_csv, MAX_DOWNLOAD_SIZE};
+use super::{
+    build_http_agent, detect_compression_magic, get_decoder, proxy_from_env, sorted_keys_csv,
+    MAX_DOWNLOAD_SIZE,
+};
 
 /// Parsed OCI image reference (e.g. `quay.io/centos/centos:stream10`).
 #[derive(Debug, PartialEq)]
@@ -98,7 +101,11 @@ impl ImageReference {
 
 impl std::fmt::Display for ImageReference {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}/{}:{}", self.registry, self.repository, self.reference)
+        write!(
+            f,
+            "{}/{}:{}",
+            self.registry, self.repository, self.reference
+        )
     }
 }
 
@@ -416,8 +423,7 @@ fn fetch_config_blob(
         bail!("config blob digest mismatch: expected {digest}, got {computed}");
     }
 
-    serde_json::from_str(&body_str)
-        .with_context(|| format!("failed to parse config blob {digest}"))
+    serde_json::from_str(&body_str).with_context(|| format!("failed to parse config blob {digest}"))
 }
 
 /// Fetch a manifest (or manifest list) from a registry.
@@ -449,8 +455,8 @@ fn fetch_manifest(
         .read_to_string()
         .with_context(|| format!("failed to read manifest body from {url}"))?;
 
-    let body: serde_json::Value =
-        serde_json::from_str(&body_str).with_context(|| format!("failed to parse manifest from {url}"))?;
+    let body: serde_json::Value = serde_json::from_str(&body_str)
+        .with_context(|| format!("failed to parse manifest from {url}"))?;
 
     Ok(body)
 }
@@ -478,7 +484,10 @@ fn resolve_manifest(
 
         let arch = host_arch();
         if verbose {
-            eprintln!("manifest list with {} entries, selecting linux/{arch}", list.manifests.len());
+            eprintln!(
+                "manifest list with {} entries, selecting linux/{arch}",
+                list.manifests.len()
+            );
         }
 
         let entry = list
@@ -641,14 +650,19 @@ pub(super) fn import_registry_image(
             Ok(image_config) => {
                 if verbose {
                     if let Some(ref cc) = image_config.config {
-                        eprintln!("image config: entrypoint={:?} cmd={:?} workdir={:?} user={:?}",
-                            cc.entrypoint, cc.cmd, cc.working_dir, cc.user);
+                        eprintln!(
+                            "image config: entrypoint={:?} cmd={:?} workdir={:?} user={:?}",
+                            cc.entrypoint, cc.cmd, cc.working_dir, cc.user
+                        );
                         if let Some(ref env) = cc.env {
                             eprintln!("image config: env ({} vars)", env.len());
                         }
                         if let Some(ref ports) = cc.exposed_ports {
                             if !ports.is_empty() {
-                                eprintln!("image config: exposed ports: {}", sorted_keys_csv(ports));
+                                eprintln!(
+                                    "image config: exposed ports: {}",
+                                    sorted_keys_csv(ports)
+                                );
                             }
                         }
                         if let Some(ref vols) = cc.volumes {
@@ -892,7 +906,10 @@ mod tests {
     fn test_is_base_os_image_with_exposed_ports() {
         // An image with Cmd=["/bin/sh"] but ExposedPorts is NOT a base image.
         let mut ports = HashMap::new();
-        ports.insert("80/tcp".to_string(), serde_json::Value::Object(Default::default()));
+        ports.insert(
+            "80/tcp".to_string(),
+            serde_json::Value::Object(Default::default()),
+        );
         let config = OciContainerConfig {
             cmd: Some(vec!["/bin/sh".to_string()]),
             exposed_ports: Some(ports),
@@ -915,7 +932,10 @@ mod tests {
     #[test]
     fn test_is_base_os_image_app_with_ports_and_entrypoint() {
         let mut ports = HashMap::new();
-        ports.insert("6379/tcp".to_string(), serde_json::Value::Object(Default::default()));
+        ports.insert(
+            "6379/tcp".to_string(),
+            serde_json::Value::Object(Default::default()),
+        );
         let config = OciContainerConfig {
             entrypoint: Some(vec!["docker-entrypoint.sh".to_string()]),
             cmd: Some(vec!["redis-server".to_string()]),

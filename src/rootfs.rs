@@ -14,7 +14,7 @@ use std::path::Path;
 use anyhow::{bail, Context, Result};
 
 use crate::copy::make_removable;
-use crate::{State, validate_name};
+use crate::{validate_name, State};
 
 /// An entry returned by [`list`].
 pub struct RootfsEntry {
@@ -234,11 +234,7 @@ fn check_rootfs_in_use(datadir: &Path, name: &str) -> Result<()> {
             if state.get("ROOTFS") == Some(name) {
                 let container = match state.get("NAME") {
                     Some(n) => n.to_string(),
-                    None => entry
-                        .file_name()
-                        .to_str()
-                        .unwrap_or("unknown")
-                        .to_string(),
+                    None => entry.file_name().to_str().unwrap_or("unknown").to_string(),
                 };
                 bail!("fs '{name}' is in use by container '{container}'");
             }
@@ -255,12 +251,18 @@ mod tests {
 
     /// Helper to import a rootfs in tests, bypassing systemd checks.
     fn test_import(datadir: &Path, source: &str, name: &str) -> Result<()> {
-        import(datadir, &ImportOptions {
-            source, name, verbose: false, force: true,
-            install_packages: InstallPackages::No,
-            oci_base: OciBase::Auto,
-            oci_base_fs: None,
-        })
+        import(
+            datadir,
+            &ImportOptions {
+                source,
+                name,
+                verbose: false,
+                force: true,
+                install_packages: InstallPackages::No,
+                oci_base: OciBase::Auto,
+                oci_base_fs: None,
+            },
+        )
     }
 
     fn tmp() -> TempDataDir {
@@ -456,11 +458,7 @@ mod tests {
     fn test_detect_distro_family_debian() {
         let tmp = TempSourceDir::new("family-debian");
         fs::create_dir_all(tmp.path().join("etc")).unwrap();
-        fs::write(
-            tmp.path().join("etc/os-release"),
-            "ID=debian\nID_LIKE=\n",
-        )
-        .unwrap();
+        fs::write(tmp.path().join("etc/os-release"), "ID=debian\nID_LIKE=\n").unwrap();
         assert_eq!(detect_distro_family(tmp.path()), DistroFamily::Debian);
     }
 
@@ -492,11 +490,7 @@ mod tests {
     fn test_detect_distro_family_fedora() {
         let tmp = TempSourceDir::new("family-fedora");
         fs::create_dir_all(tmp.path().join("etc")).unwrap();
-        fs::write(
-            tmp.path().join("etc/os-release"),
-            "ID=fedora\n",
-        )
-        .unwrap();
+        fs::write(tmp.path().join("etc/os-release"), "ID=fedora\n").unwrap();
         assert_eq!(detect_distro_family(tmp.path()), DistroFamily::Fedora);
     }
 
@@ -528,11 +522,7 @@ mod tests {
     fn test_detect_distro_family_nixos() {
         let tmp = TempSourceDir::new("family-nixos");
         fs::create_dir_all(tmp.path().join("etc")).unwrap();
-        fs::write(
-            tmp.path().join("etc/os-release"),
-            "ID=nixos\n",
-        )
-        .unwrap();
+        fs::write(tmp.path().join("etc/os-release"), "ID=nixos\n").unwrap();
         assert_eq!(detect_distro_family(tmp.path()), DistroFamily::NixOS);
     }
 
@@ -540,11 +530,7 @@ mod tests {
     fn test_detect_distro_family_unknown() {
         let tmp = TempSourceDir::new("family-unknown");
         fs::create_dir_all(tmp.path().join("etc")).unwrap();
-        fs::write(
-            tmp.path().join("etc/os-release"),
-            "ID=gentoo\n",
-        )
-        .unwrap();
+        fs::write(tmp.path().join("etc/os-release"), "ID=gentoo\n").unwrap();
         assert_eq!(detect_distro_family(tmp.path()), DistroFamily::Unknown);
     }
 
