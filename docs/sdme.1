@@ -1,4 +1,4 @@
-.TH SDME 1 "2026-02-23" "sdme" "User Commands"
+.TH SDME 1 "2026-02-24" "sdme" "User Commands"
 .SH NAME
 sdme \- lightweight systemd\-nspawn containers with overlayfs
 .SH SYNOPSIS
@@ -258,6 +258,19 @@ components are rejected.
 Lines starting with
 .B #
 and blank lines are ignored.
+.SS sdme completions \fIshell\fR
+Generate shell completions and print them to standard output.
+Supported shells:
+.BR bash ", " zsh ", " fish ", " elvish ", " powershell .
+This command does not require root privileges.
+.PP
+Example (fish):
+.PP
+.RS
+.nf
+sdme completions fish > ~/.config/fish/completions/sdme.fish
+.fi
+.RE
 .SS sdme config get
 Show current configuration values.
 .SS sdme config set \fIkey\fR \fIvalue\fR
@@ -378,6 +391,16 @@ removed when limits are cleared or the container is deleted).
 .TP
 .I ~/.config/sdme/sdmerc
 User configuration file (TOML format).
+.TP
+.I /usr/local/share/bash\-completion/completions/sdme
+Bash shell completions (installed by
+.BR "make install" ).
+.TP
+.I /usr/local/share/zsh/site\-functions/_sdme
+Zsh shell completions.
+.TP
+.I /usr/local/share/fish/vendor_completions.d/sdme.fish
+Fish shell completions.
 .SH ENVIRONMENT
 .TP
 .B SUDO_USER

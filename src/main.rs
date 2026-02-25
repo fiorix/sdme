@@ -2,7 +2,8 @@ use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 
 use anyhow::{bail, Result};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::Shell;
 use sdme::import::InstallPackages;
 use sdme::{NetworkConfig, ResourceLimits, config, containers, rootfs, system_check, systemd};
 
@@ -194,6 +195,13 @@ enum Command {
     /// Manage root filesystems
     #[command(name = "fs", subcommand)]
     Fs(RootfsCommand),
+
+    /// Generate shell completions
+    Completions {
+        /// Shell to generate completions for
+        #[arg(value_enum)]
+        shell: Shell,
+    },
 }
 
 #[derive(Subcommand)]
@@ -360,6 +368,12 @@ fn parse_network(args: NetworkArgs) -> Result<NetworkConfig> {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // Handle completions before root check (no privileges needed).
+    if let Command::Completions { shell } = cli.command {
+        clap_complete::generate(shell, &mut Cli::command(), "sdme", &mut std::io::stdout());
+        return Ok(());
+    }
 
     if unsafe { libc::geteuid() } != 0 {
         bail!("sdme requires root privileges; run with sudo");
@@ -588,6 +602,8 @@ fn main() -> Result<()> {
                 containers::stop(name, verbose)
             })?;
         }
+        // Handled before root check above.
+        Command::Completions { .. } => unreachable!(),
         Command::Fs(cmd) => match cmd {
             RootfsCommand::Import { source, name, force, install_packages } => {
                 system_check::check_systemd_version(252)?;
