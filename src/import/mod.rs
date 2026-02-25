@@ -29,6 +29,37 @@ use crate::{State, validate_name, check_interrupted};
 use std::process::Command;
 use std::time::Duration;
 
+/// Collect sorted keys from a HashMap and join them with a separator.
+fn sorted_keys_joined(map: &std::collections::HashMap<String, serde_json::Value>, sep: &str) -> String {
+    let mut keys: Vec<&str> = map.keys().map(|s| s.as_str()).collect();
+    keys.sort();
+    keys.join(sep)
+}
+
+/// Collect sorted keys from a HashMap as a comma-separated string.
+pub(super) fn sorted_keys_csv(map: &std::collections::HashMap<String, serde_json::Value>) -> String {
+    sorted_keys_joined(map, ", ")
+}
+
+/// Join command arguments into a shell-safe string.
+///
+/// Arguments containing spaces, quotes, or shell metacharacters are
+/// single-quoted. Single quotes within arguments are escaped as `'\''`.
+fn shell_join(args: &[String]) -> String {
+    args.iter()
+        .map(|arg| {
+            if arg.is_empty() {
+                "''".to_string()
+            } else if arg.chars().all(|c| c.is_ascii_alphanumeric() || "-_./=:@".contains(c)) {
+                arg.clone()
+            } else {
+                format!("'{}'", arg.replace('\'', "'\\''"))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Controls whether systemd packages are installed during rootfs import.
 #[derive(Debug, Clone, Copy, PartialEq, clap::ValueEnum)]
 pub enum InstallPackages {
@@ -38,6 +69,28 @@ pub enum InstallPackages {
     Yes,
     /// Refuse to import if systemd is missing (unless --force).
     No,
+}
+
+/// Controls how OCI registry images are classified during import.
+#[derive(Debug, Clone, Copy, PartialEq, clap::ValueEnum)]
+pub enum OciBase {
+    /// Auto-detect from image config (entrypoint, cmd, exposed ports).
+    Auto,
+    /// Treat as base OS image (run systemd detection, ignore exposed ports).
+    Yes,
+    /// Treat as application image (requires --oci-base-fs, generates service unit).
+    No,
+}
+
+/// Options for rootfs import.
+pub struct ImportOptions<'a> {
+    pub source: &'a str,
+    pub name: &'a str,
+    pub verbose: bool,
+    pub force: bool,
+    pub install_packages: InstallPackages,
+    pub oci_base: OciBase,
+    pub oci_base_fs: Option<&'a str>,
 }
 
 // --- Source detection ---
@@ -674,6 +727,191 @@ fn is_interactive_terminal() -> bool {
     unsafe { libc::isatty(libc::STDIN_FILENO) != 0 }
 }
 
+// --- OCI application image support ---
+
+/// Set up an application image by combining a base rootfs with the OCI rootfs.
+///
+/// The OCI rootfs (already extracted in staging_dir) is moved to `/oci/root`
+/// inside a copy of the base rootfs. A systemd unit is generated to chroot
+/// into the OCI rootfs and run the application's entrypoint/cmd.
+#[allow(clippy::too_many_arguments)]
+fn setup_app_image(
+    datadir: &Path,
+    staging_dir: &Path,
+    rootfs_dir: &Path,
+    name: &str,
+    base_name: &str,
+    config: &registry::OciContainerConfig,
+    image_ref: &str,
+    verbose: bool,
+) -> Result<()> {
+    validate_name(base_name)?;
+
+    let base_dir = datadir.join("fs").join(base_name);
+    if !base_dir.is_dir() {
+        bail!("base rootfs not found: {base_name}");
+    }
+
+    // Build the ExecStart command from entrypoint + cmd.
+    let mut exec_args: Vec<String> = Vec::new();
+    if let Some(ref ep) = config.entrypoint {
+        exec_args.extend(ep.iter().cloned());
+    }
+    if let Some(ref cmd) = config.cmd {
+        exec_args.extend(cmd.iter().cloned());
+    }
+    if exec_args.is_empty() {
+        bail!("OCI image has no Entrypoint or Cmd; cannot generate service unit");
+    }
+    let exec_start = shell_join(&exec_args);
+
+    let working_dir = config.working_dir.as_deref().unwrap_or("/");
+    let user = config.user.as_deref().unwrap_or("root");
+
+    if verbose {
+        eprintln!("setting up application image with base '{base_name}'");
+    }
+
+    // 1. Rename staging_dir (OCI rootfs) to a temp location.
+    let oci_tmp = rootfs_dir.join(format!(".{name}.oci-tmp"));
+    if oci_tmp.exists() {
+        let _ = make_removable(&oci_tmp);
+        fs::remove_dir_all(&oci_tmp)
+            .with_context(|| format!("failed to remove {}", oci_tmp.display()))?;
+    }
+    fs::rename(staging_dir, &oci_tmp).with_context(|| {
+        format!("failed to rename {} to {}", staging_dir.display(), oci_tmp.display())
+    })?;
+
+    // 2. Copy the base rootfs to staging_dir.
+    if verbose {
+        eprintln!("copying base rootfs '{base_name}' to staging directory");
+    }
+    fs::create_dir_all(staging_dir)
+        .with_context(|| format!("failed to create {}", staging_dir.display()))?;
+    crate::copy::copy_tree(&base_dir, staging_dir, verbose)
+        .with_context(|| format!("failed to copy base rootfs from {}", base_dir.display()))?;
+
+    // 3. Move OCI rootfs contents into staging_dir/oci/root/.
+    let oci_root = staging_dir.join("oci/root");
+    fs::create_dir_all(&oci_root)
+        .with_context(|| format!("failed to create {}", oci_root.display()))?;
+
+    if verbose {
+        eprintln!("moving OCI rootfs to {}", oci_root.display());
+    }
+    for entry in fs::read_dir(&oci_tmp)
+        .with_context(|| format!("failed to read {}", oci_tmp.display()))?
+    {
+        let entry = entry?;
+        let dest = oci_root.join(entry.file_name());
+        fs::rename(entry.path(), &dest).with_context(|| {
+            format!("failed to move {} to {}", entry.path().display(), dest.display())
+        })?;
+    }
+
+    // 4. Write OCI env file.
+    if let Some(ref env_vars) = config.env {
+        if !env_vars.is_empty() {
+            let env_path = staging_dir.join("oci/env");
+            let content = env_vars.join("\n") + "\n";
+            fs::write(&env_path, &content)
+                .with_context(|| format!("failed to write {}", env_path.display()))?;
+        }
+    }
+
+    // 4b. Write OCI ports file.
+    if let Some(ref ports) = config.exposed_ports {
+        if !ports.is_empty() {
+            let content = sorted_keys_joined(ports, "\n") + "\n";
+            fs::write(staging_dir.join("oci/ports"), &content)
+                .with_context(|| "failed to write oci/ports")?;
+        }
+    }
+
+    // 4c. Write OCI volumes file.
+    if let Some(ref vols) = config.volumes {
+        if !vols.is_empty() {
+            let content = sorted_keys_joined(vols, "\n") + "\n";
+            fs::write(staging_dir.join("oci/volumes"), &content)
+                .with_context(|| "failed to write oci/volumes")?;
+        }
+    }
+
+    // 5. Generate the systemd unit file.
+    let unit_dir = staging_dir.join("etc/systemd/system");
+    fs::create_dir_all(&unit_dir)
+        .with_context(|| format!("failed to create {}", unit_dir.display()))?;
+
+    let port_comment = config.exposed_ports.as_ref()
+        .filter(|p| !p.is_empty())
+        .map(sorted_keys_csv)
+        .unwrap_or_else(|| "none".to_string());
+
+    let volume_comment = config.volumes.as_ref()
+        .filter(|v| !v.is_empty())
+        .map(sorted_keys_csv)
+        .unwrap_or_else(|| "none".to_string());
+
+    let stop_signal_line = config.stop_signal.as_ref()
+        .map(|sig| format!("KillSignal={sig}\n"))
+        .unwrap_or_default();
+
+    let unit_content = format!(
+        r#"# Generated by sdme from OCI image: {image_ref}
+# OCI metadata saved under /oci/:
+#   /oci/root    — application rootfs
+#   /oci/env     — environment variables
+#   /oci/ports   — exposed ports (if any)
+#   /oci/volumes — declared volumes (if any)
+#
+# TODO: Port forwarding is not yet configured. Exposed ports:
+#   {port_comment}
+# To forward ports, use: sdme create --port HOST:CONTAINER -r <this-rootfs>
+#
+# TODO: Volume mounts are not yet configured. Declared volumes:
+#   {volume_comment}
+
+[Unit]
+Description=OCI application (image: {image_ref})
+After=network.target
+
+[Service]
+Type=exec
+RootDirectory=/oci/root
+ExecStart={exec_start}
+WorkingDirectory={working_dir}
+EnvironmentFile=-/oci/env
+User={user}
+{stop_signal_line}
+[Install]
+WantedBy=multi-user.target
+"#
+    );
+    let unit_path = unit_dir.join("sdme-oci-app.service");
+    fs::write(&unit_path, &unit_content)
+        .with_context(|| format!("failed to write {}", unit_path.display()))?;
+
+    if verbose {
+        eprintln!("wrote unit file: {}", unit_path.display());
+    }
+
+    // 6. Enable the unit via symlink.
+    let wants_dir = unit_dir.join("multi-user.target.wants");
+    fs::create_dir_all(&wants_dir)
+        .with_context(|| format!("failed to create {}", wants_dir.display()))?;
+    let symlink_path = wants_dir.join("sdme-oci-app.service");
+    std::os::unix::fs::symlink("../sdme-oci-app.service", &symlink_path)
+        .with_context(|| format!("failed to create symlink {}", symlink_path.display()))?;
+
+    // 7. Clean up temp OCI dir.
+    let _ = make_removable(&oci_tmp);
+    fs::remove_dir_all(&oci_tmp)
+        .with_context(|| format!("failed to remove {}", oci_tmp.display()))?;
+
+    Ok(())
+}
+
 // --- Public entry point ---
 
 /// Import a root filesystem from a directory, tarball, URL, OCI image, or QCOW2 disk image.
@@ -695,14 +933,9 @@ fn is_interactive_terminal() -> bool {
 ///
 /// The import is transactional: files are copied/extracted into a staging
 /// directory and atomically renamed into place on success.
-pub fn run(
-    datadir: &Path,
-    source: &str,
-    name: &str,
-    verbose: bool,
-    force: bool,
-    install_packages: InstallPackages,
-) -> Result<()> {
+pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
+    let ImportOptions { source, name, verbose, force, install_packages, oci_base, oci_base_fs } = *opts;
+
     validate_name(name)?;
 
     let kind = detect_source_kind(source)?;
@@ -721,6 +954,8 @@ pub fn run(
             .with_context(|| format!("failed to remove existing fs {}", final_dir.display()))?;
         let meta_path = rootfs_dir.join(format!(".{name}.meta"));
         let _ = fs::remove_file(meta_path);
+        let env_path = rootfs_dir.join(format!(".{name}.env"));
+        let _ = fs::remove_file(env_path);
     }
 
     let staging_name = format!(".{name}.importing");
@@ -732,6 +967,7 @@ pub fn run(
     fs::create_dir_all(&rootfs_dir)
         .with_context(|| format!("failed to create {}", rootfs_dir.display()))?;
 
+    let mut oci_config = None;
     let result = match kind {
         SourceKind::Directory(ref path) => dir::do_import(path, &staging_dir, verbose),
         SourceKind::Tarball(ref path) => tar::import_tarball(path, &staging_dir, verbose),
@@ -739,7 +975,13 @@ pub fn run(
         SourceKind::RawImage(ref path) => img::import_raw(path, &staging_dir, verbose),
         SourceKind::Url(ref url) => import_url(url, &staging_dir, &rootfs_dir, name, verbose),
         SourceKind::RegistryImage(ref img) => {
-            registry::import_registry_image(img, &staging_dir, &rootfs_dir, verbose)
+            match registry::import_registry_image(img, &staging_dir, &rootfs_dir, verbose) {
+                Ok(config) => {
+                    oci_config = config;
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            }
         }
     };
 
@@ -748,6 +990,71 @@ pub fn run(
         let _ = fs::remove_dir_all(&staging_dir);
         return Err(e);
     }
+
+    // --- OCI application image handling ---
+    // If this was a registry pull, check if it's an application image.
+    let skip_systemd_check = if let Some(ref cc) = oci_config {
+        let is_base = match oci_base {
+            OciBase::Yes => true,
+            OciBase::No => false,
+            OciBase::Auto => cc.is_base_os_image(),
+        };
+
+        eprintln!("OCI image: {}", if is_base { "base OS" } else { "application" });
+        if oci_base == OciBase::Auto {
+            eprintln!("  (auto-detected; override with --oci-base=yes or --oci-base=no)");
+        }
+
+        if is_base {
+            if oci_base_fs.is_some() && verbose {
+                eprintln!("note: --oci-base-fs ignored for base OS image");
+            }
+            false
+        } else {
+            match oci_base_fs {
+                Some(base_name) => {
+                    if let Err(e) = setup_app_image(
+                        datadir, &staging_dir, &rootfs_dir, name, base_name,
+                        cc, source, verbose,
+                    ) {
+                        let _ = make_removable(&staging_dir);
+                        let _ = fs::remove_dir_all(&staging_dir);
+                        return Err(e);
+                    }
+                    true // skip systemd detection — base already has it
+                }
+                None => {
+                    if force {
+                        eprintln!(
+                            "warning: image appears to be an application container; \
+                             importing raw rootfs (forced)"
+                        );
+                        false
+                    } else {
+                        let ep_str = cc.entrypoint.as_ref()
+                            .map(|v| shell_join(v))
+                            .unwrap_or_else(|| "(none)".to_string());
+                        let cmd_str = cc.cmd.as_ref()
+                            .map(|v| shell_join(v))
+                            .unwrap_or_else(|| "(none)".to_string());
+                        let _ = make_removable(&staging_dir);
+                        let _ = fs::remove_dir_all(&staging_dir);
+                        bail!(
+                            "image appears to be an application container \
+                             (Entrypoint: {ep_str}, Cmd: {cmd_str}); \
+                             specify --oci-base-fs=<rootfs> to use a systemd-capable base, \
+                             or -f to import the raw rootfs"
+                        );
+                    }
+                }
+            }
+        }
+    } else {
+        if oci_base != OciBase::Auto && verbose {
+            eprintln!("note: --oci-base ignored for non-registry source");
+        }
+        false
+    };
 
     // --- Systemd detection and optional package installation ---
     // At this point, staging_dir contains the imported rootfs.
@@ -763,7 +1070,7 @@ pub fn run(
         );
     }
 
-    if !has_systemd(&staging_dir, &family) {
+    if !skip_systemd_check && !has_systemd(&staging_dir, &family) {
         let install_result = (|| -> Result<()> {
             match install_packages {
                 InstallPackages::Yes => {
@@ -859,10 +1166,60 @@ pub fn run(
         )
     })?;
 
-    // Write distro metadata sidecar.
+    // Write distro and OCI config metadata sidecar.
     let distro = crate::rootfs::detect_distro(&final_dir);
     let mut meta = State::new();
     meta.set("DISTRO", &distro);
+
+    if let Some(ref cc) = oci_config {
+        if let Some(ref ep) = cc.entrypoint {
+            if !ep.is_empty() {
+                meta.set("OCI_ENTRYPOINT", shell_join(ep));
+            }
+        }
+        if let Some(ref cmd) = cc.cmd {
+            if !cmd.is_empty() {
+                meta.set("OCI_CMD", shell_join(cmd));
+            }
+        }
+        if let Some(ref wd) = cc.working_dir {
+            if !wd.is_empty() {
+                meta.set("OCI_WORKDIR", wd);
+            }
+        }
+        if let Some(ref user) = cc.user {
+            if !user.is_empty() {
+                meta.set("OCI_USER", user);
+            }
+        }
+        if let Some(ref env) = cc.env {
+            if !env.is_empty() {
+                // Store env vars as newline-separated KEY=VALUE pairs.
+                // The State format uses first `=` as delimiter, so multi-line
+                // values aren't directly supported. Use a separate file.
+                let env_path = rootfs_dir.join(format!(".{name}.env"));
+                let content = env.join("\n") + "\n";
+                crate::atomic_write(&env_path, content.as_bytes())
+                    .with_context(|| format!("failed to write {}", env_path.display()))?;
+            }
+        }
+        if let Some(ref ports) = cc.exposed_ports {
+            if !ports.is_empty() {
+                meta.set("OCI_PORTS", sorted_keys_joined(ports, ","));
+            }
+        }
+        if let Some(ref vols) = cc.volumes {
+            if !vols.is_empty() {
+                meta.set("OCI_VOLUMES", sorted_keys_joined(vols, ","));
+            }
+        }
+        if let Some(ref sig) = cc.stop_signal {
+            if !sig.is_empty() {
+                meta.set("OCI_STOP_SIGNAL", sig);
+            }
+        }
+    }
+
     let meta_path = rootfs_dir.join(format!(".{name}.meta"));
     meta.write_to(&meta_path)?;
 
@@ -897,7 +1254,12 @@ pub(crate) mod tests {
         // Acquire the interrupt lock to prevent concurrent InterruptGuard
         // tests from poisoning check_interrupted() calls inside run().
         let _lock = INTERRUPT_LOCK.lock().unwrap();
-        run(datadir, source, name, verbose, force, InstallPackages::No)
+        run(datadir, &ImportOptions {
+            source, name, verbose, force,
+            install_packages: InstallPackages::No,
+            oci_base: OciBase::Auto,
+            oci_base_fs: None,
+        })
     }
 
     use crate::testutil::TempDataDir;

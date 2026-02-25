@@ -3,6 +3,7 @@
 //! Pulls container images directly from OCI-compatible registries using the
 //! OCI Distribution Spec. Supports anonymous bearer token authentication.
 
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::Path;
@@ -14,7 +15,7 @@ use sha2::{Digest, Sha256};
 use crate::check_interrupted;
 
 use super::oci::unpack_oci_layer;
-use super::{build_http_agent, detect_compression_magic, get_decoder, proxy_from_env, MAX_DOWNLOAD_SIZE};
+use super::{build_http_agent, detect_compression_magic, get_decoder, proxy_from_env, sorted_keys_csv, MAX_DOWNLOAD_SIZE};
 
 /// Parsed OCI image reference (e.g. `quay.io/centos/centos:stream10`).
 #[derive(Debug, PartialEq)]
@@ -276,9 +277,16 @@ struct LayerDescriptor {
     media_type: Option<String>,
 }
 
+/// A config descriptor from an image manifest.
+#[derive(serde::Deserialize, Debug, Clone)]
+struct ConfigDescriptor {
+    digest: String,
+}
+
 /// An image manifest (OCI or Docker v2).
 #[derive(serde::Deserialize, Debug)]
 struct ImageManifest {
+    config: Option<ConfigDescriptor>,
     layers: Vec<LayerDescriptor>,
 }
 
@@ -316,6 +324,100 @@ fn host_arch() -> &'static str {
         "riscv64" => "riscv64",
         other => other,
     }
+}
+
+/// The `config` object inside an OCI image config blob.
+#[derive(serde::Deserialize, Debug, Default)]
+pub(super) struct OciContainerConfig {
+    #[serde(rename = "Entrypoint")]
+    pub(super) entrypoint: Option<Vec<String>>,
+    #[serde(rename = "Cmd")]
+    pub(super) cmd: Option<Vec<String>>,
+    #[serde(rename = "WorkingDir")]
+    pub(super) working_dir: Option<String>,
+    #[serde(rename = "Env")]
+    pub(super) env: Option<Vec<String>>,
+    #[serde(rename = "User")]
+    pub(super) user: Option<String>,
+    #[serde(rename = "ExposedPorts")]
+    pub(super) exposed_ports: Option<HashMap<String, serde_json::Value>>,
+    #[serde(rename = "Volumes")]
+    pub(super) volumes: Option<HashMap<String, serde_json::Value>>,
+    #[serde(rename = "StopSignal")]
+    pub(super) stop_signal: Option<String>,
+}
+
+impl OciContainerConfig {
+    /// Heuristic: is this a base OS image (ubuntu, debian, fedora, etc.)?
+    ///
+    /// ExposedPorts is the strongest signal: base OS images never expose ports.
+    /// After that, base OS images typically have no entrypoint and a single
+    /// shell binary as Cmd. Application images have non-shell entrypoint/cmd.
+    pub(super) fn is_base_os_image(&self) -> bool {
+        // ExposedPorts is the strongest signal: base OS images never expose ports.
+        let has_ports = self.exposed_ports.as_ref().is_some_and(|p| !p.is_empty());
+        if has_ports {
+            return false;
+        }
+        // No entrypoint and cmd is a single shell binary → base OS.
+        let entrypoint_empty = self.entrypoint.as_ref().is_none_or(|ep| ep.is_empty());
+        let cmd_is_shell = self.cmd.as_ref().is_some_and(|cmd| {
+            cmd.len() == 1 && {
+                let basename = cmd[0].rsplit('/').next().unwrap_or(&cmd[0]);
+                basename == "bash" || basename == "sh"
+            }
+        });
+        entrypoint_empty && cmd_is_shell
+    }
+}
+
+/// Top-level OCI image config blob.
+#[derive(serde::Deserialize, Debug)]
+pub(super) struct OciImageConfig {
+    pub(super) config: Option<OciContainerConfig>,
+}
+
+/// Fetch the config blob from a registry and parse it.
+fn fetch_config_blob(
+    agent: &ureq::Agent,
+    registry: &str,
+    repository: &str,
+    digest: &str,
+    token: Option<&str>,
+    verbose: bool,
+) -> Result<OciImageConfig> {
+    let url = format!("https://{registry}/v2/{repository}/blobs/{digest}");
+    if verbose {
+        eprintln!("fetching config blob: {digest}");
+    }
+
+    let mut request = agent.get(&url).header(
+        "Accept",
+        "application/vnd.oci.image.config.v1+json, application/vnd.docker.container.image.v1+json",
+    );
+    if let Some(token) = token {
+        request = request.header("Authorization", &format!("Bearer {token}"));
+    }
+
+    let body_str = request
+        .call()
+        .with_context(|| format!("failed to fetch config blob {digest}"))?
+        .into_body()
+        .into_with_config()
+        .limit(4_194_304) // 4 MiB — config blobs are small
+        .read_to_string()
+        .with_context(|| format!("failed to read config blob body {digest}"))?;
+
+    // Verify digest integrity.
+    let mut hasher = Sha256::new();
+    hasher.update(body_str.as_bytes());
+    let computed = format!("sha256:{:x}", hasher.finalize());
+    if computed != digest {
+        bail!("config blob digest mismatch: expected {digest}, got {computed}");
+    }
+
+    serde_json::from_str(&body_str)
+        .with_context(|| format!("failed to parse config blob {digest}"))
 }
 
 /// Fetch a manifest (or manifest list) from a registry.
@@ -496,12 +598,13 @@ fn download_blob(
 ///
 /// Downloads layers one at a time to temp files, verifies digests,
 /// and extracts each layer using the OCI whiteout-aware extractor.
+/// Also fetches the image config blob and returns the container config.
 pub(super) fn import_registry_image(
     image: &ImageReference,
     staging_dir: &Path,
     rootfs_dir: &Path,
     verbose: bool,
-) -> Result<()> {
+) -> Result<Option<OciContainerConfig>> {
     eprintln!("pulling {image}");
 
     let agent = build_http_agent(verbose)?;
@@ -524,6 +627,50 @@ pub(super) fn import_registry_image(
     if verbose {
         eprintln!("image has {} layer(s)", manifest.layers.len());
     }
+
+    // Fetch the config blob if present in the manifest.
+    let container_config = if let Some(ref config_desc) = manifest.config {
+        match fetch_config_blob(
+            &agent,
+            &image.registry,
+            &image.repository,
+            &config_desc.digest,
+            token_ref,
+            verbose,
+        ) {
+            Ok(image_config) => {
+                if verbose {
+                    if let Some(ref cc) = image_config.config {
+                        eprintln!("image config: entrypoint={:?} cmd={:?} workdir={:?} user={:?}",
+                            cc.entrypoint, cc.cmd, cc.working_dir, cc.user);
+                        if let Some(ref env) = cc.env {
+                            eprintln!("image config: env ({} vars)", env.len());
+                        }
+                        if let Some(ref ports) = cc.exposed_ports {
+                            if !ports.is_empty() {
+                                eprintln!("image config: exposed ports: {}", sorted_keys_csv(ports));
+                            }
+                        }
+                        if let Some(ref vols) = cc.volumes {
+                            if !vols.is_empty() {
+                                eprintln!("image config: volumes: {}", sorted_keys_csv(vols));
+                            }
+                        }
+                        if let Some(ref sig) = cc.stop_signal {
+                            eprintln!("image config: stop signal: {sig}");
+                        }
+                    }
+                }
+                image_config.config
+            }
+            Err(e) => {
+                eprintln!("warning: failed to fetch image config: {e:#}");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     fs::create_dir_all(staging_dir)
         .with_context(|| format!("failed to create staging dir {}", staging_dir.display()))?;
@@ -574,7 +721,7 @@ pub(super) fn import_registry_image(
         result?;
     }
 
-    Ok(())
+    Ok(container_config)
 }
 
 #[cfg(test)]
@@ -687,6 +834,95 @@ mod tests {
     #[test]
     fn test_parse_www_authenticate_not_bearer() {
         assert!(parse_www_authenticate("Basic realm=\"test\"").is_none());
+    }
+
+    #[test]
+    fn test_is_base_os_image_bash() {
+        let config = OciContainerConfig {
+            cmd: Some(vec!["bash".to_string()]),
+            ..Default::default()
+        };
+        assert!(config.is_base_os_image());
+    }
+
+    #[test]
+    fn test_is_base_os_image_bin_bash() {
+        let config = OciContainerConfig {
+            cmd: Some(vec!["/bin/bash".to_string()]),
+            ..Default::default()
+        };
+        assert!(config.is_base_os_image());
+    }
+
+    #[test]
+    fn test_is_base_os_image_sh() {
+        let config = OciContainerConfig {
+            cmd: Some(vec!["/bin/sh".to_string()]),
+            ..Default::default()
+        };
+        assert!(config.is_base_os_image());
+    }
+
+    #[test]
+    fn test_is_base_os_image_with_entrypoint() {
+        let config = OciContainerConfig {
+            entrypoint: Some(vec!["/docker-entrypoint.sh".to_string()]),
+            cmd: Some(vec!["nginx".to_string()]),
+            ..Default::default()
+        };
+        assert!(!config.is_base_os_image());
+    }
+
+    #[test]
+    fn test_is_base_os_image_no_cmd() {
+        let config = OciContainerConfig::default();
+        assert!(!config.is_base_os_image());
+    }
+
+    #[test]
+    fn test_is_base_os_image_multi_cmd() {
+        let config = OciContainerConfig {
+            cmd: Some(vec!["mysqld".to_string(), "--user=mysql".to_string()]),
+            ..Default::default()
+        };
+        assert!(!config.is_base_os_image());
+    }
+
+    #[test]
+    fn test_is_base_os_image_with_exposed_ports() {
+        // An image with Cmd=["/bin/sh"] but ExposedPorts is NOT a base image.
+        let mut ports = HashMap::new();
+        ports.insert("80/tcp".to_string(), serde_json::Value::Object(Default::default()));
+        let config = OciContainerConfig {
+            cmd: Some(vec!["/bin/sh".to_string()]),
+            exposed_ports: Some(ports),
+            ..Default::default()
+        };
+        assert!(!config.is_base_os_image());
+    }
+
+    #[test]
+    fn test_is_base_os_image_empty_exposed_ports() {
+        // Empty ExposedPorts map should not affect the heuristic.
+        let config = OciContainerConfig {
+            cmd: Some(vec!["/bin/bash".to_string()]),
+            exposed_ports: Some(HashMap::new()),
+            ..Default::default()
+        };
+        assert!(config.is_base_os_image());
+    }
+
+    #[test]
+    fn test_is_base_os_image_app_with_ports_and_entrypoint() {
+        let mut ports = HashMap::new();
+        ports.insert("6379/tcp".to_string(), serde_json::Value::Object(Default::default()));
+        let config = OciContainerConfig {
+            entrypoint: Some(vec!["docker-entrypoint.sh".to_string()]),
+            cmd: Some(vec!["redis-server".to_string()]),
+            exposed_ports: Some(ports),
+            ..Default::default()
+        };
+        assert!(!config.is_base_os_image());
     }
 
     #[test]

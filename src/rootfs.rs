@@ -161,15 +161,8 @@ pub fn list(datadir: &Path) -> Result<Vec<RootfsEntry>> {
 /// Import a root filesystem from a directory, tarball, URL, or OCI image.
 ///
 /// Delegates to [`crate::import::run`]. CLI command: `sdme fs import`.
-pub fn import(
-    datadir: &Path,
-    source: &str,
-    name: &str,
-    verbose: bool,
-    force: bool,
-    install_packages: crate::import::InstallPackages,
-) -> Result<()> {
-    crate::import::run(datadir, source, name, verbose, force, install_packages)
+pub fn import(datadir: &Path, opts: &crate::import::ImportOptions) -> Result<()> {
+    crate::import::run(datadir, opts)
 }
 
 /// Remove an imported root filesystem.
@@ -257,12 +250,17 @@ fn check_rootfs_in_use(datadir: &Path, name: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::import::InstallPackages;
+    use crate::import::{ImportOptions, InstallPackages, OciBase};
     use crate::testutil::TempDataDir;
 
     /// Helper to import a rootfs in tests, bypassing systemd checks.
     fn test_import(datadir: &Path, source: &str, name: &str) -> Result<()> {
-        import(datadir, source, name, false, true, InstallPackages::No)
+        import(datadir, &ImportOptions {
+            source, name, verbose: false, force: true,
+            install_packages: InstallPackages::No,
+            oci_base: OciBase::Auto,
+            oci_base_fs: None,
+        })
     }
 
     fn tmp() -> TempDataDir {

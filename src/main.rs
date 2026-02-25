@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
-use sdme::import::InstallPackages;
+use sdme::import::{ImportOptions, InstallPackages, OciBase};
 use sdme::{NetworkConfig, ResourceLimits, config, containers, rootfs, system_check, systemd};
 
 #[derive(Parser)]
@@ -207,6 +207,36 @@ enum Command {
 #[derive(Subcommand)]
 enum RootfsCommand {
     /// Import a root filesystem from a directory, tarball, URL, OCI image, registry image, or QCOW2 disk image
+    #[command(after_long_help = "\
+OCI REGISTRY IMAGES:
+    When the source is an OCI registry image (e.g. docker.io/ubuntu:24.04),
+    sdme pulls the image layers and extracts the root filesystem.
+
+    --oci-base controls how the image is classified:
+
+      auto (default)  Auto-detect from image config. Base OS images have no
+                      entrypoint, a shell as default command, and no exposed
+                      ports. Everything else is an application image.
+
+      yes             Force base OS mode. The rootfs goes through systemd
+                      detection and package installation (apt/dnf). Use this
+                      for OS images that the heuristic misclassifies.
+
+      no              Force application mode. Requires --oci-base-fs to
+                      specify a systemd-capable rootfs as the base layer.
+                      The OCI rootfs is placed under /oci/root and a systemd
+                      unit is generated to run the application.
+
+    Application images (--oci-base=no or auto-detected):
+      The OCI rootfs is placed under /oci/root inside a copy of the base
+      rootfs specified by --oci-base-fs. A systemd service unit is generated
+      to run the entrypoint/cmd via RootDirectory=/oci/root. Exposed ports
+      and volumes from the OCI config are saved under /oci/ for reference.
+
+    Examples:
+      sdme fs import ubuntu docker.io/ubuntu -v
+      sdme fs import nginx docker.io/nginx --oci-base-fs=ubuntu -v
+      sdme fs import myapp ghcr.io/org/app:v1 --oci-base=no --oci-base-fs=ubuntu")]
     Import {
         /// Name for the imported rootfs
         name: String,
@@ -218,6 +248,12 @@ enum RootfsCommand {
         /// Whether to install systemd packages if missing (auto: prompt if interactive)
         #[arg(long, value_enum, default_value_t = InstallPackages::Auto)]
         install_packages: InstallPackages,
+        /// OCI image classification: auto-detect, force base OS, or force application
+        #[arg(long, value_enum, default_value_t = OciBase::Auto)]
+        oci_base: OciBase,
+        /// Base rootfs for OCI application images (must have systemd; OCI rootfs goes under /oci/root)
+        #[arg(long)]
+        oci_base_fs: Option<String>,
     },
     /// List imported root filesystems
     Ls,
@@ -631,9 +667,20 @@ fn main() -> Result<()> {
             })?;
         }
         Command::Fs(cmd) => match cmd {
-            RootfsCommand::Import { source, name, force, install_packages } => {
+            RootfsCommand::Import { source, name, force, install_packages, oci_base, oci_base_fs } => {
                 system_check::check_systemd_version(252)?;
-                rootfs::import(&cfg.datadir, &source, &name, cli.verbose, force, install_packages)?;
+                if oci_base_fs.is_some() && oci_base == OciBase::Yes {
+                    bail!("--oci-base-fs cannot be used with --oci-base=yes");
+                }
+                rootfs::import(&cfg.datadir, &ImportOptions {
+                    source: &source,
+                    name: &name,
+                    verbose: cli.verbose,
+                    force,
+                    install_packages,
+                    oci_base,
+                    oci_base_fs: oci_base_fs.as_deref(),
+                })?;
                 println!("{name}");
             }
             RootfsCommand::Ls => {
