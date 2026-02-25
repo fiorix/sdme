@@ -10,18 +10,21 @@
 //! - OCI container image archives (.oci.tar, .oci.tar.xz, etc.)
 //! - QCOW2 disk images (via qemu-nbd, auto-detected by magic bytes)
 
+mod dir;
+mod img;
+mod oci;
+mod tar;
+
 use std::fs::{self, File};
 use std::io::Read;
-#[cfg(test)]
-use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use anyhow::{bail, Context, Result};
-use serde::Deserialize;
 
-use crate::copy::*;
+use crate::copy::make_removable;
 use crate::rootfs::DistroFamily;
 use crate::{State, validate_name, check_interrupted};
+
+use std::process::Command;
 
 /// Controls whether systemd packages are installed during rootfs import.
 #[derive(Debug, Clone, Copy, PartialEq, clap::ValueEnum)]
@@ -210,7 +213,7 @@ fn detect_source_kind(source: &str) -> Result<SourceKind> {
 // --- Compression ---
 
 #[derive(Debug)]
-enum Compression {
+pub(super) enum Compression {
     None,
     Gzip,
     Bzip2,
@@ -219,7 +222,7 @@ enum Compression {
 }
 
 /// Detect the compression format of a file by reading its magic bytes.
-fn detect_compression(path: &Path) -> Result<Compression> {
+pub(super) fn detect_compression(path: &Path) -> Result<Compression> {
     let mut file =
         File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     let mut magic = [0u8; 6];
@@ -232,7 +235,7 @@ fn detect_compression(path: &Path) -> Result<Compression> {
 }
 
 /// Detect compression from magic bytes.
-fn detect_compression_magic(magic: &[u8]) -> Result<Compression> {
+pub(super) fn detect_compression_magic(magic: &[u8]) -> Result<Compression> {
     if magic.starts_with(&[0x1f, 0x8b]) {
         Ok(Compression::Gzip)
     } else if magic.starts_with(b"BZh") {
@@ -247,7 +250,7 @@ fn detect_compression_magic(magic: &[u8]) -> Result<Compression> {
 }
 
 /// Helper to get a decompression reader based on the compression type.
-fn get_decoder(file: File, compression: &Compression) -> Result<Box<dyn Read>> {
+pub(super) fn get_decoder(file: File, compression: &Compression) -> Result<Box<dyn Read>> {
     match compression {
         Compression::Gzip => Ok(Box::new(flate2::read::GzDecoder::new(file))),
         Compression::Bzip2 => Ok(Box::new(bzip2::read::BzDecoder::new(file))),
@@ -259,333 +262,6 @@ fn get_decoder(file: File, compression: &Compression) -> Result<Box<dyn Read>> {
         },
         Compression::None => Ok(Box::new(file)),
     }
-}
-
-// --- Tarball extraction ---
-
-/// Unpack a tar archive from a reader into a destination directory.
-fn unpack_tar<R: Read>(reader: R, dest: &Path) -> Result<()> {
-    let mut archive = tar::Archive::new(reader);
-    archive.set_preserve_permissions(true);
-    archive.set_preserve_ownerships(true);
-    archive.set_unpack_xattrs(true);
-    for entry in archive.entries().with_context(|| {
-        format!("failed to extract tarball to {}", dest.display())
-    })? {
-        check_interrupted()?;
-        let mut entry = entry.with_context(|| {
-            format!("failed to extract tarball to {}", dest.display())
-        })?;
-        entry.unpack_in(dest).with_context(|| {
-            format!("failed to extract tarball to {}", dest.display())
-        })?;
-    }
-    Ok(())
-}
-
-/// Extract a tarball into the staging directory using native Rust crates.
-///
-/// After extraction, checks if the result is an OCI image layout and
-/// processes it accordingly.
-fn import_tarball(tarball: &Path, staging_dir: &Path, verbose: bool) -> Result<()> {
-    let compression = detect_compression(tarball)?;
-
-    fs::create_dir_all(staging_dir)
-        .with_context(|| format!("failed to create staging dir {}", staging_dir.display()))?;
-
-    if verbose {
-        eprintln!(
-            "extracting {} -> {}",
-            tarball.display(),
-            staging_dir.display()
-        );
-    }
-
-    let file =
-        File::open(tarball).with_context(|| format!("failed to open {}", tarball.display()))?;
-
-    unpack_tar(get_decoder(file, &compression)?, staging_dir)?;
-
-    // Check if the extracted content is an OCI image layout.
-    if is_oci_layout(staging_dir) {
-        if verbose {
-            eprintln!("detected OCI image layout");
-        }
-        let mut oci_name = staging_dir
-            .file_name()
-            .unwrap()
-            .to_os_string();
-        oci_name.push(".oci");
-        let oci_dir = staging_dir.with_file_name(oci_name);
-        fs::rename(staging_dir, &oci_dir)?;
-        let result = import_oci_layout(&oci_dir, staging_dir, verbose);
-        let _ = make_removable(&oci_dir);
-        let _ = fs::remove_dir_all(&oci_dir);
-        return result;
-    }
-
-    Ok(())
-}
-
-// --- OCI image support ---
-
-#[derive(Deserialize)]
-struct OciLayout {
-    #[serde(rename = "imageLayoutVersion")]
-    image_layout_version: String,
-}
-
-#[derive(Deserialize)]
-struct OciIndex {
-    manifests: Vec<OciDescriptor>,
-}
-
-#[derive(Deserialize)]
-struct OciDescriptor {
-    digest: String,
-    #[serde(rename = "mediaType")]
-    #[allow(dead_code)]
-    media_type: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct OciManifest {
-    layers: Vec<OciDescriptor>,
-}
-
-/// Check if a directory contains an OCI image layout (has an `oci-layout` file).
-fn is_oci_layout(dir: &Path) -> bool {
-    dir.join("oci-layout").is_file()
-}
-
-/// Read and deserialize a JSON file.
-fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
-    let content =
-        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
-    serde_json::from_str(&content)
-        .with_context(|| format!("failed to parse JSON from {}", path.display()))
-}
-
-/// Resolve a blob path from an OCI digest like `sha256:abc123`.
-fn resolve_blob(oci_dir: &Path, digest: &str) -> Result<PathBuf> {
-    let (algo, hash) = digest
-        .split_once(':')
-        .with_context(|| format!("invalid OCI digest format: {digest}"))?;
-    // Validate algo and hash contain only safe characters to prevent path traversal.
-    // OCI spec: algorithm is alphanumeric+separator, digest is hex. We allow
-    // [a-zA-Z0-9_-] for algo and [a-fA-F0-9] for hash (the latter covers all
-    // standard digest algorithms including sha256 and sha512).
-    if algo.is_empty()
-        || !algo
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
-        bail!("invalid OCI digest algorithm: {algo}");
-    }
-    if hash.is_empty() || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
-        bail!("invalid OCI digest hash: {hash}");
-    }
-    let blob_path = oci_dir.join("blobs").join(algo).join(hash);
-    if !blob_path.exists() {
-        bail!("OCI blob not found: {}", blob_path.display());
-    }
-    Ok(blob_path)
-}
-
-/// Import an OCI image layout by reading the manifest chain and extracting layers.
-fn import_oci_layout(oci_dir: &Path, staging_dir: &Path, verbose: bool) -> Result<()> {
-    // Validate oci-layout version.
-    let layout: OciLayout = read_json(&oci_dir.join("oci-layout"))?;
-    if layout.image_layout_version != "1.0.0" {
-        bail!(
-            "unsupported OCI image layout version: {}",
-            layout.image_layout_version
-        );
-    }
-
-    // Read index.json to find the manifest.
-    let index: OciIndex = read_json(&oci_dir.join("index.json"))?;
-    if index.manifests.is_empty() {
-        bail!("OCI index.json contains no manifests");
-    }
-
-    let manifest_blob = resolve_blob(oci_dir, &index.manifests[0].digest)?;
-
-    // The index may point to an image manifest or a manifest index.
-    // Use serde_json::Value to check which one it is.
-    let manifest_value: serde_json::Value = read_json(&manifest_blob)?;
-
-    let manifest: OciManifest = if manifest_value.get("layers").is_some() {
-        // Direct image manifest.
-        serde_json::from_value(manifest_value)
-            .context("failed to parse OCI image manifest")?
-    } else if manifest_value.get("manifests").is_some() {
-        // Manifest index — follow one level of indirection.
-        let sub_index: OciIndex = serde_json::from_value(manifest_value)
-            .context("failed to parse OCI manifest index")?;
-        if sub_index.manifests.is_empty() {
-            bail!("OCI manifest index contains no manifests");
-        }
-        let sub_blob = resolve_blob(oci_dir, &sub_index.manifests[0].digest)?;
-        read_json(&sub_blob)?
-    } else {
-        bail!("OCI manifest has neither 'layers' nor 'manifests' field");
-    };
-
-    if manifest.layers.is_empty() {
-        bail!("OCI manifest contains no layers");
-    }
-
-    fs::create_dir_all(staging_dir)
-        .with_context(|| format!("failed to create staging dir {}", staging_dir.display()))?;
-
-    // Extract layers in order.
-    for (i, layer) in manifest.layers.iter().enumerate() {
-        check_interrupted()?;
-        let blob_path = resolve_blob(oci_dir, &layer.digest)?;
-        if verbose {
-            eprintln!(
-                "extracting layer {}/{}: {}",
-                i + 1,
-                manifest.layers.len(),
-                layer.digest
-            );
-        }
-
-        // Detect compression from magic bytes of the blob.
-        let mut blob_file = File::open(&blob_path)
-            .with_context(|| format!("failed to open blob {}", blob_path.display()))?;
-        let mut magic = [0u8; 6];
-        let n = blob_file.read(&mut magic)?;
-        // Seek back to the start.
-        drop(blob_file);
-        let blob_file = File::open(&blob_path)?;
-
-        let compression = detect_compression_magic(&magic[..n])?;
-        unpack_oci_layer(get_decoder(blob_file, &compression)?, staging_dir)?;
-    }
-
-    Ok(())
-}
-
-
-/// Check whether a path resolves to a location inside `dest` after following symlinks.
-/// Returns `false` if the canonical path escapes `dest` or canonicalization fails.
-fn is_inside_dest(path: &Path, dest: &Path) -> bool {
-    let Ok(canonical) = fs::canonicalize(path) else {
-        return false;
-    };
-    let Ok(canonical_dest) = fs::canonicalize(dest) else {
-        return false;
-    };
-    canonical.starts_with(&canonical_dest)
-}
-
-/// Unpack an OCI layer tar archive, handling OCI whiteout markers.
-///
-/// OCI whiteouts:
-/// - `.wh..wh..opq` in a directory means "clear existing contents of this directory"
-/// - `.wh.<name>` means "delete <name> from the destination"
-fn unpack_oci_layer<R: Read>(reader: R, dest: &Path) -> Result<()> {
-    let mut archive = tar::Archive::new(reader);
-    archive.set_preserve_permissions(true);
-    archive.set_preserve_ownerships(true);
-    archive.set_unpack_xattrs(true);
-
-    for entry in archive.entries().context("failed to read tar entries")? {
-        check_interrupted()?;
-        let mut entry = entry.context("failed to read tar entry")?;
-        let raw_path = entry.path().context("failed to read entry path")?.into_owned();
-
-        // Sanitize: strip leading '/' and reject paths with '..' components
-        // to prevent path traversal in whiteout handling below.
-        let path = sanitize_dest_path(&raw_path)?;
-
-        let file_name: String = match path.file_name() {
-            Some(name) => name.to_string_lossy().into_owned(),
-            None => {
-                // Root directory entry — just ensure it exists.
-                entry.unpack_in(dest).with_context(|| {
-                    format!("failed to unpack entry {}", path.display())
-                })?;
-                continue;
-            }
-        };
-
-        if file_name == ".wh..wh..opq" {
-            // Opaque whiteout: clear existing contents of the parent directory.
-            let parent = path.parent().unwrap_or(Path::new(""));
-            let abs_parent = dest.join(parent);
-            if abs_parent.is_dir() {
-                // Verify the parent resolves inside dest after following symlinks.
-                if !is_inside_dest(&abs_parent, dest) {
-                    eprintln!(
-                        "warning: skipping opaque whiteout that escapes destination: {}",
-                        path.display()
-                    );
-                    continue;
-                }
-                for child in fs::read_dir(&abs_parent)
-                    .with_context(|| format!("failed to read dir {}", abs_parent.display()))?
-                {
-                    let child = child?;
-                    let child_path = child.path();
-                    if child.file_type()?.is_dir() {
-                        let _ = make_removable(&child_path);
-                        fs::remove_dir_all(&child_path).ok();
-                    } else {
-                        fs::remove_file(&child_path).ok();
-                    }
-                }
-            }
-            continue;
-        }
-
-        if let Some(target_name) = file_name.strip_prefix(".wh.") {
-            // Regular whiteout: delete the target file/dir.
-            let parent = path.parent().unwrap_or(Path::new(""));
-            let target = dest.join(parent).join(target_name);
-            // Verify the target resolves inside dest after following symlinks.
-            if !is_inside_dest(&target, dest) {
-                eprintln!(
-                    "warning: skipping whiteout that escapes destination: {}",
-                    path.display()
-                );
-                continue;
-            }
-            if target.is_dir() {
-                let _ = make_removable(&target);
-                fs::remove_dir_all(&target).ok();
-            } else if target.exists() || target.symlink_metadata().is_ok() {
-                fs::remove_file(&target).ok();
-            }
-            continue;
-        }
-
-        // Normal entry — unpack into destination.
-        entry
-            .unpack_in(dest)
-            .with_context(|| format!("failed to unpack entry {}", path.display()))?;
-    }
-
-    Ok(())
-}
-
-// --- Directory copy ---
-
-fn do_import(source: &Path, staging: &Path, verbose: bool) -> Result<()> {
-    // Create the staging directory and copy the root directory's metadata.
-    fs::create_dir(staging)
-        .with_context(|| format!("failed to create staging dir {}", staging.display()))?;
-    copy_metadata(source, staging)
-        .with_context(|| format!("failed to copy metadata for {}", source.display()))?;
-    copy_xattrs(source, staging)?;
-
-    if verbose {
-        eprintln!("copying {} -> {}", source.display(), staging.display());
-    }
-
-    copy_tree(source, staging, verbose)
 }
 
 // --- URL download ---
@@ -712,442 +388,14 @@ fn import_url(
         }
 
         match kind {
-            DownloadedFileKind::QcowImage => import_qcow2(&temp_file, staging_dir, verbose),
-            DownloadedFileKind::RawImage => import_raw(&temp_file, staging_dir, verbose),
-            DownloadedFileKind::Tarball => import_tarball(&temp_file, staging_dir, verbose),
+            DownloadedFileKind::QcowImage => img::import_qcow2(&temp_file, staging_dir, verbose),
+            DownloadedFileKind::RawImage => img::import_raw(&temp_file, staging_dir, verbose),
+            DownloadedFileKind::Tarball => tar::import_tarball(&temp_file, staging_dir, verbose),
         }
     })();
 
     // Clean up temp file on both success and failure.
     let _ = fs::remove_file(&temp_file);
-
-    result
-}
-
-// --- QCOW2 import ---
-
-/// RAII guard for an NBD device connection. Disconnects on drop.
-struct NbdGuard {
-    device: PathBuf,
-    active: bool,
-}
-
-impl NbdGuard {
-    fn new() -> Self {
-        Self {
-            device: PathBuf::new(),
-            active: false,
-        }
-    }
-
-    fn set_active(&mut self, device: PathBuf) {
-        self.device = device;
-        self.active = true;
-    }
-
-    fn disconnect(&mut self) {
-        if self.active {
-            let _ = Command::new("qemu-nbd")
-                .args(["--disconnect"])
-                .arg(&self.device)
-                .status();
-            self.active = false;
-        }
-    }
-}
-
-impl Drop for NbdGuard {
-    fn drop(&mut self) {
-        self.disconnect();
-    }
-}
-
-/// RAII guard for a mount point. Unmounts and removes the directory on drop.
-struct MountGuard {
-    path: PathBuf,
-    mounted: bool,
-}
-
-impl MountGuard {
-    fn new() -> Self {
-        Self {
-            path: PathBuf::new(),
-            mounted: false,
-        }
-    }
-
-    fn set_mounted(&mut self, path: PathBuf) {
-        self.path = path;
-        self.mounted = true;
-    }
-
-    fn unmount(&mut self) {
-        if self.mounted {
-            let _ = Command::new("umount").arg(&self.path).status();
-            let _ = fs::remove_dir(&self.path);
-            self.mounted = false;
-        }
-    }
-}
-
-impl Drop for MountGuard {
-    fn drop(&mut self) {
-        self.unmount();
-    }
-}
-
-/// Import a QCOW2 disk image by mounting it via qemu-nbd and copying the filesystem tree.
-///
-/// Steps:
-/// 1. Load the `nbd` kernel module
-/// 2. Find a free `/dev/nbdN` device
-/// 3. Connect the qcow2 image via `qemu-nbd`
-/// 4. Discover and mount the root partition
-/// 5. Copy the mounted tree to the staging directory
-/// 6. Clean up (unmount, disconnect)
-fn import_qcow2(image: &Path, staging_dir: &Path, verbose: bool) -> Result<()> {
-    crate::system_check::check_dependencies(
-        &[("qemu-nbd", "apt install qemu-utils")],
-        verbose,
-    )?;
-
-    if !verbose {
-        eprintln!("warning: qcow2 imports can be slow; use -v to see progress");
-    } else {
-        eprintln!("importing qcow2 image: {}", image.display());
-    }
-
-    // Load the nbd kernel module.
-    let status = Command::new("modprobe")
-        .args(["nbd", "max_part=16"])
-        .status()
-        .context("failed to run modprobe nbd")?;
-    if !status.success() {
-        bail!("modprobe nbd failed (is the nbd kernel module available?)");
-    }
-
-    // Find a free /dev/nbdN device.
-    let nbd_dev = find_free_nbd_device()?;
-    if verbose {
-        eprintln!("using nbd device: {}", nbd_dev.display());
-    }
-
-    let mut nbd_guard = NbdGuard::new();
-    let mut mount_guard = MountGuard::new();
-
-    // Connect the image. The guard ensures disconnect on any exit path.
-    let status = Command::new("qemu-nbd")
-        .args(["--read-only", "--connect"])
-        .arg(&nbd_dev)
-        .arg(image)
-        .status()
-        .context("failed to run qemu-nbd")?;
-    if !status.success() {
-        bail!("qemu-nbd --connect failed for {}", image.display());
-    }
-    nbd_guard.set_active(nbd_dev.clone());
-
-    check_interrupted()?;
-
-    // Wait for the kernel to scan partitions.
-    let status = Command::new("partprobe")
-        .arg(&nbd_dev)
-        .status();
-    // partprobe is optional; if missing, the kernel usually scans automatically.
-    if let Ok(s) = status {
-        if !s.success() && verbose {
-            eprintln!("partprobe failed (non-fatal)");
-        }
-    }
-
-    // Small delay for partition devices to appear.
-    std::thread::sleep(std::time::Duration::from_millis(500));
-
-    check_interrupted()?;
-
-    // Find the root partition device.
-    let part_dev = find_root_partition(&nbd_dev, verbose)?;
-    if verbose {
-        eprintln!("mounting partition: {}", part_dev.display());
-    }
-
-    // Create a temporary mount point.
-    let mount_dir = staging_dir.with_file_name(
-        format!(
-            ".{}.qcow2-mount",
-            staging_dir.file_name().unwrap().to_string_lossy()
-        ),
-    );
-    fs::create_dir_all(&mount_dir)
-        .with_context(|| format!("failed to create mount point {}", mount_dir.display()))?;
-
-    // Mount the partition read-only.
-    let status = Command::new("mount")
-        .args(["-o", "ro"])
-        .arg(&part_dev)
-        .arg(&mount_dir)
-        .status()
-        .context("failed to run mount")?;
-    if !status.success() {
-        let _ = fs::remove_dir(&mount_dir);
-        bail!("mount failed for {}", part_dev.display());
-    }
-    mount_guard.set_mounted(mount_dir);
-
-    // Copy the tree. Guards handle cleanup on error or interruption.
-    let result = do_import(&mount_guard.path, staging_dir, verbose);
-
-    // Explicit cleanup in order (mount before nbd disconnect).
-    mount_guard.unmount();
-    nbd_guard.disconnect();
-
-    result
-}
-
-/// Find a free `/dev/nbdN` device by checking which ones have zero size.
-fn find_free_nbd_device() -> Result<PathBuf> {
-    for i in 0..16 {
-        let dev = PathBuf::from(format!("/dev/nbd{i}"));
-        if !dev.exists() {
-            continue;
-        }
-        let size_path = PathBuf::from(format!("/sys/block/nbd{i}/size"));
-        if let Ok(content) = fs::read_to_string(&size_path) {
-            if content.trim() == "0" {
-                return Ok(dev);
-            }
-        }
-    }
-    bail!("no free nbd device found (all /dev/nbd0..15 are in use)")
-}
-
-/// Find the root partition on a block device (nbd or loop).
-///
-/// Looks for partition devices (`/dev/{dev}pM`) and picks the largest one,
-/// which is typically the root filesystem. If no partitions are found,
-/// tries the whole device (for unpartitioned disk images).
-fn find_root_partition(block_dev: &Path, verbose: bool) -> Result<PathBuf> {
-    let dev_name = block_dev
-        .file_name()
-        .unwrap()
-        .to_string_lossy()
-        .into_owned();
-
-    // Look for partition devices in /sys/block/nbdN/.
-    let sys_dir = PathBuf::from(format!("/sys/block/{dev_name}"));
-    let mut partitions: Vec<(PathBuf, u64)> = Vec::new();
-
-    if let Ok(entries) = fs::read_dir(&sys_dir) {
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if !name.starts_with(&format!("{dev_name}p")) {
-                continue;
-            }
-            let size_path = entry.path().join("size");
-            if let Ok(content) = fs::read_to_string(&size_path) {
-                if let Ok(size) = content.trim().parse::<u64>() {
-                    if size > 0 {
-                        let part_dev = PathBuf::from(format!("/dev/{name}"));
-                        if verbose {
-                            eprintln!(
-                                "found partition: {} ({} sectors)",
-                                part_dev.display(),
-                                size
-                            );
-                        }
-                        partitions.push((part_dev, size));
-                    }
-                }
-            }
-        }
-    }
-
-    if partitions.is_empty() {
-        // No partitions found — try the whole device (unpartitioned image).
-        if verbose {
-            eprintln!("no partitions found, trying whole device");
-        }
-        return Ok(block_dev.to_path_buf());
-    }
-
-    // Pick the largest partition (usually the root filesystem).
-    partitions.sort_by(|a, b| b.1.cmp(&a.1));
-    Ok(partitions[0].0.clone())
-}
-
-// --- Raw disk image import ---
-
-/// RAII guard for a loop device. Detaches on drop.
-struct LoopGuard {
-    device: PathBuf,
-    active: bool,
-}
-
-impl LoopGuard {
-    fn new() -> Self {
-        Self {
-            device: PathBuf::new(),
-            active: false,
-        }
-    }
-
-    fn set_active(&mut self, device: PathBuf) {
-        self.device = device;
-        self.active = true;
-    }
-
-    fn detach(&mut self) {
-        if self.active {
-            let _ = Command::new("losetup")
-                .args(["--detach"])
-                .arg(&self.device)
-                .status();
-            self.active = false;
-        }
-    }
-}
-
-impl Drop for LoopGuard {
-    fn drop(&mut self) {
-        self.detach();
-    }
-}
-
-/// Decompress a file in-place if it is compressed, returning the path to the
-/// uncompressed file. For uncompressed files, returns the original path unchanged.
-/// For compressed files, decompresses to a `.decompressed` sibling file and returns
-/// that path.
-fn decompress_if_needed(path: &Path, verbose: bool) -> Result<PathBuf> {
-    let compression = detect_compression(path)?;
-    match compression {
-        Compression::None => Ok(path.to_path_buf()),
-        _ => {
-            let decompressed = path.with_extension("decompressed");
-            if verbose {
-                eprintln!(
-                    "decompressing {} ({:?})",
-                    path.display(),
-                    compression,
-                );
-            }
-            let input = File::open(path)
-                .with_context(|| format!("failed to open {}", path.display()))?;
-            let mut output = File::create(&decompressed)
-                .with_context(|| format!("failed to create {}", decompressed.display()))?;
-
-            let mut reader = get_decoder(input, &compression)?;
-
-            let mut buf = [0u8; 65536];
-            loop {
-                check_interrupted()?;
-                let n = reader.read(&mut buf)
-                    .context("failed to read during decompression")?;
-                if n == 0 {
-                    break;
-                }
-                std::io::Write::write_all(&mut output, &buf[..n])
-                    .context("failed to write during decompression")?;
-            }
-
-            if verbose {
-                let meta = fs::metadata(&decompressed)?;
-                eprintln!("decompressed to {} ({} bytes)", decompressed.display(), meta.len());
-            }
-            Ok(decompressed)
-        }
-    }
-}
-
-/// Import a raw disk image by mounting it via a loop device and copying the filesystem tree.
-///
-/// Steps:
-/// 1. Decompress the image if compressed
-/// 2. Attach via `losetup --partscan --read-only --find --show`
-/// 3. Discover and mount the root partition
-/// 4. Copy the mounted tree to the staging directory
-/// 5. Clean up (unmount, detach loop, remove temp files)
-fn import_raw(image: &Path, staging_dir: &Path, verbose: bool) -> Result<()> {
-    if !verbose {
-        eprintln!("warning: raw image imports can be slow; use -v to see progress");
-    } else {
-        eprintln!("importing raw disk image: {}", image.display());
-    }
-
-    // Decompress if needed.
-    let decompressed = decompress_if_needed(image, verbose)?;
-    let cleanup_decompressed = decompressed != image;
-
-    let result = (|| -> Result<()> {
-        // Attach the image as a loop device.
-        let output = Command::new("losetup")
-            .args(["--partscan", "--read-only", "--find", "--show"])
-            .arg(&decompressed)
-            .output()
-            .context("failed to run losetup")?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("losetup failed: {stderr}");
-        }
-        let loop_dev = PathBuf::from(
-            String::from_utf8_lossy(&output.stdout).trim().to_string()
-        );
-
-        let mut loop_guard = LoopGuard::new();
-        loop_guard.set_active(loop_dev.clone());
-
-        if verbose {
-            eprintln!("attached loop device: {}", loop_dev.display());
-        }
-
-        check_interrupted()?;
-
-        // Small delay for partition devices to appear.
-        std::thread::sleep(std::time::Duration::from_millis(500));
-
-        check_interrupted()?;
-
-        // Find the root partition device.
-        let part_dev = find_root_partition(&loop_dev, verbose)?;
-        if verbose {
-            eprintln!("mounting partition: {}", part_dev.display());
-        }
-
-        // Create a temporary mount point.
-        let mut mount_guard = MountGuard::new();
-        let mount_dir = staging_dir.with_file_name(format!(
-            ".{}.raw-mount",
-            staging_dir.file_name().unwrap().to_string_lossy()
-        ));
-        fs::create_dir_all(&mount_dir)
-            .with_context(|| format!("failed to create mount point {}", mount_dir.display()))?;
-
-        // Mount the partition read-only.
-        let status = Command::new("mount")
-            .args(["-o", "ro"])
-            .arg(&part_dev)
-            .arg(&mount_dir)
-            .status()
-            .context("failed to run mount")?;
-        if !status.success() {
-            let _ = fs::remove_dir(&mount_dir);
-            bail!("mount failed for {}", part_dev.display());
-        }
-        mount_guard.set_mounted(mount_dir);
-
-        // Copy the tree. Guards handle cleanup on error or interruption.
-        let result = do_import(&mount_guard.path, staging_dir, verbose);
-
-        // Explicit cleanup in order (unmount before loop detach).
-        mount_guard.unmount();
-        loop_guard.detach();
-
-        result
-    })();
-
-    // Clean up decompressed temp file.
-    if cleanup_decompressed {
-        let _ = fs::remove_file(&decompressed);
-    }
 
     result
 }
@@ -1445,10 +693,10 @@ pub fn run(
         .with_context(|| format!("failed to create {}", rootfs_dir.display()))?;
 
     let result = match kind {
-        SourceKind::Directory(ref dir) => do_import(dir, &staging_dir, verbose),
-        SourceKind::Tarball(ref path) => import_tarball(path, &staging_dir, verbose),
-        SourceKind::QcowImage(ref path) => import_qcow2(path, &staging_dir, verbose),
-        SourceKind::RawImage(ref path) => import_raw(path, &staging_dir, verbose),
+        SourceKind::Directory(ref path) => dir::do_import(path, &staging_dir, verbose),
+        SourceKind::Tarball(ref path) => tar::import_tarball(path, &staging_dir, verbose),
+        SourceKind::QcowImage(ref path) => img::import_qcow2(path, &staging_dir, verbose),
+        SourceKind::RawImage(ref path) => img::import_raw(path, &staging_dir, verbose),
         SourceKind::Url(ref url) => import_url(url, &staging_dir, &rootfs_dir, name, verbose),
     };
 
@@ -1584,16 +832,19 @@ pub fn run(
 // --- Tests ---
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use std::os::unix::fs as unix_fs;
     use std::os::unix::fs::PermissionsExt;
+
+    use crate::copy::{copy_tree, lstat_entry, path_to_cstring};
 
     /// Mutex that serializes all tests touching the global INTERRUPTED flag
     /// so they don't poison concurrent tests that call check_interrupted().
-    static INTERRUPT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    pub(crate) static INTERRUPT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Helper to run import in tests, bypassing systemd checks.
-    fn test_run(
+    pub(crate) fn test_run(
         datadir: &Path,
         source: &str,
         name: &str,
@@ -1608,16 +859,16 @@ mod tests {
 
     use crate::testutil::TempDataDir;
 
-    fn tmp() -> TempDataDir {
+    pub(crate) fn tmp() -> TempDataDir {
         TempDataDir::new("import")
     }
 
-    struct TempSourceDir {
+    pub(crate) struct TempSourceDir {
         dir: std::path::PathBuf,
     }
 
     impl TempSourceDir {
-        fn new(suffix: &str) -> Self {
+        pub(crate) fn new(suffix: &str) -> Self {
             let dir = std::env::temp_dir().join(format!(
                 "sdme-test-import-src-{}-{:?}-{suffix}",
                 std::process::id(),
@@ -1628,7 +879,7 @@ mod tests {
             Self { dir }
         }
 
-        fn path(&self) -> &Path {
+        pub(crate) fn path(&self) -> &Path {
             &self.dir
         }
     }
@@ -1636,6 +887,28 @@ mod tests {
     impl Drop for TempSourceDir {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// RAII guard that acquires INTERRUPT_LOCK, sets INTERRUPTED to true,
+    /// and resets it on drop.
+    pub(crate) struct InterruptGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl InterruptGuard {
+        pub(crate) fn new() -> Self {
+            use std::sync::atomic::Ordering;
+            let lock = INTERRUPT_LOCK.lock().unwrap();
+            crate::INTERRUPTED.store(true, Ordering::Relaxed);
+            Self { _lock: lock }
+        }
+    }
+
+    impl Drop for InterruptGuard {
+        fn drop(&mut self) {
+            use std::sync::atomic::Ordering;
+            crate::INTERRUPTED.store(false, Ordering::Relaxed);
         }
     }
 
@@ -2093,118 +1366,6 @@ mod tests {
     }
 
     #[test]
-    fn test_import_tarball_basic() {
-        let tmp = tmp();
-        let src = TempSourceDir::new("tarball-gz");
-
-        // Create source files.
-        fs::write(src.path().join("hello.txt"), "hello world\n").unwrap();
-        fs::create_dir(src.path().join("subdir")).unwrap();
-        fs::write(src.path().join("subdir/nested.txt"), "nested\n").unwrap();
-
-        // Create a gzipped tarball using tar::Builder.
-        let tarball = std::env::temp_dir().join(format!(
-            "sdme-test-tarball-{}-{:?}.tar.gz",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let file = File::create(&tarball).unwrap();
-        let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
-        let mut builder = tar::Builder::new(encoder);
-        builder.append_dir_all(".", src.path()).unwrap();
-        let encoder = builder.into_inner().unwrap();
-        encoder.finish().unwrap();
-
-        test_run(
-            tmp.path(),
-            tarball.to_str().unwrap(),
-            "tgz",
-            false,
-            true,
-        )
-        .unwrap();
-
-        let rootfs = tmp.path().join("fs/tgz");
-        assert!(rootfs.is_dir());
-        assert_eq!(
-            fs::read_to_string(rootfs.join("hello.txt")).unwrap(),
-            "hello world\n"
-        );
-        assert!(rootfs.join("subdir").is_dir());
-        assert_eq!(
-            fs::read_to_string(rootfs.join("subdir/nested.txt")).unwrap(),
-            "nested\n"
-        );
-
-        let _ = fs::remove_file(&tarball);
-    }
-
-    #[test]
-    fn test_import_tarball_uncompressed() {
-        let tmp = tmp();
-        let src = TempSourceDir::new("tarball-plain");
-
-        fs::write(src.path().join("file.txt"), "content\n").unwrap();
-
-        // Create an uncompressed tarball using tar::Builder.
-        let tarball = std::env::temp_dir().join(format!(
-            "sdme-test-tarball-plain-{}-{:?}.tar",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let file = File::create(&tarball).unwrap();
-        let mut builder = tar::Builder::new(file);
-        builder.append_dir_all(".", src.path()).unwrap();
-        builder.finish().unwrap();
-
-        test_run(
-            tmp.path(),
-            tarball.to_str().unwrap(),
-            "plain",
-            false,
-            true,
-        )
-        .unwrap();
-
-        let rootfs = tmp.path().join("fs/plain");
-        assert_eq!(
-            fs::read_to_string(rootfs.join("file.txt")).unwrap(),
-            "content\n"
-        );
-
-        let _ = fs::remove_file(&tarball);
-    }
-
-    #[test]
-    fn test_import_tarball_invalid_file() {
-        let tmp = tmp();
-        let file_path = std::env::temp_dir().join(format!(
-            "sdme-test-bad-tarball-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        fs::write(&file_path, "this is not a tarball").unwrap();
-
-        let err = test_run(
-            tmp.path(),
-            file_path.to_str().unwrap(),
-            "bad",
-            false,
-            false,
-        )
-        .unwrap_err();
-        assert!(
-            err.to_string().contains("extract"),
-            "unexpected error: {err}"
-        );
-
-        // Staging dir should be cleaned up.
-        assert!(!tmp.path().join("fs/.bad.importing").exists());
-
-        let _ = fs::remove_file(&file_path);
-    }
-
-    #[test]
     #[ignore] // Requires CAP_CHOWN (root).
     fn test_import_preserves_ownership() {
         let tmp = tmp();
@@ -2231,576 +1392,7 @@ mod tests {
         assert_eq!(dst_stat.st_gid, 1000);
     }
 
-    // --- OCI tests ---
-
-    /// Helper to build an OCI image tarball programmatically.
-    ///
-    /// Constructs a valid OCI image layout with the given layers, each
-    /// specified as a list of (path, content) pairs for regular files.
-    /// Returns the path to the gzipped tarball.
-    fn build_oci_tarball(
-        name: &str,
-        layers: &[Vec<(&str, &[u8])>],
-        use_manifest_index: bool,
-    ) -> PathBuf {
-        use sha2::{Digest, Sha256};
-
-
-        let work_dir = std::env::temp_dir().join(format!(
-            "sdme-test-oci-build-{}-{:?}-{name}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = fs::remove_dir_all(&work_dir);
-        fs::create_dir_all(work_dir.join("blobs/sha256")).unwrap();
-
-        // Write oci-layout.
-        fs::write(
-            work_dir.join("oci-layout"),
-            r#"{"imageLayoutVersion":"1.0.0"}"#,
-        )
-        .unwrap();
-
-        // Build layer blobs.
-        let mut layer_descriptors = Vec::new();
-        for layer_files in layers {
-            let mut layer_tar = Vec::new();
-            {
-                let encoder =
-                    flate2::write::GzEncoder::new(&mut layer_tar, flate2::Compression::default());
-                let mut builder = tar::Builder::new(encoder);
-                for (path, content) in layer_files {
-                    let mut header = tar::Header::new_ustar();
-                    header.set_path(path).unwrap();
-                    header.set_size(content.len() as u64);
-                    header.set_mode(0o644);
-                    header.set_uid(unsafe { libc::getuid() } as u64);
-                    header.set_gid(unsafe { libc::getgid() } as u64);
-                    header.set_cksum();
-                    builder.append(&header, *content).unwrap();
-                }
-                let encoder = builder.into_inner().unwrap();
-                encoder.finish().unwrap();
-            }
-
-            let hash = {
-                let mut hasher = Sha256::new();
-                hasher.update(&layer_tar);
-                format!("{:x}", hasher.finalize())
-            };
-
-            fs::write(work_dir.join("blobs/sha256").join(&hash), &layer_tar).unwrap();
-            layer_descriptors.push(serde_json::json!({
-                "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
-                "digest": format!("sha256:{hash}"),
-                "size": layer_tar.len()
-            }));
-        }
-
-        // Build config blob (minimal).
-        let config_json = b"{}";
-        let config_hash = {
-            let mut hasher = Sha256::new();
-            hasher.update(config_json);
-            format!("{:x}", hasher.finalize())
-        };
-        fs::write(
-            work_dir.join("blobs/sha256").join(&config_hash),
-            config_json,
-        )
-        .unwrap();
-
-        // Build image manifest.
-        let manifest = serde_json::json!({
-            "schemaVersion": 2,
-            "mediaType": "application/vnd.oci.image.manifest.v1+json",
-            "config": {
-                "mediaType": "application/vnd.oci.image.config.v1+json",
-                "digest": format!("sha256:{config_hash}"),
-                "size": config_json.len()
-            },
-            "layers": layer_descriptors
-        });
-        let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
-        let manifest_hash = {
-            let mut hasher = Sha256::new();
-            hasher.update(&manifest_bytes);
-            format!("{:x}", hasher.finalize())
-        };
-        fs::write(
-            work_dir.join("blobs/sha256").join(&manifest_hash),
-            &manifest_bytes,
-        )
-        .unwrap();
-
-        // Build index.json.
-        let index = if use_manifest_index {
-            // Wrap in a manifest index (one level of indirection).
-            let manifest_index = serde_json::json!({
-                "schemaVersion": 2,
-                "mediaType": "application/vnd.oci.image.index.v1+json",
-                "manifests": [{
-                    "mediaType": "application/vnd.oci.image.manifest.v1+json",
-                    "digest": format!("sha256:{manifest_hash}"),
-                    "size": manifest_bytes.len()
-                }]
-            });
-            let mi_bytes = serde_json::to_vec(&manifest_index).unwrap();
-            let mi_hash = {
-                let mut hasher = Sha256::new();
-                hasher.update(&mi_bytes);
-                format!("{:x}", hasher.finalize())
-            };
-            fs::write(work_dir.join("blobs/sha256").join(&mi_hash), &mi_bytes).unwrap();
-
-            serde_json::json!({
-                "schemaVersion": 2,
-                "manifests": [{
-                    "mediaType": "application/vnd.oci.image.index.v1+json",
-                    "digest": format!("sha256:{mi_hash}"),
-                    "size": mi_bytes.len()
-                }]
-            })
-        } else {
-            serde_json::json!({
-                "schemaVersion": 2,
-                "manifests": [{
-                    "mediaType": "application/vnd.oci.image.manifest.v1+json",
-                    "digest": format!("sha256:{manifest_hash}"),
-                    "size": manifest_bytes.len()
-                }]
-            })
-        };
-        fs::write(
-            work_dir.join("index.json"),
-            serde_json::to_vec_pretty(&index).unwrap(),
-        )
-        .unwrap();
-
-        // Pack everything into a gzipped tarball.
-        let tarball_path = std::env::temp_dir().join(format!(
-            "sdme-test-oci-{}-{:?}-{name}.tar.gz",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let file = File::create(&tarball_path).unwrap();
-        let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
-        let mut builder = tar::Builder::new(encoder);
-        builder.append_dir_all(".", &work_dir).unwrap();
-        let encoder = builder.into_inner().unwrap();
-        encoder.finish().unwrap();
-
-        let _ = fs::remove_dir_all(&work_dir);
-        tarball_path
-    }
-
-    /// Helper to build an OCI layer tarball with whiteout markers.
-    fn build_oci_tarball_with_whiteouts(
-        name: &str,
-        base_files: Vec<(&str, &[u8])>,
-        whiteout_entries: Vec<&str>,
-    ) -> PathBuf {
-        use sha2::{Digest, Sha256};
-
-
-        let work_dir = std::env::temp_dir().join(format!(
-            "sdme-test-oci-wh-build-{}-{:?}-{name}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = fs::remove_dir_all(&work_dir);
-        fs::create_dir_all(work_dir.join("blobs/sha256")).unwrap();
-
-        fs::write(
-            work_dir.join("oci-layout"),
-            r#"{"imageLayoutVersion":"1.0.0"}"#,
-        )
-        .unwrap();
-
-        let mut layer_descriptors = Vec::new();
-
-        // Base layer with files.
-        {
-            let mut layer_tar = Vec::new();
-            {
-                let encoder =
-                    flate2::write::GzEncoder::new(&mut layer_tar, flate2::Compression::default());
-                let mut builder = tar::Builder::new(encoder);
-                for (path, content) in &base_files {
-                    let mut header = tar::Header::new_ustar();
-                    header.set_path(path).unwrap();
-                    header.set_size(content.len() as u64);
-                    header.set_mode(0o644);
-                    header.set_uid(unsafe { libc::getuid() } as u64);
-                    header.set_gid(unsafe { libc::getgid() } as u64);
-                    header.set_cksum();
-                    builder.append(&header, *content).unwrap();
-                }
-                let encoder = builder.into_inner().unwrap();
-                encoder.finish().unwrap();
-            }
-            let hash = {
-                let mut hasher = Sha256::new();
-                hasher.update(&layer_tar);
-                format!("{:x}", hasher.finalize())
-            };
-            fs::write(work_dir.join("blobs/sha256").join(&hash), &layer_tar).unwrap();
-            layer_descriptors.push(serde_json::json!({
-                "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
-                "digest": format!("sha256:{hash}"),
-                "size": layer_tar.len()
-            }));
-        }
-
-        // Whiteout layer.
-        {
-            let mut layer_tar = Vec::new();
-            {
-                let encoder =
-                    flate2::write::GzEncoder::new(&mut layer_tar, flate2::Compression::default());
-                let mut builder = tar::Builder::new(encoder);
-                for entry_path in &whiteout_entries {
-                    let mut header = tar::Header::new_ustar();
-                    header.set_path(entry_path).unwrap();
-                    header.set_size(0);
-                    header.set_mode(0o644);
-                    header.set_uid(unsafe { libc::getuid() } as u64);
-                    header.set_gid(unsafe { libc::getgid() } as u64);
-                    header.set_cksum();
-                    builder.append(&header, &b""[..]).unwrap();
-                }
-                let encoder = builder.into_inner().unwrap();
-                encoder.finish().unwrap();
-            }
-            let hash = {
-                let mut hasher = Sha256::new();
-                hasher.update(&layer_tar);
-                format!("{:x}", hasher.finalize())
-            };
-            fs::write(work_dir.join("blobs/sha256").join(&hash), &layer_tar).unwrap();
-            layer_descriptors.push(serde_json::json!({
-                "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
-                "digest": format!("sha256:{hash}"),
-                "size": layer_tar.len()
-            }));
-        }
-
-        // Config + manifest + index (same pattern as build_oci_tarball).
-        let config_json = b"{}";
-        let config_hash = {
-            let mut hasher = Sha256::new();
-            hasher.update(config_json);
-            format!("{:x}", hasher.finalize())
-        };
-        fs::write(
-            work_dir.join("blobs/sha256").join(&config_hash),
-            config_json,
-        )
-        .unwrap();
-
-        let manifest = serde_json::json!({
-            "schemaVersion": 2,
-            "mediaType": "application/vnd.oci.image.manifest.v1+json",
-            "config": {
-                "mediaType": "application/vnd.oci.image.config.v1+json",
-                "digest": format!("sha256:{config_hash}"),
-                "size": config_json.len()
-            },
-            "layers": layer_descriptors
-        });
-        let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
-        let manifest_hash = {
-            let mut hasher = Sha256::new();
-            hasher.update(&manifest_bytes);
-            format!("{:x}", hasher.finalize())
-        };
-        fs::write(
-            work_dir.join("blobs/sha256").join(&manifest_hash),
-            &manifest_bytes,
-        )
-        .unwrap();
-
-        let index = serde_json::json!({
-            "schemaVersion": 2,
-            "manifests": [{
-                "mediaType": "application/vnd.oci.image.manifest.v1+json",
-                "digest": format!("sha256:{manifest_hash}"),
-                "size": manifest_bytes.len()
-            }]
-        });
-        fs::write(
-            work_dir.join("index.json"),
-            serde_json::to_vec_pretty(&index).unwrap(),
-        )
-        .unwrap();
-
-        let tarball_path = std::env::temp_dir().join(format!(
-            "sdme-test-oci-wh-{}-{:?}-{name}.tar.gz",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let file = File::create(&tarball_path).unwrap();
-        let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
-        let mut builder = tar::Builder::new(encoder);
-        builder.append_dir_all(".", &work_dir).unwrap();
-        let encoder = builder.into_inner().unwrap();
-        encoder.finish().unwrap();
-
-        let _ = fs::remove_dir_all(&work_dir);
-        tarball_path
-    }
-
-    #[test]
-    fn test_is_oci_layout() {
-        let dir = std::env::temp_dir().join(format!(
-            "sdme-test-oci-detect-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-
-        // No oci-layout file.
-        assert!(!is_oci_layout(&dir));
-
-        // Create oci-layout file.
-        fs::write(dir.join("oci-layout"), r#"{"imageLayoutVersion":"1.0.0"}"#).unwrap();
-        assert!(is_oci_layout(&dir));
-
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn test_import_oci_basic() {
-        let tmp = tmp();
-        let tarball = build_oci_tarball(
-            "basic",
-            &[vec![
-                ("etc/os-release", b"PRETTY_NAME=\"TestOS 1.0\"\n"),
-                ("hello.txt", b"hello from OCI\n"),
-            ]],
-            false,
-        );
-
-        test_run(
-            tmp.path(),
-            tarball.to_str().unwrap(),
-            "ocibasic",
-            false,
-            true,
-        )
-        .unwrap();
-
-        let rootfs = tmp.path().join("fs/ocibasic");
-        assert!(rootfs.is_dir());
-        assert_eq!(
-            fs::read_to_string(rootfs.join("hello.txt")).unwrap(),
-            "hello from OCI\n"
-        );
-        assert_eq!(
-            fs::read_to_string(rootfs.join("etc/os-release")).unwrap(),
-            "PRETTY_NAME=\"TestOS 1.0\"\n"
-        );
-
-        let _ = fs::remove_file(&tarball);
-    }
-
-    #[test]
-    fn test_import_oci_multilayer() {
-        let tmp = tmp();
-        let tarball = build_oci_tarball(
-            "multi",
-            &[
-                vec![
-                    ("base.txt", b"from layer 1\n"),
-                    ("shared.txt", b"layer 1 version\n"),
-                ],
-                vec![
-                    ("overlay.txt", b"from layer 2\n"),
-                    ("shared.txt", b"layer 2 version\n"),
-                ],
-            ],
-            false,
-        );
-
-        test_run(
-            tmp.path(),
-            tarball.to_str().unwrap(),
-            "ocimulti",
-            false,
-            true,
-        )
-        .unwrap();
-
-        let rootfs = tmp.path().join("fs/ocimulti");
-        assert_eq!(
-            fs::read_to_string(rootfs.join("base.txt")).unwrap(),
-            "from layer 1\n"
-        );
-        assert_eq!(
-            fs::read_to_string(rootfs.join("overlay.txt")).unwrap(),
-            "from layer 2\n"
-        );
-        // Layer 2 should overwrite layer 1's version.
-        assert_eq!(
-            fs::read_to_string(rootfs.join("shared.txt")).unwrap(),
-            "layer 2 version\n"
-        );
-
-        let _ = fs::remove_file(&tarball);
-    }
-
-    #[test]
-    fn test_import_oci_whiteout() {
-        let tmp = tmp();
-        let tarball = build_oci_tarball_with_whiteouts(
-            "whiteout",
-            vec![
-                ("keep.txt", b"keep me\n"),
-                ("delete-me.txt", b"delete me\n"),
-                ("subdir/also-delete.txt", b"also delete\n"),
-                ("subdir/keep-this.txt", b"keep this\n"),
-            ],
-            vec![".wh.delete-me.txt", "subdir/.wh.also-delete.txt"],
-        );
-
-        test_run(
-            tmp.path(),
-            tarball.to_str().unwrap(),
-            "ociwhiteout",
-            false,
-            true,
-        )
-        .unwrap();
-
-        let rootfs = tmp.path().join("fs/ociwhiteout");
-        assert_eq!(
-            fs::read_to_string(rootfs.join("keep.txt")).unwrap(),
-            "keep me\n"
-        );
-        assert!(
-            !rootfs.join("delete-me.txt").exists(),
-            "whiteout should have deleted delete-me.txt"
-        );
-        assert!(
-            !rootfs.join("subdir/also-delete.txt").exists(),
-            "whiteout should have deleted subdir/also-delete.txt"
-        );
-        assert_eq!(
-            fs::read_to_string(rootfs.join("subdir/keep-this.txt")).unwrap(),
-            "keep this\n"
-        );
-
-        let _ = fs::remove_file(&tarball);
-    }
-
-    #[test]
-    fn test_oci_whiteout_symlink_escape() {
-        // Layer 1: a symlink "escape" pointing outside dest.
-        // Layer 2: a whiteout "escape/.wh.target" that should NOT follow the symlink.
-        let dest = std::env::temp_dir().join(format!(
-            "sdme-test-wh-escape-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let outside = std::env::temp_dir().join(format!(
-            "sdme-test-wh-outside-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = fs::remove_dir_all(&dest);
-        let _ = fs::remove_dir_all(&outside);
-        fs::create_dir_all(&dest).unwrap();
-        fs::create_dir_all(&outside).unwrap();
-
-        // Create a file outside dest that should survive.
-        fs::write(outside.join("target"), "do not delete\n").unwrap();
-
-        // Create a symlink inside dest that points outside.
-        unix_fs::symlink(&outside, dest.join("escape")).unwrap();
-
-        // Build a tar with a regular whiteout targeting escape/target.
-        let mut layer_tar = Vec::new();
-        {
-            let encoder =
-                flate2::write::GzEncoder::new(&mut layer_tar, flate2::Compression::default());
-            let mut builder = tar::Builder::new(encoder);
-            // Whiteout entry: escape/.wh.target
-            let mut header = tar::Header::new_ustar();
-            header.set_path("escape/.wh.target").unwrap();
-            header.set_size(0);
-            header.set_mode(0o644);
-            header.set_uid(0);
-            header.set_gid(0);
-            header.set_cksum();
-            builder.append(&header, &b""[..]).unwrap();
-            let encoder = builder.into_inner().unwrap();
-            encoder.finish().unwrap();
-        }
-
-        let reader = flate2::read::GzDecoder::new(&layer_tar[..]);
-        unpack_oci_layer(reader, &dest).unwrap();
-
-        // The file outside dest must NOT have been deleted.
-        assert!(
-            outside.join("target").exists(),
-            "whiteout should not follow symlink outside dest"
-        );
-
-        let _ = fs::remove_dir_all(&dest);
-        let _ = fs::remove_dir_all(&outside);
-    }
-
-    #[test]
-    fn test_import_oci_manifest_index() {
-        let tmp = tmp();
-        let tarball = build_oci_tarball(
-            "index",
-            &[vec![("from-index.txt", b"via manifest index\n")]],
-            true, // Use manifest index indirection.
-        );
-
-        test_run(
-            tmp.path(),
-            tarball.to_str().unwrap(),
-            "ociindex",
-            false,
-            true,
-        )
-        .unwrap();
-
-        let rootfs = tmp.path().join("fs/ociindex");
-        assert_eq!(
-            fs::read_to_string(rootfs.join("from-index.txt")).unwrap(),
-            "via manifest index\n"
-        );
-
-        let _ = fs::remove_file(&tarball);
-    }
-
     // --- Interrupt tests ---
-
-    /// RAII guard that acquires INTERRUPT_LOCK, sets INTERRUPTED to true,
-    /// and resets it on drop.
-    struct InterruptGuard {
-        _lock: std::sync::MutexGuard<'static, ()>,
-    }
-
-    impl InterruptGuard {
-        fn new() -> Self {
-            use std::sync::atomic::Ordering;
-            let lock = INTERRUPT_LOCK.lock().unwrap();
-            crate::INTERRUPTED.store(true, Ordering::Relaxed);
-            Self { _lock: lock }
-        }
-    }
-
-    impl Drop for InterruptGuard {
-        fn drop(&mut self) {
-            use std::sync::atomic::Ordering;
-            crate::INTERRUPTED.store(false, Ordering::Relaxed);
-        }
-    }
 
     #[test]
     fn test_check_interrupted() {
@@ -2848,42 +1440,6 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&dst);
-    }
-
-    #[test]
-    fn test_unpack_tar_interrupted() {
-        let _guard = InterruptGuard::new();
-        let src = TempSourceDir::new("int-tar-src");
-        fs::write(src.path().join("file.txt"), "data").unwrap();
-
-        // Build a small tarball.
-        let tarball_path = std::env::temp_dir().join(format!(
-            "sdme-test-int-tar-{}-{:?}.tar",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let file = File::create(&tarball_path).unwrap();
-        let mut builder = tar::Builder::new(file);
-        builder.append_dir_all(".", src.path()).unwrap();
-        builder.finish().unwrap();
-
-        let dest = std::env::temp_dir().join(format!(
-            "sdme-test-int-tar-dst-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = fs::remove_dir_all(&dest);
-        fs::create_dir_all(&dest).unwrap();
-
-        let file = File::open(&tarball_path).unwrap();
-        let err = unpack_tar(file, &dest).unwrap_err();
-        assert!(
-            err.to_string().contains("interrupted"),
-            "unexpected error: {err}"
-        );
-
-        let _ = fs::remove_dir_all(&dest);
-        let _ = fs::remove_file(&tarball_path);
     }
 
     #[test]
