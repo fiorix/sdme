@@ -168,7 +168,7 @@ fn is_inside_dest(path: &Path, dest: &Path) -> bool {
 /// OCI whiteouts:
 /// - `.wh..wh..opq` in a directory means "clear existing contents of this directory"
 /// - `.wh.<name>` means "delete <name> from the destination"
-fn unpack_oci_layer<R: Read>(reader: R, dest: &Path) -> Result<()> {
+pub(super) fn unpack_oci_layer<R: Read>(reader: R, dest: &Path) -> Result<()> {
     let mut archive = tar::Archive::new(reader);
     archive.set_preserve_permissions(true);
     archive.set_preserve_ownerships(true);

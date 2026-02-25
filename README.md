@@ -49,12 +49,27 @@ You can disable this with the `join_as_sudo_user` config setting — see `sdme c
 
 By default, host-rootfs containers (no `-r`) make `/etc/systemd/system` and `/var/log` opaque so the host's systemd overrides and log history don't leak in. Override with `-o` or change the default via `sdme config set host_rootfs_opaque_dirs`.
 
-Importing an existing root filesystem:
+Importing a root filesystem on Ubuntu with debootstrap:
 
 ```
 $ debootstrap --include=dbus,systemd noble /tmp/ubuntu
 $ sudo sdme fs import ubuntu /tmp/ubuntu
 $ sudo sdme new -r ubuntu
+```
+
+## Importing filesystem from an OCI container
+
+Fedora:
+
+```
+sudo sdme fs import fedora quay.io/fedora/fedora
+sudo sdme new -r fedora
+```
+
+Debian:
+```
+sudo sdme fs import debian docker.io/debian
+sudo sdme new -r debian
 ```
 
 ### Container management

@@ -206,11 +206,11 @@ enum Command {
 
 #[derive(Subcommand)]
 enum RootfsCommand {
-    /// Import a root filesystem from a directory, tarball, URL, OCI image, or QCOW2 disk image
+    /// Import a root filesystem from a directory, tarball, URL, OCI image, registry image, or QCOW2 disk image
     Import {
         /// Name for the imported rootfs
         name: String,
-        /// Source: directory path, tarball (.tar, .tar.gz, .tar.bz2, .tar.xz, .tar.zst), URL, OCI image (.oci.tar.xz, etc.), or QCOW2 disk image
+        /// Source: directory path, tarball (.tar, .tar.gz, .tar.bz2, .tar.xz, .tar.zst), URL, OCI image (.oci.tar.xz, etc.), registry image (e.g. quay.io/repo:tag), or QCOW2 disk image
         source: String,
         /// Remove leftover staging directory from a previous failed import
         #[arg(short, long)]

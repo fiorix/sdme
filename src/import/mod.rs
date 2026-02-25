@@ -1,4 +1,4 @@
-//! Rootfs import logic: directory copy, tarball extraction, URL download, OCI image, and QCOW2 support.
+//! Rootfs import logic: directory copy, tarball extraction, URL download, OCI image, registry pull, and QCOW2 support.
 //!
 //! NOTE: Internally the code uses "rootfs" (variables, structs, module name),
 //! but the CLI command is "fs" and the on-disk path is {datadir}/fs/.
@@ -8,11 +8,13 @@
 //! - Tarball files (.tar, .tar.gz, .tar.bz2, .tar.xz, .tar.zst)
 //! - HTTP/HTTPS URLs pointing to tarballs
 //! - OCI container image archives (.oci.tar, .oci.tar.xz, etc.)
+//! - OCI registry images (e.g. quay.io/repo:tag, pulled via OCI Distribution Spec)
 //! - QCOW2 disk images (via qemu-nbd, auto-detected by magic bytes)
 
 mod dir;
 mod img;
 mod oci;
+mod registry;
 mod tar;
 
 use std::fs::{self, File};
@@ -47,6 +49,7 @@ enum SourceKind {
     QcowImage(PathBuf),
     RawImage(PathBuf),
     Url(String),
+    RegistryImage(registry::ImageReference),
 }
 
 /// QCOW2 magic bytes: "QFI\xfb".
@@ -184,6 +187,10 @@ fn detect_source_kind(source: &str) -> Result<SourceKind> {
         return Ok(SourceKind::Url(source.to_string()));
     }
 
+    if let Some(image_ref) = registry::ImageReference::parse(source) {
+        return Ok(SourceKind::RegistryImage(image_ref));
+    }
+
     let path = Path::new(source);
     if path.is_dir() {
         return Ok(SourceKind::Directory(path.to_path_buf()));
@@ -249,18 +256,21 @@ pub(super) fn detect_compression_magic(magic: &[u8]) -> Result<Compression> {
     }
 }
 
-/// Helper to get a decompression reader based on the compression type.
-pub(super) fn get_decoder(file: File, compression: &Compression) -> Result<Box<dyn Read>> {
+/// Get a decompression reader wrapping the given reader.
+pub(super) fn get_decoder(
+    reader: impl Read + 'static,
+    compression: &Compression,
+) -> Result<Box<dyn Read>> {
     match compression {
-        Compression::Gzip => Ok(Box::new(flate2::read::GzDecoder::new(file))),
-        Compression::Bzip2 => Ok(Box::new(bzip2::read::BzDecoder::new(file))),
-        Compression::Xz => Ok(Box::new(xz2::read::XzDecoder::new(file))),
+        Compression::Gzip => Ok(Box::new(flate2::read::GzDecoder::new(reader))),
+        Compression::Bzip2 => Ok(Box::new(bzip2::read::BzDecoder::new(reader))),
+        Compression::Xz => Ok(Box::new(xz2::read::XzDecoder::new(reader))),
         Compression::Zstd => {
-            let decoder = zstd::stream::read::Decoder::new(file)
+            let decoder = zstd::stream::read::Decoder::new(reader)
                 .context("failed to create zstd decoder")?;
             Ok(Box::new(decoder))
-        },
-        Compression::None => Ok(Box::new(file)),
+        }
+        Compression::None => Ok(Box::new(reader)),
     }
 }
 
@@ -270,7 +280,7 @@ pub(super) fn get_decoder(file: File, compression: &Compression) -> Result<Box<d
 ///
 /// Checks (in order): `https_proxy`, `HTTPS_PROXY`, `http_proxy`, `HTTP_PROXY`,
 /// `all_proxy`, `ALL_PROXY`. Returns the first non-empty value found.
-fn proxy_from_env() -> Option<String> {
+pub(super) fn proxy_from_env() -> Option<String> {
     for var in [
         "https_proxy",
         "HTTPS_PROXY",
@@ -289,7 +299,17 @@ fn proxy_from_env() -> Option<String> {
 }
 
 /// Build a ureq agent, configuring proxy from environment if available.
-fn build_http_agent(verbose: bool) -> Result<ureq::Agent> {
+///
+/// Note on interrupt handling: the `ctrlc` crate installs signal handlers with
+/// `SA_RESTART`, which means a blocked `read()` syscall is automatically restarted
+/// after SIGINT rather than returning `EINTR`. If the remote server stalls during a
+/// download, Ctrl+C will set `INTERRUPTED` but the read loop won't cycle to check it
+/// until the `read()` returns. This is a pre-existing limitation shared with
+/// `download_file()` and is inherent to the `SA_RESTART` signal handling model.
+/// For metadata requests (auth, manifests), this is mitigated by response size limits
+/// (`read_to_string`). For blob downloads, stalled connections will eventually hit
+/// TCP keepalive timeouts (typically 2+ hours on Linux).
+pub(super) fn build_http_agent(verbose: bool) -> Result<ureq::Agent> {
     let mut config = ureq::Agent::config_builder();
     if let Some(proxy_uri) = proxy_from_env() {
         if verbose {
@@ -304,8 +324,8 @@ fn build_http_agent(verbose: bool) -> Result<ureq::Agent> {
     Ok(config.build().into())
 }
 
-/// Maximum download size (50 GiB) to prevent disk exhaustion from malicious URLs.
-const MAX_DOWNLOAD_SIZE: u64 = 50 * 1024 * 1024 * 1024;
+/// Maximum download size (50 GiB) to prevent disk exhaustion from malicious servers.
+pub(super) const MAX_DOWNLOAD_SIZE: u64 = 50 * 1024 * 1024 * 1024;
 
 /// Download a URL to a local file, streaming to constant memory.
 /// Returns the Content-Type mime type from the response, if present.
@@ -698,6 +718,9 @@ pub fn run(
         SourceKind::QcowImage(ref path) => img::import_qcow2(path, &staging_dir, verbose),
         SourceKind::RawImage(ref path) => img::import_raw(path, &staging_dir, verbose),
         SourceKind::Url(ref url) => import_url(url, &staging_dir, &rootfs_dir, name, verbose),
+        SourceKind::RegistryImage(ref img) => {
+            registry::import_registry_image(img, &staging_dir, &rootfs_dir, verbose)
+        }
     };
 
     if let Err(e) = result {
@@ -1363,6 +1386,30 @@ pub(crate) mod tests {
             err.to_string().contains("does not exist"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn test_detect_source_kind_registry() {
+        match detect_source_kind("quay.io/centos/centos:stream10").unwrap() {
+            SourceKind::RegistryImage(img) => {
+                assert_eq!(img.registry, "quay.io");
+                assert_eq!(img.repository, "centos/centos");
+                assert_eq!(img.reference, "stream10");
+            }
+            other => panic!("expected RegistryImage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_detect_source_kind_registry_default_tag() {
+        match detect_source_kind("ghcr.io/org/repo").unwrap() {
+            SourceKind::RegistryImage(img) => {
+                assert_eq!(img.registry, "ghcr.io");
+                assert_eq!(img.repository, "org/repo");
+                assert_eq!(img.reference, "latest");
+            }
+            other => panic!("expected RegistryImage, got {other:?}"),
+        }
     }
 
     #[test]

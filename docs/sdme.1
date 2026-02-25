@@ -190,6 +190,14 @@ The source type is auto\-detected:
 .RI ( http:// " or " https:// )
 \(em download and extract tarball
 .IP \(bu 2
+.B Registry image
+.RI ( registry/repo:tag )
+\(em pull from an OCI\-compatible registry using the OCI Distribution Spec
+(e.g.\&
+.IR quay.io/fedora/fedora:latest ).
+Supports anonymous bearer token authentication and manifest list platform
+selection.
+.IP \(bu 2
 .B Directory
 \(em copy the directory tree
 .IP \(bu 2
@@ -466,6 +474,15 @@ Import an Ubuntu rootfs from a URL and create a container:
 .nf
 sdme fs import ubuntu https://example.com/ubuntu.tar.xz
 sdme new mybox \-r ubuntu
+.fi
+.RE
+.PP
+Import a rootfs from an OCI registry:
+.PP
+.RS
+.nf
+sdme fs import fedora quay.io/fedora/fedora
+sdme new \-r fedora
 .fi
 .RE
 .PP
