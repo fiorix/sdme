@@ -246,7 +246,7 @@ fn check_rootfs_in_use(datadir: &Path, name: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::import::{ImportOptions, InstallPackages, OciBase};
+    use crate::import::{ImportOptions, InstallPackages, OciMode};
     use crate::testutil::TempDataDir;
 
     /// Helper to import a rootfs in tests, bypassing systemd checks.
@@ -259,8 +259,8 @@ mod tests {
                 verbose: false,
                 force: true,
                 install_packages: InstallPackages::No,
-                oci_base: OciBase::Auto,
-                oci_base_fs: None,
+                oci_mode: OciMode::Auto,
+                base_fs: None,
             },
         )
     }

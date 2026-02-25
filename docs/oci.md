@@ -27,17 +27,17 @@ you can use with `sdme new -r <name>`.
 
 **Application images** (nginx, mysql, redis, etc.) have an entrypoint, a
 non-shell command, or exposed ports. sdme places the application rootfs under
-`/oci/root` inside a copy of a base rootfs you specify with `--oci-base-fs`.
+`/oci/root` inside a copy of a base rootfs you specify with `--base-fs`.
 A systemd service unit (`sdme-oci-app.service`) is generated that chroots into
 `/oci/root` and runs the application's entrypoint.
 
-The `--oci-base` flag lets you override auto-detection:
+The `--oci-mode` flag lets you override auto-detection:
 
 | Flag | Behavior |
 |------|----------|
-| `--oci-base=auto` | Auto-detect from image config (default) |
-| `--oci-base=yes` | Force base OS mode |
-| `--oci-base=no` | Force application mode (requires `--oci-base-fs`) |
+| `--oci-mode=auto` | Auto-detect from image config (default) |
+| `--oci-mode=base` | Force base OS mode |
+| `--oci-mode=app` | Force application mode (requires `--base-fs`) |
 
 ## How it works
 
@@ -79,7 +79,7 @@ This pulls the Ubuntu 24.04 OCI image, extracts it, and installs systemd
 ### Step 2: Import and run nginx
 
 ```bash
-sudo sdme fs import nginx docker.io/nginx --oci-base-fs=ubuntu -v
+sudo sdme fs import nginx docker.io/nginx --base-fs=ubuntu -v
 ```
 
 sdme auto-detects nginx as an application image (it has an entrypoint and
@@ -119,7 +119,7 @@ bake this in — it's a runtime variable. After importing, you'll add it to the
 environment file before starting the container.
 
 ```bash
-sudo sdme fs import mysql docker.io/mysql --oci-base-fs=ubuntu -v
+sudo sdme fs import mysql docker.io/mysql --base-fs=ubuntu -v
 ```
 
 The env file at `/oci/env` contains the image's built-in environment (PATH,

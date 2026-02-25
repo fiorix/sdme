@@ -169,7 +169,7 @@ Extra arguments are passed through to journalctl
 (e.g.\&
 .BR \-f ,
 .BR "\-n 100" ).
-.SS sdme fs import \fIname\fR \fIsource\fR [\-f] [\-\-install\-packages \fImode\fR] [\-\-oci\-base \fImode\fR] [\-\-oci\-base\-fs \fIrootfs\fR]
+.SS sdme fs import \fIname\fR \fIsource\fR [\-f] [\-\-install\-packages \fImode\fR] [\-\-oci\-mode \fImode\fR] [\-\-base\-fs \fIrootfs\fR]
 Import a root filesystem.
 After import, systemd is detected in the rootfs; if missing, distro\-specific
 packages can be installed via chroot.
@@ -186,7 +186,7 @@ always installs,
 refuses if systemd is absent.
 .PP
 For OCI registry images, the
-.B \-\-oci\-base
+.B \-\-oci\-mode
 flag controls how the image is classified:
 .RS
 .TP
@@ -196,20 +196,20 @@ Base OS images have no entrypoint, a shell as default command, and no exposed
 ports.
 Everything else is treated as an application image.
 .TP
-.B yes
+.B base
 Force base OS mode.
 The rootfs goes through systemd detection and package installation.
 Use this for OS images that the heuristic misclassifies.
 .TP
-.B no
+.B app
 Force application mode.
 Requires
-.B \-\-oci\-base\-fs
+.B \-\-base\-fs
 to specify a systemd\-capable rootfs as the base layer.
 .RE
 .PP
 The
-.B \-\-oci\-base\-fs
+.B \-\-base\-fs
 flag specifies a previously imported rootfs (with systemd) to use as the base
 layer for OCI application images.
 The application rootfs is placed under
@@ -542,7 +542,7 @@ Import an OCI application image and run it inside a base container:
 .RS
 .nf
 sdme fs import ubuntu docker.io/ubuntu:24.04
-sdme fs import nginx docker.io/nginx \-\-oci\-base\-fs=ubuntu
+sdme fs import nginx docker.io/nginx \-\-base\-fs=ubuntu
 sdme new \-r nginx
 .fi
 .RE

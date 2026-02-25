@@ -81,13 +81,13 @@ pub enum InstallPackages {
 
 /// Controls how OCI registry images are classified during import.
 #[derive(Debug, Clone, Copy, PartialEq, clap::ValueEnum)]
-pub enum OciBase {
+pub enum OciMode {
     /// Auto-detect from image config (entrypoint, cmd, exposed ports).
     Auto,
     /// Treat as base OS image (run systemd detection, ignore exposed ports).
-    Yes,
-    /// Treat as application image (requires --oci-base-fs, generates service unit).
-    No,
+    Base,
+    /// Treat as application image (requires --base-fs, generates service unit).
+    App,
 }
 
 /// Options for rootfs import.
@@ -97,8 +97,8 @@ pub struct ImportOptions<'a> {
     pub verbose: bool,
     pub force: bool,
     pub install_packages: InstallPackages,
-    pub oci_base: OciBase,
-    pub oci_base_fs: Option<&'a str>,
+    pub oci_mode: OciMode,
+    pub base_fs: Option<&'a str>,
 }
 
 // --- Source detection ---
@@ -1047,8 +1047,8 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
         verbose,
         force,
         install_packages,
-        oci_base,
-        oci_base_fs,
+        oci_mode,
+        base_fs,
     } = *opts;
 
     validate_name(name)?;
@@ -1110,28 +1110,28 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
     // If this was a registry pull, check if it's an application image.
     let mut oci_is_base = false;
     let skip_systemd_check = if let Some(ref cc) = oci_config {
-        let is_base = match oci_base {
-            OciBase::Yes => true,
-            OciBase::No => false,
-            OciBase::Auto => cc.is_base_os_image(),
+        let is_base = match oci_mode {
+            OciMode::Base => true,
+            OciMode::App => false,
+            OciMode::Auto => cc.is_base_os_image(),
         };
 
         eprintln!(
             "OCI image: {}",
             if is_base { "base OS" } else { "application" }
         );
-        if oci_base == OciBase::Auto {
-            eprintln!("  (auto-detected; override with --oci-base=yes or --oci-base=no)");
+        if oci_mode == OciMode::Auto {
+            eprintln!("  (auto-detected; override with --oci-mode=base or --oci-mode=app)");
         }
 
         if is_base {
             oci_is_base = true;
-            if oci_base_fs.is_some() && verbose {
-                eprintln!("note: --oci-base-fs ignored for base OS image");
+            if base_fs.is_some() && verbose {
+                eprintln!("note: --base-fs ignored for base OS image");
             }
             false
         } else {
-            match oci_base_fs {
+            match base_fs {
                 Some(base_name) => {
                     if let Err(e) = setup_app_image(
                         datadir,
@@ -1172,7 +1172,7 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
                         bail!(
                             "image appears to be an application container \
                              (Entrypoint: {ep_str}, Cmd: {cmd_str}); \
-                             specify --oci-base-fs=<rootfs> to use a systemd-capable base, \
+                             specify --base-fs=<rootfs> to use a systemd-capable base, \
                              or -f to import the raw rootfs"
                         );
                     }
@@ -1180,8 +1180,8 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
             }
         }
     } else {
-        if oci_base != OciBase::Auto && verbose {
-            eprintln!("note: --oci-base ignored for non-registry source");
+        if oci_mode != OciMode::Auto && verbose {
+            eprintln!("note: --oci-mode ignored for non-registry source");
         }
         false
     };
@@ -1408,8 +1408,8 @@ pub(crate) mod tests {
                 verbose,
                 force,
                 install_packages: InstallPackages::No,
-                oci_base: OciBase::Auto,
-                oci_base_fs: None,
+                oci_mode: OciMode::Auto,
+                base_fs: None,
             },
         )
     }
