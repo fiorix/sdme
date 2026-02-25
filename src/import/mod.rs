@@ -27,6 +27,7 @@ use crate::rootfs::DistroFamily;
 use crate::{State, validate_name, check_interrupted};
 
 use std::process::Command;
+use std::time::Duration;
 
 /// Controls whether systemd packages are installed during rootfs import.
 #[derive(Debug, Clone, Copy, PartialEq, clap::ValueEnum)]
@@ -276,6 +277,20 @@ pub(super) fn get_decoder(
 
 // --- URL download ---
 
+/// Redact credentials from a proxy URI for safe logging.
+///
+/// Replaces the userinfo portion (between `://` and `@`) with `***`.
+/// If no credentials are present, returns the URI unchanged.
+fn redact_proxy_credentials(uri: &str) -> String {
+    if let Some(scheme_end) = uri.find("://") {
+        let after_scheme = &uri[scheme_end + 3..];
+        if let Some(at_pos) = after_scheme.find('@') {
+            return format!("{}://***@{}", &uri[..scheme_end], &after_scheme[at_pos + 1..]);
+        }
+    }
+    uri.to_string()
+}
+
 /// Resolve the proxy URI from environment variables.
 ///
 /// Checks (in order): `https_proxy`, `HTTPS_PROXY`, `http_proxy`, `HTTP_PROXY`,
@@ -308,15 +323,20 @@ pub(super) fn proxy_from_env() -> Option<String> {
 /// `download_file()` and is inherent to the `SA_RESTART` signal handling model.
 /// For metadata requests (auth, manifests), this is mitigated by response size limits
 /// (`read_to_string`). For blob downloads, stalled connections will eventually hit
-/// TCP keepalive timeouts (typically 2+ hours on Linux).
+/// the `timeout_recv_body` timeout (5 minutes).
 pub(super) fn build_http_agent(verbose: bool) -> Result<ureq::Agent> {
-    let mut config = ureq::Agent::config_builder();
+    let mut config = ureq::Agent::config_builder()
+        .user_agent("sdme/0.1")
+        .redirect_auth_headers(ureq::config::RedirectAuthHeaders::SameHost)
+        .timeout_connect(Some(Duration::from_secs(30)))
+        .timeout_recv_body(Some(Duration::from_secs(300)));
     if let Some(proxy_uri) = proxy_from_env() {
+        let redacted = redact_proxy_credentials(&proxy_uri);
         if verbose {
-            eprintln!("using proxy: {proxy_uri}");
+            eprintln!("using proxy: {redacted}");
         }
         let proxy = ureq::Proxy::new(&proxy_uri)
-            .with_context(|| format!("invalid proxy URI: {proxy_uri}"))?;
+            .with_context(|| format!("invalid proxy URI: {redacted}"))?;
         config = config.proxy(Some(proxy));
     } else if verbose {
         eprintln!("no proxy configured");

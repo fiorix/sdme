@@ -6,6 +6,7 @@
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
@@ -149,8 +150,11 @@ fn split_auth_params(s: &str) -> Vec<&str> {
 ///
 /// Used for the `/v2/` auth probe where we need to inspect the 401 response headers.
 fn build_noerror_agent() -> Result<ureq::Agent> {
-    let mut config = ureq::Agent::config_builder();
-    config = config.http_status_as_error(false);
+    let mut config = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .user_agent("sdme/0.1")
+        .timeout_connect(Some(Duration::from_secs(30)))
+        .timeout_recv_body(Some(Duration::from_secs(300)));
     if let Some(proxy_uri) = proxy_from_env() {
         let proxy = ureq::Proxy::new(&proxy_uri)
             .with_context(|| format!("invalid proxy URI: {proxy_uri}"))?;
@@ -230,6 +234,8 @@ fn obtain_token(
         .call()
         .with_context(|| format!("failed to request auth token from {token_url}"))?
         .into_body()
+        .into_with_config()
+        .limit(65_536)
         .read_to_string()
         .with_context(|| "failed to read token response body")?;
 
@@ -336,6 +342,8 @@ fn fetch_manifest(
         .call()
         .with_context(|| format!("failed to fetch manifest from {url}"))?
         .into_body()
+        .into_with_config()
+        .limit(1_048_576)
         .read_to_string()
         .with_context(|| format!("failed to read manifest body from {url}"))?;
 

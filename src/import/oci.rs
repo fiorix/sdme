@@ -67,6 +67,16 @@ fn resolve_blob(oci_dir: &Path, digest: &str) -> Result<PathBuf> {
     if hash.is_empty() || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
         bail!("invalid OCI digest hash: {hash}");
     }
+    // Validate hash length per OCI spec (sha256 = 64 hex chars, sha512 = 128).
+    match algo {
+        "sha256" if hash.len() != 64 => {
+            bail!("invalid sha256 digest length: expected 64 hex chars, got {}", hash.len());
+        }
+        "sha512" if hash.len() != 128 => {
+            bail!("invalid sha512 digest length: expected 128 hex chars, got {}", hash.len());
+        }
+        _ => {}
+    }
     let blob_path = oci_dir.join("blobs").join(algo).join(hash);
     if !blob_path.exists() {
         bail!("OCI blob not found: {}", blob_path.display());
