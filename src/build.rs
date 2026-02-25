@@ -16,14 +16,22 @@ use crate::{check_interrupted, containers, copy, rootfs, systemd, validate_name,
 
 #[derive(Debug)]
 struct BuildConfig {
+    path: PathBuf,
     rootfs: String,
     ops: Vec<BuildOp>,
 }
 
 #[derive(Debug)]
 enum BuildOp {
-    Copy { src: PathBuf, dst: PathBuf },
-    Run { command: String },
+    Copy {
+        src: PathBuf,
+        dst: PathBuf,
+        lineno: usize,
+    },
+    Run {
+        command: String,
+        lineno: usize,
+    },
 }
 
 // --- Parser ---
@@ -97,6 +105,7 @@ fn parse_build_config(path: &Path) -> Result<BuildConfig> {
                 ops.push(BuildOp::Copy {
                     src: PathBuf::from(src),
                     dst: PathBuf::from(dst),
+                    lineno: lineno + 1,
                 });
             }
             "RUN" => {
@@ -112,6 +121,7 @@ fn parse_build_config(path: &Path) -> Result<BuildConfig> {
                 }
                 ops.push(BuildOp::Run {
                     command: rest.to_string(),
+                    lineno: lineno + 1,
                 });
             }
             _ => {
@@ -127,7 +137,11 @@ fn parse_build_config(path: &Path) -> Result<BuildConfig> {
     let rootfs =
         rootfs.ok_or_else(|| anyhow::anyhow!("{}: missing FROM directive", path.display()))?;
 
-    Ok(BuildConfig { rootfs, ops })
+    Ok(BuildConfig {
+        path: path.to_path_buf(),
+        rootfs,
+        ops,
+    })
 }
 
 // --- Execution engine ---
@@ -149,13 +163,44 @@ fn run_in_container(name: &str, command: &str, verbose: bool) -> Result<()> {
     Ok(())
 }
 
+/// Directories that systemd mounts tmpfs over at boot, hiding any files
+/// written to the overlayfs upper layer underneath. COPY into these
+/// destinations would silently lose data.
+const SHADOWED_DIRS: &[&str] = &["/tmp", "/run", "/dev/shm"];
+
+/// Check if `dst` falls under a directory that is shadowed by a tmpfs
+/// mount at boot or marked as overlayfs-opaque, meaning files written
+/// to the upper layer would be invisible in the running container.
+fn check_shadowed_dest(dst: &Path, opaque_dirs: &[String]) -> Result<()> {
+    let dst_str = dst.to_string_lossy();
+    for dir in SHADOWED_DIRS {
+        if dst_str == *dir || dst_str.starts_with(&format!("{dir}/")) {
+            bail!(
+                "COPY to {dst_str} is not supported: systemd mounts tmpfs over {dir} at boot, \
+                 hiding files in the overlayfs upper layer; use a different destination"
+            );
+        }
+    }
+    for dir in opaque_dirs {
+        if dst_str == *dir || dst_str.starts_with(&format!("{dir}/")) {
+            bail!(
+                "COPY to {dst_str} is not supported: {dir} is an overlayfs opaque directory, \
+                 hiding lower-layer contents; use a different destination"
+            );
+        }
+    }
+    Ok(())
+}
+
 fn do_copy(
     upper_dir: &Path,
     lower_dir: &Path,
     src: &Path,
     dst: &Path,
+    opaque_dirs: &[String],
     verbose: bool,
 ) -> Result<()> {
+    check_shadowed_dest(dst, opaque_dirs)?;
     let rel_dst = sanitize_dest_path(dst)?;
     let mut target = upper_dir.join(&rel_dst);
 
@@ -213,27 +258,29 @@ fn execute_build(
     datadir: &Path,
     container_name: &str,
     rootfs: &str,
-    ops: &[BuildOp],
+    config: &BuildConfig,
+    opaque_dirs: &[String],
     boot_timeout: u64,
     verbose: bool,
 ) -> Result<()> {
     let mut container_running = false;
     let timeout = std::time::Duration::from_secs(boot_timeout);
 
-    for op in ops {
+    for op in &config.ops {
         check_interrupted()?;
 
         match op {
-            BuildOp::Run { command } => {
+            BuildOp::Run { command, lineno } => {
                 if !container_running {
                     eprintln!("starting build container '{container_name}'");
                     systemd::start(datadir, container_name, verbose)?;
                     systemd::await_boot(container_name, timeout, verbose)?;
                     container_running = true;
                 }
-                run_in_container(container_name, command, verbose)?;
+                run_in_container(container_name, command, verbose)
+                    .with_context(|| format!("{}:{}", config.path.display(), lineno))?;
             }
-            BuildOp::Copy { src, dst } => {
+            BuildOp::Copy { src, dst, lineno } => {
                 if container_running {
                     eprintln!("stopping build container '{container_name}'");
                     containers::stop(container_name, verbose)?;
@@ -244,7 +291,8 @@ fn execute_build(
                     .join(container_name)
                     .join("upper");
                 let lower_dir = datadir.join("fs").join(rootfs);
-                do_copy(&upper_dir, &lower_dir, src, dst, verbose)?;
+                do_copy(&upper_dir, &lower_dir, src, dst, opaque_dirs, verbose)
+                    .with_context(|| format!("{}:{}", config.path.display(), lineno))?;
             }
         }
     }
@@ -307,7 +355,8 @@ pub fn build(
         datadir,
         &staging_name,
         &config.rootfs,
-        &config.ops,
+        &config,
+        &create_opts.opaque_dirs,
         boot_timeout,
         verbose,
     ) {
@@ -453,13 +502,17 @@ mod tests {
         assert_eq!(config.rootfs, "ubuntu");
         assert_eq!(config.ops.len(), 2);
         match &config.ops[0] {
-            BuildOp::Run { command } => assert_eq!(command, "apt-get update"),
+            BuildOp::Run { command, lineno } => {
+                assert_eq!(command, "apt-get update");
+                assert_eq!(*lineno, 2);
+            }
             _ => panic!("expected Run"),
         }
         match &config.ops[1] {
-            BuildOp::Copy { src, dst } => {
+            BuildOp::Copy { src, dst, lineno } => {
                 assert_eq!(src, Path::new("/etc/hostname"));
                 assert_eq!(dst, Path::new("/etc/build-host"));
+                assert_eq!(*lineno, 3);
             }
             _ => panic!("expected Copy"),
         }
@@ -580,7 +633,7 @@ mod tests {
         );
         let config = parse_build_config(&path).unwrap();
         match &config.ops[0] {
-            BuildOp::Run { command } => {
+            BuildOp::Run { command, .. } => {
                 assert_eq!(command, "echo hello | grep hello && echo done");
             }
             _ => panic!("expected Run"),
@@ -618,6 +671,7 @@ mod tests {
             &lower,
             &src_file,
             Path::new("/usr/local/bin"),
+            &[],
             false,
         )
         .unwrap();
@@ -644,6 +698,7 @@ mod tests {
             &lower,
             &src_file,
             Path::new("/usr/local/bin"),
+            &[],
             false,
         )
         .unwrap();
@@ -664,7 +719,7 @@ mod tests {
         fs::write(&src_file, "content").unwrap();
 
         // dst doesn't exist in either layer — file created at exact path.
-        do_copy(&upper, &lower, &src_file, Path::new("/opt/mybin"), false).unwrap();
+        do_copy(&upper, &lower, &src_file, Path::new("/opt/mybin"), &[], false).unwrap();
         assert!(upper.join("opt/mybin").is_file());
     }
 
@@ -685,6 +740,7 @@ mod tests {
             &lower,
             &src_file,
             Path::new("/usr/local/bin/"),
+            &[],
             false,
         )
         .unwrap();
@@ -701,7 +757,7 @@ mod tests {
         fs::create_dir_all(&src_dir).unwrap();
         fs::write(src_dir.join("app.bin"), "app").unwrap();
 
-        do_copy(&upper, &lower, &src_dir, Path::new("/opt"), false).unwrap();
+        do_copy(&upper, &lower, &src_dir, Path::new("/opt"), &[], false).unwrap();
         // Named dir should be placed inside: /opt/myapp/app.bin
         assert!(upper.join("opt/myapp").is_dir());
         assert!(upper.join("opt/myapp/app.bin").is_file());
@@ -712,7 +768,7 @@ mod tests {
         let _lock = CWD_LOCK.lock().unwrap();
         let (_tmp, upper, lower) = make_layers("dot-to-dir");
         // dst dir exists in lower.
-        fs::create_dir_all(lower.join("tmp")).unwrap();
+        fs::create_dir_all(lower.join("srv")).unwrap();
         // Create source directory with contents.
         let src_dir = _tmp.path().join("dotdir");
         fs::create_dir_all(&src_dir).unwrap();
@@ -724,12 +780,12 @@ mod tests {
         let orig_dir = std::env::current_dir().unwrap();
         std::env::set_current_dir(&src_dir).unwrap();
 
-        let result = do_copy(&upper, &lower, &dot_path, Path::new("/tmp"), false);
+        let result = do_copy(&upper, &lower, &dot_path, Path::new("/srv"), &[], false);
         std::env::set_current_dir(&orig_dir).unwrap();
         result.unwrap();
 
-        // Contents should be directly in /tmp, not /tmp/./
-        assert!(upper.join("tmp/hello.txt").is_file());
+        // Contents should be directly in /srv, not /srv/./
+        assert!(upper.join("srv/hello.txt").is_file());
     }
 
     #[test]
@@ -746,7 +802,7 @@ mod tests {
         let orig_dir = std::env::current_dir().unwrap();
         std::env::set_current_dir(&src_dir).unwrap();
 
-        let result = do_copy(&upper, &lower, &dot_path, Path::new("/newdir"), false);
+        let result = do_copy(&upper, &lower, &dot_path, Path::new("/newdir"), &[], false);
         std::env::set_current_dir(&orig_dir).unwrap();
         result.unwrap();
 
@@ -766,7 +822,8 @@ mod tests {
         fs::create_dir_all(&src_dir).unwrap();
         fs::write(src_dir.join("a.txt"), "a").unwrap();
 
-        let err = do_copy(&upper, &lower, &src_dir, Path::new("/opt/target"), false).unwrap_err();
+        let err =
+            do_copy(&upper, &lower, &src_dir, Path::new("/opt/target"), &[], false).unwrap_err();
         assert!(
             err.to_string().contains("cannot copy directory"),
             "got: {err}"
@@ -787,6 +844,7 @@ mod tests {
             &lower,
             &src_file,
             Path::new("/opt/../../etc/shadow"),
+            &[],
             false,
         )
         .unwrap_err();
@@ -796,14 +854,100 @@ mod tests {
         );
 
         // Relative path with .. components.
-        let err = do_copy(&upper, &lower, &src_file, Path::new("../escape"), false).unwrap_err();
+        let err =
+            do_copy(&upper, &lower, &src_file, Path::new("../escape"), &[], false).unwrap_err();
         assert!(
             err.to_string().contains(".."),
             "should reject '..' in dst path, got: {err}"
         );
 
         // Valid paths should still work.
-        do_copy(&upper, &lower, &src_file, Path::new("/opt/safe"), false).unwrap();
+        do_copy(&upper, &lower, &src_file, Path::new("/opt/safe"), &[], false).unwrap();
         assert!(upper.join("opt/safe").is_file());
+    }
+
+    #[test]
+    fn test_do_copy_rejects_shadowed_dirs() {
+        let (_tmp, upper, lower) = make_layers("shadowed");
+        let src_dir = _tmp.path().join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+        let src_file = src_dir.join("data");
+        fs::write(&src_file, "payload").unwrap();
+
+        // /tmp is shadowed by systemd tmpfs at boot.
+        let err =
+            do_copy(&upper, &lower, &src_file, Path::new("/tmp/data"), &[], false).unwrap_err();
+        assert!(
+            err.to_string().contains("tmpfs"),
+            "should reject /tmp as shadowed, got: {err}"
+        );
+
+        // /run is also shadowed.
+        let err =
+            do_copy(&upper, &lower, &src_file, Path::new("/run/foo"), &[], false).unwrap_err();
+        assert!(
+            err.to_string().contains("tmpfs"),
+            "should reject /run as shadowed, got: {err}"
+        );
+
+        // /dev/shm is also shadowed.
+        let err = do_copy(
+            &upper,
+            &lower,
+            &src_file,
+            Path::new("/dev/shm/bar"),
+            &[],
+            false,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("tmpfs"),
+            "should reject /dev/shm as shadowed, got: {err}"
+        );
+
+        // Exact match on shadowed dir.
+        let err =
+            do_copy(&upper, &lower, &src_file, Path::new("/tmp"), &[], false).unwrap_err();
+        assert!(
+            err.to_string().contains("tmpfs"),
+            "should reject /tmp exact match, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_do_copy_rejects_opaque_dirs() {
+        let (_tmp, upper, lower) = make_layers("opaque");
+        let src_dir = _tmp.path().join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+        let src_file = src_dir.join("unit");
+        fs::write(&src_file, "payload").unwrap();
+
+        let opaque = vec!["/etc/systemd/system".to_string()];
+
+        let err = do_copy(
+            &upper,
+            &lower,
+            &src_file,
+            Path::new("/etc/systemd/system/foo.service"),
+            &opaque,
+            false,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("opaque"),
+            "should reject opaque dir destination, got: {err}"
+        );
+
+        // Non-opaque path should still work.
+        do_copy(
+            &upper,
+            &lower,
+            &src_file,
+            Path::new("/etc/foo.conf"),
+            &opaque,
+            false,
+        )
+        .unwrap();
+        assert!(upper.join("etc/foo.conf").is_file());
     }
 }

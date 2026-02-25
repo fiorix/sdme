@@ -316,6 +316,11 @@ BUILD CONFIG FORMAT:
     COPY stops the container (if running) and writes directly to the
     overlayfs upper layer. Paths with '..' components are rejected.
 
+    COPY does not support these destinations: /tmp, /run, /dev/shm.
+    systemd mounts tmpfs over them at boot, which hides files written
+    to the overlayfs upper layer. Overlayfs opaque directories are also
+    rejected. Use a different path (e.g. /root, /opt, /srv).
+
 EXAMPLE:
     # Import a base rootfs
     sudo debootstrap --include=dbus,systemd noble /tmp/ubuntu

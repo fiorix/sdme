@@ -314,6 +314,16 @@ is an existing directory, the source is placed inside it.
 Destination paths with
 .B ..
 components are rejected.
+.PP
+Because COPY writes directly to the overlayfs upper layer (while the
+container is stopped), destinations under directories that systemd mounts
+tmpfs over at boot are rejected:
+.BR /tmp ", " /run ", " /dev/shm .
+Files placed there would be hidden by the tmpfs and invisible inside the
+running container.
+Destinations under overlayfs opaque directories are also rejected.
+Use a different path (e.g.\&
+.BR /root ", " /opt ", " /srv ).
 .RE
 .PP
 Lines starting with
