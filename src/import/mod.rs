@@ -1076,6 +1076,7 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
 
     // --- OCI application image handling ---
     // If this was a registry pull, check if it's an application image.
+    let mut oci_is_base = false;
     let skip_systemd_check = if let Some(ref cc) = oci_config {
         let is_base = match oci_base {
             OciBase::Yes => true,
@@ -1089,6 +1090,7 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
         }
 
         if is_base {
+            oci_is_base = true;
             if oci_base_fs.is_some() && verbose {
                 eprintln!("note: --oci-base-fs ignored for base OS image");
             }
@@ -1195,6 +1197,18 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
                         } else {
                             bail!("systemd not found in rootfs; import aborted by user");
                         }
+                    } else if oci_is_base {
+                        // OCI base OS image in non-interactive mode: install
+                        // packages automatically since we know the intent.
+                        eprintln!(
+                            "installing systemd packages for {} (OCI base OS image)",
+                            if distro_name.is_empty() {
+                                format!("{:?}", family)
+                            } else {
+                                distro_name.clone()
+                            }
+                        );
+                        install_systemd_packages(&staging_dir, &family, verbose)?;
                     } else {
                         if force {
                             eprintln!(

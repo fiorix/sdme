@@ -221,10 +221,10 @@ impl EnvConfig {
         let mut args = Vec::new();
 
         for var in &self.vars {
-            if let Some((key, _)) = var.split_once('=') {
+            if let Some((key, value)) = var.split_once('=') {
                 // Pass the full KEY=VALUE through; quoting for the systemd
                 // unit file context is handled by the drop-in writer.
-                args.push(format!("--setenv={key}={}", &var[key.len() + 1..]));
+                args.push(format!("--setenv={key}={value}"));
             }
         }
 
@@ -246,7 +246,7 @@ impl EnvConfig {
 
 /// Validate a single environment variable specification.
 fn validate_env(spec: &str) -> Result<()> {
-    let (key, _value) = spec.split_once('=').ok_or_else(|| {
+    let (key, value) = spec.split_once('=').ok_or_else(|| {
         anyhow::anyhow!(
             "invalid environment variable '{spec}': expected KEY=VALUE"
         )
@@ -274,7 +274,6 @@ fn validate_env(spec: &str) -> Result<()> {
     }
 
     // Pipe is the separator in the state file serialization format.
-    let (_, value) = spec.split_once('=').unwrap();
     if value.contains('|') {
         bail!(
             "invalid environment variable value for '{key}': \

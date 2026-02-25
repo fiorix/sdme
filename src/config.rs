@@ -122,7 +122,7 @@ pub fn save(config: &Config, path: Option<&Path>) -> Result<()> {
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
     let contents =
-        toml::to_string(config).with_context(|| "failed to serialize config".to_string())?;
+        toml::to_string(config).context("failed to serialize config")?;
     crate::atomic_write(&path, contents.as_bytes())
         .with_context(|| format!("failed to write config {}", path.display()))?;
     // Ensure restrictive permissions (atomic_write creates with default umask).
