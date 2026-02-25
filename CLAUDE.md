@@ -48,6 +48,8 @@ The project is a single Rust binary (`src/main.rs`) backed by a shared library (
 | `sdme fs import` | Import a rootfs from a directory, tarball, URL, OCI image, or QCOW2 disk image |
 | `sdme fs ls` | List imported root filesystems |
 | `sdme fs rm` | Remove imported root filesystems |
+| `sdme fs build` | Build a root filesystem from a build config |
+| `sdme set` | Set resource limits on a container (replaces all limits) |
 | `sdme config get/set` | View or modify configuration |
 
 ### Key Modules
@@ -63,6 +65,9 @@ The project is a single Rust binary (`src/main.rs`) backed by a shared library (
 | `src/import.rs` | Rootfs import: directory copy, tarball extraction, URL download (with proxy support), OCI image extraction, QCOW2 disk image import |
 | `src/names.rs` | Container name generation from a Tupi-Guarani wordlist with collision avoidance |
 | `src/config.rs` | Config file loading/saving (`~/.config/sdme/sdmerc`) |
+| `src/build.rs` | Build config parsing and rootfs build execution |
+| `src/copy.rs` | Filesystem tree copying with xattr and special file support |
+| `src/network.rs` | Network configuration validation and state serialization |
 
 ### Rust Dependencies
 
@@ -101,7 +106,7 @@ Dependencies are checked at runtime before use via `system_check::check_dependen
 - **D-Bus**: used for `start_unit`, `daemon_reload`, `is_unit_active`, `get_systemd_version`, `terminate_machine`. Always system bus.
 - **Rootfs import sources**: `sdme fs import` auto-detects the source type: URL prefix (`http://`/`https://`) → download + tarball extraction; existing directory → directory copy; QCOW2 disk image (magic bytes `QFI\xfb`) → mount via `qemu-nbd` + copy filesystem tree; existing file → tarball extraction via native Rust crates (`tar`, `flate2`, `bzip2`, `xz2`, `zstd`) with magic-byte compression detection. OCI container images (`.oci.tar.xz`, etc.) are auto-detected after tarball extraction by checking for an `oci-layout` file; the manifest chain is walked and filesystem layers are extracted in order with whiteout marker handling. QCOW2 import loads the `nbd` kernel module, connects the image read-only via `qemu-nbd`, discovers partitions via `/sys/block/`, mounts the largest partition, and copies the tree using the same `copy_tree()` used for directory imports. After import, systemd is detected in the rootfs; if missing, distro-specific packages are installed via chroot (`--install-packages` flag controls this: `auto` prompts interactively, `yes` always installs, `no` refuses if systemd is absent).
 - **HTTP proxy support**: URL downloads in `sdme fs import` respect the standard proxy environment variables: `https_proxy`, `HTTPS_PROXY`, `http_proxy`, `HTTP_PROXY`, `all_proxy`, `ALL_PROXY` (first non-empty wins, in that order). `no_proxy`/`NO_PROXY` is also supported. The proxy is configured explicitly via `ureq::Proxy` in `build_http_agent()` (`src/import.rs`), with verbose logging of the selected proxy URI. Since sdme runs as root, users must pass proxy variables through sudo (e.g. `sudo -E` or `sudo https_proxy=... sdme ...`).
-- **DNS in containers**: containers share the host's network namespace (no `--private-network`). `systemd-resolved` is masked in the overlayfs upper layer during `create` so the container's NSS `resolve` module returns UNAVAIL, falling through to the `dns` module which queries the host's resolver via `/etc/resolv.conf`. A regular-file placeholder is written to shadow any rootfs symlink so `systemd-nspawn --resolv-conf=auto` can populate it at boot.
+- **DNS in containers**: containers share the host's network namespace (by default; `--private-network` enables isolation). `systemd-resolved` is masked in the overlayfs upper layer during `create` so the container's NSS `resolve` module returns UNAVAIL, falling through to the `dns` module which queries the host's resolver via `/etc/resolv.conf`. A regular-file placeholder is written to shadow any rootfs symlink so `systemd-nspawn --resolv-conf=auto` can populate it at boot.
 - **Umask check**: `containers::create()` refuses to proceed when the process umask strips read or execute from "other" (`umask & 005 != 0`). A restrictive umask causes files in the overlayfs upper layer to be inaccessible to non-root services (e.g. dbus-daemon as `messagebus`), preventing boot.
 - **Interrupt handling**: a global `INTERRUPTED` flag (`src/lib.rs`) and `ctrlc` handler are installed once in `main()`. Both `sdme fs import` and the boot-wait loops (`wait_for_boot`, `wait_for_dbus`) check this flag, allowing Ctrl+C to cancel long-running operations cleanly.
 - **Boot failure cleanup**: `sdme new` removes the just-created container on boot failure or Ctrl+C. `sdme start` stops the container on boot failure or Ctrl+C (preserving it on disk for debugging).

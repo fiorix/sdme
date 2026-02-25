@@ -109,5 +109,10 @@ sudo sdme logs mybox                                    # view logs
 sudo sdme logs mybox -f                                 # follow logs
 sudo sdme ps                                            # list containers
 sudo sdme stop mybox                                    # stop one or more containers
+sudo sdme stop --all                                    # stop all running containers
+sudo sdme set mybox --memory 2G --cpus 4                # set resource limits
 sudo sdme rm mybox                                      # remove it (stops if running)
+sudo sdme rm --all --force                              # remove all containers (no prompt)
+sudo sdme fs rm ubuntu                                  # remove a rootfs
+sudo sdme fs build custom build.conf                    # build rootfs from config
 ```

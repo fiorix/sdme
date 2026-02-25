@@ -135,13 +135,16 @@ for a clean shutdown.
 Use
 .B \-a
 to stop all running containers (cannot be combined with names).
-.SS sdme rm [\-a] \fIname\fR...
+.SS sdme rm [\-a] [\-f] \fIname\fR...
 Remove one or more containers.
 Running containers are stopped first.
 Deletes the state file and all overlayfs directories.
 Use
 .B \-a
 to remove all containers (cannot be combined with names).
+Use
+.B \-f
+to skip confirmation prompts (useful for scripting).
 .SS sdme ps
 List all containers with their status, health, detected OS, and shared directory path.
 Health checks detect broken containers (missing directories, missing rootfs).
@@ -195,8 +198,14 @@ Use
 to remove a leftover staging directory from a previous failed import.
 .SS sdme fs ls
 List imported root filesystems with distro detection and paths.
-.SS sdme fs rm \fIname\fR...
+.SS sdme fs rm [\-a] [\-f] \fIname\fR...
 Remove one or more imported root filesystems.
+Use
+.B \-a
+to remove all imported root filesystems (cannot be combined with names).
+Use
+.B \-f
+to skip confirmation prompts.
 .SS sdme fs build \fIname\fR \fIbuild.conf\fR [\-t \fIseconds\fR] [\-f]
 Build a root filesystem from a build config file.
 Creates a temporary staging container from the base rootfs specified by
