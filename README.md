@@ -4,6 +4,8 @@ Lightweight systemd-nspawn containers with overlayfs.
 
 Runs on Linux with systemd. Uses kernel overlayfs for copy-on-write storage. By default, containers are overlayfs clones of `/` but you can also import rootfs from other distros (Ubuntu, Debian, Fedora, NixOS — see [docs/nix](docs/nix/)).
 
+**On macOS?** See [docs/macos.md](docs/macos.md) for instructions using lima-vm.
+
 ## Dependencies
 
 ### Runtime
