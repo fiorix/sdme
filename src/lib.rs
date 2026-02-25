@@ -3,12 +3,14 @@ pub mod config;
 pub mod containers;
 pub mod copy;
 pub mod import;
+pub mod mounts;
 pub mod names;
 pub mod network;
 pub mod rootfs;
 pub mod system_check;
 pub mod systemd;
 
+pub use mounts::{BindConfig, EnvConfig};
 pub use network::NetworkConfig;
 
 use std::collections::BTreeMap;
@@ -67,15 +69,14 @@ pub fn sudo_user() -> Option<SudoUser> {
     })
 }
 
+#[derive(Default)]
 pub struct State {
     entries: BTreeMap<String, String>,
 }
 
 impl State {
     pub fn new() -> Self {
-        Self {
-            entries: BTreeMap::new(),
-        }
+        Self::default()
     }
 
     pub fn set(&mut self, key: impl Into<String>, value: impl Into<String>) {

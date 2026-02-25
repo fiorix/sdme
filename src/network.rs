@@ -40,8 +40,8 @@ impl NetworkConfig {
     /// Read network config from a state file's key-value pairs.
     pub fn from_state(state: &State) -> Self {
         Self {
-            private_network: state.get("PRIVATE_NETWORK").map_or(false, |s| s == "1"),
-            network_veth: state.get("NETWORK_VETH").map_or(false, |s| s == "1"),
+            private_network: state.get("PRIVATE_NETWORK") == Some("1"),
+            network_veth: state.get("NETWORK_VETH") == Some("1"),
             network_bridge: state
                 .get("NETWORK_BRIDGE")
                 .filter(|s| !s.is_empty())
@@ -91,16 +91,9 @@ impl NetworkConfig {
 
     /// Generate systemd-nspawn arguments for network configuration.
     ///
-    /// Returns the arguments as a space-separated string suitable for
-    /// inclusion in an environment file.
-    ///
-    /// Safety: the output is written raw into a systemd `EnvironmentFile` and
-    /// expanded via `${NETWORK_OPTS}` in the unit template. This is safe because
-    /// `validate_network_name()` and `validate_port()` restrict all user-supplied
-    /// values to `[a-zA-Z0-9_-]` and digits, preventing injection of systemd
-    /// directives or shell metacharacters. If validation is ever relaxed, this
-    /// becomes an injection vector.
-    pub fn to_nspawn_args(&self) -> String {
+    /// Returns individual arguments suitable for direct inclusion in a
+    /// systemd unit file's `ExecStart` line. Each element is one nspawn flag.
+    pub fn to_nspawn_args(&self) -> Vec<String> {
         let mut args = Vec::new();
 
         if self.private_network {
@@ -126,7 +119,7 @@ impl NetworkConfig {
             args.push(format!("--port={port}"));
         }
 
-        args.join(" ")
+        args
     }
 
     /// Validate all network options.
@@ -395,7 +388,7 @@ mod tests {
     #[test]
     fn test_network_to_nspawn_args_empty() {
         let network = NetworkConfig::default();
-        assert_eq!(network.to_nspawn_args(), "--resolv-conf=auto");
+        assert_eq!(network.to_nspawn_args(), vec!["--resolv-conf=auto"]);
     }
 
     #[test]
@@ -406,7 +399,7 @@ mod tests {
         };
         assert_eq!(
             network.to_nspawn_args(),
-            "--private-network --resolv-conf=auto"
+            vec!["--private-network", "--resolv-conf=auto"]
         );
     }
 
@@ -420,13 +413,13 @@ mod tests {
             ports: vec!["8080:80".to_string(), "443:443/tcp".to_string()],
         };
         let args = network.to_nspawn_args();
-        assert!(args.contains("--private-network"));
-        assert!(args.contains("--resolv-conf=auto"));
-        assert!(args.contains("--network-veth"));
-        assert!(args.contains("--network-bridge=br0"));
-        assert!(args.contains("--network-zone=myzone"));
-        assert!(args.contains("--port=8080:80"));
-        assert!(args.contains("--port=443:443/tcp"));
+        assert!(args.contains(&"--private-network".to_string()));
+        assert!(args.contains(&"--resolv-conf=auto".to_string()));
+        assert!(args.contains(&"--network-veth".to_string()));
+        assert!(args.contains(&"--network-bridge=br0".to_string()));
+        assert!(args.contains(&"--network-zone=myzone".to_string()));
+        assert!(args.contains(&"--port=8080:80".to_string()));
+        assert!(args.contains(&"--port=443:443/tcp".to_string()));
     }
 
     #[test]

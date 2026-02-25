@@ -1,7 +1,7 @@
 //! Internal API for managing interactions with systemd and D-Bus.
 //!
 //! Provides helpers for installing the `sdme@.service` template unit,
-//! writing per-container environment files, and starting containers
+//! writing per-container nspawn drop-in files, and starting containers
 //! via the systemd D-Bus interface.
 
 use std::fs;
@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
-use crate::{NetworkConfig, ResourceLimits, State};
+use crate::{BindConfig, EnvConfig, NetworkConfig, ResourceLimits, State};
 
 mod dbus {
     use anyhow::{bail, Context, Result};
@@ -693,32 +693,91 @@ pub fn resolve_paths() -> Result<UnitPaths> {
     Ok(UnitPaths { nspawn, mount, umount })
 }
 
-pub fn unit_template(datadir: &str, paths: &UnitPaths) -> String {
-    let mount = paths.mount.display();
-    let umount = paths.umount.display();
-    let nspawn = paths.nspawn.display();
-    format!(
-        r#"[Unit]
+/// Generate the thin template unit for `sdme@.service`.
+///
+/// Contains only the Unit section and Service metadata. The actual
+/// ExecStartPre/ExecStart/ExecStopPost commands are written per-container
+/// in a drop-in file by [`write_nspawn_dropin`].
+pub fn unit_template() -> String {
+    r#"[Unit]
 Description=sdme container %i
 After=network.target local-fs.target
 
 [Service]
 Type=simple
-EnvironmentFile={datadir}/containers/%i/env
-ExecStartPre={mount} -t overlay overlay \
-    -o lowerdir=${{LOWERDIR}},upperdir={datadir}/containers/%i/upper,workdir={datadir}/containers/%i/work \
-    {datadir}/containers/%i/merged
-ExecStart={nspawn} \
-    --directory={datadir}/containers/%i/merged \
-    --machine=%i \
-    --bind={datadir}/containers/%i/shared:/shared \
-    ${{NETWORK_OPTS}} \
-    --boot
-ExecStopPost=-{umount} {datadir}/containers/%i/merged
+ExecStart=/bin/false
 KillMode=mixed
 Delegate=yes
 "#
-    )
+    .to_string()
+}
+
+/// Escape an argument for a systemd unit file `ExecStart` line.
+///
+/// If the argument contains spaces, double quotes, or backslashes,
+/// it is wrapped in double quotes with internal `"` and `\` escaped.
+/// This follows systemd's C-style escape rules for quoted strings.
+fn escape_exec_arg(arg: &str) -> String {
+    if !arg.contains([' ', '"', '\\', '\t']) {
+        return arg.to_string();
+    }
+    let escaped = arg.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
+}
+
+/// Generate the per-container nspawn drop-in content.
+///
+/// Contains ExecStartPre (overlayfs mount), ExecStart (systemd-nspawn
+/// with all arguments baked in), and ExecStopPost (unmount). Every
+/// argument is explicit — no environment variable substitution needed.
+pub fn nspawn_dropin(
+    datadir: &str,
+    name: &str,
+    lowerdir: &str,
+    paths: &UnitPaths,
+    nspawn_args: &[String],
+) -> String {
+    let mount = paths.mount.display();
+    let umount = paths.umount.display();
+    let nspawn = paths.nspawn.display();
+
+    let mut lines = Vec::new();
+    lines.push("[Service]".to_string());
+    lines.push("ExecStart=".to_string());
+    lines.push(format!(
+        "ExecStartPre={mount} -t overlay overlay \\",
+    ));
+    lines.push(format!(
+        "    -o lowerdir={lowerdir},upperdir={datadir}/containers/{name}/upper,workdir={datadir}/containers/{name}/work \\",
+    ));
+    lines.push(format!(
+        "    {datadir}/containers/{name}/merged",
+    ));
+    lines.push(format!(
+        "ExecStart={nspawn} \\",
+    ));
+    lines.push(format!(
+        "    --directory={datadir}/containers/{name}/merged \\",
+    ));
+    lines.push(format!(
+        "    --machine={name} \\",
+    ));
+    lines.push(format!(
+        "    --bind={datadir}/containers/{name}/shared:/shared \\",
+    ));
+
+    for arg in nspawn_args {
+        lines.push(format!("    {} \\", escape_exec_arg(arg)));
+    }
+
+    lines.push("    --boot".to_string());
+    lines.push(format!(
+        "ExecStopPost=-{umount} {datadir}/containers/{name}/merged",
+    ));
+    // Trailing newline.
+    lines.push(String::new());
+
+    lines.join("\n")
 }
 
 fn write_unit_if_changed(unit_path: &Path, content: &str, verbose: bool) -> Result<bool> {
@@ -743,7 +802,21 @@ fn write_unit_if_changed(unit_path: &Path, content: &str, verbose: bool) -> Resu
     Ok(true)
 }
 
-fn ensure_template_unit(datadir: &Path, verbose: bool) -> Result<()> {
+fn ensure_template_unit(verbose: bool) -> Result<()> {
+    let unit_path = Path::new("/etc/systemd/system/sdme@.service");
+    let content = unit_template();
+    if write_unit_if_changed(unit_path, &content, verbose)? {
+        dbus::daemon_reload()?;
+    }
+    Ok(())
+}
+
+/// Write the per-container nspawn drop-in.
+///
+/// Reads the container's state file and generates a drop-in with the full
+/// ExecStartPre/ExecStart/ExecStopPost commands, all arguments baked in.
+/// Returns the path to the drop-in file (for cleanup on failure).
+pub fn write_nspawn_dropin(datadir: &Path, name: &str, verbose: bool) -> Result<PathBuf> {
     let datadir_str = datadir
         .to_str()
         .context("datadir path is not valid UTF-8")?;
@@ -755,22 +828,12 @@ fn ensure_template_unit(datadir: &Path, verbose: bool) -> Result<()> {
         eprintln!("found systemd-nspawn: {}", paths.nspawn.display());
     }
 
-    let unit_path = Path::new("/etc/systemd/system/sdme@.service");
-    let content = unit_template(datadir_str, &paths);
-    if write_unit_if_changed(unit_path, &content, verbose)? {
-        dbus::daemon_reload()?;
-    }
-    Ok(())
-}
-
-pub fn write_env_file(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
     let state_path = datadir.join("state").join(name);
     let state = State::read_from(&state_path)?;
     let rootfs = state.rootfs();
     let lowerdir = if rootfs.is_empty() {
         "/".to_string()
     } else {
-        // Validate the ROOTFS value to prevent path traversal via corrupted state files.
         crate::validate_name(rootfs).with_context(|| {
             format!("invalid ROOTFS value in state file: {rootfs:?}")
         })?;
@@ -783,26 +846,35 @@ pub fn write_env_file(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
         eprintln!("lowerdir: {lowerdir}");
     }
 
-    // Generate network options from state.
+    // Collect all nspawn arguments from state.
+    let mut nspawn_args = Vec::new();
+
     let network = NetworkConfig::from_state(&state);
-    let network_opts = network.to_nspawn_args();
-    if verbose && !network.is_empty() {
-        eprintln!("network_opts: {network_opts}");
+    nspawn_args.extend(network.to_nspawn_args());
+
+    let binds = BindConfig::from_state(&state);
+    nspawn_args.extend(binds.to_nspawn_args());
+
+    let envs = EnvConfig::from_state(&state);
+    nspawn_args.extend(envs.to_nspawn_args());
+
+    if verbose {
+        for arg in &nspawn_args {
+            eprintln!("nspawn arg: {arg}");
+        }
     }
 
-    let env_path = datadir.join("containers").join(name).join("env");
-    fs::write(&env_path, format!("LOWERDIR={lowerdir}\nNETWORK_OPTS={network_opts}\n"))
-        .with_context(|| format!("failed to write {}", env_path.display()))?;
-    // Ensure env file is not world-readable regardless of umask.
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&env_path, fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("failed to set permissions on {}", env_path.display()))?;
+    let content = nspawn_dropin(datadir_str, name, &lowerdir, &paths, &nspawn_args);
+
+    let dir = dropin_dir(name);
+    fs::create_dir_all(&dir)
+        .with_context(|| format!("failed to create {}", dir.display()))?;
+
+    let dropin_path = dir.join("nspawn.conf");
+    if write_unit_if_changed(&dropin_path, &content, verbose)? {
+        dbus::daemon_reload()?;
     }
-    if verbose {
-        eprintln!("wrote env file: {}", env_path.display());
-    }
-    Ok(())
+    Ok(dropin_path)
 }
 
 fn dropin_dir(name: &str) -> PathBuf {
@@ -860,12 +932,11 @@ pub fn remove_limits_dropin(name: &str, verbose: bool) -> Result<()> {
 }
 
 pub fn start(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
-    ensure_template_unit(datadir, verbose)?;
+    ensure_template_unit(verbose)?;
 
     crate::containers::ensure_permissions(datadir, name)?;
 
-    let env_path = datadir.join("containers").join(name).join("env");
-    write_env_file(datadir, name, verbose)?;
+    let nspawn_dropin_path = write_nspawn_dropin(datadir, name, verbose)?;
 
     // Read limits from state and write/remove the drop-in file.
     let state_path = datadir.join("state").join(name);
@@ -877,7 +948,7 @@ pub fn start(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
         eprintln!("starting unit: {}", service_name(name));
     }
     if let Err(e) = dbus::start_unit(&service_name(name)) {
-        let _ = fs::remove_file(&env_path);
+        let _ = fs::remove_file(&nspawn_dropin_path);
         return Err(e);
     }
 
@@ -909,75 +980,105 @@ mod tests {
 
     #[test]
     fn test_unit_template() {
-        let paths = test_paths();
-        let template = unit_template("/var/lib/sdme", &paths);
+        let template = unit_template();
         assert!(template.contains("Description=sdme container %i"));
-        assert!(template.contains("EnvironmentFile=/var/lib/sdme/containers/%i/env"));
-        assert!(template.contains("lowerdir=${LOWERDIR}"));
-        assert!(template.contains("upperdir=/var/lib/sdme/containers/%i/upper"));
-        assert!(template.contains("workdir=/var/lib/sdme/containers/%i/work"));
-        assert!(template.contains("/var/lib/sdme/containers/%i/merged"));
-        assert!(template.contains("--machine=%i"));
-        assert!(template.contains("--bind=/var/lib/sdme/containers/%i/shared:/shared"));
-        assert!(template.contains("${NETWORK_OPTS}"));
-        assert!(template.contains("--boot"));
+        assert!(template.contains("Type=simple"));
+        assert!(template.contains("ExecStart=/bin/false"));
+        assert!(template.contains("KillMode=mixed"));
         assert!(template.contains("Delegate=yes"));
-        assert!(template.contains("/usr/bin/systemd-nspawn"));
-        assert!(template.contains("/usr/bin/mount"));
-        assert!(template.contains("/usr/bin/umount"));
+        // Template should NOT contain per-container details.
+        assert!(!template.contains("EnvironmentFile"));
+        assert!(!template.contains("systemd-nspawn"));
+        assert!(!template.contains("overlay"));
     }
 
     #[test]
-    fn test_unit_template_custom_datadir() {
+    fn test_nspawn_dropin_host_rootfs() {
         let paths = test_paths();
-        let template = unit_template("/tmp/custom", &paths);
-        assert!(template.contains("EnvironmentFile=/tmp/custom/containers/%i/env"));
-        assert!(template.contains("upperdir=/tmp/custom/containers/%i/upper"));
-        assert!(template.contains("workdir=/tmp/custom/containers/%i/work"));
-        assert!(template.contains("/tmp/custom/containers/%i/merged"));
-        assert!(template.contains("--bind=/tmp/custom/containers/%i/shared:/shared"));
+        let content = nspawn_dropin(
+            "/var/lib/sdme",
+            "mybox",
+            "/",
+            &paths,
+            &["--resolv-conf=auto".to_string()],
+        );
+        assert!(content.contains("[Service]"));
+        assert!(content.contains("ExecStart=\n"));
+        assert!(content.contains("lowerdir=/,upperdir=/var/lib/sdme/containers/mybox/upper"));
+        assert!(content.contains("workdir=/var/lib/sdme/containers/mybox/work"));
+        assert!(content.contains("/var/lib/sdme/containers/mybox/merged"));
+        assert!(content.contains("--machine=mybox"));
+        assert!(content.contains("--bind=/var/lib/sdme/containers/mybox/shared:/shared"));
+        assert!(content.contains("--resolv-conf=auto"));
+        assert!(content.contains("--boot"));
+        assert!(content.contains("/usr/bin/systemd-nspawn"));
+        assert!(content.contains("/usr/bin/mount"));
+        assert!(content.contains("/usr/bin/umount"));
     }
 
     #[test]
-    fn test_write_env_file_host_rootfs() {
-        let tmp = tmp();
-        let opts = CreateOptions {
-            name: Some("hostbox".to_string()),
-            rootfs: None,
-            limits: Default::default(),
-            network: Default::default(),
-            opaque_dirs: vec![],
-        };
-        create(tmp.path(), &opts, false).unwrap();
-
-        write_env_file(tmp.path(), "hostbox", false).unwrap();
-
-        let env_path = tmp.path().join("containers/hostbox/env");
-        let content = fs::read_to_string(&env_path).unwrap();
-        assert_eq!(content, "LOWERDIR=/\nNETWORK_OPTS=--resolv-conf=auto\n");
+    fn test_nspawn_dropin_explicit_rootfs() {
+        let paths = test_paths();
+        let content = nspawn_dropin(
+            "/var/lib/sdme",
+            "ubox",
+            "/var/lib/sdme/fs/ubuntu",
+            &paths,
+            &["--resolv-conf=auto".to_string()],
+        );
+        assert!(content.contains("lowerdir=/var/lib/sdme/fs/ubuntu,upperdir=/var/lib/sdme/containers/ubox/upper"));
     }
 
     #[test]
-    fn test_write_env_file_explicit_rootfs() {
-        let tmp = tmp();
-        let rootfs_dir = tmp.path().join("fs/ubuntu");
-        fs::create_dir_all(&rootfs_dir).unwrap();
+    fn test_nspawn_dropin_with_binds_and_envs() {
+        let paths = test_paths();
+        let args = vec![
+            "--resolv-conf=auto".to_string(),
+            "--bind=/data:/data".to_string(),
+            "--bind-ro=/logs:/logs".to_string(),
+            "--setenv=FOO=bar".to_string(),
+        ];
+        let content = nspawn_dropin("/var/lib/sdme", "mybox", "/", &paths, &args);
+        assert!(content.contains("    --bind=/data:/data \\\n"));
+        assert!(content.contains("    --bind-ro=/logs:/logs \\\n"));
+        assert!(content.contains("    --setenv=FOO=bar \\\n"));
+    }
 
-        let opts = CreateOptions {
-            name: Some("ubox".to_string()),
-            rootfs: Some("ubuntu".to_string()),
-            limits: Default::default(),
-            network: Default::default(),
-            opaque_dirs: vec![],
-        };
-        create(tmp.path(), &opts, false).unwrap();
+    #[test]
+    fn test_nspawn_dropin_escapes_spaces() {
+        let paths = test_paths();
+        let args = vec![
+            "--resolv-conf=auto".to_string(),
+            "--setenv=MSG=hello world".to_string(),
+        ];
+        let content = nspawn_dropin("/var/lib/sdme", "mybox", "/", &paths, &args);
+        assert!(content.contains("\"--setenv=MSG=hello world\""));
+    }
 
-        write_env_file(tmp.path(), "ubox", false).unwrap();
+    #[test]
+    fn test_escape_exec_arg_safe() {
+        assert_eq!(escape_exec_arg("--boot"), "--boot");
+        assert_eq!(escape_exec_arg("--bind=/a:/b"), "--bind=/a:/b");
+    }
 
-        let env_path = tmp.path().join("containers/ubox/env");
-        let content = fs::read_to_string(&env_path).unwrap();
-        let expected = format!("LOWERDIR={}/fs/ubuntu\nNETWORK_OPTS=--resolv-conf=auto\n", tmp.path().display());
-        assert_eq!(content, expected);
+    #[test]
+    fn test_escape_exec_arg_spaces() {
+        assert_eq!(
+            escape_exec_arg("--setenv=FOO=hello world"),
+            "\"--setenv=FOO=hello world\""
+        );
+    }
+
+    #[test]
+    fn test_escape_exec_arg_quotes_and_backslashes() {
+        assert_eq!(
+            escape_exec_arg("--setenv=MSG=say \"hi\""),
+            "\"--setenv=MSG=say \\\"hi\\\"\""
+        );
+        assert_eq!(
+            escape_exec_arg("--setenv=PATH=C:\\foo"),
+            "\"--setenv=PATH=C:\\\\foo\""
+        );
     }
 
     #[test]
@@ -1003,6 +1104,8 @@ mod tests {
             limits,
             network: Default::default(),
             opaque_dirs: vec![],
+            binds: Default::default(),
+            envs: Default::default(),
         };
         create(tmp.path(), &opts, false).unwrap();
 
