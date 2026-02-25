@@ -37,7 +37,7 @@ Path to config file.
 Default:
 .IR ~/.config/sdme/sdmerc .
 .SH COMMANDS
-.SS sdme new [\fIname\fR] [\-r \fIfs\fR] [\-t \fIseconds\fR] [\fIlimits\fR] [\fInetwork\fR] [\-\-] [\fIcommand\fR...]
+.SS sdme new [\fIname\fR] [\-r \fIfs\fR] [\-t \fIseconds\fR] [\fIlimits\fR] [\fInetwork\fR] [\-o \fIdir\fR]... [\-\-] [\fIcommand\fR...]
 Create, start, and enter a new container.
 If
 .I name
@@ -72,9 +72,16 @@ see
 .B NETWORKING
 below.
 .PP
+Use
+.B \-o
+to make directories opaque in the overlayfs upper layer (hides lower layer
+contents); see
+.B OVERLAYFS OPAQUE DIRS
+below.
+.PP
 If boot fails or is interrupted (Ctrl+C), the just\-created container is
 automatically removed.
-.SS sdme create [\fIname\fR] [\-r \fIfs\fR] [\fIlimits\fR] [\fInetwork\fR]
+.SS sdme create [\fIname\fR] [\-r \fIfs\fR] [\fIlimits\fR] [\fInetwork\fR] [\-o \fIdir\fR]...
 Create a new container without starting it.
 Sets up the overlayfs directories and state file.
 Resource limits can be set with
@@ -94,6 +101,11 @@ and
 .BR \-\-port ;
 see
 .B NETWORKING
+below.
+Use
+.B \-o
+to make directories opaque in the overlayfs upper layer; see
+.B OVERLAYFS OPAQUE DIRS
 below.
 Requires a permissive umask (see
 .B NOTES
@@ -291,6 +303,17 @@ Values:
 .BR yes " or " no .
 Default:
 .BR yes .
+.TP
+.B host_rootfs_opaque_dirs
+Comma\-separated list of directories to make opaque by default when creating
+host\-rootfs containers (no
+.BR \-r ).
+Explicit
+.B \-o
+flags override this setting.
+Set to an empty string to disable.
+Default:
+.BR /etc/systemd/system,/var/log .
 .RE
 .SH CONFIGURATION
 The configuration file is in TOML format, located at
@@ -340,6 +363,22 @@ so the session runs as the invoking user rather than root.
 Containers created with an imported rootfs are unaffected.
 Default:
 .BR true .
+.TP
+.B host_rootfs_opaque_dirs
+String.
+Comma\-separated list of absolute directory paths to make opaque in the overlayfs
+upper layer when creating host\-rootfs containers (i.e., when
+.B \-r
+is not specified).
+Opaque directories hide all lower\-layer contents, so they start empty in the
+container.
+If the user passes one or more
+.B \-o
+flags at creation time, this config value is ignored.
+Containers created with an imported rootfs are unaffected.
+Set to an empty string to disable default opaque dirs.
+Default:
+.BR /etc/systemd/system,/var/log .
 .SH FILES
 .TP
 .I /var/lib/sdme/
@@ -354,8 +393,10 @@ Container state files (KEY=VALUE format).
 Contains container metadata including creation timestamp, rootfs name,
 resource limits
 .RB ( MEMORY ", " CPUS ", " CPU_WEIGHT ),
-and network configuration
-.RB ( PRIVATE_NETWORK ", " NETWORK_VETH ", " NETWORK_BRIDGE ", " NETWORK_ZONE ", " PORTS ).
+network configuration
+.RB ( PRIVATE_NETWORK ", " NETWORK_VETH ", " NETWORK_BRIDGE ", " NETWORK_ZONE ", " PORTS ),
+and opaque directories
+.RB ( OPAQUE_DIRS ).
 .TP
 .I /var/lib/sdme/containers/\fIname\fR/upper/
 Per\-container overlayfs upper layer (copy\-on\-write modifications).
@@ -605,6 +646,36 @@ Example:
 .PP
 Network configuration is stored in the container's state file and applied at
 start time via environment variables in the systemd unit.
+.SH OVERLAYFS OPAQUE DIRS
+Directories listed with
+.B \-o
+(or
+.BR \-\-overlayfs\-opaque\-dirs )
+are created in the overlayfs upper layer with the
+.B trusted.overlay.opaque
+extended attribute set to
+.BR y .
+This makes overlayfs hide all lower\-layer contents for that directory,
+so it starts empty inside the container.
+Can be specified multiple times.
+.PP
+Each path must be absolute, must not contain
+.B ..
+components, and duplicates are rejected.
+Trailing slashes are normalized.
+.PP
+For host\-rootfs containers (no
+.BR \-r ),
+if no
+.B \-o
+flags are given, the
+.B host_rootfs_opaque_dirs
+config value is applied automatically (default:
+.BR /etc/systemd/system,/var/log ).
+This prevents the host's systemd unit overrides and log history from
+leaking into the container.
+Set the config value to an empty string to disable this behavior.
+For imported\-rootfs containers, no default opaque dirs are applied.
 .SH NOTES
 .SS Umask
 .B sdme create

@@ -72,6 +72,10 @@ enum Command {
         #[arg(long)]
         cpu_weight: Option<String>,
 
+        /// Make directories opaque in overlayfs (hides lower layer contents, repeatable)
+        #[arg(short = 'o', long = "overlayfs-opaque-dirs")]
+        opaque_dirs: Vec<String>,
+
         #[command(flatten)]
         network: NetworkArgs,
     },
@@ -127,6 +131,10 @@ enum Command {
         /// CPU weight 1–10000 (default: 100)
         #[arg(long)]
         cpu_weight: Option<String>,
+
+        /// Make directories opaque in overlayfs (hides lower layer contents, repeatable)
+        #[arg(short = 'o', long = "overlayfs-opaque-dirs")]
+        opaque_dirs: Vec<String>,
 
         #[command(flatten)]
         network: NetworkArgs,
@@ -358,6 +366,29 @@ fn parse_network(args: NetworkArgs) -> Result<NetworkConfig> {
     Ok(network)
 }
 
+/// Parse the comma-separated `host_rootfs_opaque_dirs` config value into a Vec.
+fn parse_opaque_dirs_config(s: &str) -> Vec<String> {
+    if s.is_empty() {
+        return Vec::new();
+    }
+    s.split(',').map(|p| p.trim().to_string()).collect()
+}
+
+/// Resolve opaque dirs for container creation.
+///
+/// If the user passed explicit `-o` flags, those take priority.
+/// Otherwise, for host-rootfs containers (no `-r`), apply the config defaults.
+/// For imported-rootfs containers, return an empty vec.
+fn resolve_opaque_dirs(cli_dirs: Vec<String>, is_host_rootfs: bool, cfg: &config::Config) -> Vec<String> {
+    if !cli_dirs.is_empty() {
+        cli_dirs
+    } else if is_host_rootfs {
+        parse_opaque_dirs_config(&cfg.host_rootfs_opaque_dirs)
+    } else {
+        Vec::new()
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -409,16 +440,26 @@ fn main() -> Result<()> {
                         "no" => cfg.join_as_sudo_user = false,
                         _ => bail!("invalid value for join_as_sudo_user: {value} (expected yes or no)"),
                     },
+                    "host_rootfs_opaque_dirs" => {
+                        if value.is_empty() {
+                            cfg.host_rootfs_opaque_dirs = String::new();
+                        } else {
+                            let dirs = parse_opaque_dirs_config(&value);
+                            let normalized = containers::validate_opaque_dirs(&dirs)?;
+                            cfg.host_rootfs_opaque_dirs = normalized.join(",");
+                        }
+                    }
                     _ => bail!("unknown config key: {key}"),
                 }
                 config::save(&cfg, config_path)?;
             }
         },
-        Command::Create { name, fs, memory, cpus, cpu_weight, network } => {
+        Command::Create { name, fs, memory, cpus, cpu_weight, opaque_dirs, network } => {
             system_check::check_systemd_version(252)?;
             let limits = parse_limits(memory, cpus, cpu_weight)?;
             let network = parse_network(network)?;
-            let opts = containers::CreateOptions { name, rootfs: fs, limits, network };
+            let opaque_dirs = resolve_opaque_dirs(opaque_dirs, fs.is_none(), &cfg);
+            let opts = containers::CreateOptions { name, rootfs: fs, limits, network, opaque_dirs };
             let name = containers::create(&cfg.datadir, &opts, cli.verbose)?;
             eprintln!("creating '{name}'");
             println!("{name}");
@@ -470,11 +511,12 @@ fn main() -> Result<()> {
             let err = cmd.exec();
             bail!("failed to exec journalctl: {err}");
         }
-        Command::New { name, fs, timeout, memory, cpus, cpu_weight, network, command } => {
+        Command::New { name, fs, timeout, memory, cpus, cpu_weight, opaque_dirs, network, command } => {
             system_check::check_systemd_version(252)?;
             let limits = parse_limits(memory, cpus, cpu_weight)?;
             let network = parse_network(network)?;
-            let opts = containers::CreateOptions { name, rootfs: fs, limits, network };
+            let opaque_dirs = resolve_opaque_dirs(opaque_dirs, fs.is_none(), &cfg);
+            let opts = containers::CreateOptions { name, rootfs: fs, limits, network, opaque_dirs };
             let name = containers::create(&cfg.datadir, &opts, cli.verbose)?;
             eprintln!("creating '{name}'");
 

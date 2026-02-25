@@ -294,6 +294,7 @@ pub fn build(
         rootfs: Some(config.rootfs.clone()),
         limits: crate::ResourceLimits::default(),
         network: crate::NetworkConfig::default(),
+        opaque_dirs: vec![],
     };
     containers::create(datadir, &create_opts, verbose)?;
 

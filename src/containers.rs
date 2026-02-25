@@ -7,10 +7,11 @@
 //! are cleaned up before the error is returned. New implementations and changes
 //! should conform to this pattern.
 
+use std::ffi::CString;
 use std::fs::{self, OpenOptions};
-use std::os::unix::fs::{OpenOptionsExt, symlink};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt, symlink};
 use std::os::unix::process::CommandExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
@@ -22,6 +23,7 @@ pub struct CreateOptions {
     pub rootfs: Option<String>,
     pub limits: ResourceLimits,
     pub network: NetworkConfig,
+    pub opaque_dirs: Vec<String>,
 }
 
 /// Read the current process umask. There is no "get umask" syscall, so
@@ -60,6 +62,8 @@ pub fn create(datadir: &Path, opts: &CreateOptions, verbose: bool) -> Result<Str
         eprintln!("rootfs: {}", rootfs.display());
     }
 
+    let opaque_dirs = validate_opaque_dirs(&opts.opaque_dirs)?;
+
     // Atomically claim the name by creating the state file with O_CREAT|O_EXCL.
     // This prevents a TOCTOU race where two concurrent creates pass check_conflicts().
     let state_dir = datadir.join("state");
@@ -88,7 +92,7 @@ pub fn create(datadir: &Path, opts: &CreateOptions, verbose: bool) -> Result<Str
         eprintln!("claimed state file: {}", state_path.display());
     }
 
-    match do_create(datadir, &name, &rootfs, &opts.limits, &opts.network, verbose) {
+    match do_create(datadir, &name, &rootfs, &opts.limits, &opts.network, &opaque_dirs, verbose) {
         Ok(()) => Ok(name),
         Err(e) => {
             let container_dir = datadir.join("containers").join(&name);
@@ -99,7 +103,7 @@ pub fn create(datadir: &Path, opts: &CreateOptions, verbose: bool) -> Result<Str
     }
 }
 
-fn do_create(datadir: &Path, name: &str, rootfs: &Path, limits: &ResourceLimits, network: &NetworkConfig, verbose: bool) -> Result<()> {
+fn do_create(datadir: &Path, name: &str, rootfs: &Path, limits: &ResourceLimits, network: &NetworkConfig, opaque_dirs: &[String], verbose: bool) -> Result<()> {
     let container_dir = datadir.join("containers").join(name);
     let containers_dir = datadir.join("containers");
     fs::create_dir_all(&containers_dir)
@@ -125,6 +129,24 @@ fn do_create(datadir: &Path, name: &str, rootfs: &Path, limits: &ResourceLimits,
 
     if verbose {
         eprintln!("created container directory: {}", container_dir.display());
+    }
+
+    // Set up opaque directories in the upper layer. Setting the
+    // trusted.overlay.opaque xattr to "y" on a directory makes overlayfs
+    // hide all lower-layer contents, so the directory starts empty.
+    let upper = container_dir.join("upper");
+    for dir in opaque_dirs {
+        let rel = dir.strip_prefix('/').unwrap_or(dir);
+        let target = upper.join(rel);
+        fs::create_dir_all(&target)
+            .with_context(|| format!("failed to create opaque dir {}", target.display()))?;
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o755))
+            .with_context(|| format!("failed to set permissions on {}", target.display()))?;
+        set_opaque_xattr(&target)
+            .with_context(|| format!("failed to set opaque xattr on {}", target.display()))?;
+        if verbose {
+            eprintln!("set opaque: {dir}");
+        }
     }
 
     let etc_dir = container_dir.join("upper").join("etc");
@@ -217,6 +239,9 @@ fn do_create(datadir: &Path, name: &str, rootfs: &Path, limits: &ResourceLimits,
     state.set("ROOTFS", rootfs_value);
     limits.write_to_state(&mut state);
     network.write_to_state(&mut state);
+    if !opaque_dirs.is_empty() {
+        state.set("OPAQUE_DIRS", opaque_dirs.join(","));
+    }
 
     // State file was already created atomically by create(); write content to it.
     let state_path = datadir.join("state").join(name);
@@ -226,6 +251,59 @@ fn do_create(datadir: &Path, name: &str, rootfs: &Path, limits: &ResourceLimits,
         eprintln!("wrote state file: {}", state_path.display());
     }
 
+    Ok(())
+}
+
+/// Validate and normalize opaque directory paths.
+///
+/// Each path must be absolute, must not contain `..` components, and must
+/// not be empty. Trailing slashes are stripped and duplicates are rejected.
+pub fn validate_opaque_dirs(dirs: &[String]) -> Result<Vec<String>> {
+    let mut seen = std::collections::HashSet::new();
+    let mut result = Vec::with_capacity(dirs.len());
+    for raw in dirs {
+        if raw.is_empty() {
+            bail!("opaque directory path cannot be empty");
+        }
+        let path = Path::new(raw);
+        if !path.is_absolute() {
+            bail!("opaque directory must be an absolute path: {raw}");
+        }
+        for comp in path.components() {
+            if comp == Component::ParentDir {
+                bail!("opaque directory must not contain '..': {raw}");
+            }
+        }
+        // Normalize: rebuild from components (strips trailing slashes).
+        let normalized: PathBuf = path.components().collect();
+        let s = normalized.to_string_lossy().to_string();
+        if !seen.insert(s.clone()) {
+            bail!("duplicate opaque directory: {s}");
+        }
+        result.push(s);
+    }
+    Ok(result)
+}
+
+/// Set the `trusted.overlay.opaque` extended attribute on a directory.
+fn set_opaque_xattr(path: &Path) -> Result<()> {
+    let c_path = CString::new(path.as_os_str().as_encoded_bytes())
+        .context("path contains null byte")?;
+    let c_name = CString::new("trusted.overlay.opaque").unwrap();
+    let value = b"y";
+    let ret = unsafe {
+        libc::lsetxattr(
+            c_path.as_ptr(),
+            c_name.as_ptr(),
+            value.as_ptr() as *const libc::c_void,
+            value.len(),
+            0,
+        )
+    };
+    if ret != 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("lsetxattr failed");
+    }
     Ok(())
 }
 
@@ -554,7 +632,13 @@ fn machinectl_shell(
         if let Ok(state) = State::read_from(&state_path) {
             if state.get("ROOTFS") == Some("") {
                 if let Some(su) = crate::sudo_user() {
-                    eprintln!("host rootfs container: joining as user '{}'", su.name);
+                    let opaque = state.get("OPAQUE_DIRS").unwrap_or("");
+                    if opaque.is_empty() {
+                        eprintln!("host rootfs container: joining as user '{}'", su.name);
+                    } else {
+                        let dirs = opaque.split(',').collect::<Vec<_>>().join(", ");
+                        eprintln!("host rootfs container: joining as user '{}' with opaque dirs {dirs}", su.name);
+                    }
                     cmd.args(["--uid", &su.name]);
                 } else if verbose {
                     eprintln!("host rootfs container but no sudo user detected; joining as root");
@@ -671,6 +755,7 @@ mod tests {
             rootfs: None,
             limits: Default::default(),
             network: Default::default(),
+            opaque_dirs: vec![],
         };
         let name = create(tmp.path(), &opts, false).unwrap();
         assert!(validate_name(&name).is_ok());
@@ -705,6 +790,7 @@ mod tests {
             rootfs: None,
             limits: Default::default(),
             network: Default::default(),
+            opaque_dirs: vec![],
         };
         let name = create(tmp.path(), &opts, false).unwrap();
         assert_eq!(name, "hello");
@@ -735,6 +821,7 @@ mod tests {
             rootfs: None,
             limits: Default::default(),
             network: Default::default(),
+            opaque_dirs: vec![],
         };
         create(tmp.path(), &opts, false).unwrap();
         let err = create(tmp.path(), &opts, false).unwrap_err();
@@ -752,6 +839,7 @@ mod tests {
             rootfs: Some("nonexistent".to_string()),
             limits: Default::default(),
             network: Default::default(),
+            opaque_dirs: vec![],
         };
         let err = create(tmp.path(), &opts, false).unwrap_err();
         assert!(
@@ -771,6 +859,7 @@ mod tests {
             rootfs: Some("myroot".to_string()),
             limits: Default::default(),
             network: Default::default(),
+            opaque_dirs: vec![],
         };
         let name = create(tmp.path(), &opts, false).unwrap();
         assert_eq!(name, "test");
@@ -791,6 +880,7 @@ mod tests {
             rootfs: None,
             limits: Default::default(),
             network: Default::default(),
+            opaque_dirs: vec![],
         };
         let err = create(tmp.path(), &opts, false);
         assert!(err.is_err());
@@ -807,6 +897,7 @@ mod tests {
             rootfs: None,
             limits: Default::default(),
             network: Default::default(),
+            opaque_dirs: vec![],
         };
         create(tmp.path(), &opts, false).unwrap();
         assert!(ensure_exists(tmp.path(), "mybox").is_ok());
@@ -902,6 +993,7 @@ mod tests {
             rootfs: None,
             limits,
             network: Default::default(),
+            opaque_dirs: vec![],
         };
         let name = create(tmp.path(), &opts, false).unwrap();
         assert_eq!(name, "limited");
@@ -922,6 +1014,7 @@ mod tests {
             rootfs: None,
             limits: Default::default(),
             network: Default::default(),
+            opaque_dirs: vec![],
         };
         let err = create(tmp.path(), &opts, false);
         unsafe { libc::umask(old) };
@@ -931,5 +1024,119 @@ mod tests {
             err.to_string().contains("umask"),
             "unexpected error: {err}"
         );
+    }
+
+    // --- validate_opaque_dirs tests ---
+
+    #[test]
+    fn test_validate_opaque_dirs_ok() {
+        let dirs = vec!["/var".to_string(), "/opt".to_string(), "/tmp".to_string()];
+        let result = validate_opaque_dirs(&dirs).unwrap();
+        assert_eq!(result, vec!["/var", "/opt", "/tmp"]);
+    }
+
+    #[test]
+    fn test_validate_opaque_dirs_rejects_relative() {
+        let dirs = vec!["var/log".to_string()];
+        let err = validate_opaque_dirs(&dirs).unwrap_err();
+        assert!(err.to_string().contains("absolute"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_validate_opaque_dirs_rejects_dotdot() {
+        let dirs = vec!["/var/../etc".to_string()];
+        let err = validate_opaque_dirs(&dirs).unwrap_err();
+        assert!(err.to_string().contains(".."), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_validate_opaque_dirs_normalizes() {
+        let dirs = vec!["/var/".to_string(), "/opt///".to_string()];
+        let result = validate_opaque_dirs(&dirs).unwrap();
+        assert_eq!(result, vec!["/var", "/opt"]);
+    }
+
+    #[test]
+    fn test_validate_opaque_dirs_rejects_duplicates() {
+        let dirs = vec!["/var".to_string(), "/var/".to_string()];
+        let err = validate_opaque_dirs(&dirs).unwrap_err();
+        assert!(err.to_string().contains("duplicate"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_validate_opaque_dirs_rejects_empty() {
+        let dirs = vec!["".to_string()];
+        let err = validate_opaque_dirs(&dirs).unwrap_err();
+        assert!(err.to_string().contains("empty"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_validate_opaque_dirs_empty_list_ok() {
+        let dirs: Vec<String> = vec![];
+        let result = validate_opaque_dirs(&dirs).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_create_with_opaque_dirs() {
+        // Setting trusted.* xattrs requires root; skip if not root.
+        if unsafe { libc::geteuid() } != 0 {
+            eprintln!("skipping test_create_with_opaque_dirs: requires root");
+            return;
+        }
+        let tmp = tmp();
+        let opts = CreateOptions {
+            name: Some("opaquebox".to_string()),
+            rootfs: None,
+            limits: Default::default(),
+            network: Default::default(),
+            opaque_dirs: vec!["/var".to_string(), "/opt/data".to_string()],
+        };
+        let name = create(tmp.path(), &opts, false).unwrap();
+        assert_eq!(name, "opaquebox");
+
+        // Verify directories were created in the upper layer.
+        let upper = tmp.path().join("containers/opaquebox/upper");
+        assert!(upper.join("var").is_dir());
+        assert!(upper.join("opt/data").is_dir());
+
+        // Verify the trusted.overlay.opaque xattr is set.
+        for dir in &["var", "opt/data"] {
+            let path = upper.join(dir);
+            let c_path = CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+            let c_name = CString::new("trusted.overlay.opaque").unwrap();
+            let mut buf = [0u8; 16];
+            let size = unsafe {
+                libc::lgetxattr(
+                    c_path.as_ptr(),
+                    c_name.as_ptr(),
+                    buf.as_mut_ptr() as *mut libc::c_void,
+                    buf.len(),
+                )
+            };
+            assert!(size > 0, "lgetxattr failed for {}", path.display());
+            assert_eq!(&buf[..size as usize], b"y", "xattr value mismatch for {dir}");
+        }
+    }
+
+    #[test]
+    fn test_create_opaque_dirs_state() {
+        // Setting trusted.* xattrs requires root; skip if not root.
+        if unsafe { libc::geteuid() } != 0 {
+            eprintln!("skipping test_create_opaque_dirs_state: requires root");
+            return;
+        }
+        let tmp = tmp();
+        let opts = CreateOptions {
+            name: Some("statebox".to_string()),
+            rootfs: None,
+            limits: Default::default(),
+            network: Default::default(),
+            opaque_dirs: vec!["/var".to_string(), "/opt".to_string()],
+        };
+        create(tmp.path(), &opts, false).unwrap();
+
+        let state = State::read_from(&tmp.path().join("state/statebox")).unwrap();
+        assert_eq!(state.get("OPAQUE_DIRS"), Some("/var,/opt"));
     }
 }

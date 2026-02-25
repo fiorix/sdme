@@ -58,6 +58,8 @@ sudo sdme new
 This also checks for `$SUDO_USER` and joins the container as that user.
 You can disable this with the `join_as_sudo_user` config setting — see `sdme config get`.
 
+By default, host-rootfs containers (no `-r`) make `/etc/systemd/system` and `/var/log` opaque so the host's systemd overrides and log history don't leak in. Override with `-o` or change the default via `sdme config set host_rootfs_opaque_dirs`.
+
 Creating a rootfs (imported rootfs needs systemd and dbus):
 
 ```bash
@@ -111,6 +113,7 @@ sudo sdme ps                                            # list containers
 sudo sdme stop mybox                                    # stop one or more containers
 sudo sdme stop --all                                    # stop all running containers
 sudo sdme set mybox --memory 2G --cpus 4                # set resource limits
+sudo sdme create -o /var/log -o /tmp mybox              # create with custom opaque dirs
 sudo sdme rm mybox                                      # remove it (stops if running)
 sudo sdme rm --all --force                              # remove all containers (no prompt)
 sudo sdme fs rm ubuntu                                  # remove a rootfs

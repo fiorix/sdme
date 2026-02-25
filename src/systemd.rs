@@ -944,6 +944,7 @@ mod tests {
             rootfs: None,
             limits: Default::default(),
             network: Default::default(),
+            opaque_dirs: vec![],
         };
         create(tmp.path(), &opts, false).unwrap();
 
@@ -965,6 +966,7 @@ mod tests {
             rootfs: Some("ubuntu".to_string()),
             limits: Default::default(),
             network: Default::default(),
+            opaque_dirs: vec![],
         };
         create(tmp.path(), &opts, false).unwrap();
 
@@ -998,6 +1000,7 @@ mod tests {
             rootfs: None,
             limits,
             network: Default::default(),
+            opaque_dirs: vec![],
         };
         create(tmp.path(), &opts, false).unwrap();
 

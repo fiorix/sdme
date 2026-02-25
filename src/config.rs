@@ -23,6 +23,9 @@ pub struct Config {
 
     #[serde(default = "default_join_as_sudo_user")]
     pub join_as_sudo_user: bool,
+
+    #[serde(default = "default_host_rootfs_opaque_dirs")]
+    pub host_rootfs_opaque_dirs: String,
 }
 
 fn default_interactive() -> bool {
@@ -41,6 +44,10 @@ fn default_join_as_sudo_user() -> bool {
     true
 }
 
+fn default_host_rootfs_opaque_dirs() -> String {
+    "/etc/systemd/system,/var/log".to_string()
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -48,6 +55,7 @@ impl Default for Config {
             datadir: default_datadir(),
             boot_timeout: default_boot_timeout(),
             join_as_sudo_user: default_join_as_sudo_user(),
+            host_rootfs_opaque_dirs: default_host_rootfs_opaque_dirs(),
         }
     }
 }
@@ -60,6 +68,7 @@ impl Config {
         println!("datadir = {}", self.datadir.display());
         println!("boot_timeout = {}", self.boot_timeout);
         println!("join_as_sudo_user = {join_as_sudo_user}");
+        println!("host_rootfs_opaque_dirs = {}", self.host_rootfs_opaque_dirs);
     }
 }
 
@@ -247,6 +256,36 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap();
         std::env::remove_var("SUDO_USER");
         assert!(sudo_user_config_path().is_none());
+    }
+
+    #[test]
+    fn test_default_host_rootfs_opaque_dirs() {
+        let config = Config::default();
+        assert_eq!(config.host_rootfs_opaque_dirs, "/etc/systemd/system,/var/log");
+    }
+
+    #[test]
+    fn test_save_and_load_host_rootfs_opaque_dirs() {
+        let _tmp = TempConfig::new();
+        let config = Config {
+            host_rootfs_opaque_dirs: "/var/log".to_string(),
+            ..Config::default()
+        };
+        save(&config, None).unwrap();
+        let loaded = load(None).unwrap();
+        assert_eq!(loaded.host_rootfs_opaque_dirs, "/var/log");
+    }
+
+    #[test]
+    fn test_save_and_load_host_rootfs_opaque_dirs_empty() {
+        let _tmp = TempConfig::new();
+        let config = Config {
+            host_rootfs_opaque_dirs: String::new(),
+            ..Config::default()
+        };
+        save(&config, None).unwrap();
+        let loaded = load(None).unwrap();
+        assert_eq!(loaded.host_rootfs_opaque_dirs, "");
     }
 
     #[test]
