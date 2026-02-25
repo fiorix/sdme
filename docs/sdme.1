@@ -169,7 +169,7 @@ Extra arguments are passed through to journalctl
 (e.g.\&
 .BR \-f ,
 .BR "\-n 100" ).
-.SS sdme fs import \fIname\fR \fIsource\fR [\-f] [\-\-install\-packages \fImode\fR]
+.SS sdme fs import \fIname\fR \fIsource\fR [\-f] [\-\-install\-packages \fImode\fR] [\-\-oci\-base \fImode\fR] [\-\-oci\-base\-fs \fIrootfs\fR]
 Import a root filesystem.
 After import, systemd is detected in the rootfs; if missing, distro\-specific
 packages can be installed via chroot.
@@ -182,6 +182,45 @@ flag controls this:
 always installs,
 .B no
 refuses if systemd is absent.
+.PP
+For OCI registry images, the
+.B \-\-oci\-base
+flag controls how the image is classified:
+.RS
+.TP
+.B auto
+(default) Auto\-detect from image config.
+Base OS images have no entrypoint, a shell as default command, and no exposed
+ports.
+Everything else is treated as an application image.
+.TP
+.B yes
+Force base OS mode.
+The rootfs goes through systemd detection and package installation.
+Use this for OS images that the heuristic misclassifies.
+.TP
+.B no
+Force application mode.
+Requires
+.B \-\-oci\-base\-fs
+to specify a systemd\-capable rootfs as the base layer.
+.RE
+.PP
+The
+.B \-\-oci\-base\-fs
+flag specifies a previously imported rootfs (with systemd) to use as the base
+layer for OCI application images.
+The application rootfs is placed under
+.I /oci/root
+inside a copy of the base, and a systemd service unit
+.RI ( sdme\-oci\-app.service )
+is generated to run the application's entrypoint via
+.BR RootDirectory=/oci/root .
+OCI metadata (environment, ports, volumes) is saved under
+.IR /oci/ .
+See
+.I docs/oci.md
+for a full walkthrough.
 .PP
 The source type is auto\-detected:
 .RS
@@ -483,6 +522,16 @@ Import a rootfs from an OCI registry:
 .nf
 sdme fs import fedora quay.io/fedora/fedora
 sdme new \-r fedora
+.fi
+.RE
+.PP
+Import an OCI application image and run it inside a base container:
+.PP
+.RS
+.nf
+sdme fs import ubuntu docker.io/ubuntu:24.04
+sdme fs import nginx docker.io/nginx \-\-oci\-base\-fs=ubuntu
+sdme new \-r nginx
 .fi
 .RE
 .PP
