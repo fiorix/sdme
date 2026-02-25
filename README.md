@@ -2,39 +2,13 @@
 
 Lightweight systemd-nspawn containers with overlayfs.
 
+Why does this even exist? Here's my pitch: from a linux system with just systemd and sdme, you can create and run any container and cloud image that exists today. 1 binary.
+
+The containers we create are booted systemd containers. When you import OCI images from quay or docker they run in a chroot inside a systemd booted container.
+
 Runs on Linux with systemd. Uses kernel overlayfs for copy-on-write storage. By default, containers are overlayfs clones of `/` but you can also import rootfs from other distros (Ubuntu, Debian, Fedora, NixOS — see [docs/nix](docs/nix/)).
 
 **On macOS?** See [docs/macos.md](docs/macos.md) for instructions using lima-vm.
-
-## Dependencies
-
-### Runtime
-
-| Program | Package | Required for |
-|---------|---------|--------------|
-| `systemd` (>= 252) | `systemd` | All commands (D-Bus communication) |
-| `systemd-nspawn` | `systemd-container` | Running containers (`sdme start`) |
-| `machinectl` | `systemd-container` | `sdme join`, `sdme exec`, `sdme new` |
-| `journalctl` | `systemd` | `sdme logs` |
-| `qemu-nbd` | `qemu-utils` | `sdme fs import` (QCOW2 images only) |
-
-### Install all dependencies (Debian/Ubuntu)
-
-```bash
-sudo apt install systemd-container
-```
-
-For QCOW2 image imports, also install `qemu-utils`.
-
-## Build
-
-```bash
-cargo build --release       # build the binary
-cargo test                  # run all tests
-cargo test <test_name>      # run a single test
-make                        # same as cargo build --release
-sudo make install           # install to /usr/local (does NOT rebuild)
-```
 
 ## Usage
 
@@ -74,31 +48,33 @@ sudo sdme new -r debian
 
 sdme can also run OCI application images (nginx, mysql, etc.) as systemd services inside a base container. See [docs/oci.md](docs/oci.md) for details.
 
-### Container management
+## Dependencies
+
+### Runtime
+
+| Program | Package | Required for |
+|---------|---------|--------------|
+| `systemd` (>= 252) | `systemd` | All commands (D-Bus communication) |
+| `systemd-nspawn` | `systemd-container` | Running containers (`sdme start`) |
+| `machinectl` | `systemd-container` | `sdme join`, `sdme exec`, `sdme new` |
+| `journalctl` | `systemd` | `sdme logs` |
+| `qemu-nbd` | `qemu-utils` | `sdme fs import` (QCOW2 images only) |
+
+### Install all dependencies (Debian/Ubuntu)
 
 ```bash
-sudo sdme new mybox --fs ubuntu                         # create + start + join
-sudo sdme create mybox --fs ubuntu                      # create a container
-sudo sdme create -o /var/log -o /tmp mybox              # create with custom opaque dirs
-sudo sdme start mybox                                   # start it
-sudo sdme join mybox                                    # enter it (login shell)
-sudo sdme join mybox /bin/bash -l                       # enter with a specific command
-sudo sdme exec mybox cat /etc/os-release                # run a one-off command
-sudo sdme logs mybox                                    # view logs
-sudo sdme logs mybox -f                                 # follow logs
-sudo sdme ps                                            # list containers
-sudo sdme stop mybox                                    # stop one or more containers
-sudo sdme stop --all                                    # stop all running containers
-sudo sdme set mybox --memory 2G --cpus 4                # set resource limits
-sudo sdme rm mybox                                      # remove it (stops if running)
-sudo sdme rm --all --force                              # remove all containers (no prompt)
+sudo apt install systemd-container
 ```
 
-### Root filesystem management (`sdme fs`)
+For QCOW2 image imports, also install `qemu-utils`.
+
+## Build
 
 ```bash
-sudo sdme fs import ubuntu /path/to/rootfs              # import a rootfs (dir, tarball, URL, OCI, QCOW2)
-sudo sdme fs build custom build.conf                    # build rootfs from config
-sudo sdme fs ls                                         # list imported rootfs
-sudo sdme fs rm ubuntu                                  # remove a rootfs
+cargo build --release       # build the binary
+cargo test                  # run all tests
+cargo test <test_name>      # run a single test
+make                        # same as cargo build --release
+sudo make install           # install to /usr/local (does NOT rebuild)
 ```
+
