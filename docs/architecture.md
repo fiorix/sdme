@@ -174,9 +174,9 @@ both sdme containers and any other nspawn machines on the system.
 ```
   create --> start --> join/exec --> stop --> rm
     |           |                     |       |
-    |     install/update         TerminateMachine
-    |     template unit              (D-Bus)
-    |     StartUnit (D-Bus)
+    |     install/update         graceful: KillMachine SIGRTMIN+4
+    |     template unit          --term:   TerminateMachine
+    |     StartUnit (D-Bus)      --kill:   KillMachine SIGKILL
     |     wait for boot
     |
     +-- mkdir upper/ work/ merged/ shared/
@@ -207,9 +207,11 @@ balance struck is: use D-Bus where it gives us programmatic control (start,
 stop, status queries), shell out where the existing tool already does the job
 well (interactive shell sessions, running commands).
 
-**stop** calls `TerminateMachine` over D-Bus, which sends SIGTERM to the nspawn
-process and waits for clean shutdown. Multiple containers can be stopped in one
-invocation.
+**stop** has three tiers: graceful (default) sends `SIGRTMIN+4` to the container
+leader via `KillMachine` (90s timeout), `--term` calls `TerminateMachine` which
+sends SIGTERM to the nspawn process (30s timeout), and `--kill` sends SIGKILL to
+all processes via `KillMachine` (15s timeout). Multiple containers can be stopped
+in one invocation.
 
 **rm** stops the container if running, removes the state file, and deletes the
 container's directories. The `make_removable()` helper recursively fixes
