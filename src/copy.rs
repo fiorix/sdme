@@ -78,7 +78,7 @@ pub(crate) fn copy_entry(src: &Path, dst: &Path, verbose: bool) -> Result<()> {
             };
             if ret != 0 {
                 let err = std::io::Error::last_os_error();
-                // ENOTSUP on some filesystems for symlink timestamps — not fatal.
+                // ENOTSUP on some filesystems for symlink timestamps; not fatal.
                 if err.raw_os_error() != Some(libc::ENOTSUP) {
                     return Err(err)
                         .with_context(|| format!("utimensat failed for {}", dst.display()));
@@ -140,7 +140,7 @@ pub(crate) fn copy_metadata_from_stat(dst: &Path, stat: &libc::stat) -> Result<(
             .with_context(|| format!("lchown failed for {}", dst.display()));
     }
 
-    // Permission bits (skip for symlinks — chmod doesn't apply to them).
+    // Permission bits (skip for symlinks; chmod doesn't apply to them).
     let file_type = stat.st_mode & libc::S_IFMT;
     if file_type != libc::S_IFLNK {
         let ret = unsafe { libc::chmod(c_path.as_ptr(), stat.st_mode & 0o7777) };

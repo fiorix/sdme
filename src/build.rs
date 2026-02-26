@@ -297,7 +297,7 @@ fn execute_build(
         }
     }
 
-    // Ensure container is stopped — overlayfs must be unmounted for merged layer copy.
+    // Ensure container is stopped; overlayfs must be unmounted for merged layer copy.
     if container_running {
         eprintln!("stopping build container '{container_name}'");
         containers::stop(container_name, verbose)?;
@@ -350,7 +350,7 @@ pub fn build(
     };
     containers::create(datadir, &create_opts, verbose)?;
 
-    // Execute all build operations — clean up on failure.
+    // Execute all build operations; clean up on failure.
     if let Err(e) = execute_build(
         datadir,
         &staging_name,
@@ -718,7 +718,7 @@ mod tests {
         let src_file = src_dir.join("mybin");
         fs::write(&src_file, "content").unwrap();
 
-        // dst doesn't exist in either layer — file created at exact path.
+        // dst doesn't exist in either layer; file created at exact path.
         do_copy(&upper, &lower, &src_file, Path::new("/opt/mybin"), &[], false).unwrap();
         assert!(upper.join("opt/mybin").is_file());
     }

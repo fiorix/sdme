@@ -117,7 +117,7 @@ pub(super) fn import_oci_layout(oci_dir: &Path, staging_dir: &Path, verbose: boo
         // Direct image manifest.
         serde_json::from_value(manifest_value).context("failed to parse OCI image manifest")?
     } else if manifest_value.get("manifests").is_some() {
-        // Manifest index — follow one level of indirection.
+        // Manifest index; follow one level of indirection.
         let sub_index: OciIndex =
             serde_json::from_value(manifest_value).context("failed to parse OCI manifest index")?;
         if sub_index.manifests.is_empty() {
@@ -203,7 +203,7 @@ pub(super) fn unpack_oci_layer<R: Read>(reader: R, dest: &Path) -> Result<()> {
         let file_name: String = match path.file_name() {
             Some(name) => name.to_string_lossy().into_owned(),
             None => {
-                // Root directory entry — just ensure it exists.
+                // Root directory entry; just ensure it exists.
                 entry
                     .unpack_in(dest)
                     .with_context(|| format!("failed to unpack entry {}", path.display()))?;
@@ -261,7 +261,7 @@ pub(super) fn unpack_oci_layer<R: Read>(reader: R, dest: &Path) -> Result<()> {
             continue;
         }
 
-        // Normal entry — unpack into destination.
+        // Normal entry; unpack into destination.
         entry
             .unpack_in(dest)
             .with_context(|| format!("failed to unpack entry {}", path.display()))?;

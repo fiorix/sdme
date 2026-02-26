@@ -27,7 +27,7 @@ pub static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 /// Read a line from stdin, returning `ErrorKind::Interrupted` if a signal
 /// interrupts the read.
 ///
-/// Unlike `BufRead::read_line()`, this does NOT retry on `EINTR` — it
+/// Unlike `BufRead::read_line()`, this does NOT retry on `EINTR`; it
 /// surfaces the interruption to the caller so Ctrl+C works during
 /// interactive prompts.
 pub fn read_line_interruptible(buf: &mut String) -> std::io::Result<usize> {
@@ -197,11 +197,11 @@ impl State {
 /// container's state file and converted to a systemd drop-in at start time.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct ResourceLimits {
-    /// `MemoryMax=` — e.g. "512M", "2G"
+    /// `MemoryMax=`, e.g. "512M", "2G"
     pub memory: Option<String>,
-    /// `CPUQuota=` — stored as a number of CPUs (e.g. "2" → 200%)
+    /// `CPUQuota=`, stored as a number of CPUs (e.g. "2" → 200%)
     pub cpus: Option<String>,
-    /// `CPUWeight=` — integer 1–10000
+    /// `CPUWeight=`, integer 1–10000
     pub cpu_weight: Option<String>,
 }
 

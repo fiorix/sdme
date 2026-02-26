@@ -14,7 +14,7 @@ sh <(curl -L https://nixos.org/nix/install) --daemon --yes
 
 ```bash
 sudo ./build-rootfs.sh
-sudo sdme fs import nixos -f docs/nix/nixos-rootfs
+sudo sdme fs import nixos docs/nix/nixos-rootfs --install-packages no
 ```
 
 The build script runs `nix-build` on `container.nix` to produce the NixOS
@@ -22,13 +22,13 @@ system closure, then copies the full `/nix/store` closure into a rootfs
 directory that systemd-nspawn can boot.
 
 The `sdme fs import` will warn about systemd not being found at standard
-paths — this is expected since NixOS keeps everything under `/nix/store`.
-Use `-f` to force the import.
+paths. This is expected since NixOS keeps everything under `/nix/store`.
+Use `--install-packages no` to skip the systemd check.
 
 ## Use
 
 ```bash
-sudo sdme create --name mybox --fs nixos
+sudo sdme create mybox --fs nixos
 sudo sdme start mybox
 sudo sdme join mybox
 ```
@@ -61,7 +61,7 @@ Then rebuild and re-import:
 ```bash
 sudo ./build-rootfs.sh
 sudo sdme fs rm nixos
-sudo sdme fs import nixos -f docs/nix/nixos-rootfs
+sudo sdme fs import nixos docs/nix/nixos-rootfs --install-packages no
 ```
 
 ## What's inside

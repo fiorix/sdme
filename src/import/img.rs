@@ -237,7 +237,7 @@ fn find_root_partition(block_dev: &Path, verbose: bool) -> Result<PathBuf> {
     }
 
     if partitions.is_empty() {
-        // No partitions found — try the whole device (unpartitioned image).
+        // No partitions found; try the whole device (unpartitioned image).
         if verbose {
             eprintln!("no partitions found, trying whole device");
         }

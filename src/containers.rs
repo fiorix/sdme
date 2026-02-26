@@ -123,7 +123,7 @@ fn do_create(
     set_dir_permissions(&containers_dir, 0o700)?;
 
     // The upper directory becomes the root of the overlayfs merged view, so it
-    // must be world-readable (0o755) — otherwise non-root services inside the
+    // must be world-readable (0o755); otherwise non-root services inside the
     // container (e.g. dbus-daemon running as messagebus) cannot traverse the
     // filesystem. The merged mount point also needs 0o755. The work directory
     // is overlayfs-internal and can stay restricted.
@@ -214,7 +214,7 @@ fn do_create(
     let resolv_path = etc_dir.join("resolv.conf");
     fs::write(
         &resolv_path,
-        "# placeholder — replaced by systemd-nspawn at boot\n",
+        "# placeholder, replaced by systemd-nspawn at boot\n",
     )
     .with_context(|| format!("failed to write {}", resolv_path.display()))?;
 
@@ -237,7 +237,7 @@ fn do_create(
     let fstab_path = etc_dir.join("fstab");
     fs::write(
         &fstab_path,
-        "# empty — host mounts not applicable in container\n",
+        "# empty, host mounts not applicable in container\n",
     )
     .with_context(|| format!("failed to write {}", fstab_path.display()))?;
 
@@ -385,7 +385,7 @@ pub fn resolve_name(datadir: &Path, input: &str) -> Result<String> {
             }
         }
     }
-    // Exact match — return immediately.
+    // Exact match; return immediately.
     if names.iter().any(|n| n == input) {
         return Ok(input.to_string());
     }

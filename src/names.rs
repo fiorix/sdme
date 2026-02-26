@@ -291,7 +291,7 @@ pub fn generate_name(datadir: &Path) -> Result<String> {
         }
     }
 
-    // All base words taken — try vowel mutations.
+    // All base words taken; try vowel mutations.
     for _ in 0..200 {
         let base = words[random_usize()? % words.len()];
         let mutated = mutate_vowels(base)?;

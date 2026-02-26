@@ -47,7 +47,7 @@ impl ImageReference {
             return None;
         }
 
-        // Reject URLs — they're handled by the Url source kind.
+        // Reject URLs; they're handled by the Url source kind.
         if source.starts_with("http://") || source.starts_with("https://") {
             return None;
         }
@@ -411,7 +411,7 @@ fn fetch_config_blob(
         .with_context(|| format!("failed to fetch config blob {digest}"))?
         .into_body()
         .into_with_config()
-        .limit(4_194_304) // 4 MiB — config blobs are small
+        .limit(4_194_304) // 4 MiB; config blobs are small
         .read_to_string()
         .with_context(|| format!("failed to read config blob body {digest}"))?;
 
@@ -477,7 +477,7 @@ fn resolve_manifest(
         return serde_json::from_value(manifest).context("failed to parse image manifest");
     }
 
-    // Must be a manifest list/index — select the right platform.
+    // Must be a manifest list/index; select the right platform.
     if manifest.get("manifests").is_some() {
         let list: ManifestList =
             serde_json::from_value(manifest).context("failed to parse manifest list")?;

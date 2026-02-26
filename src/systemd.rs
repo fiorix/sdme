@@ -263,7 +263,7 @@ mod dbus {
                     if verbose {
                         eprintln!("machine '{name}' registered");
                     }
-                    // Machine appeared — check its state.
+                    // Machine appeared; check its state.
                     if let Some(state) = get_machine_state(&conn, name)? {
                         if verbose {
                             eprintln!("container state: {state}");
@@ -277,7 +277,7 @@ mod dbus {
                     bail!("container '{name}' exited during boot");
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    // No signal received — poll the state via D-Bus.
+                    // No signal received; poll the state via D-Bus.
                     // This handles the "opening" → "running" transition
                     // that is signaled via PropertiesChanged (which we
                     // don't subscribe to separately).
@@ -399,7 +399,7 @@ mod dbus {
     /// sends SIGTERM to the container leader process (nspawn).
     /// nspawn handles SIGTERM by initiating a clean container shutdown.
     ///
-    /// This is a non-blocking call — the machine shuts down asynchronously.
+    /// This is a non-blocking call; the machine shuts down asynchronously.
     /// Use [`wait_for_shutdown`] to wait for full shutdown.
     pub fn terminate_machine(name: &str) -> Result<()> {
         let conn = connect()?;
@@ -575,7 +575,7 @@ mod dbus {
                     }
                 }
                 None => {
-                    // Unit not found — treat as inactive.
+                    // Unit not found; treat as inactive.
                     return Ok(());
                 }
             }
@@ -698,7 +698,7 @@ fn escape_exec_arg(arg: &str) -> String {
 ///
 /// Contains ExecStartPre (overlayfs mount), ExecStart (systemd-nspawn
 /// with all arguments baked in), and ExecStopPost (unmount). Every
-/// argument is explicit — no environment variable substitution needed.
+/// argument is explicit; no environment variable substitution needed.
 pub fn nspawn_dropin(
     datadir: &str,
     name: &str,

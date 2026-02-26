@@ -198,7 +198,7 @@ mod tests {
         let _tmp = TempConfig::new();
         let path = config_path().unwrap();
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        // Write an empty TOML file — missing keys should get defaults.
+        // Write an empty TOML file; missing keys should get defaults.
         fs::write(&path, "").unwrap();
         let config = load(None).unwrap();
         assert!(config.interactive);

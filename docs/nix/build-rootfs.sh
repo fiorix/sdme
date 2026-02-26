@@ -8,7 +8,7 @@
 #
 # The script builds the NixOS system closure from container.nix, then
 # assembles a rootfs directory that systemd-nspawn can boot. The result
-# can be imported directly with: sdme fs import nixos -f <output-dir>
+# can be imported directly with: sdme fs import nixos <output-dir>
 #
 set -euo pipefail
 
@@ -53,7 +53,7 @@ nix-store -qR "$TOPLEVEL" | while read -r p; do
     cp -a "$p" "$OUTPUT/nix/store/"
 done
 
-# /sbin/init — systemd-nspawn looks here for the init binary.
+# /sbin/init: systemd-nspawn looks here for the init binary.
 ln -sf "$TOPLEVEL/init" "$OUTPUT/sbin/init"
 
 # /etc/os-release for distro detection.
@@ -71,4 +71,4 @@ chmod 1777 "$OUTPUT/tmp"
 echo "Rootfs ready at $OUTPUT"
 echo ""
 echo "Import with:"
-echo "  sdme fs import nixos -f $OUTPUT"
+echo "  sdme fs import nixos $OUTPUT"

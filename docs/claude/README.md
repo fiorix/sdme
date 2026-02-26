@@ -14,8 +14,8 @@ cp docs/claude/*.md ~/.claude/commands/
 
 Two agents handle complementary responsibilities:
 
-- **`/syseng`** — Systems engineer. Implements new functionality, reviews code for correctness and basic security, and handles Linux-specific concerns (systemd, D-Bus, overlayfs, etc.).
+- **`/syseng`**: Systems engineer. Implements new functionality, reviews code for correctness and basic security, and handles Linux-specific concerns (systemd, D-Bus, overlayfs, etc.).
 
-- **`/rustacean`** — Rust expert. Reviews all code produced for idiomatic Rust, eliminates duplication, maintains project hygiene (dependencies, clippy, formatting), and ensures the codebase stays clean and consistent.
+- **`/rustacean`**: Rust expert. Reviews all code produced for idiomatic Rust, eliminates duplication, maintains project hygiene (dependencies, clippy, formatting), and ensures the codebase stays clean and consistent.
 
 The general flow: ask the syseng to implement a feature or fix, then ask the rustacean to review the result.

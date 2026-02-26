@@ -1,6 +1,6 @@
 # OCI Container Support in sdme
 
-sdme manages systemd-booted containers — full init, journal, cgroups, the
+sdme manages systemd-booted containers: full init, journal, cgroups, the
 works. OCI images come from a different world: single-process, no init,
 environment-driven configuration. These two paradigms don't naturally fit
 together, but there's a useful middle ground.
@@ -49,20 +49,20 @@ When an application image is imported, sdme:
 4. Creates essential runtime dirs (`/tmp`, `/run`, etc.) inside `/oci/root`
 5. Removes Docker-specific `/dev/stdout` symlinks that break under systemd
 6. Writes OCI metadata under `/oci/`:
-   - `/oci/env` — environment variables from the image config
-   - `/oci/ports` — exposed ports (for reference)
-   - `/oci/volumes` — declared volumes (for reference)
+   - `/oci/env`: environment variables from the image config
+   - `/oci/ports`: exposed ports (for reference)
+   - `/oci/volumes`: declared volumes (for reference)
 7. Generates `etc/systemd/system/sdme-oci-app.service` with:
-   - `RootDirectory=/oci/root` — chroots into the OCI rootfs
-   - `MountAPIVFS=yes` — provides `/proc`, `/sys`, `/dev`
-   - `EnvironmentFile=-/oci/env` — loads the image's environment
+   - `RootDirectory=/oci/root`: chroots into the OCI rootfs
+   - `MountAPIVFS=yes`: provides `/proc`, `/sys`, `/dev`
+   - `EnvironmentFile=-/oci/env`: loads the image's environment
    - `ExecStart=` built from the image's Entrypoint + Cmd
    - `User=` from the image config (or root)
 8. Enables the unit via symlink in `multi-user.target.wants/`
 
 When you create a container from this rootfs (`sdme new -r nginx`), systemd
 boots inside the nspawn container, reaches `multi-user.target`, and starts
-`sdme-oci-app.service` — which chroots into the OCI rootfs and runs the
+`sdme-oci-app.service`, which chroots into the OCI rootfs and runs the
 application.
 
 ## Practical examples
@@ -115,7 +115,7 @@ curl -s http://localhost
 ### Step 3: Import and run MySQL
 
 MySQL needs `MYSQL_ROOT_PASSWORD` set at first boot. The OCI image doesn't
-bake this in — it's a runtime variable. After importing, you'll add it to the
+bake this in; it's a runtime variable. After importing, you'll add it to the
 environment file before starting the container.
 
 ```bash
@@ -187,7 +187,7 @@ mysql -u root -psecret -h 127.0.0.1 -e 'SELECT 1'
 
 - **No health checks.** OCI HEALTHCHECK directives are ignored.
 
-- **No restart policy mapping.** OCI restart policies don't map to systemd —
+- **No restart policy mapping.** OCI restart policies don't map to systemd;
   the generated unit uses systemd defaults. Edit the unit if you need
   `Restart=always` or similar.
 
@@ -198,7 +198,7 @@ multiple OCI services run inside it as individual systemd units. This would
 let you compose services (nginx + app + database) inside a single nspawn
 container with shared networking and storage, managed by systemctl.
 
-Port and volume wiring is the next practical step — generating `BindPaths=`
+Port and volume wiring is the next practical step: generating `BindPaths=`
 from OCI volume declarations and integrating with sdme's `--port` flag for
 network-isolated containers.
 

@@ -41,7 +41,7 @@ let
       # No bootloader.
       boot.loader.grub.enable = false;
 
-      # Explicitly disable resolved — it conflicts with container mode's
+      # Explicitly disable resolved; it conflicts with container mode's
       # host resolv.conf.
       services.resolved.enable = false;
 

@@ -2,7 +2,7 @@
 
 Lightweight systemd-nspawn containers with overlayfs.
 
-Runs on Linux with systemd. Uses kernel overlayfs for copy-on-write storage. By default, containers are overlayfs clones of `/` but you can also import rootfs from other distros (Ubuntu, Debian, Fedora, NixOS — see [docs/nix](docs/nix/)).
+Runs on Linux with systemd. Uses kernel overlayfs for copy-on-write storage. By default, containers are overlayfs clones of `/` but you can also import rootfs from other distros (Ubuntu, Debian, Fedora, NixOS; see [docs/nix](docs/nix/)).
 
 **Why does this even exist?**
 Here's my pitch: from a linux system with just systemd and sdme, you can create and run any container and cloud image that exists today. 1 binary.
@@ -18,9 +18,6 @@ Cloning your own "/" filesystem:
 ```bash
 sudo sdme new
 ```
-
-This also checks for `$SUDO_USER` and joins the container as that user.
-You can disable this with the `join_as_sudo_user` config setting — see `sdme config get`.
 
 By default, host-rootfs containers (no `-r`) make `/etc/systemd/system` and `/var/log` opaque so the host's systemd overrides and log history don't leak in. Override with `-o` or change the default via `sdme config set host_rootfs_opaque_dirs`.
 

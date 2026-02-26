@@ -1,18 +1,18 @@
 # sdme: Architecture and Design
 
-**Alexandre Fiori — February 2026**
+**Alexandre Fiori, February 2026**
 
 ## 1. Introduction
 
 sdme is a container manager for Linux. It runs on top of systemd-nspawn and
-overlayfs — both already present on any modern systemd-based distribution — and
+overlayfs (both already present on any modern systemd-based distribution) and
 needs nothing else installed. No daemon, no runtime dependency beyond systemd
 itself. A single static-ish binary that talks to the kernel and to systemd over
 D-Bus.
 
 The project started as an experiment inspired by virtme-ng: what if you could
 clone your running host system into an isolated container with a single command?
-Overlayfs makes this nearly free — mount the host rootfs as a read-only lower
+Overlayfs makes this nearly free: mount the host rootfs as a read-only lower
 layer, give the container its own upper layer for writes, and you have a
 full-featured Linux environment that shares the host's binaries but can't damage
 the host's files. That was the seed.
@@ -24,10 +24,10 @@ systemd do the heavy lifting.
 
 sdme is not an attempt to replace Podman, Docker, or any other container runtime.
 Podman in particular has excellent systemd integration through Quadlet
-(podman-systemd.unit(5)) — it is the mature, full-featured approach to
+(podman-systemd.unit(5)), the mature, full-featured approach to
 systemd-native container management. sdme is a different thing entirely. It boots
 full systemd inside nspawn containers, manages overlayfs storage directly, and
-bridges the OCI ecosystem — all without a daemon and without pulling in a
+bridges the OCI ecosystem, all without a daemon and without pulling in a
 container runtime.
 
 The name stands for *Systemd Machine Editor*, and its pronunciation is left as
@@ -37,7 +37,7 @@ an exercise for the reader.
 
 The foundational mode of sdme is what you get when you run `sdme new` with no
 flags. It creates a container that is an overlayfs clone of your running host
-system — same kernel, same binaries, same libraries, but with its own writable
+system: same kernel, same binaries, same libraries, but with its own writable
 layer so changes stay isolated.
 
 ```
@@ -66,11 +66,38 @@ layer so changes stay isolated.
   there, not the host's units and logs.
 ```
 
+Looks like this:
+
+```
+$ sudo sdme new
+creating 'jerinhouma'
+starting 'jerinhouma'
+joining 'jerinhouma'
+host rootfs container: joining as user 'fiorix' with opaque dirs /etc/systemd/system, /var/log
+Connected to machine jerinhouma. Press ^] three times within 1s to exit session.
+jerinhouma ~ $ systemctl status
+● jerinhouma
+    State: running
+    Units: 185 loaded (incl. loaded aliases)
+     Jobs: 0 queued
+   Failed: 0 units
+    Since: Thu 2026-02-26 01:15:38 GMT; 7s ago
+  systemd: 257.9-0ubuntu2.1
+...
+```
+
 Each container boots its own systemd instance inside the nspawn namespace. The
 host's systemd manages the container as a service unit; the container's systemd
 manages everything inside. Both talk to their own D-Bus, both write to their own
 journal, but the container's writes land on the overlayfs upper layer and never
 touch the host.
+
+**User identity preservation.** When sdme is run via `sudo` and the container
+is a host-rootfs clone (no `-r` flag), it reads `$SUDO_USER` and joins the
+container as that user rather than root. This is a convenience for landing on
+your own machine as your own user: your own `$HOME`, dotfiles, shell, etc.
+The behaviour is controlled by the `join_as_sudo_user` config setting (enabled
+by default) and can be disabled with `sdme config set join_as_sudo_user no`.
 
 **Opaque directories** are the key to making host clones usable. Without them,
 the container would inherit the host's systemd units and try to start all the
@@ -116,14 +143,14 @@ configurable via `sdme config set datadir <path>`):
 **State files** are flat KEY=VALUE text files under `state/`. They record
 everything about a container: name, rootfs, creation timestamp, resource limits,
 network configuration, bind mounts, environment variables, opaque directories.
-The format is intentionally simple — readable with `cat`, parseable with `grep`,
+The format is intentionally simple: readable with `cat`, parseable with `grep`,
 editable with `sed` in an emergency. The `State` type in the code uses a
 `BTreeMap<String, String>` for deterministic key ordering.
 
 **Transactional operations** follow a staging pattern throughout sdme. Rootfs
 imports write to a `.{name}.importing` staging directory, then do an atomic
 `rename()` to the final path on success. If the import fails or is interrupted,
-the staging directory is cleaned up — and if it's left behind (power failure,
+the staging directory is cleaned up, and if it's left behind (power failure,
 OOM kill), the next import detects it and offers to clean up with `--force`.
 
 **Health detection** in `sdme ps` checks that a container's expected directories
@@ -165,7 +192,7 @@ D-Bus signals and polling the machine state. The boot timeout defaults to 60
 seconds and is configurable.
 
 **join** and **exec** use `machinectl shell` to enter a running container. This
-was a deliberate choice — machinectl handles the namespace entry, PAM session
+was a deliberate choice: machinectl handles the namespace entry, PAM session
 setup, and environment correctly, and reimplementing that logic in Rust would
 buy nothing. The balance struck is: use D-Bus where it gives us programmatic
 control (start, stop, status queries), shell out where the existing tool already
@@ -177,20 +204,20 @@ invocation.
 
 **rm** stops the container if running, removes the state file, and deletes the
 container's directories. The `make_removable()` helper recursively fixes
-permissions before deletion — containers can create files owned by arbitrary UIDs
+permissions before deletion, since containers can create files owned by arbitrary UIDs
 with restrictive modes, and `remove_dir_all()` would fail without this.
 
 **Boot failure cleanup** differs between `sdme new` and `sdme start`. If
 `sdme new` fails to boot the container (or is interrupted with Ctrl+C), it
-removes the just-created container entirely — the user never asked for a stopped
-container, they asked for a running one. If `sdme start` fails, it stops the
+removes the just-created container entirely (the user never asked for a stopped
+container, they asked for a running one). If `sdme start` fails, it stops the
 container but preserves it on disk for debugging.
 
 ## 5. Container Names
 
 When you don't specify a name, sdme generates one from a wordlist of 200
-Tupi-Guarani words and variations. The choice is an easter egg — a nod to the
-indigenous languages of Brazil.
+Tupi-Guarani words and variations. The choice is an easter egg, a nod to the
+indigenous languages of Brazil - our roots!
 
 Name generation shuffles the wordlist (Fisher-Yates, seeded from
 `/dev/urandom`), checks each candidate against the three-way conflict detection
@@ -239,7 +266,7 @@ lists and copies all xattrs except `security.selinux` (which doesn't transfer
 meaningfully between filesystems). The overlayfs `trusted.overlay.opaque` xattr
 is preserved when present.
 
-**Special files** — block devices, character devices, FIFOs, and Unix sockets —
+**Special files** (block devices, character devices, FIFOs, and Unix sockets)
 are recreated with `mknod()` and `mkfifo()` using the original mode and device
 numbers. This matters for rootfs that include `/dev/null`, `/dev/zero`, and
 friends.
@@ -255,11 +282,11 @@ The first few bytes of a file reveal its compression format:
 | `28 b5 2f fd`       | zstd   |
 
 This means `sdme fs import ubuntu rootfs.tar.zst` works even if the file is
-named `rootfs.tar` — the content, not the name, determines the decompressor.
+named `rootfs.tar`, because the content, not the name, determines the decompressor.
 
 **Systemd detection** runs after import. If the rootfs doesn't contain systemd
 and dbus (both required for nspawn containers), sdme can install them
-automatically — it detects the distro family from `/etc/os-release` and runs the
+automatically: it detects the distro family from `/etc/os-release` and runs the
 appropriate package manager (`apt`, `dnf`) in a chroot. The `--install-packages`
 flag controls this: `auto` prompts interactively, `yes` always installs, `no`
 refuses if systemd is absent.
@@ -292,7 +319,7 @@ processes operations sequentially. The key insight is that COPY and RUN have
 different requirements:
 
 - **COPY** writes directly to the overlayfs upper layer while the container is
-  stopped. This is a filesystem operation — no running container needed.
+  stopped. This is a filesystem operation; no running container needed.
 - **RUN** executes a command inside the container via `machinectl shell`. The
   container must be running.
 
@@ -305,7 +332,7 @@ group their COPYs at the top and RUNs at the bottom.
 **Path sanitisation** rejects COPY destinations under directories that systemd
 mounts tmpfs over at boot (`/tmp`, `/run`, `/dev/shm`). Files written to the
 overlayfs upper layer in these locations would be hidden by the tmpfs mount when
-the container starts — a silent data loss that's hard to debug. Destinations
+the container starts, a silent data loss that's hard to debug. Destinations
 under overlayfs-opaque directories are also rejected. Errors include the config
 file path and line number for easy debugging.
 
@@ -322,15 +349,14 @@ regardless of success or failure.
 
 ### Learning the spec
 
-OCI registry pulling implements the OCI Distribution Spec directly — no shelling
-out to `skopeo` or `crane`. The flow is: parse the image reference, probe the
-registry for auth requirements, obtain a bearer token if needed, fetch the
-manifest (resolving manifest lists by architecture), then download and extract
-layers in order.
+OCI registry pulling implements the OCI Distribution Spec directly, no shelling
+out. The flow is: parse the image reference, probe the registry for auth
+requirements, obtain a bearer token if needed, fetch the manifest (resolving
+manifest lists by architecture), then download and extract layers in order.
 
 Layer extraction handles OCI whiteout markers: `.wh.<name>` deletes a file from
 the previous layer, `.wh..wh..opq` clears an entire directory. Tar paths are
-sanitised — leading `/` is stripped and `..` components are rejected — to prevent
+sanitised (leading `/` is stripped and `..` components are rejected) to prevent
 path traversal escaping the destination directory.
 
 ### Two modes: base OS and application
@@ -383,7 +409,7 @@ when the container boots.
 The capsule model means OCI applications get the full systemd operational model
 for free: `journalctl -u sdme-oci-app` for logs, `systemctl restart` for
 restarts, cgroup resource limits from the host. The application doesn't know or
-care that it's inside an nspawn container — it sees a chroot with API
+care that it's inside an nspawn container; it sees a chroot with API
 filesystems, exactly what it expects.
 
 ### Future direction
@@ -402,7 +428,7 @@ images from public registries, QCOW2 disk images from unknown sources. Several
 hardening measures are in place:
 
 **Path traversal prevention.** OCI layer tar paths are sanitised before
-extraction — `..` components are rejected and leading `/` is stripped. Whiteout
+extraction: `..` components are rejected and leading `/` is stripped. Whiteout
 marker handling verifies (via `canonicalize()`) that the target path stays
 within the destination directory before deleting anything.
 
@@ -416,8 +442,8 @@ checked during streaming. A malicious or misbehaving server cannot fill the disk
 by sending an unbounded response.
 
 **Rootfs name validation.** The `-r`/`--fs` parameter (on `create` and `new`)
-is validated with `validate_name()` — alphanumeric, hyphens, no leading/trailing
-hyphens, no `..` — before being used to construct filesystem paths.
+is validated with `validate_name()` (alphanumeric, hyphens, no leading/trailing
+hyphens, no `..`) before being used to construct filesystem paths.
 
 **Opaque directory validation.** Paths must be absolute, contain no `..`
 components, no empty strings, no duplicates. Normalised before storage.
@@ -428,7 +454,9 @@ directories with `0o700`. Overlayfs work directories get mode `0o700`.
 **Umask enforcement.** Container creation refuses to proceed if the process
 umask strips read or execute from "other" (`umask & 005 != 0`). A restrictive
 umask would make overlayfs upper-layer files inaccessible to non-root services
-like dbus-daemon, preventing container boot.
+like dbus-daemon, preventing container boot. This actually happened during
+development when setting umask to 007 before the `sdme create` command, would
+result in `sdme start` mysteriously misbehaving.
 
 If you find a way to escape a container, traverse a path, or corrupt the host
 filesystem through sdme, please open an issue.
@@ -459,5 +487,5 @@ hiding them.
 **Build failure cleanup** removes the staging container and any partial rootfs
 on error, regardless of which build step failed.
 
-If you find a way to leave sdme's state inconsistent — a container that can't be
-listed, removed, or recovered — please open an issue.
+If you find a way to leave sdme's state inconsistent (a container that can't be
+listed, removed, or recovered), please open an issue.
