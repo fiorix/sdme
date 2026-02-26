@@ -2,11 +2,12 @@
 
 Lightweight systemd-nspawn containers with overlayfs.
 
-Why does this even exist? Here's my pitch: from a linux system with just systemd and sdme, you can create and run any container and cloud image that exists today. 1 binary.
-
-The containers we create are booted systemd containers. When you import OCI images from quay or docker they run in a chroot inside a systemd booted container.
-
 Runs on Linux with systemd. Uses kernel overlayfs for copy-on-write storage. By default, containers are overlayfs clones of `/` but you can also import rootfs from other distros (Ubuntu, Debian, Fedora, NixOS — see [docs/nix](docs/nix/)).
+
+**Why does this even exist?**
+Here's my pitch: from a linux system with just systemd and sdme, you can create and run any container and cloud image that exists today. 1 binary.
+
+Check out the [sdme architecture](docs/architecture.md) for details about what this is and how it works. The containers we create are booted systemd containers.
 
 **On macOS?** See [docs/macos.md](docs/macos.md) for instructions using lima-vm.
 
