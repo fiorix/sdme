@@ -443,13 +443,11 @@ For isolation, `--private-network` gives the container its own network namespace
 with no connectivity. The remaining network flags build on top of it and all
 imply `--private-network` automatically:
 
-| Flag                                     | What it does                                               |
-|------------------------------------------|-------------------------------------------------------- ---|
-| `--private-network`                      | Isolated network namespace, no connectivity                |
-| `--network-veth`                         | Creates a virtual ethernet link between host and container |
-| `--network-bridge <name>`                | Connects the container's veth to a host bridge             |
-| `--network-zone <name>`                  | Joins a named zone for inter-container networking          |
-| `--port / -p <HOST:CONTAINER[/PROTO]>`   | Forwards a port (TCP by default, repeatable)               |
+- `--private-network`: isolated network namespace, no connectivity
+- `--network-veth`: creates a virtual ethernet link between host and container
+- `--network-bridge <name>`: connects the container's veth to a host bridge
+- `--network-zone <name>`: joins a named zone for inter-container networking
+- `--port / -p <HOST:CONTAINER[/PROTO]>`: forwards a port (TCP by default, repeatable)
 
 These flags are available on both `sdme create` and `sdme new`. They compose
 freely: you can combine `--network-zone` with `--port`, or use `--network-bridge`
