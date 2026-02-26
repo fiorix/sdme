@@ -18,6 +18,17 @@ make                        # same as cargo build --release
 sudo make install           # install to /usr/local (does NOT rebuild)
 ```
 
+### Release
+
+Static musl binaries (x86_64 + aarch64) are built with `cargo-zigbuild`. Locally:
+
+```bash
+./scripts/build-release.sh            # build all targets to target/dist/
+./scripts/build-release.sh -v <target> # build one target, verbose
+```
+
+CI: pushing a `v*` tag triggers `.github/workflows/release.yml`, which runs tests, cross-compiles both targets, generates SHA256SUMS, and creates a GitHub release with all artifacts.
+
 ## Architecture
 
 The project is a single Rust binary (`src/main.rs`) backed by a shared library (`src/lib.rs`). CLI parsing uses clap with derive.

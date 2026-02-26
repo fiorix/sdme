@@ -719,7 +719,15 @@ mod tests {
         fs::write(&src_file, "content").unwrap();
 
         // dst doesn't exist in either layer; file created at exact path.
-        do_copy(&upper, &lower, &src_file, Path::new("/opt/mybin"), &[], false).unwrap();
+        do_copy(
+            &upper,
+            &lower,
+            &src_file,
+            Path::new("/opt/mybin"),
+            &[],
+            false,
+        )
+        .unwrap();
         assert!(upper.join("opt/mybin").is_file());
     }
 
@@ -822,8 +830,15 @@ mod tests {
         fs::create_dir_all(&src_dir).unwrap();
         fs::write(src_dir.join("a.txt"), "a").unwrap();
 
-        let err =
-            do_copy(&upper, &lower, &src_dir, Path::new("/opt/target"), &[], false).unwrap_err();
+        let err = do_copy(
+            &upper,
+            &lower,
+            &src_dir,
+            Path::new("/opt/target"),
+            &[],
+            false,
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("cannot copy directory"),
             "got: {err}"
@@ -854,15 +869,30 @@ mod tests {
         );
 
         // Relative path with .. components.
-        let err =
-            do_copy(&upper, &lower, &src_file, Path::new("../escape"), &[], false).unwrap_err();
+        let err = do_copy(
+            &upper,
+            &lower,
+            &src_file,
+            Path::new("../escape"),
+            &[],
+            false,
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains(".."),
             "should reject '..' in dst path, got: {err}"
         );
 
         // Valid paths should still work.
-        do_copy(&upper, &lower, &src_file, Path::new("/opt/safe"), &[], false).unwrap();
+        do_copy(
+            &upper,
+            &lower,
+            &src_file,
+            Path::new("/opt/safe"),
+            &[],
+            false,
+        )
+        .unwrap();
         assert!(upper.join("opt/safe").is_file());
     }
 
@@ -875,8 +905,15 @@ mod tests {
         fs::write(&src_file, "payload").unwrap();
 
         // /tmp is shadowed by systemd tmpfs at boot.
-        let err =
-            do_copy(&upper, &lower, &src_file, Path::new("/tmp/data"), &[], false).unwrap_err();
+        let err = do_copy(
+            &upper,
+            &lower,
+            &src_file,
+            Path::new("/tmp/data"),
+            &[],
+            false,
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("tmpfs"),
             "should reject /tmp as shadowed, got: {err}"
@@ -906,8 +943,7 @@ mod tests {
         );
 
         // Exact match on shadowed dir.
-        let err =
-            do_copy(&upper, &lower, &src_file, Path::new("/tmp"), &[], false).unwrap_err();
+        let err = do_copy(&upper, &lower, &src_file, Path::new("/tmp"), &[], false).unwrap_err();
         assert!(
             err.to_string().contains("tmpfs"),
             "should reject /tmp exact match, got: {err}"

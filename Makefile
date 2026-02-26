@@ -29,7 +29,20 @@ uninstall-completions:
 	rm -f $(DESTDIR)/share/zsh/site-functions/_sdme
 	rm -f $(DESTDIR)/share/fish/vendor_completions.d/sdme.fish
 
+dist/completions: all
+	mkdir -p dist/completions
+	target/release/sdme completions bash > dist/completions/sdme.bash
+	target/release/sdme completions zsh > dist/completions/_sdme
+	target/release/sdme completions fish > dist/completions/sdme.fish
+
+deb: dist/completions
+	cargo deb --no-build
+
+rpm: dist/completions
+	cargo generate-rpm
+
 clean:
 	cargo clean
+	rm -rf dist
 
-.PHONY: all install install-man install-completions uninstall uninstall-man uninstall-completions clean
+.PHONY: all install install-man install-completions uninstall uninstall-man uninstall-completions deb rpm clean
