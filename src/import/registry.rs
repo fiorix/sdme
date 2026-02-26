@@ -162,6 +162,8 @@ fn build_noerror_agent() -> Result<ureq::Agent> {
         .http_status_as_error(false)
         .user_agent("sdme/0.1")
         .timeout_connect(Some(Duration::from_secs(30)))
+        .timeout_resolve(Some(Duration::from_secs(30)))
+        .timeout_recv_response(Some(Duration::from_secs(60)))
         .timeout_recv_body(Some(Duration::from_secs(300)));
     if let Some(proxy_uri) = proxy_from_env() {
         let proxy = ureq::Proxy::new(&proxy_uri)

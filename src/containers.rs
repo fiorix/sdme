@@ -10,8 +10,8 @@
 use std::ffi::CString;
 use std::fs::{self, OpenOptions};
 use std::os::unix::fs::{symlink, OpenOptionsExt, PermissionsExt};
-use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
+use std::process::ExitStatus;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
@@ -175,15 +175,6 @@ fn do_create(
     )
     .with_context(|| format!("failed to write {}", hosts_path.display()))?;
 
-    // Mask systemd-resolved in the container. When a container shares the
-    // host's network namespace (the default, no --private-network), the
-    // container's own systemd-resolved cannot bind 127.0.0.53 (already owned
-    // by the host) and ends up with no upstream DNS servers. The NSS "resolve"
-    // module then intercepts all lookups, gets SERVFAIL from the broken
-    // resolved, and the [!UNAVAIL=return] action in nsswitch.conf prevents
-    // fallback to the "dns" module. Masking the service makes NSS skip the
-    // resolve module (UNAVAIL) and fall through to "dns", which reads
-    // /etc/resolv.conf and queries the host's resolver.
     let systemd_unit_dir = etc_dir.join("systemd").join("system");
     fs::create_dir_all(&systemd_unit_dir)
         .with_context(|| format!("failed to create {}", systemd_unit_dir.display()))?;
@@ -193,17 +184,26 @@ fn do_create(
     // These units reference block devices and paths (e.g. /data) that don't
     // exist inside the container, causing "Failed to isolate default target"
     // when systemd can't resolve their dependencies at boot.
+    //
+    // Also mask systemd-resolved: when a container shares the host's network
+    // namespace (the default), the container's resolved cannot bind 127.0.0.53
+    // (already owned by the host) and ends up with no upstream DNS servers.
+    // Masking makes NSS skip the resolve module and fall through to "dns",
+    // which queries the host's resolver via /etc/resolv.conf.
+    //
+    // For imported rootfs these patches are applied at import time
+    // (see import/mod.rs::patch_rootfs_services).
     if rootfs == Path::new("/") {
         mask_host_mount_units(&systemd_unit_dir, verbose)?;
-    }
 
-    let resolved_mask = systemd_unit_dir.join("systemd-resolved.service");
-    symlink("/dev/null", &resolved_mask).with_context(|| {
-        format!(
-            "failed to mask systemd-resolved at {}",
-            resolved_mask.display()
-        )
-    })?;
+        let resolved_mask = systemd_unit_dir.join("systemd-resolved.service");
+        symlink("/dev/null", &resolved_mask).with_context(|| {
+            format!(
+                "failed to mask systemd-resolved at {}",
+                resolved_mask.display()
+            )
+        })?;
+    }
 
     // Write a placeholder /etc/resolv.conf as a regular file so that
     // systemd-nspawn's --resolv-conf=auto can overwrite it with the host's
@@ -615,7 +615,7 @@ pub fn join(
     command: &[String],
     join_as_sudo_user: bool,
     verbose: bool,
-) -> Result<()> {
+) -> Result<ExitStatus> {
     ensure_exists(datadir, name)?;
 
     if !systemd::is_active(name)? {
@@ -631,7 +631,7 @@ pub fn exec(
     command: &[String],
     join_as_sudo_user: bool,
     verbose: bool,
-) -> Result<()> {
+) -> Result<ExitStatus> {
     ensure_exists(datadir, name)?;
 
     if !systemd::is_active(name)? {
@@ -647,7 +647,7 @@ fn machinectl_shell(
     command: &[String],
     join_as_sudo_user: bool,
     verbose: bool,
-) -> Result<()> {
+) -> Result<ExitStatus> {
     let mut cmd = std::process::Command::new("machinectl");
     cmd.arg("shell");
 
@@ -687,8 +687,8 @@ fn machinectl_shell(
                 .join(" ")
         );
     }
-    let err = cmd.exec();
-    bail!("failed to exec machinectl: {err}");
+    let status = cmd.status().context("failed to run machinectl")?;
+    Ok(status)
 }
 
 /// Update resource limits on an existing container.

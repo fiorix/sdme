@@ -389,6 +389,8 @@ pub(super) fn build_http_agent(verbose: bool) -> Result<ureq::Agent> {
         .user_agent("sdme/0.1")
         .redirect_auth_headers(ureq::config::RedirectAuthHeaders::SameHost)
         .timeout_connect(Some(Duration::from_secs(30)))
+        .timeout_resolve(Some(Duration::from_secs(30)))
+        .timeout_recv_response(Some(Duration::from_secs(60)))
         .timeout_recv_body(Some(Duration::from_secs(300)));
     if let Some(proxy_uri) = proxy_from_env() {
         let redacted = redact_proxy_credentials(&proxy_uri);
@@ -670,7 +672,7 @@ fn install_commands(family: &DistroFamily) -> Vec<&'static str> {
             "DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC apt-get -y install tzdata",
             "apt-get install -y dbus systemd; apt-get autoremove -y -f && apt-get clean && rm -rf /var/lib/apt/lists/*",
         ],
-        DistroFamily::Fedora => vec!["dnf install -y systemd util-linux pam; dnf clean all"],
+        DistroFamily::Fedora => vec!["dnf install -y systemd dbus util-linux pam; dnf clean all"],
         _ => vec![],
     }
 }
@@ -716,6 +718,99 @@ fn install_systemd_packages(rootfs: &Path, family: &DistroFamily, verbose: bool)
     chroot_guard.cleanup();
 
     result
+}
+
+/// Patch systemd services in an imported rootfs for nspawn compatibility.
+///
+/// - Masks systemd-resolved: when containers share the host's network namespace,
+///   the container's resolved cannot bind 127.0.0.53. Masking it makes NSS fall
+///   through to the "dns" module, which reads /etc/resolv.conf.
+///
+/// - Unmasks systemd-logind: some OCI images (CentOS, AlmaLinux) mask logind
+///   because Docker/Podman don't need it. sdme requires logind for machinectl
+///   shell (join/exec).
+///
+/// - Installs missing packages required by machinectl shell: some minimal OCI
+///   images lack /etc/pam.d/login (needed for PAM session setup). For RHEL-family
+///   distros this means installing `util-linux` and `pam`.
+fn patch_rootfs_services(rootfs: &Path, family: &DistroFamily, verbose: bool) -> Result<()> {
+    let unit_dir = rootfs.join("etc/systemd/system");
+    fs::create_dir_all(&unit_dir)
+        .with_context(|| format!("failed to create {}", unit_dir.display()))?;
+
+    // Mask systemd-resolved.
+    let resolved = unit_dir.join("systemd-resolved.service");
+    if !resolved.exists() {
+        std::os::unix::fs::symlink("/dev/null", &resolved).with_context(|| {
+            format!("failed to mask systemd-resolved at {}", resolved.display())
+        })?;
+        if verbose {
+            eprintln!("masked systemd-resolved in rootfs");
+        }
+    }
+
+    // Unmask systemd-logind if it points to /dev/null.
+    let logind = unit_dir.join("systemd-logind.service");
+    if let Ok(target) = fs::read_link(&logind) {
+        if target == Path::new("/dev/null") {
+            fs::remove_file(&logind)
+                .with_context(|| format!("failed to remove logind mask at {}", logind.display()))?;
+            if verbose {
+                eprintln!("unmasked systemd-logind in rootfs");
+            }
+        }
+    }
+
+    // Ensure /etc/pam.d/login exists (required by machinectl shell).
+    let pam_login = rootfs.join("etc/pam.d/login");
+    if !pam_login.exists() {
+        let commands = machinectl_fix_commands(family);
+        if !commands.is_empty() {
+            eprintln!("installing packages for machinectl shell support");
+            let mut chroot_guard = ChrootGuard::setup(rootfs)?;
+            let result = (|| -> Result<()> {
+                for cmd_str in &commands {
+                    check_interrupted()?;
+                    if verbose {
+                        eprintln!("chroot: {cmd_str}");
+                    }
+                    let status = Command::new("chroot")
+                        .arg(rootfs)
+                        .args(["/bin/sh", "-c", cmd_str])
+                        .status()
+                        .with_context(|| format!("failed to run chroot command: {cmd_str}"))?;
+                    if !status.success() {
+                        bail!(
+                            "chroot command failed (exit {}): {cmd_str}",
+                            status.code().unwrap_or(-1)
+                        );
+                    }
+                }
+                Ok(())
+            })();
+            chroot_guard.cleanup();
+            result?;
+        } else if verbose {
+            eprintln!(
+                "warning: /etc/pam.d/login missing but no fix commands for {:?}",
+                family
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Commands to install packages needed by machinectl shell.
+///
+/// These are only needed when the rootfs has systemd but is missing
+/// /etc/pam.d/login (typical of minimal RHEL-family container images).
+fn machinectl_fix_commands(family: &DistroFamily) -> Vec<&'static str> {
+    match family {
+        DistroFamily::Fedora => vec!["dnf install -y util-linux pam; dnf clean all"],
+        DistroFamily::Debian => vec!["apt-get update && apt-get install -y login && apt-get clean && rm -rf /var/lib/apt/lists/*"],
+        _ => vec![],
+    }
 }
 
 /// Prompt the user interactively to install systemd packages.
@@ -1299,6 +1394,14 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
             let _ = make_removable(&staging_dir);
             let _ = fs::remove_dir_all(&staging_dir);
             bail!("systemd still not found after package installation");
+        }
+    }
+
+    // Patch systemd services for nspawn compatibility (mask resolved,
+    // unmask logind, install missing machinectl shell dependencies).
+    if !skip_systemd_check && has_systemd(&staging_dir, &family) {
+        if let Err(e) = patch_rootfs_services(&staging_dir, &family, verbose) {
+            eprintln!("warning: rootfs service patching failed: {e}");
         }
     }
 

@@ -112,9 +112,11 @@ starts clean.
 
 **DNS** requires special treatment because containers share the host's network
 namespace by default. The host's `systemd-resolved` already owns `127.0.0.53`,
-so the container's copy would fail to bind. sdme masks `systemd-resolved` in
-the container's overlayfs upper layer during creation (a symlink to `/dev/null`
-in `/etc/systemd/system/`). This causes the container's NSS `resolve` module to
+so the container's copy would fail to bind. For imported rootfs, sdme masks
+`systemd-resolved` directly in the rootfs during `sdme fs import`. For
+host-rootfs containers (no `-r`), the mask goes in the overlayfs upper layer
+during `create`. Either way, the mask is a symlink to `/dev/null` in
+`/etc/systemd/system/`. This causes the container's NSS `resolve` module to
 return UNAVAIL, falling through to the `dns` module which reads
 `/etc/resolv.conf`. A placeholder regular file is written there so
 `systemd-nspawn --resolv-conf=auto` can populate it at boot.
@@ -178,7 +180,7 @@ both sdme containers and any other nspawn machines on the system.
     |     wait for boot
     |
     +-- mkdir upper/ work/ merged/ shared/
-    +-- mask systemd-resolved
+    +-- mask systemd-resolved (host-rootfs only; imported rootfs patched at import)
     +-- write /etc/resolv.conf placeholder
     +-- set opaque dirs (xattr)
     +-- write state file
@@ -195,12 +197,15 @@ for the container to reach the `running` state by subscribing to `machined`
 D-Bus signals and polling the machine state. The boot timeout defaults to 60
 seconds and is configurable.
 
-**join** and **exec** use `machinectl shell` to enter a running container. This
-was a deliberate choice: machinectl handles the namespace entry, PAM session
-setup, and environment correctly, and reimplementing that logic in Rust would
-buy nothing. The balance struck is: use D-Bus where it gives us programmatic
-control (start, stop, status queries), shell out where the existing tool already
-does the job well (interactive shell sessions, running commands).
+**join** and **exec** spawn `machinectl shell` as a child process and forward
+its exit status. This was a deliberate choice: machinectl handles the namespace
+entry, PAM session setup, and environment correctly, and reimplementing that
+logic in Rust would buy nothing. Spawning (rather than exec'ing) keeps sdme
+alive so it can inspect the exit code and clean up on failure (particularly
+important for `sdme new`, which removes the container if the join fails). The
+balance struck is: use D-Bus where it gives us programmatic control (start,
+stop, status queries), shell out where the existing tool already does the job
+well (interactive shell sessions, running commands).
 
 **stop** calls `TerminateMachine` over D-Bus, which sends SIGTERM to the nspawn
 process and waits for clean shutdown. Multiple containers can be stopped in one
@@ -212,10 +217,10 @@ permissions before deletion, since containers can create files owned by arbitrar
 with restrictive modes, and `remove_dir_all()` would fail without this.
 
 **Boot failure cleanup** differs between `sdme new` and `sdme start`. If
-`sdme new` fails to boot the container (or is interrupted with Ctrl+C), it
-removes the just-created container entirely (the user never asked for a stopped
-container, they asked for a running one). If `sdme start` fails, it stops the
-container but preserves it on disk for debugging.
+`sdme new` fails to boot or join the container (or is interrupted with Ctrl+C),
+it removes the just-created container entirely (the user never asked for a
+stopped container, they asked for a running one). If `sdme start` fails, it
+stops the container but preserves it on disk for debugging.
 
 ## 5. Container Names
 
@@ -294,6 +299,16 @@ automatically: it detects the distro family from `/etc/os-release` and runs the
 appropriate package manager (`apt`, `dnf`) in a chroot. The `--install-packages`
 flag controls this: `auto` prompts interactively, `yes` always installs, `no`
 refuses if systemd is absent.
+
+**Rootfs patching** runs after systemd detection. Even when systemd is present,
+sdme patches the rootfs for nspawn compatibility: `systemd-resolved` is masked
+(containers share the host's network namespace and cannot bind 127.0.0.53),
+`systemd-logind` is unmasked if masked (some OCI images like CentOS/AlmaLinux
+mask it, but `machinectl shell` requires logind), and missing packages needed by
+`machinectl shell` (e.g. `util-linux` and `pam` on RHEL-family, which provide
+`/etc/pam.d/login`) are installed via chroot. These patches are applied directly
+to the rootfs so all containers created from it inherit a working environment
+without overlayfs-level fixups.
 
 **Staging areas and atomic operations** ensure that a failed import doesn't
 leave a half-written rootfs. The staging directory `.{name}.importing` is
@@ -578,11 +593,15 @@ or detected and reported on the next run.
 POSIX `SIGINT` handler. The handler is installed without `SA_RESTART`, so
 blocking system calls (file reads, network I/O) return `EINTR` immediately.
 Import loops, boot-wait loops, and build operations check the flag between
-steps, allowing Ctrl+C to cancel cleanly at any point.
+steps, allowing Ctrl+C to cancel cleanly at any point. The handler also
+restores the default `SIGINT` disposition after the first press, so a second
+Ctrl+C force-kills the process. This covers cases where Rust's stdlib retries
+`poll()`/`connect()` on EINTR, preventing cooperative cancellation during
+blocked DNS resolution or TCP connection attempts.
 
 **Boot failure cleanup** differs by intent: `sdme new` removes the container on
-failure (the user wanted a running container, not a broken one), while
-`sdme start` (from previous `sdme create`) preserves it for debugging.
+boot or join failure (the user wanted a running container, not a broken one),
+while `sdme start` (from previous `sdme create`) preserves it for debugging.
 
 **Health checks** in `sdme ps` detect containers with missing directories or
 missing rootfs and report them as `broken` rather than crashing or silently

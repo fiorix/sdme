@@ -579,13 +579,14 @@ fn main() -> Result<()> {
         }
         Command::Exec { name, command } => {
             let name = containers::resolve_name(&cfg.datadir, &name)?;
-            containers::exec(
+            let status = containers::exec(
                 &cfg.datadir,
                 &name,
                 &command,
                 cfg.join_as_sudo_user,
                 cli.verbose,
             )?;
+            std::process::exit(status.code().unwrap_or(1));
         }
         Command::Set {
             name,
@@ -613,13 +614,14 @@ fn main() -> Result<()> {
         Command::Join { name, command } => {
             let name = containers::resolve_name(&cfg.datadir, &name)?;
             eprintln!("joining '{name}'");
-            containers::join(
+            let status = containers::join(
                 &cfg.datadir,
                 &name,
                 &command,
                 cfg.join_as_sudo_user,
                 cli.verbose,
             )?;
+            std::process::exit(status.code().unwrap_or(1));
         }
         Command::Logs { name, args } => {
             system_check::check_dependencies(
@@ -688,13 +690,19 @@ fn main() -> Result<()> {
             }
 
             eprintln!("joining '{name}'");
-            containers::join(
+            let status = containers::join(
                 &cfg.datadir,
                 &name,
                 &command,
                 cfg.join_as_sudo_user,
                 cli.verbose,
             )?;
+            if !status.success() {
+                let code = status.code().unwrap_or(1);
+                eprintln!("join failed (exit code {code}), removing '{name}'");
+                let _ = containers::remove(&cfg.datadir, &name, cli.verbose);
+                std::process::exit(code);
+            }
         }
         Command::Ps => {
             let entries = containers::list(&cfg.datadir)?;

@@ -68,6 +68,12 @@ pub fn install_interrupt_handler() {
         // Deliberately NOT setting SA_RESTART so that blocking syscalls
         // (e.g. read() during interactive prompts) return EINTR on Ctrl+C
         // instead of silently restarting.
+        //
+        // The handler sets INTERRUPTED and restores the default SIGINT
+        // disposition, so a second Ctrl+C force-kills the process. This
+        // is needed because Rust's stdlib retries poll()/connect() on
+        // EINTR, preventing cooperative check_interrupted() from running
+        // during blocked connection attempts.
         sa.sa_flags = 0;
         libc::sigaction(libc::SIGINT, &sa, std::ptr::null_mut());
     }
@@ -75,6 +81,10 @@ pub fn install_interrupt_handler() {
 
 extern "C" fn signal_handler(_sig: libc::c_int) {
     INTERRUPTED.store(true, Ordering::Relaxed);
+    // Restore default handler: next SIGINT terminates the process.
+    unsafe {
+        libc::signal(libc::SIGINT, libc::SIG_DFL);
+    }
 }
 
 /// Prompt the user for yes/no confirmation, returning `Ok(true)` for "y".
