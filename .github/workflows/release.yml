@@ -8,7 +8,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   ZIG_VERSION: "0.14.1"
-  ZIG_SHA256: "24aeeec8081ca4b950e9c1444582e8a4a682e2e1e6ce5e40e34e72b7aa30cabd"
+  ZIG_SHA256: "24aeeec8af16c381934a6cd7d95c807a8cb2cf7df9fa40d359aa884195c4716c"
 
 permissions:
   contents: write
@@ -39,7 +39,9 @@ jobs:
         run: |
           curl -sL -o zig.tar.xz "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
           echo "${ZIG_SHA256}  zig.tar.xz" | sha256sum -c -
-          tar -xJf zig.tar.xz -C /usr/local --strip-components=1
+          mkdir -p "$HOME/.zig"
+          tar -xJf zig.tar.xz -C "$HOME/.zig" --strip-components=1
+          echo "$HOME/.zig" >> "$GITHUB_PATH"
           rm zig.tar.xz
 
       - name: Install cargo-zigbuild
