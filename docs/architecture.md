@@ -5,10 +5,10 @@
 ## 1. Introduction
 
 sdme is a container manager for Linux. It runs on top of systemd-nspawn and
-overlayfs (both already present on any modern systemd-based distribution) and
-needs nothing else installed. No daemon, no runtime dependency beyond systemd
-itself. A single static-ish binary that talks to the kernel and to systemd over
-D-Bus.
+overlayfs, both already present on any modern systemd-based distribution.
+
+No daemon, no runtime dependency beyond systemd itself. A single static binary
+that manages overlayfs layering and drives systemd over D-Bus.
 
 The project started as an experiment inspired by virtme-ng: what if you could
 clone your running host system into an isolated container with a single command?
@@ -20,15 +20,18 @@ the host's files. That was the seed.
 From there it grew: importing rootfs from other distros, pulling OCI images from
 Docker Hub, building custom root filesystems, managing container lifecycle
 through D-Bus. Each piece turned out to be surprisingly tractable when you let
-systemd do the heavy lifting.
+claude (and systemd) do the heavy lifting.
 
 sdme is not an attempt to replace Podman, Docker, or any other container runtime.
 Podman in particular has excellent systemd integration through Quadlet
-(podman-systemd.unit(5)), the mature, full-featured approach to
-systemd-native container management. sdme is a different thing entirely. It boots
-full systemd inside nspawn containers, manages overlayfs storage directly, and
-bridges the OCI ecosystem, all without a daemon and without pulling in a
-container runtime.
+(podman-systemd).
+It is today's mature, full-featured approach to systemd-native container
+management. sdme is a different thing entirely. It boots full systemd inside
+nspawn containers, manages overlayfs layering directly, and bridges the OCI
+ecosystem, all without a daemon and without pulling in a container runtime.
+
+You get the operational model of systemd (journalctl, systemctl, resource
+limits) with the packaging model of OCI (Docker Hub, GHCR, Quay).
 
 The name stands for *Systemd Machine Editor*, and its pronunciation is left as
 an exercise for the reader.
@@ -90,7 +93,8 @@ Each container boots its own systemd instance inside the nspawn namespace. The
 host's systemd manages the container as a service unit; the container's systemd
 manages everything inside. Both talk to their own D-Bus, both write to their own
 journal, but the container's writes land on the overlayfs upper layer and never
-touch the host.
+touch the host - well, except that they are stored on the host. This matters,
+and the details are explained in Section 13.
 
 **User identity preservation.** When sdme is run via `sudo` and the container
 is a host-rootfs clone (no `-r` flag), it reads `$SUDO_USER` and joins the
@@ -414,14 +418,116 @@ filesystems, exactly what it expects.
 
 ### Future direction
 
-The sidecar model feels right: a base sdme container runs systemd, and multiple
-OCI services run inside it as individual systemd units. This would let you
-compose services (nginx + app + database) inside a single nspawn container with
-shared networking and storage, managed by systemctl.
-
 At this point this is all very exploratory. This journey is 1% complete.
 
-## 9. Security
+**Important caveat.** OCI capsules (application images) currently have significant
+gaps. Bind mounts (`-b`) and environment variables (`-e`) set on the container
+operate at the nspawn level, not inside the `RootDirectory=/oci/root` chroot
+where the application actually runs.
+
+OCI-declared volumes are saved to `/oci/volumes` as metadata only and are not
+mounted. OCI-declared ports are saved to `/oci/ports` but are not automatically
+forwarded; the user must manually pass `--port` when creating the container.
+
+In short: the plumbing between the outer nspawn container and the inner chroot
+is incomplete. This is a known limitation and the TODOs live in the generated
+`sdme-oci-app.service` unit file.
+
+## 9. Networking
+
+By default, containers share the host's network namespace: same interfaces, same
+addresses, same ports. This is the simplest mode and what you get with `sdme new`
+out of the box.
+
+For isolation, `--private-network` gives the container its own network namespace
+with no connectivity. The remaining network flags build on top of it and all
+imply `--private-network` automatically:
+
+| Flag                                     | What it does                                               |
+|------------------------------------------|-------------------------------------------------------- ---|
+| `--private-network`                      | Isolated network namespace, no connectivity                |
+| `--network-veth`                         | Creates a virtual ethernet link between host and container |
+| `--network-bridge <name>`                | Connects the container's veth to a host bridge             |
+| `--network-zone <name>`                  | Joins a named zone for inter-container networking          |
+| `--port / -p <HOST:CONTAINER[/PROTO]>`   | Forwards a port (TCP by default, repeatable)               |
+
+These flags are available on both `sdme create` and `sdme new`. They compose
+freely: you can combine `--network-zone` with `--port`, or use `--network-bridge`
+with `--network-veth`. Port forwarding requires a private network namespace
+because systemd-nspawn's `--port` flag only works when host and container have
+separate network stacks.
+
+Under the hood, each flag translates directly to a systemd-nspawn argument.
+The network configuration is persisted in the container's state file
+(`PRIVATE_NETWORK`, `NETWORK_VETH`, `NETWORK_BRIDGE`, `NETWORK_ZONE`, `PORTS`)
+and written into the per-container nspawn drop-in at start time.
+
+Bridge and zone names are validated (alphanumeric, hyphens, underscores). Port
+specs are validated for format (`HOST:CONTAINER[/PROTO]`) and range (1-65535).
+
+## 10. Resource Limits
+
+sdme exposes three cgroup-based resource controls:
+
+| Flag                      | systemd property | Example                                 |
+|---------------------------|------------------|-----------------------------------------|
+| `--memory <size>`         | `MemoryMax=`     | `--memory 2G`                           |
+| `--cpus <count>`          | `CPUQuota=`      | `--cpus 0.5` (50%), `--cpus 2` (200%)   |
+| `--cpu-weight <1-10000>`  | `CPUWeight=`     | `--cpu-weight 100`                      |
+
+These flags are available on `sdme create`, `sdme new`, and `sdme set`. They
+are applied via a systemd drop-in file (`limits.conf`) installed alongside the
+container's service unit. A `daemon-reload` is triggered when the drop-in changes.
+
+`sdme set` replaces all limits at once: flags not specified are removed. If the
+container is running, sdme prints a note that a restart is needed for the new
+limits to take effect.
+
+Memory values accept K/M/G/T suffixes. CPU count is a positive float where `1`
+means one full core and `0.5` means half a core (converted to systemd's
+`CPUQuota=` percentage internally). CPU weight is an integer from 1 to 10000,
+controlling relative scheduling priority when CPUs are contended.
+
+## 11. Bind Mounts and Environment Variables
+
+Custom bind mounts and environment variables are set at creation time with
+`-b`/`--bind` and `-e`/`--env`, available on both `sdme create` and `sdme new`.
+
+**Bind mounts** use the format `HOST:CONTAINER[:ro]`. Read-write is the default;
+append `:ro` for read-only. Both paths must be absolute with no `..` components,
+and the host path must exist at creation time. At start time, each bind becomes
+a `--bind=` or `--bind-ro=` argument to systemd-nspawn.
+
+**Environment variables** use the format `KEY=VALUE`. Keys must be alphanumeric
+or underscore (no leading digit). At start time, each variable becomes a
+`--setenv=KEY=VALUE` argument to systemd-nspawn.
+
+Both are stored in the container's state file (`BINDS=` and `ENVS=`,
+pipe-separated) and reconstituted into nspawn arguments on every start.
+
+## 12. Configuration
+
+sdme stores its settings in a TOML file at `~/.config/sdme/sdmerc`:
+
+| Setting                    | Default                        | Description                                                            |
+|----------------------------|--------------------------------|------------------------------------------------------------------------|
+| `interactive`              | `true`                         | Enable interactive prompts                                             |
+| `datadir`                  | `/var/lib/sdme`                | Root directory for all container and rootfs data                       |
+| `boot_timeout`             | `60`                           | Seconds to wait for container boot before giving up                    |
+| `join_as_sudo_user`        | `true`                         | Join host-rootfs containers as `$SUDO_USER` instead of root            |
+| `host_rootfs_opaque_dirs`  | `/etc/systemd/system,/var/log` | Default opaque dirs for host-rootfs containers (empty string disables) |
+
+Settings are read with `sdme config get` and written with `sdme config set <key> <value>`.
+
+**Sudo interplay.** Since sdme runs as root via `sudo`, the config file lookup
+checks whether `$SUDO_USER` is set to a non-root user. If so, and if that user's
+`~/.config/sdme/sdmerc` exists, it is used instead of root's config. This means
+the invoking user's preferences are respected without requiring the config to live
+under `/root`. An explicit `-c`/`--config` flag overrides all resolution logic.
+
+Config files are written with mode `0600` and directories with mode `0700`.
+
+## 13. Security
 
 sdme runs as root and handles untrusted input: tarballs from the internet, OCI
 images from public registries, QCOW2 disk images from unknown sources. Several
@@ -461,7 +567,7 @@ result in `sdme start` mysteriously misbehaving.
 If you find a way to escape a container, traverse a path, or corrupt the host
 filesystem through sdme, please open an issue.
 
-## 10. Reliability
+## 14. Reliability
 
 Multi-step operations in sdme are designed to fail cleanly rather than leave
 broken state behind.
