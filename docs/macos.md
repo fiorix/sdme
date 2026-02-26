@@ -29,21 +29,10 @@ limactl shell dev
 
 From here on, all commands run inside the VM.
 
-## Install dependencies and build sdme
-
-Note that lima mounts /Users/{you} inside the vm and the shells start there.
-
-Make sure to go to your home inside the vm first!
+## Install sdme
 
 ```bash
-cd
-sudo apt update
-sudo apt install -y rustup clang
-rustup toolchain install stable
-git clone https://github.com/fiorix/sdme
-cd sdme
-make
-sudo make install
+curl -fsSL https://fiorix.github.io/sdme/install.sh | sudo sh
 ```
 
 ## Run your first container

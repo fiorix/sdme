@@ -2,6 +2,10 @@
 
 Lightweight systemd-nspawn containers with overlayfs.
 
+## Quick install
+
+Download a static binary from [fiorix.github.io/sdme](https://fiorix.github.io/sdme/).
+
 Runs on Linux with systemd. Uses kernel overlayfs for copy-on-write storage. By default, containers are overlayfs clones of `/` but you can also import rootfs from other distros (Ubuntu, Debian, Fedora, NixOS; see [docs/nix](docs/nix/)).
 
 **Why does this even exist?**

@@ -191,17 +191,3 @@ mysql -u root -psecret -h 127.0.0.1 -e 'SELECT 1'
   the generated unit uses systemd defaults. Edit the unit if you need
   `Restart=always` or similar.
 
-## Future direction
-
-The sidecar model feels right: a base sdme container runs systemd, and
-multiple OCI services run inside it as individual systemd units. This would
-let you compose services (nginx + app + database) inside a single nspawn
-container with shared networking and storage, managed by systemctl.
-
-Port and volume wiring is the next practical step: generating `BindPaths=`
-from OCI volume declarations and integrating with sdme's `--port` flag for
-network-isolated containers.
-
-The goal isn't to replace Docker or Podman. It's to give systemd-nspawn
-users a way to tap into the OCI ecosystem without leaving the systemd
-operational model.
