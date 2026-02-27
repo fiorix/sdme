@@ -205,6 +205,31 @@ fn do_create(
         })?;
     }
 
+    // When /etc/systemd/system is opaque, the dbus.service alias from the
+    // lower layer is hidden. dbus.service is typically a symlink to the
+    // actual D-Bus implementation (dbus-broker.service or dbus-daemon.service).
+    // Without it, dbus.socket has no service to activate, D-Bus never starts,
+    // logind crash-loops (it needs D-Bus), and dbus.socket hits its start
+    // rate limit — leaving the container without a system bus.
+    if opaque_dirs.iter().any(|d| d == "/etc/systemd/system") {
+        let host_dbus = rootfs.join("etc/systemd/system/dbus.service");
+        if let Ok(target) = fs::read_link(&host_dbus) {
+            let upper_dbus = systemd_unit_dir.join("dbus.service");
+            symlink(&target, &upper_dbus).with_context(|| {
+                format!(
+                    "failed to preserve dbus.service symlink at {}",
+                    upper_dbus.display()
+                )
+            })?;
+            if verbose {
+                eprintln!(
+                    "preserved dbus.service -> {}",
+                    target.display()
+                );
+            }
+        }
+    }
+
     // Write a placeholder /etc/resolv.conf as a regular file so that
     // systemd-nspawn's --resolv-conf=auto can overwrite it with the host's
     // DNS configuration. Many rootfs images (e.g. Debian) ship resolv.conf as

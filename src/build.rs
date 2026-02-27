@@ -360,6 +360,7 @@ pub fn build(
         boot_timeout,
         verbose,
     ) {
+        crate::reset_interrupt();
         eprintln!("build failed, removing '{staging_name}'");
         let _ = containers::remove(datadir, &staging_name, verbose);
         return Err(e);

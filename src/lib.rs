@@ -60,6 +60,21 @@ pub fn check_interrupted() -> Result<()> {
     Ok(())
 }
 
+/// Reset the interrupt flag and re-install the signal handler.
+///
+/// Called before cleanup operations (e.g. removing a container after a
+/// failed boot in `sdme new`). Without this, a prior Ctrl+C leaves
+/// `INTERRUPTED == true` and the cleanup code — which also calls
+/// `check_interrupted()` — would bail immediately, skipping the undo.
+///
+/// Re-installing the handler means a *second* Ctrl+C during cleanup
+/// will still force-kill the process (the handler restores SIG_DFL on
+/// first invocation).
+pub fn reset_interrupt() {
+    INTERRUPTED.store(false, Ordering::Relaxed);
+    install_interrupt_handler();
+}
+
 pub fn install_interrupt_handler() {
     unsafe {
         let mut sa: libc::sigaction = std::mem::zeroed();

@@ -606,6 +606,7 @@ fn main() -> Result<()> {
             systemd::start(&cfg.datadir, &name, cli.verbose)?;
             let boot_timeout = std::time::Duration::from_secs(timeout.unwrap_or(cfg.boot_timeout));
             if let Err(e) = await_boot(&name, boot_timeout, cli.verbose) {
+                sdme::reset_interrupt();
                 eprintln!("boot failed, stopping '{name}'");
                 let _ = containers::stop(&name, cli.verbose);
                 return Err(e);
@@ -684,6 +685,7 @@ fn main() -> Result<()> {
             })();
 
             if let Err(e) = boot_result {
+                sdme::reset_interrupt();
                 eprintln!("boot failed, removing '{name}'");
                 let _ = containers::remove(&cfg.datadir, &name, cli.verbose);
                 return Err(e);
