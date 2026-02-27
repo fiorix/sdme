@@ -177,11 +177,14 @@ The
 .B \-\-install\-packages
 flag controls this:
 .B auto
-(default) prompts interactively, or installs automatically for OCI base OS
-images in non\-interactive mode (e.g.\& with
-.BR \-v );
+(default) prompts interactively; in non\-interactive mode (e.g.\& with
+.BR \-v ),
+refuses and suggests re\-running with
+.B \-\-install\-packages=yes
+or
+.BR \-f .
 .B yes
-always installs,
+always installs.
 .B no
 refuses if systemd is absent.
 .PP

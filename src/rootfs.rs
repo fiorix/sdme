@@ -258,6 +258,7 @@ mod tests {
                 name,
                 verbose: false,
                 force: true,
+                interactive: false,
                 install_packages: InstallPackages::No,
                 oci_mode: OciMode::Auto,
                 base_fs: None,

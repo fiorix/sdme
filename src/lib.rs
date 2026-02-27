@@ -102,11 +102,11 @@ extern "C" fn signal_handler(_sig: libc::c_int) {
     }
 }
 
-/// Prompt the user for yes/no confirmation, returning `Ok(true)` for "y".
+/// Display a prompt on stderr and read a line from stdin.
 ///
 /// Returns `Err` if the read is interrupted by a signal.
-pub fn confirm(prompt: &str) -> Result<bool> {
-    eprint!("{prompt}");
+fn prompt(msg: &str) -> Result<String> {
+    eprint!("{msg}");
     let _ = std::io::stderr().flush();
     let mut answer = String::new();
     if let Err(e) = read_line_interruptible(&mut answer) {
@@ -115,7 +115,24 @@ pub fn confirm(prompt: &str) -> Result<bool> {
         }
         bail!("interrupted");
     }
-    Ok(answer.trim().eq_ignore_ascii_case("y"))
+    Ok(answer)
+}
+
+/// Prompt the user for yes/no confirmation, returning `Ok(true)` for "y".
+///
+/// Returns `Err` if the read is interrupted by a signal.
+pub fn confirm(msg: &str) -> Result<bool> {
+    Ok(prompt(msg)?.trim().eq_ignore_ascii_case("y"))
+}
+
+/// Prompt the user for yes/no confirmation, returning `Ok(true)` for "y" or
+/// empty input (Enter). Only "n"/"no" returns `false`.
+///
+/// Returns `Err` if the read is interrupted by a signal.
+pub fn confirm_default_yes(msg: &str) -> Result<bool> {
+    let answer = prompt(msg)?;
+    let trimmed = answer.trim();
+    Ok(!trimmed.eq_ignore_ascii_case("n") && !trimmed.eq_ignore_ascii_case("no"))
 }
 
 pub struct SudoUser {

@@ -507,6 +507,9 @@ fn main() -> Result<()> {
 
     let cfg = config::load(config_path)?;
 
+    let interactive =
+        cfg.interactive && !cli.verbose && unsafe { libc::isatty(libc::STDIN_FILENO) != 0 };
+
     match cli.command {
         Command::Config(cmd) => match cmd {
             ConfigCommand::Get => {
@@ -756,19 +759,17 @@ fn main() -> Result<()> {
                     return Ok(());
                 }
                 if !force {
-                    if cli.verbose {
-                        bail!("use -f to confirm removal in verbose (non-interactive) mode");
+                    if !interactive {
+                        bail!("use -f to confirm removal in non-interactive mode");
                     }
-                    if unsafe { libc::isatty(libc::STDIN_FILENO) } != 0 {
-                        eprintln!(
-                            "this will remove {} container{}: {}",
-                            all_names.len(),
-                            if all_names.len() == 1 { "" } else { "s" },
-                            all_names.join(", "),
-                        );
-                        if !confirm("are you sure? [y/N] ")? {
-                            bail!("aborted");
-                        }
+                    eprintln!(
+                        "this will remove {} container{}: {}",
+                        all_names.len(),
+                        if all_names.len() == 1 { "" } else { "s" },
+                        all_names.join(", "),
+                    );
+                    if !confirm("are you sure? [y/N] ")? {
+                        bail!("aborted");
                     }
                 }
                 all_names
@@ -842,6 +843,7 @@ fn main() -> Result<()> {
                         name: &name,
                         verbose: cli.verbose,
                         force,
+                        interactive,
                         install_packages,
                         oci_mode,
                         base_fs: base_fs.as_deref(),
@@ -885,19 +887,17 @@ fn main() -> Result<()> {
                         return Ok(());
                     }
                     if !force {
-                        if cli.verbose {
-                            bail!("use -f to confirm removal in verbose (non-interactive) mode");
+                        if !interactive {
+                            bail!("use -f to confirm removal in non-interactive mode");
                         }
-                        if unsafe { libc::isatty(libc::STDIN_FILENO) } != 0 {
-                            eprintln!(
-                                "this will remove {} fs entr{}: {}",
-                                all_names.len(),
-                                if all_names.len() == 1 { "y" } else { "ies" },
-                                all_names.join(", "),
-                            );
-                            if !confirm("are you sure? [y/N] ")? {
-                                bail!("aborted");
-                            }
+                        eprintln!(
+                            "this will remove {} fs entr{}: {}",
+                            all_names.len(),
+                            if all_names.len() == 1 { "y" } else { "ies" },
+                            all_names.join(", "),
+                        );
+                        if !confirm("are you sure? [y/N] ")? {
+                            bail!("aborted");
                         }
                     }
                     all_names

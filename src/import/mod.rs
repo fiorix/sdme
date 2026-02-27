@@ -96,6 +96,7 @@ pub struct ImportOptions<'a> {
     pub name: &'a str,
     pub verbose: bool,
     pub force: bool,
+    pub interactive: bool,
     pub install_packages: InstallPackages,
     pub oci_mode: OciMode,
     pub base_fs: Option<&'a str>,
@@ -824,12 +825,7 @@ fn prompt_install_systemd(family: &DistroFamily, distro_name: &str) -> Result<bo
     for cmd in &commands {
         eprintln!("  {cmd}");
     }
-    crate::confirm("\nProceed? [y/N]: ")
-}
-
-/// Check if stdin is an interactive terminal.
-fn is_interactive_terminal() -> bool {
-    unsafe { libc::isatty(libc::STDIN_FILENO) != 0 }
+    crate::confirm_default_yes("\nProceed? [Y/n]: ")
 }
 
 // --- OCI application image support ---
@@ -1141,6 +1137,7 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
         name,
         verbose,
         force,
+        interactive,
         install_packages,
         oci_mode,
         base_fs,
@@ -1203,7 +1200,6 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
 
     // --- OCI application image handling ---
     // If this was a registry pull, check if it's an application image.
-    let mut oci_is_base = false;
     let skip_systemd_check = if let Some(ref cc) = oci_config {
         let is_base = match oci_mode {
             OciMode::Base => true,
@@ -1220,7 +1216,6 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
         }
 
         if is_base {
-            oci_is_base = true;
             if base_fs.is_some() && verbose {
                 eprintln!("note: --base-fs ignored for base OS image");
             }
@@ -1335,32 +1330,19 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
                             family
                         );
                     }
-                    if !verbose && is_interactive_terminal() {
+                    if interactive {
                         if prompt_install_systemd(&family, &distro_name)? {
                             install_systemd_packages(&staging_dir, &family, verbose)?;
                         } else {
                             bail!("systemd not found in rootfs; import aborted by user");
                         }
-                    } else if oci_is_base {
-                        // OCI base OS image in non-interactive mode: install
-                        // packages automatically since we know the intent.
+                    } else if force {
                         eprintln!(
-                            "installing systemd packages for {} (OCI base OS image)",
-                            if distro_name.is_empty() {
-                                format!("{:?}", family)
-                            } else {
-                                distro_name.clone()
-                            }
+                            "warning: systemd not found in rootfs; \
+                             importing anyway (forced)"
                         );
-                        install_systemd_packages(&staging_dir, &family, verbose)?;
+                        return Ok(());
                     } else {
-                        if force {
-                            eprintln!(
-                                "warning: systemd not found in rootfs; \
-                                 importing anyway (forced)"
-                            );
-                            return Ok(());
-                        }
                         bail!(
                             "systemd not found in rootfs and running non-interactively; \
                              re-run with --install-packages=yes or -f to override"
@@ -1510,6 +1492,7 @@ pub(crate) mod tests {
                 name,
                 verbose,
                 force,
+                interactive: false,
                 install_packages: InstallPackages::No,
                 oci_mode: OciMode::Auto,
                 base_fs: None,
