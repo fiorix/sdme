@@ -31,7 +31,7 @@ CI: pushing a `v*` tag triggers `.github/workflows/release.yml`, which runs test
 
 ## Architecture
 
-The project is a single Rust binary (`src/main.rs`) backed by a shared library (`src/lib.rs`). CLI parsing uses clap with derive.
+The project is a single Rust binary (`src/main.rs`) backed by a shared library (`src/lib.rs`), plus two auxiliary binaries (`sdme-connector-server`, `sdme-connector-client`) for the connector proxy feature. CLI parsing uses clap with derive.
 
 ### Core Concepts
 
@@ -41,7 +41,7 @@ The project is a single Rust binary (`src/main.rs`) backed by a shared library (
 - **DNS resolution**: containers share the host's network namespace. `systemd-resolved` is masked in the overlayfs upper layer at creation time so the host's resolver handles DNS. A placeholder `/etc/resolv.conf` regular file is written so `systemd-nspawn --resolv-conf=auto` can populate it at boot.
 - **State files**: container metadata persisted as KEY=VALUE files under `{datadir}/state/{name}`.
 - **Health checks**: `sdme ps` detects broken containers (missing dirs, missing rootfs) and reports health status with OS detection via os-release.
-- **Conflict detection**: prevents name collisions with existing containers and `/var/lib/machines/`.
+- **Connectors**: `--oci-mode=connector` on `sdme fs import` generates socket-activated proxy units instead of a direct service. The OCI entrypoint runs behind `sdme-connector-server`, accessible from other containers via connector directories. Client containers use `--connector <name>` on `create`/`new` or `sdme connector add` to bind-mount connector dirs. The client binary (`sdme-connector-client`) works busybox-style via symlinks. Privilege separation by design: the client sends only argv and stdin/stdout/stderr fds via SCM_RIGHTS; environment and cwd are controlled by the server container.
 
 ### CLI Commands
 
@@ -61,6 +61,9 @@ The project is a single Rust binary (`src/main.rs`) backed by a shared library (
 | `sdme fs rm` | Remove imported root filesystems |
 | `sdme fs build` | Build a root filesystem from a build config |
 | `sdme set` | Set resource limits on a container (replaces all limits) |
+| `sdme connector add` | Add a service connector to a container |
+| `sdme connector rm` | Remove a service connector from a container |
+| `sdme connector ls` | List connectors on a container |
 | `sdme config get/set` | View or modify configuration |
 | `sdme completions` | Generate shell completions (Bash, Fish, Zsh) |
 
@@ -86,6 +89,10 @@ The project is a single Rust binary (`src/main.rs`) backed by a shared library (
 | `src/copy.rs` | Filesystem tree copying with xattr and special file support |
 | `src/mounts.rs` | Bind mount (`BindConfig`) and environment variable (`EnvConfig`) configuration |
 | `src/network.rs` | Network configuration validation and state serialization |
+| `src/connectors.rs` | Connector configuration (`ConnectorConfig`): state persistence, nspawn arg generation, add/remove |
+| `src/proxy/mod.rs` | Shared proxy protocol types (`ProxyRequest`/`ProxyResponse`), SCM_RIGHTS fd passing helpers, length-prefixed framing |
+| `src/proxy/server.rs` | `sdme-connector-server` binary: socket-activated server, accepts connections, forks and execs entrypoint |
+| `src/proxy/client.rs` | `sdme-connector-client` binary: connects to connector socket, sends fds via SCM_RIGHTS, busybox-style invocation |
 
 ### Rust Dependencies
 
@@ -129,6 +136,7 @@ Dependencies are checked at runtime before use via `system_check::check_dependen
 - **Umask check**: `containers::create()` refuses to proceed when the process umask strips read or execute from "other" (`umask & 005 != 0`). A restrictive umask causes files in the overlayfs upper layer to be inaccessible to non-root services (e.g. dbus-daemon as `messagebus`), preventing boot.
 - **Bind mounts and env vars**: `-b`/`--bind` and `-e`/`--env` on `create`/`new` add custom bind mounts and environment variables. Stored in the state file and converted to systemd-nspawn flags at start time. Bind mounts validated (absolute paths, no `..`). Managed by `BindConfig` and `EnvConfig` in `src/mounts.rs`.
 - **OCI registry pulling**: supports pulling from OCI registries (e.g. `docker.io/ubuntu:24.04`). Implements the OCI Distribution Spec in `src/import/registry.rs`; resolves tags to manifests, matches architecture, downloads and extracts layers. Supports `--oci-mode` and `--base-fs` for running OCI app images as systemd services.
+- **Connectors and proxy mode**: `--oci-mode=connector` on `sdme fs import` creates a socket-activated proxy setup instead of a direct service unit. Generates `sdme-oci-app.socket` (systemd socket unit) + `sdme-oci-app.service` (runs `sdme-connector-server <entrypoint>`). The connector directory (`/var/lib/sdme/connectors/<name>/`) contains a Unix socket and busybox-style symlinks to `sdme-connector-client`. At start time, proxy-mode rootfs are detected via an `oci/proxy-mode` marker file; the connector dir and proxy binaries are bind-mounted into the container. Client containers use `--connector <name>` or `sdme connector add` to get read-only access to the connector dir. Privilege separation: clients send only argv + stdin/stdout/stderr fds (via SCM_RIGHTS); env and cwd are server-controlled. Connectors on existing containers are managed via `sdme connector add/rm/ls`, following the `set_limits()` pattern: modify state, regenerate nspawn dropin, warn if running.
 - **Interrupt handling**: a global `INTERRUPTED` flag (`src/lib.rs`) set by a POSIX `SIGINT` handler (installed without `SA_RESTART`). Import loops, boot-wait loops, and build operations check it for clean Ctrl+C cancellation. Second Ctrl+C force-kills the process. Cleanup paths (e.g. container removal after boot failure in `sdme new`) call `reset_interrupt()` to clear the flag and re-install the handler, ensuring cleanup code that also checks `check_interrupted()` is not short-circuited by a prior Ctrl+C.
 - **Build COPY restrictions**: `sdme fs build` COPY writes to the overlayfs upper layer while stopped. Destinations under tmpfs-mounted dirs (`/tmp`, `/run`, `/dev/shm`) or opaque dirs are rejected. Validation in `check_shadowed_dest()` (`src/build.rs`); errors include config file path and line number.
 - **Boot failure cleanup**: `sdme new` removes the just-created container on boot failure, join failure, or Ctrl+C. `sdme start` stops the container on boot failure or Ctrl+C (preserving it on disk for debugging). Both reset the interrupt flag before cleanup so that the stop/remove operations (which internally call `check_interrupted()`) can complete.

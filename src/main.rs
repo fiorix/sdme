@@ -6,8 +6,8 @@ use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 use sdme::import::{ImportOptions, InstallPackages, OciMode};
 use sdme::{
-    config, confirm, containers, rootfs, system_check, systemd, BindConfig, EnvConfig,
-    NetworkConfig, ResourceLimits,
+    config, confirm, containers, rootfs, system_check, systemd, BindConfig, ConnectorConfig,
+    EnvConfig, NetworkConfig, ResourceLimits,
 };
 
 #[derive(Parser)]
@@ -62,6 +62,10 @@ struct MountArgs {
     /// Set environment variable KEY=VALUE (repeatable)
     #[arg(long = "env", short = 'e')]
     envs: Vec<String>,
+
+    /// Connect to a service connector (bind-mount connector dir, repeatable)
+    #[arg(long = "connector")]
+    connectors: Vec<String>,
 }
 
 #[derive(Subcommand)]
@@ -236,6 +240,10 @@ enum Command {
     #[command(name = "fs", subcommand)]
     Fs(RootfsCommand),
 
+    /// Manage service connectors on a container
+    #[command(subcommand)]
+    Connector(ConnectorCommand),
+
     /// Generate shell completions
     Completions {
         /// Shell to generate completions for
@@ -373,6 +381,29 @@ enum ConfigCommand {
     },
 }
 
+#[derive(Subcommand)]
+enum ConnectorCommand {
+    /// Add a service connector to a container
+    Add {
+        /// Container name
+        name: String,
+        /// Connector name (rootfs imported with --oci-mode=connector)
+        connector: String,
+    },
+    /// Remove a service connector from a container
+    Rm {
+        /// Container name
+        name: String,
+        /// Connector name
+        connector: String,
+    },
+    /// List connectors on a container
+    Ls {
+        /// Container name
+        name: String,
+    },
+}
+
 fn for_each_container(
     datadir: &std::path::Path,
     targets: &[String],
@@ -447,13 +478,16 @@ fn parse_network(args: NetworkArgs) -> Result<NetworkConfig> {
     Ok(network)
 }
 
-/// Build `BindConfig` and `EnvConfig` from CLI flags (for `create` / `new`).
-fn parse_mounts(args: MountArgs) -> Result<(BindConfig, EnvConfig)> {
+/// Build `BindConfig`, `EnvConfig`, and `ConnectorConfig` from CLI flags (for `create` / `new`).
+fn parse_mounts(args: MountArgs) -> Result<(BindConfig, EnvConfig, ConnectorConfig)> {
     let binds = BindConfig::from_cli_args(args.binds)?;
     binds.validate()?;
     let envs = EnvConfig { vars: args.envs };
     envs.validate()?;
-    Ok((binds, envs))
+    let connectors = ConnectorConfig {
+        connectors: args.connectors,
+    };
+    Ok((binds, envs, connectors))
 }
 
 /// Parse the comma-separated `host_rootfs_opaque_dirs` config value into a Vec.
@@ -570,7 +604,7 @@ fn main() -> Result<()> {
             system_check::check_systemd_version(252)?;
             let limits = parse_limits(memory, cpus, cpu_weight)?;
             let network = parse_network(network)?;
-            let (binds, envs) = parse_mounts(mounts)?;
+            let (binds, envs, connectors) = parse_mounts(mounts)?;
             let opaque_dirs = resolve_opaque_dirs(opaque_dirs, fs.is_none(), &cfg);
             let opts = containers::CreateOptions {
                 name,
@@ -580,6 +614,7 @@ fn main() -> Result<()> {
                 opaque_dirs,
                 binds,
                 envs,
+                connectors,
             };
             let name = containers::create(&cfg.datadir, &opts, cli.verbose)?;
             eprintln!("creating '{name}'");
@@ -669,7 +704,7 @@ fn main() -> Result<()> {
             system_check::check_systemd_version(252)?;
             let limits = parse_limits(memory, cpus, cpu_weight)?;
             let network = parse_network(network)?;
-            let (binds, envs) = parse_mounts(mounts)?;
+            let (binds, envs, connectors) = parse_mounts(mounts)?;
             let opaque_dirs = resolve_opaque_dirs(opaque_dirs, fs.is_none(), &cfg);
             let opts = containers::CreateOptions {
                 name,
@@ -679,6 +714,7 @@ fn main() -> Result<()> {
                 opaque_dirs,
                 binds,
                 envs,
+                connectors,
             };
             let name = containers::create(&cfg.datadir, &opts, cli.verbose)?;
             eprintln!("creating '{name}'");
@@ -835,6 +871,9 @@ fn main() -> Result<()> {
                 if base_fs.is_some() && oci_mode == OciMode::Base {
                     bail!("--base-fs cannot be used with --oci-mode=base");
                 }
+                if oci_mode == OciMode::Connector && base_fs.is_none() {
+                    bail!("--oci-mode=connector requires --base-fs");
+                }
                 rootfs::import(
                     &cfg.datadir,
                     &ImportOptions {
@@ -934,6 +973,51 @@ fn main() -> Result<()> {
                     cli.verbose,
                 )?;
                 println!("{name}");
+            }
+        },
+        Command::Connector(cmd) => match cmd {
+            ConnectorCommand::Add { name, connector } => {
+                let name = containers::resolve_name(&cfg.datadir, &name)?;
+                containers::ensure_exists(&cfg.datadir, &name)?;
+
+                let state_path = cfg.datadir.join("state").join(&name);
+                let state = sdme::State::read_from(&state_path)?;
+                let mut config = ConnectorConfig::from_state(&state);
+                if !config.add(&connector) {
+                    eprintln!("connector '{connector}' already configured on '{name}'");
+                    return Ok(());
+                }
+                config.validate(&cfg.datadir)?;
+                containers::set_connectors(&cfg.datadir, &name, &config, cli.verbose)?;
+                eprintln!("added connector '{connector}' to '{name}'");
+            }
+            ConnectorCommand::Rm { name, connector } => {
+                let name = containers::resolve_name(&cfg.datadir, &name)?;
+                containers::ensure_exists(&cfg.datadir, &name)?;
+
+                let state_path = cfg.datadir.join("state").join(&name);
+                let state = sdme::State::read_from(&state_path)?;
+                let mut config = ConnectorConfig::from_state(&state);
+                if !config.remove(&connector) {
+                    bail!("connector '{connector}' not found on '{name}'");
+                }
+                containers::set_connectors(&cfg.datadir, &name, &config, cli.verbose)?;
+                eprintln!("removed connector '{connector}' from '{name}'");
+            }
+            ConnectorCommand::Ls { name } => {
+                let name = containers::resolve_name(&cfg.datadir, &name)?;
+                containers::ensure_exists(&cfg.datadir, &name)?;
+
+                let state_path = cfg.datadir.join("state").join(&name);
+                let state = sdme::State::read_from(&state_path)?;
+                let config = ConnectorConfig::from_state(&state);
+                if config.connectors.is_empty() {
+                    println!("no connectors configured");
+                } else {
+                    for c in &config.connectors {
+                        println!("{c}");
+                    }
+                }
             }
         },
     }

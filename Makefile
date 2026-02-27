@@ -6,6 +6,8 @@ all:
 
 install: install-man install-completions
 	install -Dm755 target/release/sdme $(DESTDIR)/bin/sdme
+	install -Dm755 target/release/sdme-connector-server $(DESTDIR)/libexec/sdme-connector-server
+	install -Dm755 target/release/sdme-connector-client $(DESTDIR)/libexec/sdme-connector-client
 
 install-man:
 	install -Dm644 docs/sdme.1 $(DESTDIR)/share/man/man1/sdme.1
@@ -20,6 +22,8 @@ install-completions:
 
 uninstall: uninstall-man uninstall-completions
 	rm -f $(DESTDIR)/bin/sdme
+	rm -f $(DESTDIR)/libexec/sdme-connector-server
+	rm -f $(DESTDIR)/libexec/sdme-connector-client
 
 uninstall-man:
 	rm -f $(DESTDIR)/share/man/man1/sdme.1

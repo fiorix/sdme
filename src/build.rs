@@ -347,6 +347,7 @@ pub fn build(
         opaque_dirs: vec![],
         binds: crate::BindConfig::default(),
         envs: crate::EnvConfig::default(),
+        connectors: crate::ConnectorConfig::default(),
     };
     containers::create(datadir, &create_opts, verbose)?;
 
