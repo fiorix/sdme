@@ -517,7 +517,7 @@ pub fn remove(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
         if verbose {
             eprintln!("stopping container '{name}'");
         }
-        stop(name, verbose)?;
+        stop(name, StopMode::Terminate, verbose)?;
     }
 
     let container_dir = datadir.join("containers").join(name);
@@ -747,12 +747,54 @@ pub fn set_limits(
     Ok(())
 }
 
-pub fn stop(name: &str, verbose: bool) -> Result<()> {
-    if verbose {
-        eprintln!("terminating machine '{name}'");
+/// Controls how `stop()` shuts down a container.
+#[derive(Debug, Clone, Copy)]
+pub enum StopMode {
+    /// Send SIGRTMIN+4 to the container leader (graceful poweroff).
+    Graceful,
+    /// Call TerminateMachine (SIGTERM to nspawn leader).
+    Terminate,
+    /// Send SIGKILL to all processes in the container.
+    Kill,
+}
+
+pub fn stop(name: &str, mode: StopMode, verbose: bool) -> Result<()> {
+    match mode {
+        StopMode::Graceful => {
+            if verbose {
+                eprintln!("powering off machine '{name}'");
+            }
+            let signal = libc::SIGRTMIN() + 4;
+            systemd::kill_machine(name, "leader", signal)?;
+            systemd::wait_for_shutdown(name, std::time::Duration::from_secs(90), verbose)
+                .with_context(|| {
+                    format!(
+                        "hint: the container may be stuck during shutdown; \
+                         try 'sdme stop --kill {name}' to force-kill it"
+                    )
+                })
+        }
+        StopMode::Terminate => {
+            if verbose {
+                eprintln!("terminating machine '{name}'");
+            }
+            systemd::terminate_machine(name)?;
+            systemd::wait_for_shutdown(name, std::time::Duration::from_secs(30), verbose)
+                .with_context(|| {
+                    format!(
+                        "hint: the container may be stuck; \
+                         try 'sdme stop --kill {name}' to force-kill it"
+                    )
+                })
+        }
+        StopMode::Kill => {
+            if verbose {
+                eprintln!("killing machine '{name}'");
+            }
+            systemd::kill_machine(name, "all", libc::SIGKILL)?;
+            systemd::wait_for_shutdown(name, std::time::Duration::from_secs(15), verbose)
+        }
     }
-    systemd::terminate_machine(name)?;
-    systemd::wait_for_shutdown(name, std::time::Duration::from_secs(30), verbose)
 }
 
 #[cfg(test)]

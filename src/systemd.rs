@@ -412,6 +412,25 @@ mod dbus {
         Ok(())
     }
 
+    /// Send a signal to a machine via org.freedesktop.machine1.
+    ///
+    /// Calls `KillMachine(name, who, signal)` on the machined Manager.
+    /// `who` is either `"leader"` (just the init process) or `"all"`
+    /// (every process in the machine). `signal` is the signal number.
+    ///
+    /// This is a non-blocking call; the machine shuts down asynchronously.
+    /// Use [`wait_for_shutdown`] to wait for full shutdown.
+    pub fn kill_machine(name: &str, who: &str, signal: i32) -> Result<()> {
+        let conn = connect()?;
+        let manager = machine1_manager(&conn)?;
+
+        manager
+            .call_method("KillMachine", &(name, who, signal))
+            .with_context(|| format!("failed to kill machine '{name}'"))?;
+
+        Ok(())
+    }
+
     /// List all registered machines via org.freedesktop.machine1.
     ///
     /// Returns a vector of machine names. Returns an empty vector if the
@@ -629,6 +648,10 @@ pub fn await_boot(name: &str, timeout: std::time::Duration, verbose: bool) -> Re
 
 pub fn terminate_machine(name: &str) -> Result<()> {
     dbus::terminate_machine(name)
+}
+
+pub fn kill_machine(name: &str, who: &str, signal: i32) -> Result<()> {
+    dbus::kill_machine(name, who, signal)
 }
 
 pub fn wait_for_shutdown(name: &str, timeout: std::time::Duration, verbose: bool) -> Result<()> {

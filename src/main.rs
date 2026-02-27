@@ -194,6 +194,14 @@ enum Command {
         /// Stop all running containers
         #[arg(short, long)]
         all: bool,
+
+        /// Terminate (SIGTERM to nspawn leader, 30s timeout)
+        #[arg(long, conflicts_with = "kill")]
+        term: bool,
+
+        /// Force-kill all processes (SIGKILL, 15s timeout)
+        #[arg(long, conflicts_with = "term")]
+        kill: bool,
     },
 
     /// Set resource limits on a container (replaces all limits)
@@ -608,7 +616,7 @@ fn main() -> Result<()> {
             if let Err(e) = await_boot(&name, boot_timeout, cli.verbose) {
                 sdme::reset_interrupt();
                 eprintln!("boot failed, stopping '{name}'");
-                let _ = containers::stop(&name, cli.verbose);
+                let _ = containers::stop(&name, containers::StopMode::Terminate, cli.verbose);
                 return Err(e);
             }
         }
@@ -773,13 +781,25 @@ fn main() -> Result<()> {
                 containers::remove(datadir, name, verbose)
             })?;
         }
-        Command::Stop { names, all } => {
+        Command::Stop {
+            names,
+            all,
+            term,
+            kill,
+        } => {
             if all && !names.is_empty() {
                 bail!("--all cannot be combined with container names");
             }
             if !all && names.is_empty() {
                 bail!("provide one or more container names, or use --all");
             }
+            let mode = if kill {
+                containers::StopMode::Kill
+            } else if term {
+                containers::StopMode::Terminate
+            } else {
+                containers::StopMode::Graceful
+            };
             let targets: Vec<String> = if all {
                 containers::list(&cfg.datadir)?
                     .into_iter()
@@ -797,7 +817,7 @@ fn main() -> Result<()> {
             let verbose = cli.verbose;
             for_each_container(datadir, &targets, "stopping", "stopped", |name| {
                 containers::ensure_exists(datadir, name)?;
-                containers::stop(name, verbose)
+                containers::stop(name, mode, verbose)
             })?;
         }
         // Handled before root check above.

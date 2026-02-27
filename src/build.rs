@@ -283,7 +283,7 @@ fn execute_build(
             BuildOp::Copy { src, dst, lineno } => {
                 if container_running {
                     eprintln!("stopping build container '{container_name}'");
-                    containers::stop(container_name, verbose)?;
+                    containers::stop(container_name, containers::StopMode::Terminate, verbose)?;
                     container_running = false;
                 }
                 let upper_dir = datadir
@@ -300,7 +300,7 @@ fn execute_build(
     // Ensure container is stopped; overlayfs must be unmounted for merged layer copy.
     if container_running {
         eprintln!("stopping build container '{container_name}'");
-        containers::stop(container_name, verbose)?;
+        containers::stop(container_name, containers::StopMode::Terminate, verbose)?;
     }
 
     Ok(())
