@@ -222,10 +222,7 @@ fn do_create(
                 )
             })?;
             if verbose {
-                eprintln!(
-                    "preserved dbus.service -> {}",
-                    target.display()
-                );
+                eprintln!("preserved dbus.service -> {}", target.display());
             }
         }
     }
