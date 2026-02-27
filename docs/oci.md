@@ -38,6 +38,7 @@ The `--oci-mode` flag lets you override auto-detection:
 | `--oci-mode=auto` | Auto-detect from image config (default) |
 | `--oci-mode=base` | Force base OS mode |
 | `--oci-mode=app` | Force application mode (requires `--base-fs`) |
+| `--oci-mode=connector` | Force connector mode (requires `--base-fs`) |
 
 ## How it works
 
@@ -193,4 +194,124 @@ mysql -u root -psecret -h 127.0.0.1 -e 'SELECT 1'
 - **No restart policy mapping.** OCI restart policies don't map to systemd;
   the generated unit uses systemd defaults. Edit the unit if you need
   `Restart=always` or similar.
+
+## Connector mode (`--oci-mode=connector`)
+
+Connector mode extends the application model with socket-activated proxying
+for cross-container access. Instead of running the OCI entrypoint directly,
+the entrypoint runs behind `sdme-connector-server`, a socket-activated proxy.
+Other containers can invoke the service through a shared connector directory
+without needing `machinectl shell` privileges.
+
+### Design: privilege separation
+
+The client sends **only** its argv and stdin/stdout/stderr file descriptors
+(via Unix socket SCM_RIGHTS). It does **not** send its environment or working
+directory. The server inherits these from the systemd unit that manages it.
+This is intentional: the server container controls what environment the command
+runs in, not the caller. This provides a well-defined entrypoint with strong
+privilege separation.
+
+### How it works
+
+When an application image is imported with `--oci-mode=connector`:
+
+1. Steps 1–5 are the same as `--oci-mode=app` (base rootfs copy, OCI rootfs
+   under `/oci/root`, env/ports/volumes metadata)
+2. A marker file `/oci/proxy-mode` is written containing the connector name
+3. A connector directory is created at `/connectors/<name>/` with:
+   - A busybox-style symlink: `<entrypoint-basename> -> /usr/libexec/sdme-connector-client`
+4. Two systemd units are generated instead of one:
+   - `sdme-oci-app.socket`: listens on `/connectors/<name>/<name>.sock`
+   - `sdme-oci-app.service`: runs `sdme-connector-server <entrypoint>` on
+     socket activation
+5. The socket unit is enabled (symlinked into `sockets.target.wants/`)
+
+At container start time, sdme detects the `oci/proxy-mode` marker and
+automatically:
+- Creates the host-side connector directory at `/var/lib/sdme/connectors/<name>/`
+- Bind-mounts it into the container (read-write, so the socket can be created)
+- Bind-mounts `sdme-connector-server` and `sdme-connector-client` into
+  `/usr/libexec/`
+
+### Connecting from another container
+
+To give a container access to a connector, use `--connector` at creation time
+or `sdme connector add` on an existing container:
+
+```bash
+# At creation time
+sudo sdme new -r ubuntu --connector nginx
+
+# On an existing container
+sudo sdme connector add mybox nginx
+sudo sdme stop mybox && sudo sdme start mybox
+```
+
+The connector directory is bind-mounted read-only into the client container at
+`/connectors/<name>/`. The environment variable `SDME_CONNECTOR_DIR` is set
+automatically. Inside the client container:
+
+```bash
+# Busybox-style invocation via the symlink
+/connectors/nginx/nginx
+
+# Or explicit invocation
+sdme-connector-client --connector-dir=/connectors/nginx --name=nginx
+```
+
+### Managing connectors
+
+```bash
+# List connectors on a container
+sudo sdme connector ls mybox
+
+# Add a connector
+sudo sdme connector add mybox nginx
+
+# Remove a connector
+sudo sdme connector rm mybox nginx
+```
+
+Changes require a container restart to take effect (connector bind mounts are
+baked into the systemd nspawn drop-in).
+
+### Practical example
+
+```bash
+# 1. Import a base OS
+sudo sdme fs import ubuntu docker.io/ubuntu:24.04 -v
+
+# 2. Import nginx with proxy mode
+sudo sdme fs import nginx docker.io/nginx --oci-mode=connector --base-fs=ubuntu -v
+
+# 3. Start the nginx server container
+sudo sdme new -r nginx
+
+# 4. Create a client container with access to the nginx connector
+sudo sdme new -r ubuntu --connector nginx
+
+# Inside the client container:
+# /connectors/nginx/nginx is a symlink to sdme-connector-client
+# Running it invokes nginx in the server container via the proxy
+```
+
+### Wire protocol
+
+The connector proxy uses a simple JSON-over-Unix-socket protocol:
+
+1. Client connects to `<connector_dir>/<name>.sock`
+2. Client sends via `sendmsg()` with SCM_RIGHTS:
+   - Ancillary data: 3 file descriptors (stdin, stdout, stderr)
+   - Message data: `[4-byte BE length][JSON]` where JSON is `{"argv": [...]}`
+3. Server forks, sets up the received fds as stdin/stdout/stderr, execs the
+   entrypoint with the client's argv appended
+4. If the received stdin is a terminal, the server acquires it as the
+   controlling terminal (`setsid` + `TIOCSCTTY`)
+5. Server sends response: `[4-byte BE length][JSON]` where JSON is
+   `{"exit_code": N}`
+6. Client exits with the received exit code
+
+Connections are serialized (one client at a time). The server exits when idle;
+systemd restarts it via socket activation on the next connection.
 

@@ -18,6 +18,14 @@ path = "src/lib.rs"
 name = "sdme"
 path = "src/main.rs"
 
+[[bin]]
+name = "sdme-connector-server"
+path = "src/proxy/server.rs"
+
+[[bin]]
+name = "sdme-connector-client"
+path = "src/proxy/client.rs"
+
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
@@ -43,6 +51,8 @@ section = "admin"
 priority = "optional"
 assets = [
     ["target/release/sdme", "usr/bin/", "755"],
+    ["target/release/sdme-connector-server", "usr/libexec/", "755"],
+    ["target/release/sdme-connector-client", "usr/libexec/", "755"],
     ["docs/sdme.1", "usr/share/man/man1/sdme.1", "644"],
     ["dist/completions/sdme.bash", "usr/share/bash-completion/completions/sdme", "644"],
     ["dist/completions/_sdme", "usr/share/zsh/vendor-completions/_sdme", "644"],
@@ -52,6 +62,8 @@ assets = [
 [package.metadata.generate-rpm]
 assets = [
     { source = "target/release/sdme", dest = "/usr/bin/sdme", mode = "755" },
+    { source = "target/release/sdme-connector-server", dest = "/usr/libexec/sdme-connector-server", mode = "755" },
+    { source = "target/release/sdme-connector-client", dest = "/usr/libexec/sdme-connector-client", mode = "755" },
     { source = "docs/sdme.1", dest = "/usr/share/man/man1/sdme.1", mode = "644", doc = true },
     { source = "dist/completions/sdme.bash", dest = "/usr/share/bash-completion/completions/sdme", mode = "644" },
     { source = "dist/completions/_sdme", dest = "/usr/share/zsh/site-functions/_sdme", mode = "644" },

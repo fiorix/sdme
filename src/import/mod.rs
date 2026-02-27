@@ -88,6 +88,8 @@ pub enum OciMode {
     Base,
     /// Treat as application image (requires --base-fs, generates service unit).
     App,
+    /// Like App, but generates socket-activated connector units for cross-container access.
+    Connector,
 }
 
 /// Options for rootfs import.
@@ -1257,6 +1259,268 @@ WantedBy=multi-user.target
     Ok(())
 }
 
+/// Set up a proxy image by combining a base rootfs with the OCI rootfs.
+///
+/// Like [`setup_app_image`], but instead of a direct service unit, generates
+/// a socket-activated proxy setup:
+///
+/// - `sdme-oci-app.socket`: systemd socket unit for the connector
+/// - `sdme-oci-app.service`: runs `sdme-connector-server <entrypoint>` on activation
+/// - Connector directory with client symlinks for busybox-style invocation
+/// - Marker file (`/oci/proxy-mode`) for start-time detection
+///
+/// The proxy provides privilege separation: clients send only argv and their
+/// stdin/stdout/stderr fds. Environment and working directory are controlled
+/// by the server container's systemd unit.
+#[allow(clippy::too_many_arguments)]
+fn setup_proxy_image(
+    datadir: &Path,
+    staging_dir: &Path,
+    rootfs_dir: &Path,
+    name: &str,
+    base_name: &str,
+    config: &registry::OciContainerConfig,
+    image_ref: &str,
+    verbose: bool,
+) -> Result<()> {
+    validate_name(base_name)?;
+
+    let base_dir = datadir.join("fs").join(base_name);
+    if !base_dir.is_dir() {
+        bail!("base rootfs not found: {base_name}");
+    }
+
+    // Build the entrypoint command from entrypoint + cmd.
+    let mut exec_args: Vec<String> = Vec::new();
+    if let Some(ref ep) = config.entrypoint {
+        exec_args.extend(ep.iter().cloned());
+    }
+    if let Some(ref cmd) = config.cmd {
+        exec_args.extend(cmd.iter().cloned());
+    }
+    if exec_args.is_empty() {
+        bail!("OCI image has no Entrypoint or Cmd; cannot generate proxy units");
+    }
+
+    let working_dir = config.working_dir.as_deref().unwrap_or("/");
+    let user = config.user.as_deref().unwrap_or("root");
+
+    if verbose {
+        eprintln!("setting up proxy image with base '{base_name}'");
+    }
+
+    // 1. Rename staging_dir (OCI rootfs) to a temp location.
+    let oci_tmp = rootfs_dir.join(format!(".{name}.oci-tmp"));
+    if oci_tmp.exists() {
+        let _ = make_removable(&oci_tmp);
+        fs::remove_dir_all(&oci_tmp)
+            .with_context(|| format!("failed to remove {}", oci_tmp.display()))?;
+    }
+    fs::rename(staging_dir, &oci_tmp).with_context(|| {
+        format!(
+            "failed to rename {} to {}",
+            staging_dir.display(),
+            oci_tmp.display()
+        )
+    })?;
+
+    // 2. Copy the base rootfs to staging_dir.
+    if verbose {
+        eprintln!("copying base rootfs '{base_name}' to staging directory");
+    }
+    fs::create_dir_all(staging_dir)
+        .with_context(|| format!("failed to create {}", staging_dir.display()))?;
+    crate::copy::copy_tree(&base_dir, staging_dir, verbose)
+        .with_context(|| format!("failed to copy base rootfs from {}", base_dir.display()))?;
+
+    // 3. Move OCI rootfs contents into staging_dir/oci/root/.
+    let oci_root = staging_dir.join("oci/root");
+    fs::create_dir_all(&oci_root)
+        .with_context(|| format!("failed to create {}", oci_root.display()))?;
+
+    if verbose {
+        eprintln!("moving OCI rootfs to {}", oci_root.display());
+    }
+    for entry in
+        fs::read_dir(&oci_tmp).with_context(|| format!("failed to read {}", oci_tmp.display()))?
+    {
+        let entry = entry?;
+        let dest = oci_root.join(entry.file_name());
+        fs::rename(entry.path(), &dest).with_context(|| {
+            format!(
+                "failed to move {} to {}",
+                entry.path().display(),
+                dest.display()
+            )
+        })?;
+    }
+
+    // 3b. Ensure essential runtime directories exist in OCI root.
+    for (dir, mode) in [
+        ("tmp", 0o1777),
+        ("run", 0o755),
+        ("var/run", 0o755),
+        ("var/tmp", 0o1777),
+    ] {
+        use std::os::unix::fs::DirBuilderExt;
+        let path = oci_root.join(dir);
+        if !path.exists() {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("failed to create {}", parent.display()))?;
+            }
+            fs::DirBuilder::new()
+                .mode(mode)
+                .create(&path)
+                .with_context(|| format!("failed to create {}", path.display()))?;
+        }
+    }
+
+    // 3c. Remove symlinks to /dev/stdout, /dev/stderr, etc.
+    remove_dev_symlinks(&oci_root, verbose)?;
+
+    // 4. Write OCI env file.
+    if let Some(ref env_vars) = config.env {
+        if !env_vars.is_empty() {
+            let env_path = staging_dir.join("oci/env");
+            let content = env_vars.join("\n") + "\n";
+            fs::write(&env_path, &content)
+                .with_context(|| format!("failed to write {}", env_path.display()))?;
+        }
+    }
+
+    // 4b. Write OCI ports file.
+    if let Some(ref ports) = config.exposed_ports {
+        if !ports.is_empty() {
+            let content = sorted_keys_joined(ports, "\n") + "\n";
+            fs::write(staging_dir.join("oci/ports"), &content)
+                .with_context(|| "failed to write oci/ports")?;
+        }
+    }
+
+    // 4c. Write OCI volumes file.
+    if let Some(ref vols) = config.volumes {
+        if !vols.is_empty() {
+            let content = sorted_keys_joined(vols, "\n") + "\n";
+            fs::write(staging_dir.join("oci/volumes"), &content)
+                .with_context(|| "failed to write oci/volumes")?;
+        }
+    }
+
+    // 4d. Write proxy-mode marker (connector name = rootfs name).
+    fs::write(staging_dir.join("oci/proxy-mode"), format!("{name}\n"))
+        .with_context(|| "failed to write oci/proxy-mode")?;
+
+    // 5. Create the connector directory structure.
+    let connector_dir = staging_dir.join("connectors").join(name);
+    fs::create_dir_all(&connector_dir)
+        .with_context(|| format!("failed to create {}", connector_dir.display()))?;
+
+    // Create busybox-style client symlinks for the entrypoint basename.
+    let entrypoint_basename = exec_args[0]
+        .rsplit('/')
+        .next()
+        .unwrap_or(&exec_args[0]);
+    std::os::unix::fs::symlink(
+        "/usr/libexec/sdme-connector-client",
+        connector_dir.join(entrypoint_basename),
+    )
+    .with_context(|| {
+        format!(
+            "failed to create client symlink for {entrypoint_basename}"
+        )
+    })?;
+
+    if verbose {
+        eprintln!(
+            "created connector symlink: {entrypoint_basename} -> /usr/libexec/sdme-connector-client"
+        );
+    }
+
+    // 6. Generate systemd socket + service unit files.
+    let unit_dir = staging_dir.join("etc/systemd/system");
+    fs::create_dir_all(&unit_dir)
+        .with_context(|| format!("failed to create {}", unit_dir.display()))?;
+
+    let stop_signal_line = config
+        .stop_signal
+        .as_ref()
+        .map(|sig| format!("KillSignal={sig}\n"))
+        .unwrap_or_default();
+
+    // The proxy server command: sdme-connector-server <entrypoint> [args...]
+    let proxy_exec_start = format!(
+        "/usr/libexec/sdme-connector-server {}",
+        shell_join(&exec_args)
+    );
+
+    // Socket unit.
+    let socket_content = format!(
+        r#"# Generated by sdme from OCI image: {image_ref}
+# Socket-activated proxy for cross-container access.
+
+[Unit]
+Description=OCI application socket (image: {image_ref})
+
+[Socket]
+ListenStream=/connectors/{name}/{name}.sock
+Accept=no
+
+[Install]
+WantedBy=sockets.target
+"#
+    );
+    let socket_path = unit_dir.join("sdme-oci-app.socket");
+    fs::write(&socket_path, &socket_content)
+        .with_context(|| format!("failed to write {}", socket_path.display()))?;
+
+    // Service unit.
+    let service_content = format!(
+        r#"# Generated by sdme from OCI image: {image_ref}
+# Socket-activated proxy server. Environment and working directory are
+# controlled here, NOT by the client (privilege separation by design).
+
+[Unit]
+Description=OCI application (image: {image_ref})
+Requires=sdme-oci-app.socket
+After=sdme-oci-app.socket
+
+[Service]
+Type=simple
+ExecStart={proxy_exec_start}
+RootDirectory=/oci/root
+MountAPIVFS=yes
+WorkingDirectory={working_dir}
+EnvironmentFile=-/oci/env
+User={user}
+{stop_signal_line}
+"#
+    );
+    let service_path = unit_dir.join("sdme-oci-app.service");
+    fs::write(&service_path, &service_content)
+        .with_context(|| format!("failed to write {}", service_path.display()))?;
+
+    if verbose {
+        eprintln!("wrote socket unit: {}", socket_path.display());
+        eprintln!("wrote service unit: {}", service_path.display());
+    }
+
+    // 7. Enable the socket unit via symlink.
+    let wants_dir = unit_dir.join("sockets.target.wants");
+    fs::create_dir_all(&wants_dir)
+        .with_context(|| format!("failed to create {}", wants_dir.display()))?;
+    let symlink_path = wants_dir.join("sdme-oci-app.socket");
+    std::os::unix::fs::symlink("../sdme-oci-app.socket", &symlink_path)
+        .with_context(|| format!("failed to create symlink {}", symlink_path.display()))?;
+
+    // 8. Clean up temp OCI dir.
+    let _ = make_removable(&oci_tmp);
+    fs::remove_dir_all(&oci_tmp)
+        .with_context(|| format!("failed to remove {}", oci_tmp.display()))?;
+
+    Ok(())
+}
+
 // --- Public entry point ---
 
 /// Import a root filesystem from a directory, tarball, URL, OCI image, or QCOW2 disk image.
@@ -1350,7 +1614,7 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
     let skip_systemd_check = if let Some(ref cc) = oci_config {
         let is_base = match oci_mode {
             OciMode::Base => true,
-            OciMode::App => false,
+            OciMode::App | OciMode::Connector => false,
             OciMode::Auto => cc.is_base_os_image(),
         };
 
@@ -1370,16 +1634,30 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
         } else {
             match base_fs {
                 Some(base_name) => {
-                    if let Err(e) = setup_app_image(
-                        datadir,
-                        &staging_dir,
-                        &rootfs_dir,
-                        name,
-                        base_name,
-                        cc,
-                        source,
-                        verbose,
-                    ) {
+                    let setup_result = if oci_mode == OciMode::Connector {
+                        setup_proxy_image(
+                            datadir,
+                            &staging_dir,
+                            &rootfs_dir,
+                            name,
+                            base_name,
+                            cc,
+                            source,
+                            verbose,
+                        )
+                    } else {
+                        setup_app_image(
+                            datadir,
+                            &staging_dir,
+                            &rootfs_dir,
+                            name,
+                            base_name,
+                            cc,
+                            source,
+                            verbose,
+                        )
+                    };
+                    if let Err(e) = setup_result {
                         let _ = make_removable(&staging_dir);
                         let _ = fs::remove_dir_all(&staging_dir);
                         return Err(e);
