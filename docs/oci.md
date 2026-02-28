@@ -166,6 +166,38 @@ From the host (container shares the host network):
 mysql -u root -psecret -h 127.0.0.1 -e 'SELECT 1'
 ```
 
+## OCI pods
+
+OCI pods let multiple OCI app containers share a network namespace, similar
+to Kubernetes pods. Containers in the same pod can reach each other via
+localhost.
+
+```bash
+# Create a pod (loopback-only network namespace)
+sudo sdme oci-pod new my-pod
+
+# Run nginx in the pod
+sudo sdme fs import nginx-unprivileged quay.io/nginx/nginx-unprivileged --base-fs=ubuntu
+sudo sdme new --oci-pod=my-pod -r nginx-unprivileged web
+
+# nginx is reachable on the pod's loopback
+sudo nsenter --net=/run/sdme/oci-pods/my-pod curl -s http://localhost:8080
+```
+
+A second container created with `--oci-pod=my-pod` shares the same
+network namespace: it can reach nginx on `localhost:8080` and vice versa.
+
+Pod management:
+
+```bash
+sdme oci-pod ls          # list pods
+sdme oci-pod rm my-pod   # remove (fails if containers reference it)
+sdme oci-pod rm -f my-pod  # force remove
+```
+
+`--oci-pod` is mutually exclusive with `--private-network` and requires an
+OCI app rootfs (the rootfs must contain `sdme-oci-app.service`).
+
 ## Current limitations
 
 - **Port bindings are not wired up.** The `/oci/ports` file records exposed
