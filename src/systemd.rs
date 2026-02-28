@@ -840,18 +840,32 @@ pub fn write_nspawn_dropin(datadir: &Path, name: &str, verbose: bool) -> Result<
     let envs = EnvConfig::from_state(&state);
     nspawn_args.extend(envs.to_nspawn_args());
 
-    // OCI pod: run the entire container inside the pod's shared network
-    // namespace via --network-namespace-path=.
+    // OCI pod: bind-mount the pod's netns into the container so the
+    // sdme-oci-app.service can use NetworkNamespacePath= to enter it.
     let oci_pod = state
         .get("OCI_POD")
         .filter(|s| !s.is_empty())
         .map(String::from);
     if let Some(ref pod_name) = oci_pod {
-        crate::oci_pod::ensure_runtime(datadir, pod_name, verbose)?;
-        let netns_path = crate::oci_pod::runtime_path(pod_name);
+        crate::pod::ensure_runtime(datadir, pod_name, verbose)?;
+        let netns_path = crate::pod::runtime_path(pod_name);
+        nspawn_args.push(format!("--bind-ro={netns_path}:/run/sdme/oci-pod-netns"));
+        if verbose {
+            eprintln!("oci-pod '{pod_name}': bind-mounting netns {netns_path} into container");
+        }
+    }
+
+    // Pod: entire container runs in the pod's network namespace.
+    let pod = state
+        .get("POD")
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    if let Some(ref pod_name) = pod {
+        crate::pod::ensure_runtime(datadir, pod_name, verbose)?;
+        let netns_path = crate::pod::runtime_path(pod_name);
         nspawn_args.push(format!("--network-namespace-path={netns_path}"));
         if verbose {
-            eprintln!("oci-pod '{pod_name}': using netns {netns_path}");
+            eprintln!("pod '{pod_name}': using netns {netns_path}");
         }
     }
 
@@ -1100,6 +1114,7 @@ mod tests {
             limits,
             network: Default::default(),
             opaque_dirs: vec![],
+            pod: None,
             oci_pod: None,
             binds: Default::default(),
             envs: Default::default(),

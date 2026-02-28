@@ -1,11 +1,11 @@
-//! OCI pod network namespace management.
+//! Pod network namespace management.
 //!
-//! An OCI pod is a shared network namespace that multiple OCI app containers
-//! can join, so their applications see the same localhost. This enables
-//! patterns like "database :5432 + app :8080, reachable via 127.0.0.1".
+//! A pod is a shared network namespace that multiple containers can join,
+//! so their processes see the same localhost. This enables patterns like
+//! "database :5432 + app :8080, reachable via 127.0.0.1".
 //!
-//! **State (persistent):** `/var/lib/sdme/oci-pods/{name}` — KEY=VALUE file.
-//! **Runtime (volatile):** `/run/sdme/oci-pods/{name}` — bind-mount of the
+//! **State (persistent):** `{datadir}/pods/{name}/state` — KEY=VALUE file.
+//! **Runtime (volatile):** `/run/sdme/pods/{name}/netns` — bind-mount of the
 //! network namespace fd. Disappears on reboot; lazily recreated by
 //! [`ensure_runtime`] when a container references the pod.
 
@@ -17,36 +17,37 @@ use anyhow::{bail, Context, Result};
 
 use crate::{validate_name, State};
 
-/// Persistent state directory for OCI pods.
-const STATE_SUBDIR: &str = "oci-pods";
+/// Persistent state directory for pods.
+const STATE_SUBDIR: &str = "pods";
 
 /// Runtime directory for netns bind-mounts (volatile, under /run).
-const RUNTIME_DIR: &str = "/run/sdme/oci-pods";
+const RUNTIME_DIR: &str = "/run/sdme/pods";
 
-/// Information about a listed OCI pod.
+/// Information about a listed pod.
 pub struct PodInfo {
     pub name: String,
     pub created: String,
     pub active: bool,
 }
 
-/// Create a new OCI pod: allocate a network namespace with loopback up,
+/// Create a new pod: allocate a network namespace with loopback up,
 /// bind-mount it to the runtime path, and write the persistent state file.
 pub fn create(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
     validate_name(name)?;
 
     // Ensure persistent state directory exists.
-    let state_dir = datadir.join(STATE_SUBDIR);
-    fs::create_dir_all(&state_dir)
-        .with_context(|| format!("failed to create {}", state_dir.display()))?;
-
-    let state_path = state_dir.join(name);
-    if state_path.exists() {
-        bail!("oci-pod already exists: {name}");
+    let pod_dir = datadir.join(STATE_SUBDIR).join(name);
+    if pod_dir.exists() {
+        bail!("pod already exists: {name}");
     }
+    fs::create_dir_all(&pod_dir)
+        .with_context(|| format!("failed to create {}", pod_dir.display()))?;
 
     // Create the network namespace and bind-mount it.
-    create_netns(name, verbose)?;
+    if let Err(e) = create_netns(name, verbose) {
+        let _ = fs::remove_dir_all(&pod_dir);
+        return Err(e);
+    }
 
     // Write persistent state.
     let mut state = State::new();
@@ -55,7 +56,11 @@ pub fn create(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
         .expect("system clock before unix epoch")
         .as_secs();
     state.set("CREATED", created.to_string());
-    state.write_to(&state_path)?;
+    let state_path = pod_dir.join("state");
+    if let Err(e) = state.write_to(&state_path) {
+        let _ = fs::remove_dir_all(&pod_dir);
+        return Err(e);
+    }
 
     if verbose {
         eprintln!("wrote state: {}", state_path.display());
@@ -64,7 +69,7 @@ pub fn create(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
     Ok(())
 }
 
-/// List all OCI pods.
+/// List all pods.
 pub fn list(datadir: &Path) -> Result<Vec<PodInfo>> {
     let state_dir = datadir.join(STATE_SUBDIR);
     if !state_dir.is_dir() {
@@ -76,7 +81,7 @@ pub fn list(datadir: &Path) -> Result<Vec<PodInfo>> {
         .with_context(|| format!("failed to read {}", state_dir.display()))?
     {
         let entry = entry?;
-        if !entry.file_type()?.is_file() {
+        if !entry.file_type()?.is_dir() {
             continue;
         }
         let name = match entry.file_name().to_str() {
@@ -84,13 +89,16 @@ pub fn list(datadir: &Path) -> Result<Vec<PodInfo>> {
             None => continue,
         };
 
-        let state_path = state_dir.join(&name);
+        let state_path = state_dir.join(&name).join("state");
+        if !state_path.exists() {
+            continue;
+        }
         let created = match State::read_from(&state_path) {
             Ok(s) => s.get("CREATED").unwrap_or("").to_string(),
             Err(_) => String::new(),
         };
 
-        let runtime_path = Path::new(RUNTIME_DIR).join(&name);
+        let runtime_path = Path::new(RUNTIME_DIR).join(&name).join("netns");
         let active = runtime_path.exists();
 
         entries.push(PodInfo {
@@ -103,32 +111,35 @@ pub fn list(datadir: &Path) -> Result<Vec<PodInfo>> {
     Ok(entries)
 }
 
-/// Remove one or more OCI pods.
+/// Remove a pod.
 ///
-/// Unmounts the runtime netns, removes the runtime file, and deletes the
-/// persistent state file. Errors if any container still references this pod
-/// unless `force` is true.
+/// Unmounts the runtime netns, removes the runtime dir, and deletes the
+/// persistent state directory. Errors if any container still references
+/// this pod (via POD or OCI_POD keys) unless `force` is true.
 pub fn remove(datadir: &Path, name: &str, force: bool, verbose: bool) -> Result<()> {
-    let state_path = datadir.join(STATE_SUBDIR).join(name);
+    let pod_dir = datadir.join(STATE_SUBDIR).join(name);
+    let state_path = pod_dir.join("state");
     if !state_path.exists() {
-        bail!("oci-pod not found: {name}");
+        bail!("pod not found: {name}");
     }
 
     // Check for containers referencing this pod.
     if !force {
-        let state_dir = datadir.join("state");
-        if state_dir.is_dir() {
-            for entry in fs::read_dir(&state_dir)? {
+        let ct_state_dir = datadir.join("state");
+        if ct_state_dir.is_dir() {
+            for entry in fs::read_dir(&ct_state_dir)? {
                 let entry = entry?;
                 if !entry.file_type()?.is_file() {
                     continue;
                 }
                 let ct_name = entry.file_name().to_string_lossy().to_string();
-                let ct_state_path = state_dir.join(&ct_name);
+                let ct_state_path = ct_state_dir.join(&ct_name);
                 if let Ok(state) = State::read_from(&ct_state_path) {
-                    if state.get("OCI_POD") == Some(name) {
+                    let is_referenced = state.get("POD") == Some(name)
+                        || state.get("OCI_POD") == Some(name);
+                    if is_referenced {
                         bail!(
-                            "oci-pod '{name}' is referenced by container '{ct_name}'; \
+                            "pod '{name}' is referenced by container '{ct_name}'; \
                              remove the container first or use --force"
                         );
                     }
@@ -137,17 +148,20 @@ pub fn remove(datadir: &Path, name: &str, force: bool, verbose: bool) -> Result<
         }
     }
 
-    // Unmount and remove runtime file.
-    let runtime_path = Path::new(RUNTIME_DIR).join(name);
-    if runtime_path.exists() {
-        unmount_netns(&runtime_path, verbose)?;
+    // Unmount and remove runtime files.
+    let runtime_netns = Path::new(RUNTIME_DIR).join(name).join("netns");
+    if runtime_netns.exists() {
+        unmount_netns(&runtime_netns, verbose)?;
     }
+    // Remove runtime dir (may already be empty).
+    let runtime_dir = Path::new(RUNTIME_DIR).join(name);
+    let _ = fs::remove_dir(&runtime_dir);
 
-    // Remove persistent state.
-    fs::remove_file(&state_path)
-        .with_context(|| format!("failed to remove {}", state_path.display()))?;
+    // Remove persistent state directory.
+    fs::remove_dir_all(&pod_dir)
+        .with_context(|| format!("failed to remove {}", pod_dir.display()))?;
     if verbose {
-        eprintln!("removed state: {}", state_path.display());
+        eprintln!("removed state: {}", pod_dir.display());
     }
 
     Ok(())
@@ -158,33 +172,33 @@ pub fn remove(datadir: &Path, name: &str, force: bool, verbose: bool) -> Result<
 /// Called at container start time. If the runtime file is missing (e.g. after
 /// reboot) but the persistent state exists, the netns is recreated.
 pub fn ensure_runtime(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
-    let state_path = datadir.join(STATE_SUBDIR).join(name);
+    let state_path = datadir.join(STATE_SUBDIR).join(name).join("state");
     if !state_path.exists() {
-        bail!("oci-pod not found: {name}");
+        bail!("pod not found: {name}");
     }
 
-    let runtime_path = Path::new(RUNTIME_DIR).join(name);
-    if runtime_path.exists() {
+    let runtime_netns = Path::new(RUNTIME_DIR).join(name).join("netns");
+    if runtime_netns.exists() {
         if verbose {
-            eprintln!("oci-pod '{name}' runtime netns already exists");
+            eprintln!("pod '{name}' runtime netns already exists");
         }
         return Ok(());
     }
 
     if verbose {
-        eprintln!("recreating runtime netns for oci-pod '{name}'");
+        eprintln!("recreating runtime netns for pod '{name}'");
     }
     create_netns(name, verbose)
 }
 
 /// Check that a pod exists in the catalogue (state file present).
 pub fn exists(datadir: &Path, name: &str) -> bool {
-    datadir.join(STATE_SUBDIR).join(name).exists()
+    datadir.join(STATE_SUBDIR).join(name).join("state").exists()
 }
 
 /// Return the runtime path for a pod's netns bind-mount.
 pub fn runtime_path(name: &str) -> String {
-    format!("{RUNTIME_DIR}/{name}")
+    format!("{RUNTIME_DIR}/{name}/netns")
 }
 
 // ---------------------------------------------------------------------------
@@ -192,7 +206,7 @@ pub fn runtime_path(name: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// Create a new network namespace with loopback up and bind-mount it
-/// to `/run/sdme/oci-pods/{name}`.
+/// to `/run/sdme/pods/{name}/netns`.
 fn create_netns(name: &str, verbose: bool) -> Result<()> {
     // 1. Save current netns fd.
     let saved_fd = {
@@ -270,13 +284,13 @@ fn bring_up_loopback() -> Result<()> {
     Ok(())
 }
 
-/// Bind-mount `/proc/self/ns/net` to `/run/sdme/oci-pods/{name}`.
+/// Bind-mount `/proc/self/ns/net` to `/run/sdme/pods/{name}/netns`.
 fn bind_mount_netns(name: &str, verbose: bool) -> Result<()> {
-    let runtime_dir = Path::new(RUNTIME_DIR);
-    fs::create_dir_all(runtime_dir)
-        .with_context(|| format!("failed to create {}", runtime_dir.display()))?;
+    let pod_runtime_dir = Path::new(RUNTIME_DIR).join(name);
+    fs::create_dir_all(&pod_runtime_dir)
+        .with_context(|| format!("failed to create {}", pod_runtime_dir.display()))?;
 
-    let target = runtime_dir.join(name);
+    let target = pod_runtime_dir.join("netns");
 
     // Create empty file as mount point.
     fs::write(&target, "").with_context(|| format!("failed to create {}", target.display()))?;
@@ -297,6 +311,7 @@ fn bind_mount_netns(name: &str, verbose: bool) -> Result<()> {
     if ret != 0 {
         let err = std::io::Error::last_os_error();
         let _ = fs::remove_file(&target);
+        let _ = fs::remove_dir(&pod_runtime_dir);
         return Err(err).context("failed to bind-mount network namespace");
     }
 
@@ -336,7 +351,7 @@ mod tests {
     use crate::testutil::TempDataDir;
 
     fn tmp() -> TempDataDir {
-        TempDataDir::new("oci-pod")
+        TempDataDir::new("pod")
     }
 
     #[test]
@@ -352,10 +367,10 @@ mod tests {
     #[test]
     fn test_create_rejects_duplicate() {
         let tmp = tmp();
-        // Manually create state file to simulate existing pod.
-        let state_dir = tmp.path().join(STATE_SUBDIR);
-        fs::create_dir_all(&state_dir).unwrap();
-        fs::write(state_dir.join("mypod"), "CREATED=1234\n").unwrap();
+        // Manually create state dir/file to simulate existing pod.
+        let pod_dir = tmp.path().join(STATE_SUBDIR).join("mypod");
+        fs::create_dir_all(&pod_dir).unwrap();
+        fs::write(pod_dir.join("state"), "CREATED=1234\n").unwrap();
 
         let err = create(tmp.path(), "mypod", false).unwrap_err();
         assert!(
@@ -375,9 +390,12 @@ mod tests {
     fn test_list_with_entries() {
         let tmp = tmp();
         let state_dir = tmp.path().join(STATE_SUBDIR);
-        fs::create_dir_all(&state_dir).unwrap();
-        fs::write(state_dir.join("alpha"), "CREATED=1000\n").unwrap();
-        fs::write(state_dir.join("beta"), "CREATED=2000\n").unwrap();
+        let alpha_dir = state_dir.join("alpha");
+        let beta_dir = state_dir.join("beta");
+        fs::create_dir_all(&alpha_dir).unwrap();
+        fs::create_dir_all(&beta_dir).unwrap();
+        fs::write(alpha_dir.join("state"), "CREATED=1000\n").unwrap();
+        fs::write(beta_dir.join("state"), "CREATED=2000\n").unwrap();
 
         let pods = list(tmp.path()).unwrap();
         assert_eq!(pods.len(), 2);
@@ -401,14 +419,14 @@ mod tests {
     }
 
     #[test]
-    fn test_remove_blocked_by_container() {
+    fn test_remove_blocked_by_container_oci_pod() {
         let tmp = tmp();
         // Create pod state.
-        let pod_dir = tmp.path().join(STATE_SUBDIR);
+        let pod_dir = tmp.path().join(STATE_SUBDIR).join("mypod");
         fs::create_dir_all(&pod_dir).unwrap();
-        fs::write(pod_dir.join("mypod"), "CREATED=1234\n").unwrap();
+        fs::write(pod_dir.join("state"), "CREATED=1234\n").unwrap();
 
-        // Create container state referencing the pod.
+        // Create container state referencing the pod via OCI_POD.
         let ct_dir = tmp.path().join("state");
         fs::create_dir_all(&ct_dir).unwrap();
         fs::write(
@@ -425,12 +443,36 @@ mod tests {
     }
 
     #[test]
+    fn test_remove_blocked_by_container_pod() {
+        let tmp = tmp();
+        // Create pod state.
+        let pod_dir = tmp.path().join(STATE_SUBDIR).join("mypod");
+        fs::create_dir_all(&pod_dir).unwrap();
+        fs::write(pod_dir.join("state"), "CREATED=1234\n").unwrap();
+
+        // Create container state referencing the pod via POD.
+        let ct_dir = tmp.path().join("state");
+        fs::create_dir_all(&ct_dir).unwrap();
+        fs::write(
+            ct_dir.join("mycontainer"),
+            "NAME=mycontainer\nPOD=mypod\n",
+        )
+        .unwrap();
+
+        let err = remove(tmp.path(), "mypod", false, false).unwrap_err();
+        assert!(
+            err.to_string().contains("referenced by container"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn test_remove_force_ignores_references() {
         let tmp = tmp();
         // Create pod state.
-        let pod_dir = tmp.path().join(STATE_SUBDIR);
+        let pod_dir = tmp.path().join(STATE_SUBDIR).join("mypod");
         fs::create_dir_all(&pod_dir).unwrap();
-        fs::write(pod_dir.join("mypod"), "CREATED=1234\n").unwrap();
+        fs::write(pod_dir.join("state"), "CREATED=1234\n").unwrap();
 
         // Create container state referencing the pod.
         let ct_dir = tmp.path().join("state");
@@ -443,7 +485,7 @@ mod tests {
 
         // Force remove succeeds (no runtime file to unmount).
         remove(tmp.path(), "mypod", true, false).unwrap();
-        assert!(!pod_dir.join("mypod").exists());
+        assert!(!pod_dir.exists());
     }
 
     #[test]
@@ -451,16 +493,16 @@ mod tests {
         let tmp = tmp();
         assert!(!exists(tmp.path(), "mypod"));
 
-        let state_dir = tmp.path().join(STATE_SUBDIR);
-        fs::create_dir_all(&state_dir).unwrap();
-        fs::write(state_dir.join("mypod"), "CREATED=1234\n").unwrap();
+        let pod_dir = tmp.path().join(STATE_SUBDIR).join("mypod");
+        fs::create_dir_all(&pod_dir).unwrap();
+        fs::write(pod_dir.join("state"), "CREATED=1234\n").unwrap();
 
         assert!(exists(tmp.path(), "mypod"));
     }
 
     #[test]
     fn test_runtime_path() {
-        assert_eq!(runtime_path("mypod"), "/run/sdme/oci-pods/mypod");
+        assert_eq!(runtime_path("mypod"), "/run/sdme/pods/mypod/netns");
     }
 
     #[test]

@@ -8,7 +8,7 @@ pub mod import;
 pub mod mounts;
 pub mod names;
 pub mod network;
-pub mod oci_pod;
+pub mod pod;
 pub mod rootfs;
 pub mod system_check;
 pub mod systemd;
