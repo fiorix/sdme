@@ -62,11 +62,14 @@ jobs:
           name: ${{ matrix.binary }}
           path: ${{ matrix.binary }}
 
-      - name: Upload target binary
+      - name: Upload target binaries
         uses: actions/upload-artifact@v4
         with:
           name: target-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/sdme
+          path: |
+            target/${{ matrix.target }}/release/sdme
+            target/${{ matrix.target }}/release/sdme-connector-server
+            target/${{ matrix.target }}/release/sdme-connector-client
 
   package:
     needs: build
@@ -103,8 +106,8 @@ jobs:
           /tmp/sdme-bin/sdme completions zsh > dist/completions/_sdme
           /tmp/sdme-bin/sdme completions fish > dist/completions/sdme.fish
 
-      - name: Ensure binary is executable
-        run: chmod +x target/${{ matrix.target }}/release/sdme
+      - name: Ensure binaries are executable
+        run: chmod +x target/${{ matrix.target }}/release/sdme target/${{ matrix.target }}/release/sdme-connector-server target/${{ matrix.target }}/release/sdme-connector-client
 
       - name: Build deb
         run: cargo deb --no-build --no-strip --target ${{ matrix.target }}
