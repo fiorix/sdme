@@ -186,7 +186,7 @@ fn handle_connection(conn: RawFd, entrypoint: &[String]) -> Result<(), Box<dyn s
     }
 
     // Parent process.
-    // Close the client's fds — the child owns them now.
+    // Close the client's fds; the child owns them now.
     proxy::close_fd(client_stdin);
     proxy::close_fd(client_stdout);
     proxy::close_fd(client_stderr);
@@ -205,10 +205,10 @@ fn handle_connection(conn: RawFd, entrypoint: &[String]) -> Result<(), Box<dyn s
         break;
     }
 
-    let exit_code = if unsafe { libc::WIFEXITED(status) } {
-        unsafe { libc::WEXITSTATUS(status) }
-    } else if unsafe { libc::WIFSIGNALED(status) } {
-        128 + unsafe { libc::WTERMSIG(status) }
+    let exit_code = if libc::WIFEXITED(status) {
+        libc::WEXITSTATUS(status)
+    } else if libc::WIFSIGNALED(status) {
+        128 + libc::WTERMSIG(status)
     } else {
         1
     };

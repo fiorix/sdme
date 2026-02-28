@@ -166,7 +166,7 @@ fn connect_unix(path: &str) -> Result<RawFd, Box<dyn std::error::Error>> {
     unsafe {
         std::ptr::copy_nonoverlapping(
             path_bytes.as_ptr(),
-            addr.sun_path.as_mut_ptr() as *mut u8,
+            addr.sun_path.as_mut_ptr(),
             path_bytes.len(),
         );
     }

@@ -211,7 +211,7 @@ fn do_create(
     // actual D-Bus implementation (dbus-broker.service or dbus-daemon.service).
     // Without it, dbus.socket has no service to activate, D-Bus never starts,
     // logind crash-loops (it needs D-Bus), and dbus.socket hits its start
-    // rate limit — leaving the container without a system bus.
+    // rate limit, leaving the container without a system bus.
     if opaque_dirs.iter().any(|d| d == "/etc/systemd/system") {
         let host_dbus = rootfs.join("etc/systemd/system/dbus.service");
         if let Ok(target) = fs::read_link(&host_dbus) {
@@ -888,6 +888,7 @@ mod tests {
             opaque_dirs: vec![],
             binds: Default::default(),
             envs: Default::default(),
+            connectors: Default::default(),
         };
         let name = create(tmp.path(), &opts, false).unwrap();
         assert!(validate_name(&name).is_ok());
@@ -928,6 +929,7 @@ mod tests {
             opaque_dirs: vec![],
             binds: Default::default(),
             envs: Default::default(),
+            connectors: Default::default(),
         };
         let name = create(tmp.path(), &opts, false).unwrap();
         assert_eq!(name, "hello");
@@ -955,6 +957,7 @@ mod tests {
             opaque_dirs: vec![],
             binds: Default::default(),
             envs: Default::default(),
+            connectors: Default::default(),
         };
         create(tmp.path(), &opts, false).unwrap();
         let err = create(tmp.path(), &opts, false).unwrap_err();
@@ -975,6 +978,7 @@ mod tests {
             opaque_dirs: vec![],
             binds: Default::default(),
             envs: Default::default(),
+            connectors: Default::default(),
         };
         let err = create(tmp.path(), &opts, false).unwrap_err();
         assert!(
@@ -997,6 +1001,7 @@ mod tests {
             opaque_dirs: vec![],
             binds: Default::default(),
             envs: Default::default(),
+            connectors: Default::default(),
         };
         let name = create(tmp.path(), &opts, false).unwrap();
         assert_eq!(name, "test");
@@ -1020,6 +1025,7 @@ mod tests {
             opaque_dirs: vec![],
             binds: Default::default(),
             envs: Default::default(),
+            connectors: Default::default(),
         };
         let err = create(tmp.path(), &opts, false);
         assert!(err.is_err());
@@ -1039,6 +1045,7 @@ mod tests {
             opaque_dirs: vec![],
             binds: Default::default(),
             envs: Default::default(),
+            connectors: Default::default(),
         };
         create(tmp.path(), &opts, false).unwrap();
         assert!(ensure_exists(tmp.path(), "mybox").is_ok());
@@ -1143,6 +1150,7 @@ mod tests {
             opaque_dirs: vec![],
             binds: Default::default(),
             envs: Default::default(),
+            connectors: Default::default(),
         };
         let name = create(tmp.path(), &opts, false).unwrap();
         assert_eq!(name, "limited");
@@ -1166,6 +1174,7 @@ mod tests {
             opaque_dirs: vec![],
             binds: Default::default(),
             envs: Default::default(),
+            connectors: Default::default(),
         };
         let err = create(tmp.path(), &opts, false);
         unsafe { libc::umask(old) };
@@ -1247,6 +1256,7 @@ mod tests {
             opaque_dirs: vec!["/var".to_string(), "/opt/data".to_string()],
             binds: Default::default(),
             envs: Default::default(),
+            connectors: Default::default(),
         };
         let name = create(tmp.path(), &opts, false).unwrap();
         assert_eq!(name, "opaquebox");
@@ -1295,6 +1305,7 @@ mod tests {
             opaque_dirs: vec!["/var".to_string(), "/opt".to_string()],
             binds: Default::default(),
             envs: Default::default(),
+            connectors: Default::default(),
         };
         create(tmp.path(), &opts, false).unwrap();
 

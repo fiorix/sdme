@@ -1376,9 +1376,6 @@ fn setup_proxy_image(
         }
     }
 
-    // 3c. Remove symlinks to /dev/stdout, /dev/stderr, etc.
-    remove_dev_symlinks(&oci_root, verbose)?;
-
     // 4. Write OCI env file.
     if let Some(ref env_vars) = config.env {
         if !env_vars.is_empty() {

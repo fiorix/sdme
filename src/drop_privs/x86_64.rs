@@ -1,4 +1,4 @@
-// x86_64.rs — Machine code emitter for the drop_privs binary (x86_64)
+// x86_64.rs: Machine code emitter for the drop_privs binary (x86_64)
 //
 // Emits raw x86_64 machine code that performs:
 //   1. Parse argc/argv from the Linux process stack
@@ -398,7 +398,7 @@ pub fn generate() -> Vec<u8> {
     // syscall
     a.emit(&[0x0F, 0x05]);
 
-    // execve only returns on error — fall through
+    // execve only returns on error; fall through
 
     // ========== Error handlers ==========
 

@@ -1,4 +1,4 @@
-// elf.rs — Minimal ELF64 header construction
+// elf.rs: Minimal ELF64 header construction
 //
 // Builds the smallest valid ELF64 executable: a 64-byte ELF header followed
 // by a single 56-byte PT_LOAD program header, then the machine code. No

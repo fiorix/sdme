@@ -1175,6 +1175,7 @@ mod tests {
             opaque_dirs: vec![],
             binds: Default::default(),
             envs: Default::default(),
+            connectors: Default::default(),
         };
         create(tmp.path(), &opts, false).unwrap();
 

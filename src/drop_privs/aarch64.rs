@@ -1,4 +1,4 @@
-// aarch64.rs — Machine code emitter for the drop_privs binary (aarch64)
+// aarch64.rs: Machine code emitter for the drop_privs binary (aarch64)
 //
 // Emits raw AArch64 machine code that performs the same sequence as x86_64.rs.
 //
@@ -108,7 +108,7 @@ impl Asm {
 
     // ---- AArch64 instruction emitters ----
 
-    /// LDR Xt, [Xn, #imm] — 64-bit load, unsigned offset.
+    /// LDR Xt, [Xn, #imm]: 64-bit load, unsigned offset.
     /// imm must be a multiple of 8, max 32760.
     fn ldr_x(&mut self, rt: u8, rn: u8, imm: u16) {
         assert!(imm.is_multiple_of(8) && imm <= 32760);
@@ -118,7 +118,7 @@ impl Asm {
         self.emit32(insn);
     }
 
-    /// LDRB Wt, [Xn] — byte load, unsigned offset.
+    /// LDRB Wt, [Xn]: byte load, unsigned offset.
     fn ldrb_w(&mut self, rt: u8, rn: u8, imm: u16) {
         assert!(imm <= 4095);
         // 00 111 0 01 01 imm12 Rn Rt
@@ -126,7 +126,7 @@ impl Asm {
         self.emit32(insn);
     }
 
-    /// ADD Xd, Xn, #imm12 — 64-bit add immediate.
+    /// ADD Xd, Xn, #imm12: 64-bit add immediate.
     fn add_x_imm(&mut self, rd: u8, rn: u8, imm: u16) {
         assert!(imm <= 4095);
         // 1 00 10001 0 imm12 Rn Rd
@@ -134,14 +134,14 @@ impl Asm {
         self.emit32(insn);
     }
 
-    /// ADD Xd, Xn, Xm — 64-bit add register.
+    /// ADD Xd, Xn, Xm: 64-bit add register.
     fn add_x_reg(&mut self, rd: u8, rn: u8, rm: u8) {
         // 1 00 01011 00 0 Rm 000000 Rn Rd
         let insn = 0x8B000000 | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32);
         self.emit32(insn);
     }
 
-    /// SUB Wd, Wn, #imm12 — 32-bit subtract immediate.
+    /// SUB Wd, Wn, #imm12: 32-bit subtract immediate.
     fn sub_w_imm(&mut self, rd: u8, rn: u8, imm: u16) {
         assert!(imm <= 4095);
         // 0 10 10001 0 imm12 Rn Rd
@@ -149,7 +149,7 @@ impl Asm {
         self.emit32(insn);
     }
 
-    /// CMP Xn, #imm12 — 64-bit compare (alias for SUBS XZR, Xn, #imm).
+    /// CMP Xn, #imm12: 64-bit compare (alias for SUBS XZR, Xn, #imm).
     fn cmp_x_imm(&mut self, rn: u8, imm: u16) {
         assert!(imm <= 4095);
         // 1 11 10001 0 imm12 Rn 11111(xzr)
@@ -157,7 +157,7 @@ impl Asm {
         self.emit32(insn);
     }
 
-    /// CMP Wn, #imm12 — 32-bit compare.
+    /// CMP Wn, #imm12: 32-bit compare.
     fn cmp_w_imm(&mut self, rn: u8, imm: u16) {
         assert!(imm <= 4095);
         // 0 11 10001 0 imm12 Rn 11111(wzr)
@@ -165,21 +165,21 @@ impl Asm {
         self.emit32(insn);
     }
 
-    /// MOV Xd, Xm — 64-bit register move (alias for ORR Xd, XZR, Xm).
+    /// MOV Xd, Xm: 64-bit register move (alias for ORR Xd, XZR, Xm).
     fn mov_x(&mut self, rd: u8, rm: u8) {
         // 1 01 01010 00 0 Rm 000000 11111 Rd
         let insn = 0xAA0003E0 | ((rm as u32) << 16) | (rd as u32);
         self.emit32(insn);
     }
 
-    /// MOVZ Xd, #imm16 — move 16-bit immediate, zero rest.
+    /// MOVZ Xd, #imm16: move 16-bit immediate, zero rest.
     fn movz_x(&mut self, rd: u8, imm: u16) {
         // 1 10 100101 00 imm16 Rd
         let insn = 0xD2800000 | ((imm as u32) << 5) | (rd as u32);
         self.emit32(insn);
     }
 
-    /// LSL Xd, Xn, #shift — logical shift left (alias for UBFM).
+    /// LSL Xd, Xn, #shift: logical shift left (alias for UBFM).
     fn lsl_x(&mut self, rd: u8, rn: u8, shift: u8) {
         assert!(shift < 64);
         let immr = (64 - shift) as u32;
@@ -189,7 +189,7 @@ impl Asm {
         self.emit32(insn);
     }
 
-    /// LSR Xd, Xn, #shift — logical shift right (alias for UBFM).
+    /// LSR Xd, Xn, #shift: logical shift right (alias for UBFM).
     fn lsr_x(&mut self, rd: u8, rn: u8, shift: u8) {
         assert!(shift < 64);
         let immr = shift as u32;
@@ -199,24 +199,24 @@ impl Asm {
         self.emit32(insn);
     }
 
-    /// MUL Xd, Xn, Xm — 64-bit multiply (alias for MADD Xd, Xn, Xm, XZR).
+    /// MUL Xd, Xn, Xm: 64-bit multiply (alias for MADD Xd, Xn, Xm, XZR).
     fn mul_x(&mut self, rd: u8, rn: u8, rm: u8) {
         // 1 00 11011 000 Rm 0 11111 Rn Rd
         let insn = 0x9B007C00 | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32);
         self.emit32(insn);
     }
 
-    /// SVC #0 — supervisor call (syscall).
+    /// SVC #0: supervisor call (syscall).
     fn svc(&mut self) {
         self.emit32(0xD4000001);
     }
 
-    /// RET — return (BR X30).
+    /// RET: return (BR X30).
     fn ret(&mut self) {
         self.emit32(0xD65F03C0);
     }
 
-    /// B.cond label — conditional branch (19-bit range).
+    /// B.cond label: conditional branch (19-bit range).
     fn b_cond(&mut self, cond: u8, target: Label) {
         let offset = self.pos();
         // 0101 0100 imm19(placeholder) 0 cond
@@ -229,7 +229,7 @@ impl Asm {
         });
     }
 
-    /// B label — unconditional branch (26-bit range).
+    /// B label: unconditional branch (26-bit range).
     fn b(&mut self, target: Label) {
         let offset = self.pos();
         self.emit32(0x14000000); // placeholder
@@ -240,7 +240,7 @@ impl Asm {
         });
     }
 
-    /// BL label — branch with link (26-bit range).
+    /// BL label: branch with link (26-bit range).
     fn bl(&mut self, target: Label) {
         let offset = self.pos();
         self.emit32(0x94000000); // placeholder
@@ -251,7 +251,7 @@ impl Asm {
         });
     }
 
-    /// CBZ Wn, label — compare and branch if zero (32-bit register).
+    /// CBZ Wn, label: compare and branch if zero (32-bit register).
     fn cbz_w(&mut self, rt: u8, target: Label) {
         let offset = self.pos();
         // 0 011010 0 imm19(placeholder) Rt
@@ -264,7 +264,7 @@ impl Asm {
         });
     }
 
-    /// CBNZ Xn, label — compare and branch if nonzero (64-bit register).
+    /// CBNZ Xn, label: compare and branch if nonzero (64-bit register).
     fn cbnz_x(&mut self, rt: u8, target: Label) {
         let offset = self.pos();
         // 1 011010 1 imm19(placeholder) Rt
@@ -277,10 +277,10 @@ impl Asm {
         });
     }
 
-    /// ADR Xd, label — PC-relative address (21-bit range).
+    /// ADR Xd, label: PC-relative address (21-bit range).
     fn adr(&mut self, rd: u8, target: Label) {
         let offset = self.pos();
-        // immlo(2) 10000 immhi(19) Rd(5) — placeholder all zero
+        // immlo(2) 10000 immhi(19) Rd(5): placeholder all zero
         let insn = 0x10000000 | (rd as u32);
         self.emit32(insn);
         self.fixups.push(Fixup {
@@ -450,7 +450,7 @@ pub fn generate() -> Vec<u8> {
     a.add_x_reg(X2, X20, X2); // x2 = envp
     a.movz_x(X8, SYS_EXECVE);
     a.svc();
-    // execve only returns on error — fall through
+    // execve only returns on error; fall through
 
     // ========== Error handlers ==========
 

@@ -90,6 +90,7 @@ The project is a single Rust binary (`src/main.rs`) backed by a shared library (
 | `src/mounts.rs` | Bind mount (`BindConfig`) and environment variable (`EnvConfig`) configuration |
 | `src/network.rs` | Network configuration validation and state serialization |
 | `src/connectors.rs` | Connector configuration (`ConnectorConfig`): state persistence, nspawn arg generation, add/remove |
+| `src/drop_privs/` | Privilege dropping via minimal static ELF binaries (x86_64 and aarch64 machine code emitters, ELF header construction) |
 | `src/proxy/mod.rs` | Shared proxy protocol types (`ProxyRequest`/`ProxyResponse`), SCM_RIGHTS fd passing helpers, length-prefixed framing |
 | `src/proxy/server.rs` | `sdme-connector-server` binary: socket-activated server, accepts connections, forks and execs entrypoint |
 | `src/proxy/client.rs` | `sdme-connector-client` binary: connects to connector socket, sends fds via SCM_RIGHTS, busybox-style invocation |
@@ -98,7 +99,7 @@ The project is a single Rust binary (`src/main.rs`) backed by a shared library (
 
 - `clap`: CLI parsing (derive)
 - `zbus`: D-Bus communication with systemd (blocking API)
-- `libc`: syscalls for rootfs import (lchown, mknod, etc.)
+- `libc`: syscalls for rootfs import (lchown, mknod, etc.), proxy fd passing, privilege dropping
 - `anyhow`: error handling
 - `serde`/`toml`: config file parsing
 - `tar`: archive extraction with xattr support
@@ -106,7 +107,7 @@ The project is a single Rust binary (`src/main.rs`) backed by a shared library (
 - `bzip2`: bzip2 decompression
 - `xz2`: xz/lzma decompression
 - `zstd`: zstd decompression
-- `serde_json`: JSON parsing (OCI image manifests)
+- `serde_json`: JSON parsing (OCI image manifests, proxy protocol)
 - `ureq`: HTTP client for URL downloads and OCI registry pulling (blocking, rustls TLS)
 - `sha2`: SHA-256 hashing (OCI digest verification)
 - `clap_complete`: shell completion generation (Bash, Fish, Zsh)

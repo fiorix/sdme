@@ -230,14 +230,25 @@ mod tests {
 
     #[test]
     fn test_connector_validate_duplicate() {
+        let tmp = std::env::temp_dir().join(format!(
+            "sdme-test-connector-validate-dup-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let connector_dir = tmp.join("connectors/nginx");
+        std::fs::create_dir_all(&connector_dir).unwrap();
+
         let config = ConnectorConfig {
             connectors: vec!["nginx".to_string(), "nginx".to_string()],
         };
-        let err = config.validate(Path::new("/var/lib/sdme")).unwrap_err();
+        let err = config.validate(&tmp).unwrap_err();
         assert!(
             err.to_string().contains("duplicate"),
             "unexpected error: {err}"
         );
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

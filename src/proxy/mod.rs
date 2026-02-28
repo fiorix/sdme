@@ -3,7 +3,7 @@
 //! Defines the JSON wire protocol and SCM_RIGHTS file descriptor passing
 //! used by `sdme-connector-server` and `sdme-connector-client`.
 //!
-//! **Design decision — privilege separation**: The client sends only argv
+//! **Design decision (privilege separation)**: The client sends only argv
 //! and its stdin/stdout/stderr file descriptors. Environment variables and
 //! working directory are NOT sent; the server inherits these from its own
 //! process context (set by the container's systemd unit). This provides
@@ -88,10 +88,7 @@ pub fn send_with_fds(sock: RawFd, data: &[u8], fds: &[RawFd]) -> io::Result<()> 
     // Fill in the control message header.
     let cmsg: *mut libc::cmsghdr = unsafe { libc::CMSG_FIRSTHDR(&msg) };
     if cmsg.is_null() {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            "CMSG_FIRSTHDR returned null",
-        ));
+        return Err(io::Error::other("CMSG_FIRSTHDR returned null"));
     }
     unsafe {
         (*cmsg).cmsg_level = libc::SOL_SOCKET;
