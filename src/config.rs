@@ -26,6 +26,10 @@ pub struct Config {
 
     #[serde(default = "default_host_rootfs_opaque_dirs")]
     pub host_rootfs_opaque_dirs: String,
+
+    /// Comma-separated capabilities dropped by `--hardened`.
+    #[serde(default = "default_hardened_drop_caps")]
+    pub hardened_drop_caps: String,
 }
 
 fn default_interactive() -> bool {
@@ -48,6 +52,10 @@ fn default_host_rootfs_opaque_dirs() -> String {
     "/etc/systemd/system,/var/log".to_string()
 }
 
+fn default_hardened_drop_caps() -> String {
+    crate::security::HARDENED_DROP_CAPS.join(",")
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -56,6 +64,7 @@ impl Default for Config {
             boot_timeout: default_boot_timeout(),
             join_as_sudo_user: default_join_as_sudo_user(),
             host_rootfs_opaque_dirs: default_host_rootfs_opaque_dirs(),
+            hardened_drop_caps: default_hardened_drop_caps(),
         }
     }
 }
@@ -69,6 +78,7 @@ impl Config {
         println!("boot_timeout = {}", self.boot_timeout);
         println!("join_as_sudo_user = {join_as_sudo_user}");
         println!("host_rootfs_opaque_dirs = {}", self.host_rootfs_opaque_dirs);
+        println!("hardened_drop_caps = {}", self.hardened_drop_caps);
     }
 }
 

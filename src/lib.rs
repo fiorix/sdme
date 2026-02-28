@@ -10,11 +10,13 @@ pub mod names;
 pub mod network;
 pub mod pod;
 pub mod rootfs;
+pub mod security;
 pub mod system_check;
 pub mod systemd;
 
 pub use mounts::{BindConfig, EnvConfig};
 pub use network::NetworkConfig;
+pub use security::SecurityConfig;
 
 use std::collections::BTreeMap;
 use std::ffi::CString;

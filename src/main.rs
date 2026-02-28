@@ -6,8 +6,8 @@ use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 use sdme::import::{ImportOptions, InstallPackages, OciMode};
 use sdme::{
-    config, confirm, containers, pod, rootfs, system_check, systemd, BindConfig, EnvConfig,
-    NetworkConfig, ResourceLimits,
+    config, confirm, containers, pod, rootfs, security, system_check, systemd, BindConfig,
+    EnvConfig, NetworkConfig, ResourceLimits, SecurityConfig,
 };
 
 #[derive(Parser)]
@@ -64,6 +64,39 @@ struct MountArgs {
     envs: Vec<String>,
 }
 
+/// Security hardening CLI arguments (shared by create/new).
+#[derive(clap::Args, Default)]
+struct SecurityArgs {
+    /// Drop a capability (e.g. CAP_SYS_PTRACE, repeatable)
+    #[arg(long = "drop-capability")]
+    drop_caps: Vec<String>,
+
+    /// Add a capability (e.g. CAP_NET_ADMIN, repeatable)
+    #[arg(long = "capability")]
+    add_caps: Vec<String>,
+
+    /// Prevent gaining privileges via setuid binaries or file capabilities
+    #[arg(long)]
+    no_new_privileges: bool,
+
+    /// Mount the container rootfs read-only
+    #[arg(long)]
+    read_only: bool,
+
+    /// Seccomp system call filter (e.g. @system-service, ~@mount, repeatable)
+    #[arg(long = "system-call-filter")]
+    system_call_filter: Vec<String>,
+
+    /// AppArmor profile to confine the container
+    #[arg(long)]
+    apparmor_profile: Option<String>,
+
+    /// Enable hardened security defaults (userns, private-network, no-new-privileges,
+    /// drops CAP_SYS_PTRACE, CAP_NET_RAW, CAP_SYS_RAWIO, CAP_SYS_BOOT)
+    #[arg(long)]
+    hardened: bool,
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// Manage configuration
@@ -112,6 +145,9 @@ enum Command {
 
         #[command(flatten)]
         mounts: MountArgs,
+
+        #[command(flatten)]
+        security: SecurityArgs,
     },
 
     /// Run a command in a running container
@@ -187,6 +223,9 @@ enum Command {
 
         #[command(flatten)]
         mounts: MountArgs,
+
+        #[command(flatten)]
+        security: SecurityArgs,
 
         /// Command to run inside the container (default: login shell)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -497,6 +536,59 @@ fn parse_mounts(args: MountArgs) -> Result<(BindConfig, EnvConfig)> {
     Ok((binds, envs))
 }
 
+/// Build a `SecurityConfig` from CLI flags (for `create` / `new`).
+///
+/// When `--hardened` is set, merges the config's `hardened_drop_caps` with
+/// any explicit flags. Explicit `--capability` and `--drop-capability`
+/// flags take priority.
+fn parse_security(args: SecurityArgs, cfg: &config::Config) -> Result<(SecurityConfig, bool)> {
+    let mut drop_caps: Vec<String> = args
+        .drop_caps
+        .iter()
+        .map(|c| security::normalize_cap(c))
+        .collect();
+    let add_caps: Vec<String> = args
+        .add_caps
+        .iter()
+        .map(|c| security::normalize_cap(c))
+        .collect();
+    let mut no_new_privileges = args.no_new_privileges;
+
+    // --hardened expands into sensible defaults (overridable by explicit flags).
+    let hardened = args.hardened;
+    if hardened {
+        // Merge hardened drop_caps from config.
+        let hardened_caps: Vec<String> = if cfg.hardened_drop_caps.is_empty() {
+            Vec::new()
+        } else {
+            cfg.hardened_drop_caps
+                .split(',')
+                .map(|c| security::normalize_cap(c.trim()))
+                .collect()
+        };
+        for cap in hardened_caps {
+            // Don't add if user explicitly re-adds via --capability.
+            if !add_caps.contains(&cap) && !drop_caps.contains(&cap) {
+                drop_caps.push(cap);
+            }
+        }
+        // --hardened implies --no-new-privileges unless explicitly unset
+        // (there's no --new-privileges flag, so this always applies).
+        no_new_privileges = true;
+    }
+
+    let sec = SecurityConfig {
+        drop_caps,
+        add_caps,
+        no_new_privileges,
+        read_only: args.read_only,
+        system_call_filter: args.system_call_filter,
+        apparmor_profile: args.apparmor_profile,
+    };
+    sec.validate()?;
+    Ok((sec, hardened))
+}
+
 /// Parse the comma-separated `host_rootfs_opaque_dirs` config value into a Vec.
 fn parse_opaque_dirs_config(s: &str) -> Vec<String> {
     if s.is_empty() {
@@ -659,6 +751,20 @@ fn main() -> Result<()> {
                             cfg.host_rootfs_opaque_dirs = normalized.join(",");
                         }
                     }
+                    "hardened_drop_caps" => {
+                        if value.is_empty() {
+                            cfg.hardened_drop_caps = String::new();
+                        } else {
+                            let caps: Vec<String> = value
+                                .split(',')
+                                .map(|c| security::normalize_cap(c.trim()))
+                                .collect();
+                            for cap in &caps {
+                                security::validate_capability(cap)?;
+                            }
+                            cfg.hardened_drop_caps = caps.join(",");
+                        }
+                    }
                     _ => bail!("unknown config key: {key}"),
                 }
                 config::save(&cfg, config_path)?;
@@ -676,10 +782,15 @@ fn main() -> Result<()> {
             userns,
             network,
             mounts,
+            security,
         } => {
             system_check::check_systemd_version(252)?;
             let limits = parse_limits(memory, cpus, cpu_weight)?;
-            let network = parse_network(network)?;
+            let (sec, hardened) = parse_security(security, &cfg)?;
+            let mut network = parse_network(network)?;
+            if hardened && !network.private_network {
+                network.private_network = true;
+            }
             validate_pod_args(&cfg.datadir, pod.as_deref(), &network)?;
             validate_oci_pod_args(&cfg.datadir, oci_pod.as_deref(), fs.as_deref())?;
             let (binds, envs) = parse_mounts(mounts)?;
@@ -694,7 +805,8 @@ fn main() -> Result<()> {
                 oci_pod,
                 binds,
                 envs,
-                userns,
+                userns: userns || hardened,
+                security: sec,
             };
             let name = containers::create(&cfg.datadir, &opts, cli.verbose)?;
             eprintln!("creating '{name}'");
@@ -782,11 +894,16 @@ fn main() -> Result<()> {
             userns,
             network,
             mounts,
+            security,
             command,
         } => {
             system_check::check_systemd_version(252)?;
             let limits = parse_limits(memory, cpus, cpu_weight)?;
-            let network = parse_network(network)?;
+            let (sec, hardened) = parse_security(security, &cfg)?;
+            let mut network = parse_network(network)?;
+            if hardened && !network.private_network {
+                network.private_network = true;
+            }
             validate_pod_args(&cfg.datadir, pod.as_deref(), &network)?;
             validate_oci_pod_args(&cfg.datadir, oci_pod.as_deref(), fs.as_deref())?;
             let (binds, envs) = parse_mounts(mounts)?;
@@ -801,7 +918,8 @@ fn main() -> Result<()> {
                 oci_pod,
                 binds,
                 envs,
-                userns,
+                userns: userns || hardened,
+                security: sec,
             };
             let name = containers::create(&cfg.datadir, &opts, cli.verbose)?;
             eprintln!("creating '{name}'");
@@ -867,14 +985,7 @@ fn main() -> Result<()> {
                 let binds_display: Vec<String> =
                     entries.iter().map(|e| e.binds_display()).collect();
                 let binds_w = if binds_display.iter().any(|b| !b.is_empty()) {
-                    Some(
-                        binds_display
-                            .iter()
-                            .map(|b| b.len())
-                            .max()
-                            .unwrap()
-                            .max(5),
-                    )
+                    Some(binds_display.iter().map(|b| b.len()).max().unwrap().max(5))
                 } else {
                     None
                 };

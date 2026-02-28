@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
-use crate::{BindConfig, EnvConfig, NetworkConfig, ResourceLimits, State};
+use crate::{BindConfig, EnvConfig, NetworkConfig, ResourceLimits, SecurityConfig, State};
 
 mod dbus {
     use anyhow::{bail, Context, Result};
@@ -347,6 +347,14 @@ mod dbus {
     /// system bus via `/proc/{leader}/root/run/dbus/system_bus_socket`
     /// (the same mechanism `busctl --machine=` uses internally) until
     /// the connection succeeds or the timeout expires.
+    ///
+    /// For containers with `--userns`, the container runs in its own user
+    /// namespace. Connecting to the container's D-Bus socket from the host
+    /// user namespace fails because `SO_PEERCRED` returns the overflow UID
+    /// (65534) and EXTERNAL auth is rejected. We detect this by comparing
+    /// the user namespace inode of the container leader vs the host, and
+    /// temporarily enter the container's user namespace for the connection
+    /// attempt (mirroring what `systemd-machined` does internally).
     pub fn wait_for_dbus(name: &str, timeout: std::time::Duration, verbose: bool) -> Result<()> {
         let conn = connect()?;
         let deadline = std::time::Instant::now() + timeout;
@@ -358,17 +366,30 @@ mod dbus {
         let socket_path = format!("/proc/{leader}/root/run/dbus/system_bus_socket");
         let address = format!("unix:path={socket_path}");
 
+        // Check if the container has its own user namespace by comparing
+        // inode numbers. If they differ, we need to enter the container's
+        // userns before connecting to its D-Bus socket.
+        let userns_fd = open_foreign_userns(leader);
         if verbose {
-            eprintln!("waiting for container D-Bus at {socket_path}");
+            eprintln!(
+                "waiting for container D-Bus at {socket_path}{}",
+                if userns_fd.is_some() { " (userns)" } else { "" }
+            );
         }
 
-        loop {
+        let result = (|| loop {
             crate::check_interrupted()?;
 
-            match zbus::blocking::connection::Builder::address(address.as_str())
-                .and_then(|b| b.build())
-            {
-                Ok(_) => {
+            let probe_result = match userns_fd {
+                Some(fd) => probe_dbus_in_userns(fd, &address),
+                None => zbus::blocking::connection::Builder::address(address.as_str())
+                    .and_then(|b| b.build())
+                    .map(|_| ())
+                    .map_err(|e| anyhow::anyhow!("{e}")),
+            };
+
+            match probe_result {
+                Ok(()) => {
                     if verbose {
                         eprintln!("container '{name}' D-Bus is ready");
                     }
@@ -390,7 +411,77 @@ mod dbus {
             }
 
             std::thread::sleep(poll_interval.min(remaining));
+        })();
+
+        if let Some(fd) = userns_fd {
+            unsafe { libc::close(fd) };
         }
+
+        result
+    }
+
+    /// Open the container leader's user namespace fd if it differs from the host's.
+    ///
+    /// Returns `Some(fd)` when the container has its own user namespace (userns
+    /// containers), or `None` for standard containers (same userns as host).
+    fn open_foreign_userns(leader: u32) -> Option<i32> {
+        use std::os::unix::fs::MetadataExt;
+
+        let host_path = "/proc/self/ns/user";
+        let container_path = format!("/proc/{leader}/ns/user");
+
+        let host_ino = std::fs::metadata(host_path).ok()?.ino();
+        let container_ino = std::fs::metadata(&container_path).ok()?.ino();
+
+        if host_ino == container_ino {
+            return None;
+        }
+
+        let c_path = std::ffi::CString::new(container_path).ok()?;
+        let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+        if fd < 0 {
+            return None;
+        }
+        Some(fd)
+    }
+
+    /// Attempt a D-Bus connection inside the container's user namespace.
+    ///
+    /// Enters the container's userns via `setns`, attempts the zbus connection,
+    /// then restores the original userns. Follows the same save-fd / setns /
+    /// restore pattern used by `pod::create_netns`.
+    fn probe_dbus_in_userns(userns_fd: i32, address: &str) -> Result<()> {
+        // Save current user namespace.
+        let self_path = std::ffi::CString::new("/proc/self/ns/user").unwrap();
+        let saved_fd = unsafe { libc::open(self_path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+        if saved_fd < 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("failed to open /proc/self/ns/user");
+        }
+
+        // Enter the container's user namespace.
+        let ret = unsafe { libc::setns(userns_fd, libc::CLONE_NEWUSER) };
+        if ret != 0 {
+            let err = std::io::Error::last_os_error();
+            unsafe { libc::close(saved_fd) };
+            return Err(err).context("setns(CLONE_NEWUSER) failed");
+        }
+
+        // Attempt the D-Bus connection.
+        let probe_result = zbus::blocking::connection::Builder::address(address)
+            .and_then(|b| b.build())
+            .map(|_| ());
+
+        // Restore original user namespace — fatal if this fails.
+        let ret = unsafe { libc::setns(saved_fd, libc::CLONE_NEWUSER) };
+        unsafe { libc::close(saved_fd) };
+        if ret != 0 {
+            let err = std::io::Error::last_os_error();
+            eprintln!("FATAL: failed to restore user namespace: {err}");
+            std::process::exit(1);
+        }
+
+        probe_result.map_err(|e| anyhow::anyhow!("{e}"))
     }
 
     /// Terminate a machine via org.freedesktop.machine1.
@@ -728,6 +819,7 @@ pub fn nspawn_dropin(
     lowerdir: &str,
     paths: &UnitPaths,
     nspawn_args: &[String],
+    service_directives: &[String],
 ) -> String {
     let mount = paths.mount.display();
     let umount = paths.umount.display();
@@ -735,6 +827,9 @@ pub fn nspawn_dropin(
 
     let mut lines = Vec::new();
     lines.push("[Service]".to_string());
+    for directive in service_directives {
+        lines.push(directive.clone());
+    }
     lines.push("ExecStart=".to_string());
     lines.push(format!("ExecStartPre={mount} -t overlay overlay \\",));
     lines.push(format!(
@@ -858,6 +953,10 @@ pub fn write_nspawn_dropin(datadir: &Path, name: &str, verbose: bool) -> Result<
         nspawn_args.push("--private-users-ownership=auto".to_string());
     }
 
+    // Security: capabilities, seccomp, no-new-privileges, read-only.
+    let security = SecurityConfig::from_state(&state);
+    nspawn_args.extend(security.to_nspawn_args());
+
     // Pod: entire container runs in the pod's network namespace.
     let pod = state.get("POD").filter(|s| !s.is_empty()).map(String::from);
     if let Some(ref pod_name) = pod {
@@ -869,13 +968,29 @@ pub fn write_nspawn_dropin(datadir: &Path, name: &str, verbose: bool) -> Result<
         }
     }
 
+    // Service-level directives (not nspawn flags).
+    let mut service_directives = Vec::new();
+    if let Some(profile) = &security.apparmor_profile {
+        service_directives.push(format!("AppArmorProfile={profile}"));
+        if verbose {
+            eprintln!("apparmor profile: {profile}");
+        }
+    }
+
     if verbose {
         for arg in &nspawn_args {
             eprintln!("nspawn arg: {arg}");
         }
     }
 
-    let content = nspawn_dropin(datadir_str, name, &lowerdir, &paths, &nspawn_args);
+    let content = nspawn_dropin(
+        datadir_str,
+        name,
+        &lowerdir,
+        &paths,
+        &nspawn_args,
+        &service_directives,
+    );
 
     let dir = dropin_dir(name);
     fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
@@ -1009,6 +1124,7 @@ mod tests {
             "/",
             &paths,
             &["--resolv-conf=auto".to_string()],
+            &[],
         );
         assert!(content.contains("[Service]"));
         assert!(content.contains("ExecStart=\n"));
@@ -1036,6 +1152,7 @@ mod tests {
                 "--private-users=pick".to_string(),
                 "--private-users-ownership=auto".to_string(),
             ],
+            &[],
         );
         assert!(content.contains("--private-users=pick"));
         assert!(content.contains("--private-users-ownership=auto"));
@@ -1051,6 +1168,7 @@ mod tests {
             "/var/lib/sdme/fs/ubuntu",
             &paths,
             &["--resolv-conf=auto".to_string()],
+            &[],
         );
         assert!(content.contains(
             "lowerdir=/var/lib/sdme/fs/ubuntu,upperdir=/var/lib/sdme/containers/ubox/upper"
@@ -1066,7 +1184,7 @@ mod tests {
             "--bind-ro=/logs:/logs".to_string(),
             "--setenv=FOO=bar".to_string(),
         ];
-        let content = nspawn_dropin("/var/lib/sdme", "mybox", "/", &paths, &args);
+        let content = nspawn_dropin("/var/lib/sdme", "mybox", "/", &paths, &args, &[]);
         assert!(content.contains("    --bind=/data:/data \\\n"));
         assert!(content.contains("    --bind-ro=/logs:/logs \\\n"));
         assert!(content.contains("    --setenv=FOO=bar \\\n"));
@@ -1079,7 +1197,7 @@ mod tests {
             "--resolv-conf=auto".to_string(),
             "--setenv=MSG=hello world".to_string(),
         ];
-        let content = nspawn_dropin("/var/lib/sdme", "mybox", "/", &paths, &args);
+        let content = nspawn_dropin("/var/lib/sdme", "mybox", "/", &paths, &args, &[]);
         assert!(content.contains("\"--setenv=MSG=hello world\""));
     }
 
@@ -1139,5 +1257,83 @@ mod tests {
         assert_eq!(restored.memory.as_deref(), Some("1G"));
         assert_eq!(restored.cpus.as_deref(), Some("2"));
         assert_eq!(restored.cpu_weight.as_deref(), Some("50"));
+    }
+
+    #[test]
+    fn test_nspawn_dropin_with_security() {
+        let paths = test_paths();
+        let args = vec![
+            "--resolv-conf=auto".to_string(),
+            "--drop-capability=CAP_SYS_PTRACE".to_string(),
+            "--drop-capability=CAP_NET_RAW".to_string(),
+            "--no-new-privileges=yes".to_string(),
+            "--read-only".to_string(),
+            "--system-call-filter=@system-service".to_string(),
+            "--system-call-filter=~@mount".to_string(),
+        ];
+        let content = nspawn_dropin("/var/lib/sdme", "secbox", "/", &paths, &args, &[]);
+        assert!(content.contains("--drop-capability=CAP_SYS_PTRACE"));
+        assert!(content.contains("--drop-capability=CAP_NET_RAW"));
+        assert!(content.contains("--no-new-privileges=yes"));
+        assert!(content.contains("--read-only"));
+        assert!(content.contains("--system-call-filter=@system-service"));
+        assert!(content.contains("--system-call-filter=~@mount"));
+        // AppArmor should NOT appear in nspawn args.
+        assert!(!content.contains("AppArmor"));
+    }
+
+    #[test]
+    fn test_nspawn_dropin_with_apparmor() {
+        let paths = test_paths();
+        let args = vec!["--resolv-conf=auto".to_string()];
+        let service_directives = vec!["AppArmorProfile=sdme-default".to_string()];
+        let content = nspawn_dropin(
+            "/var/lib/sdme",
+            "aabox",
+            "/",
+            &paths,
+            &args,
+            &service_directives,
+        );
+        // AppArmor directive should appear in the [Service] section.
+        assert!(content.contains("AppArmorProfile=sdme-default"));
+        // It should be before ExecStart=.
+        let aa_pos = content.find("AppArmorProfile=sdme-default").unwrap();
+        let exec_pos = content.find("ExecStart=\n").unwrap();
+        assert!(
+            aa_pos < exec_pos,
+            "AppArmorProfile should appear before ExecStart="
+        );
+    }
+
+    #[test]
+    fn test_create_with_security_state() {
+        let tmp = tmp();
+        let security = SecurityConfig {
+            drop_caps: vec!["CAP_SYS_PTRACE".to_string(), "CAP_NET_RAW".to_string()],
+            add_caps: vec!["CAP_NET_ADMIN".to_string()],
+            no_new_privileges: true,
+            read_only: true,
+            system_call_filter: vec!["@system-service".to_string(), "~@mount".to_string()],
+            apparmor_profile: Some("sdme-default".to_string()),
+        };
+        let opts = CreateOptions {
+            name: Some("secbox".to_string()),
+            security,
+            ..Default::default()
+        };
+        create(tmp.path(), &opts, false).unwrap();
+
+        let state = crate::State::read_from(&tmp.path().join("state/secbox")).unwrap();
+        let restored = SecurityConfig::from_state(&state);
+        assert_eq!(restored.drop_caps, vec!["CAP_SYS_PTRACE", "CAP_NET_RAW"]);
+        assert_eq!(restored.add_caps, vec!["CAP_NET_ADMIN"]);
+        assert!(restored.no_new_privileges);
+        assert!(restored.read_only);
+        assert_eq!(
+            restored.system_call_filter,
+            vec!["@system-service", "~@mount"]
+        );
+        assert_eq!(restored.apparmor_profile.as_deref(), Some("sdme-default"));
     }
 }

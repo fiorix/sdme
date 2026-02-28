@@ -18,7 +18,7 @@ use anyhow::{bail, Context, Result};
 
 use crate::{
     names, rootfs, systemd, validate_name, BindConfig, EnvConfig, NetworkConfig, ResourceLimits,
-    State,
+    SecurityConfig, State,
 };
 
 #[derive(Default)]
@@ -33,6 +33,7 @@ pub struct CreateOptions {
     pub binds: BindConfig,
     pub envs: EnvConfig,
     pub userns: bool,
+    pub security: SecurityConfig,
 }
 
 /// Read the current process umask. There is no "get umask" syscall, so
@@ -309,6 +310,7 @@ fn do_create(
     if opts.userns {
         state.set("USERNS", "yes");
     }
+    opts.security.write_to_state(&mut state);
     if !opaque_dirs.is_empty() {
         state.set("OPAQUE_DIRS", opaque_dirs.join(","));
     }
@@ -645,7 +647,13 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
             ),
             Err(_) => {
                 problems.push("unreadable state file");
-                (String::new(), String::new(), String::new(), false, String::new())
+                (
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    false,
+                    String::new(),
+                )
             }
         };
 
@@ -1297,6 +1305,36 @@ mod tests {
                 "xattr value mismatch for {dir}"
             );
         }
+    }
+
+    #[test]
+    fn test_create_with_security() {
+        let _lock = UMASK_LOCK.lock().unwrap();
+        let tmp = tmp();
+        let security = crate::SecurityConfig {
+            drop_caps: vec!["CAP_SYS_PTRACE".to_string()],
+            no_new_privileges: true,
+            read_only: true,
+            system_call_filter: vec!["~@mount".to_string()],
+            apparmor_profile: Some("sdme-container".to_string()),
+            ..Default::default()
+        };
+        let opts = CreateOptions {
+            name: Some("sectest".to_string()),
+            security,
+            ..Default::default()
+        };
+        let name = create(tmp.path(), &opts, false).unwrap();
+        assert_eq!(name, "sectest");
+
+        let state = State::read_from(&tmp.path().join("state/sectest")).unwrap();
+        assert_eq!(state.get("DROP_CAPS"), Some("CAP_SYS_PTRACE"));
+        assert_eq!(state.get("NO_NEW_PRIVS"), Some("yes"));
+        assert_eq!(state.get("READ_ONLY"), Some("yes"));
+        assert_eq!(state.get("SYSCALL_FILTER"), Some("~@mount"));
+        assert_eq!(state.get("APPARMOR_PROFILE"), Some("sdme-container"));
+        // ADD_CAPS not set — should not appear.
+        assert_eq!(state.get("ADD_CAPS"), None);
     }
 
     #[test]
