@@ -37,7 +37,7 @@ Path to config file.
 Default:
 .IR ~/.config/sdme/sdmerc .
 .SH COMMANDS
-.SS sdme new [\fIname\fR] [\-r \fIfs\fR] [\-t \fIseconds\fR] [\fIlimits\fR] [\fInetwork\fR] [\-o \fIdir\fR]... [\-b \fIbind\fR]... [\-e \fIenv\fR]... [\-\-connector \fIname\fR]... [\-\-] [\fIcommand\fR...]
+.SS sdme new [\fIname\fR] [\-r \fIfs\fR] [\-t \fIseconds\fR] [\fIlimits\fR] [\fInetwork\fR] [\-o \fIdir\fR]... [\-b \fIbind\fR]... [\-e \fIenv\fR]... [\-\-] [\fIcommand\fR...]
 Create, start, and enter a new container.
 If
 .I name
@@ -87,15 +87,9 @@ to set environment variables; see
 .B BIND MOUNTS AND ENVIRONMENT
 below.
 .PP
-Use
-.B \-\-connector
-to connect to a service connector (repeatable); see
-.B CONNECTORS
-below.
-.PP
 If boot fails or is interrupted (Ctrl+C), the just\-created container is
 automatically removed.
-.SS sdme create [\fIname\fR] [\-r \fIfs\fR] [\fIlimits\fR] [\fInetwork\fR] [\-o \fIdir\fR]... [\-b \fIbind\fR]... [\-e \fIenv\fR]... [\-\-connector \fIname\fR]...
+.SS sdme create [\fIname\fR] [\-r \fIfs\fR] [\fIlimits\fR] [\fInetwork\fR] [\-o \fIdir\fR]... [\-b \fIbind\fR]... [\-e \fIenv\fR]...
 Create a new container without starting it.
 Sets up the overlayfs directories and state file.
 Resource limits can be set with
@@ -127,11 +121,6 @@ to add bind mounts and
 .B \-e
 to set environment variables; see
 .B BIND MOUNTS AND ENVIRONMENT
-below.
-Use
-.B \-\-connector
-to connect to a service connector (repeatable); see
-.B CONNECTORS
 below.
 Requires a permissive umask (see
 .B NOTES
@@ -247,25 +236,6 @@ Force application mode.
 Requires
 .B \-\-base\-fs
 to specify a systemd\-capable rootfs as the base layer.
-.TP
-.B connector
-Create a socket\-activated proxy service.
-Requires
-.B \-\-base\-fs
-to specify a systemd\-capable rootfs as the base layer.
-The OCI entrypoint runs behind
-.BR sdme\-connector\-server ,
-accessible from other containers via connector directories.
-Client containers use
-.B \-\-connector
-on
-.BR create / new
-or
-.B sdme connector add
-to connect.
-See
-.B CONNECTORS
-below.
 .RE
 .PP
 The
@@ -390,16 +360,6 @@ Use a different path (e.g.\&
 Lines starting with
 .B #
 and blank lines are ignored.
-.SS sdme connector add \fIname\fR \fIconnector\fR
-Add a service connector to an existing container.
-The connector must be a rootfs previously imported with
-.BR "\-\-oci\-mode=connector" .
-If the container is running, a note is printed advising a restart.
-.SS sdme connector rm \fIname\fR \fIconnector\fR
-Remove a service connector from a container.
-If the container is running, a note is printed advising a restart.
-.SS sdme connector ls \fIname\fR
-List connectors configured on a container.
 .SS sdme config get
 Show current configuration values.
 .SS sdme config set \fIkey\fR \fIvalue\fR
@@ -529,15 +489,8 @@ opaque directories
 .RB ( OPAQUE_DIRS ),
 bind mounts
 .RB ( BINDS ),
-environment variables
-.RB ( ENVS ),
-and connectors
-.RB ( CONNECTORS ).
-.TP
-.I /var/lib/sdme/connectors/\fIname\fR/
-Connector directories.
-Each contains a Unix socket and busybox\-style symlinks to
-.BR sdme\-connector\-client .
+and environment variables
+.RB ( ENVS ).
 .TP
 .I /var/lib/sdme/containers/\fIname\fR/upper/
 Per\-container overlayfs upper layer (copy\-on\-write modifications).
@@ -700,25 +653,6 @@ Create a container with bind mounts and environment variables:
 .RS
 .nf
 sdme new \-b /data:/mnt/data \-e LANG=C.UTF\-8 mybox \-r ubuntu
-.fi
-.RE
-.PP
-Import an OCI image as a connector and use it from another container:
-.PP
-.RS
-.nf
-sdme fs import ubuntu docker.io/ubuntu:24.04
-sdme fs import redis docker.io/redis \-\-base\-fs=ubuntu \-\-oci\-mode=connector
-sdme new \-\-connector redis \-r ubuntu
-# Inside the container, redis\-cli is available at /connectors/redis/redis\-cli
-.fi
-.RE
-.PP
-Add a connector to an existing container:
-.PP
-.RS
-.nf
-sdme connector add mybox redis
 .fi
 .RE
 .PP
@@ -890,32 +824,6 @@ Example:
 .PP
 Bind mounts and environment variables are stored in the container's state file
 and applied at start time via the systemd nspawn drop\-in configuration.
-.SH CONNECTORS
-Connectors provide cross\-container service access using socket\-activated
-proxy servers.
-A connector is created by importing an OCI image with
-.BR "\-\-oci\-mode=connector" :
-this generates a socket\-activated service that runs the OCI entrypoint
-behind
-.BR sdme\-connector\-server .
-.PP
-Client containers access the service by adding a connector with
-.B \-\-connector
-on
-.BR create / new ,
-or
-.B sdme connector add
-on existing containers.
-This bind\-mounts the connector directory (containing a Unix socket and
-busybox\-style symlinks to
-.BR sdme\-connector\-client )
-into the client container at
-.IR /connectors/<name>/ .
-.PP
-Privilege separation: the client sends only its argv and stdin/stdout/stderr
-file descriptors via SCM_RIGHTS.
-Environment variables and working directory are controlled by the server
-container, not the caller.
 .SH NOTES
 .SS Umask
 .B sdme create

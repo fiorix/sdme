@@ -497,53 +497,6 @@ In short: the plumbing between the outer nspawn container and the inner chroot
 is incomplete. This is a known limitation and the TODOs live in the generated
 `sdme-oci-app.service` unit file.
 
-### Connector mode: cross-container service access
-
-Connector mode (`--oci-mode=connector`) extends the capsule model with
-socket-activated proxying. Instead of running the entrypoint directly inside
-the container, it runs behind `sdme-connector-server`, which accepts
-connections from other containers via a shared Unix socket.
-
-```
-  +------------------------------------------------------+
-  |                     HOST SYSTEM                      |
-  |         kernel . systemd . D-Bus . machined          |
-  |                        |                             |
-  |    /var/lib/sdme/connectors/nginx/                   |
-  |      nginx.sock (unix socket)                        |
-  |      nginx -> sdme-connector-client (symlink)        |
-  |                        |                             |
-  |   +----- SERVER ------++----- CLIENT --------+       |
-  |   | sdme@nginx.service || sdme@dev.service   |       |
-  |   |                    ||                    |       |
-  |   | sdme-oci-app.socket||  /connectors/nginx/|       |
-  |   |   -> sdme-oci-app  ||    nginx (symlink) |       |
-  |   |      .service      ||    nginx.sock      |       |
-  |   |                    ||                    |       |
-  |   | sdme-connector-    || sdme-connector-    |       |
-  |   |   server nginx     ||   client           |       |
-  |   |   (forks entrypoint||   (sends fds +     |       |
-  |   |    on connection)  ||    argv over sock) |       |
-  |   +--------------------++--------------------+       |
-  +------------------------------------------------------+
-```
-
-The connector proxy provides strong privilege separation: the client sends
-only argv and its stdin/stdout/stderr file descriptors via SCM_RIGHTS.
-Environment variables and working directory are NOT sent; the server inherits
-these from its systemd unit. The server container controls the execution
-context, not the caller. This is an intentional design choice, since the
-purpose of connectors is to provide secure, well-defined entry points.
-
-The proxy binary pair (`sdme-connector-server` and `sdme-connector-client`)
-is bind-mounted into containers at `/usr/libexec/` at start time. The client
-binary supports busybox-style invocation: a symlink
-`nginx -> /usr/libexec/sdme-connector-client` invoked as `nginx` will connect
-to `$SDME_CONNECTOR_DIR/nginx.sock` and proxy the call.
-
-Connections are serialized (one at a time). The server exits when idle;
-systemd socket activation restarts it on the next connection.
-
 ## 9. Networking
 
 By default, containers share the host's network namespace: same interfaces, same

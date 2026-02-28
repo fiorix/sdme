@@ -17,8 +17,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{bail, Context, Result};
 
 use crate::{
-    names, rootfs, systemd, validate_name, BindConfig, ConnectorConfig, EnvConfig, NetworkConfig,
-    ResourceLimits, State,
+    names, rootfs, systemd, validate_name, BindConfig, EnvConfig, NetworkConfig, ResourceLimits,
+    State,
 };
 
 pub struct CreateOptions {
@@ -29,7 +29,6 @@ pub struct CreateOptions {
     pub opaque_dirs: Vec<String>,
     pub binds: BindConfig,
     pub envs: EnvConfig,
-    pub connectors: ConnectorConfig,
 }
 
 /// Read the current process umask. There is no "get umask" syscall, so
@@ -285,7 +284,6 @@ fn do_create(
     opts.network.write_to_state(&mut state);
     opts.binds.write_to_state(&mut state);
     opts.envs.write_to_state(&mut state);
-    opts.connectors.write_to_state(&mut state);
     if !opaque_dirs.is_empty() {
         state.set("OPAQUE_DIRS", opaque_dirs.join(","));
     }
@@ -746,39 +744,6 @@ pub fn set_limits(
     Ok(())
 }
 
-/// Update connector configuration on an existing container.
-///
-/// Reads the current state file, replaces the connector config, writes
-/// it back, and regenerates the systemd drop-in so the next start picks
-/// up the new bind mounts. If the container is running, prints a note
-/// that a restart is needed.
-pub fn set_connectors(
-    datadir: &Path,
-    name: &str,
-    connectors: &ConnectorConfig,
-    verbose: bool,
-) -> Result<()> {
-    ensure_exists(datadir, name)?;
-
-    let state_path = datadir.join("state").join(name);
-    let mut state = State::read_from(&state_path)?;
-    connectors.write_to_state(&mut state);
-    state.write_to(&state_path)?;
-
-    if verbose {
-        eprintln!("updated state file: {}", state_path.display());
-    }
-
-    // Regenerate the nspawn dropin so connector bind mounts take effect.
-    systemd::write_nspawn_dropin(datadir, name, verbose)?;
-
-    if systemd::is_active(name)? {
-        eprintln!("note: container '{name}' is running; restart for changes to take effect");
-    }
-
-    Ok(())
-}
-
 /// Controls how `stop()` shuts down a container.
 #[derive(Debug, Clone, Copy)]
 pub enum StopMode {
@@ -888,7 +853,7 @@ mod tests {
             opaque_dirs: vec![],
             binds: Default::default(),
             envs: Default::default(),
-            connectors: Default::default(),
+
         };
         let name = create(tmp.path(), &opts, false).unwrap();
         assert!(validate_name(&name).is_ok());
@@ -929,7 +894,7 @@ mod tests {
             opaque_dirs: vec![],
             binds: Default::default(),
             envs: Default::default(),
-            connectors: Default::default(),
+
         };
         let name = create(tmp.path(), &opts, false).unwrap();
         assert_eq!(name, "hello");
@@ -957,7 +922,7 @@ mod tests {
             opaque_dirs: vec![],
             binds: Default::default(),
             envs: Default::default(),
-            connectors: Default::default(),
+
         };
         create(tmp.path(), &opts, false).unwrap();
         let err = create(tmp.path(), &opts, false).unwrap_err();
@@ -978,7 +943,7 @@ mod tests {
             opaque_dirs: vec![],
             binds: Default::default(),
             envs: Default::default(),
-            connectors: Default::default(),
+
         };
         let err = create(tmp.path(), &opts, false).unwrap_err();
         assert!(
@@ -1001,7 +966,7 @@ mod tests {
             opaque_dirs: vec![],
             binds: Default::default(),
             envs: Default::default(),
-            connectors: Default::default(),
+
         };
         let name = create(tmp.path(), &opts, false).unwrap();
         assert_eq!(name, "test");
@@ -1025,7 +990,7 @@ mod tests {
             opaque_dirs: vec![],
             binds: Default::default(),
             envs: Default::default(),
-            connectors: Default::default(),
+
         };
         let err = create(tmp.path(), &opts, false);
         assert!(err.is_err());
@@ -1045,7 +1010,7 @@ mod tests {
             opaque_dirs: vec![],
             binds: Default::default(),
             envs: Default::default(),
-            connectors: Default::default(),
+
         };
         create(tmp.path(), &opts, false).unwrap();
         assert!(ensure_exists(tmp.path(), "mybox").is_ok());
@@ -1150,7 +1115,7 @@ mod tests {
             opaque_dirs: vec![],
             binds: Default::default(),
             envs: Default::default(),
-            connectors: Default::default(),
+
         };
         let name = create(tmp.path(), &opts, false).unwrap();
         assert_eq!(name, "limited");
@@ -1174,7 +1139,7 @@ mod tests {
             opaque_dirs: vec![],
             binds: Default::default(),
             envs: Default::default(),
-            connectors: Default::default(),
+
         };
         let err = create(tmp.path(), &opts, false);
         unsafe { libc::umask(old) };
@@ -1256,7 +1221,7 @@ mod tests {
             opaque_dirs: vec!["/var".to_string(), "/opt/data".to_string()],
             binds: Default::default(),
             envs: Default::default(),
-            connectors: Default::default(),
+
         };
         let name = create(tmp.path(), &opts, false).unwrap();
         assert_eq!(name, "opaquebox");
@@ -1305,7 +1270,7 @@ mod tests {
             opaque_dirs: vec!["/var".to_string(), "/opt".to_string()],
             binds: Default::default(),
             envs: Default::default(),
-            connectors: Default::default(),
+
         };
         create(tmp.path(), &opts, false).unwrap();
 

@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
-use crate::{BindConfig, ConnectorConfig, EnvConfig, NetworkConfig, ResourceLimits, State};
+use crate::{BindConfig, EnvConfig, NetworkConfig, ResourceLimits, State};
 
 mod dbus {
     use anyhow::{bail, Context, Result};
@@ -685,51 +685,6 @@ pub fn resolve_paths() -> Result<UnitPaths> {
     })
 }
 
-pub struct ProxyBinaries {
-    pub server: PathBuf,
-    pub client: PathBuf,
-}
-
-/// Locate the `sdme-connector-server` and `sdme-connector-client` binaries.
-///
-/// Checks in the same directory as the running `sdme` binary first
-/// (via `/proc/self/exe`), then falls back to PATH lookup.
-pub fn find_proxy_binaries() -> Result<ProxyBinaries> {
-    use crate::system_check::find_program;
-
-    // Try same directory as the running binary first.
-    if let Ok(self_exe) = fs::read_link("/proc/self/exe") {
-        if let Some(dir) = self_exe.parent() {
-            let server = dir.join("sdme-connector-server");
-            let client = dir.join("sdme-connector-client");
-            if server.exists() && client.exists() {
-                return Ok(ProxyBinaries { server, client });
-            }
-        }
-    }
-
-    // Check well-known paths.
-    for dir in &[
-        "/usr/libexec",
-        "/usr/local/libexec",
-        "/usr/bin",
-        "/usr/local/bin",
-    ] {
-        let server = PathBuf::from(dir).join("sdme-connector-server");
-        let client = PathBuf::from(dir).join("sdme-connector-client");
-        if server.exists() && client.exists() {
-            return Ok(ProxyBinaries { server, client });
-        }
-    }
-
-    // Fall back to PATH.
-    let server =
-        find_program("sdme-connector-server").context("sdme-connector-server not found")?;
-    let client =
-        find_program("sdme-connector-client").context("sdme-connector-client not found")?;
-    Ok(ProxyBinaries { server, client })
-}
-
 /// Generate the thin template unit for `sdme@.service`.
 ///
 /// Contains only the Unit section and Service metadata. The actual
@@ -884,55 +839,6 @@ pub fn write_nspawn_dropin(datadir: &Path, name: &str, verbose: bool) -> Result<
 
     let envs = EnvConfig::from_state(&state);
     nspawn_args.extend(envs.to_nspawn_args());
-
-    // Connector bind mounts (for client containers consuming connectors).
-    let connectors = ConnectorConfig::from_state(&state);
-    nspawn_args.extend(connectors.to_nspawn_args(datadir));
-
-    // Proxy-mode detection: if the rootfs has an oci/proxy-mode marker,
-    // this is a server container. Bind-mount the connector directory
-    // (read-write for socket creation) and the proxy binaries.
-    if !rootfs.is_empty() {
-        let rootfs_path = datadir.join("fs").join(rootfs);
-        let proxy_marker = rootfs_path.join("oci/proxy-mode");
-        if proxy_marker.exists() {
-            if let Ok(raw) = fs::read_to_string(&proxy_marker) {
-                let connector_name = raw.trim();
-                if !connector_name.is_empty() {
-                    let host_connector_dir =
-                        crate::connectors::connector_dir(datadir, connector_name);
-                    fs::create_dir_all(&host_connector_dir).with_context(|| {
-                        format!("failed to create {}", host_connector_dir.display())
-                    })?;
-                    nspawn_args.push(format!(
-                        "--bind={}:/connectors/{connector_name}",
-                        host_connector_dir.display()
-                    ));
-
-                    // Bind-mount the proxy binaries.
-                    if let Ok(bins) = find_proxy_binaries() {
-                        nspawn_args.push(format!(
-                            "--bind-ro={}:/usr/libexec/sdme-connector-server",
-                            bins.server.display()
-                        ));
-                        nspawn_args.push(format!(
-                            "--bind-ro={}:/usr/libexec/sdme-connector-client",
-                            bins.client.display()
-                        ));
-                    } else if verbose {
-                        eprintln!(
-                            "warning: sdme-connector-server/sdme-connector-client not found; \
-                             proxy may not work inside the container"
-                        );
-                    }
-
-                    if verbose {
-                        eprintln!("proxy mode: connector '{connector_name}'");
-                    }
-                }
-            }
-        }
-    }
 
     if verbose {
         for arg in &nspawn_args {
@@ -1180,7 +1086,6 @@ mod tests {
             opaque_dirs: vec![],
             binds: Default::default(),
             envs: Default::default(),
-            connectors: Default::default(),
         };
         create(tmp.path(), &opts, false).unwrap();
 
