@@ -1,6 +1,6 @@
-// drop_privs — Generates tiny static ELF64 binaries for privilege dropping
+// drop_privs: generates tiny static ELF64 binaries for privilege dropping.
 //
-// These binaries have no libc dependency — they talk directly to the kernel
+// These binaries have no libc dependency; they talk directly to the kernel
 // via syscalls. They solve the systemd User=/RootDirectory= ordering problem
 // where NSS resolves UIDs against the host before entering the chroot.
 
@@ -12,7 +12,7 @@ mod x86_64;
 ///
 /// Returns the raw bytes of a ready-to-run static ELF64 executable.
 /// The binary drops privileges (setgroups/setgid/setuid), changes to a
-/// working directory, and execs a program — all via raw syscalls with
+/// working directory, and execs a program, all via raw syscalls with
 /// no libc dependency.
 pub fn generate(arch: Arch) -> Vec<u8> {
     let (machine, code) = match arch {

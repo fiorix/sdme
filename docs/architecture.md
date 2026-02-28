@@ -433,6 +433,33 @@ restarts, cgroup resource limits from the host. The application doesn't know or
 care that it's inside an nspawn container; it sees a chroot with API
 filesystems, exactly what it expects.
 
+### Privilege dropping for non-root OCI users
+
+Many OCI application images declare a non-root `User` in their config (e.g.
+`nginx` runs as UID 101). systemd's `User=` directive resolves usernames via
+NSS **before** entering the `RootDirectory=` chroot, so users that only exist
+inside the OCI rootfs cause exit code 217/USER. This is a known upstream
+limitation (see [systemd#12498](https://github.com/systemd/systemd/issues/12498),
+[systemd#19781](https://github.com/systemd/systemd/issues/19781)).
+
+sdme solves this with a generated static ELF binary (`drop_privs`, under 1 KiB)
+that performs `setgroups(0,NULL)` then `setgid` then `setuid` then `chdir` then
+`execve`, all via raw syscalls with no libc or NSS dependency. The binary is
+written to `/.sdme-drop-privs` inside the OCI root at import time (mode `0o111`,
+owned by root). For non-root users the generated unit becomes:
+
+```ini
+ExecStart=/.sdme-drop-privs <uid> <gid> <workdir> <entrypoint> [args...]
+```
+
+No `User=` or `WorkingDirectory=` directives are needed; the binary handles
+both. For root users, the standard `User=root` unit is generated unchanged.
+
+The OCI `User` field is resolved at import time against `etc/passwd` and
+`etc/group` inside the OCI rootfs, supporting named users, numeric UIDs,
+explicit groups, and `uid:gid` pairs. Full details in
+[docs/drop-privs.md](drop-privs.md).
+
 ### Future direction
 
 At this point this is all very exploratory. This journey is 1% complete.

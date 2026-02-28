@@ -828,6 +828,132 @@ fn prompt_install_systemd(family: &DistroFamily, distro_name: &str) -> Result<bo
     crate::confirm_default_yes("\nProceed? [Y/n]: ")
 }
 
+// --- OCI user resolution ---
+
+/// Resolved numeric identity for an OCI container user.
+#[derive(Debug)]
+struct ResolvedUser {
+    uid: u32,
+    gid: u32,
+}
+
+/// Parse an `/etc/passwd`-format file and look up a user by name or numeric UID.
+///
+/// Returns `(uid, primary_gid)` on match. The `user` argument may be a name
+/// (matched against field 0) or a numeric string (matched against field 2).
+fn lookup_passwd(passwd_path: &Path, user: &str) -> Option<(u32, u32)> {
+    let content = fs::read_to_string(passwd_path).ok()?;
+    let is_numeric = user.parse::<u32>().is_ok();
+    for line in content.lines() {
+        let fields: Vec<&str> = line.split(':').collect();
+        if fields.len() < 4 {
+            continue;
+        }
+        let matched = if is_numeric {
+            fields[2] == user
+        } else {
+            fields[0] == user
+        };
+        if matched {
+            let uid: u32 = fields[2].parse().ok()?;
+            let gid: u32 = fields[3].parse().ok()?;
+            return Some((uid, gid));
+        }
+    }
+    None
+}
+
+/// Parse an `/etc/group`-format file and look up a group by name.
+///
+/// Returns the numeric GID on match.
+fn lookup_group(group_path: &Path, group: &str) -> Option<u32> {
+    let content = fs::read_to_string(group_path).ok()?;
+    for line in content.lines() {
+        let fields: Vec<&str> = line.split(':').collect();
+        if fields.len() < 3 {
+            continue;
+        }
+        if fields[0] == group {
+            return fields[2].parse().ok();
+        }
+    }
+    None
+}
+
+/// Resolve the OCI `User` field to numeric uid:gid.
+///
+/// The User field can be:
+/// - `""` or `"root"` or `"0"` → root (uid=0, gid=0)
+/// - `"name"` → look up in etc/passwd
+/// - `"uid"` → use directly; look up primary GID from etc/passwd if found
+/// - `"name:group"` or `"uid:gid"` → resolve both parts
+///
+/// Returns `None` for root users (uid=0), since they don't need drop_privs.
+fn resolve_oci_user(oci_root: &Path, user: &str) -> Result<Option<ResolvedUser>> {
+    // Empty or literal "root": no drop_privs needed.
+    // Note: "root:somegroup" is treated as plain root (group ignored). This
+    // differs from "0:somegroup" which goes through full resolution. The
+    // early return is intentional: it avoids requiring etc/passwd to exist
+    // just to resolve the well-known "root" name.
+    if user.is_empty() || user == "root" {
+        return Ok(None);
+    }
+
+    // Split on `:` for user and optional group.
+    let (user_part, group_part) = match user.split_once(':') {
+        Some((u, g)) => (u, Some(g)),
+        None => (user, None),
+    };
+
+    // Determine UID and default GID from user part.
+    let passwd_path = oci_root.join("etc/passwd");
+    let (uid, default_gid) = if let Ok(numeric_uid) = user_part.parse::<u32>() {
+        // Numeric UID: look up primary GID from passwd if possible.
+        let primary_gid = lookup_passwd(&passwd_path, user_part)
+            .map(|(_, gid)| gid)
+            .unwrap_or(numeric_uid);
+        (numeric_uid, primary_gid)
+    } else {
+        // Name: must resolve from passwd.
+        match lookup_passwd(&passwd_path, user_part) {
+            Some((uid, gid)) => (uid, gid),
+            None => bail!(
+                "OCI User '{}' not found in {}",
+                user_part,
+                passwd_path.display()
+            ),
+        }
+    };
+
+    // Root user (uid=0 without explicit group): no drop_privs needed.
+    if uid == 0 && group_part.is_none() {
+        return Ok(None);
+    }
+
+    // Resolve explicit group if given.
+    let gid = match group_part {
+        Some(g) => {
+            if let Ok(numeric_gid) = g.parse::<u32>() {
+                numeric_gid
+            } else {
+                let group_path = oci_root.join("etc/group");
+                match lookup_group(&group_path, g) {
+                    Some(gid) => gid,
+                    None => bail!("OCI group '{}' not found in {}", g, group_path.display()),
+                }
+            }
+        }
+        None => default_gid,
+    };
+
+    // Root user with explicit root group: still no drop_privs needed.
+    if uid == 0 && gid == 0 {
+        return Ok(None);
+    }
+
+    Ok(Some(ResolvedUser { uid, gid }))
+}
+
 // --- OCI application image support ---
 
 /// Recursively remove symlinks that target `/dev/stdout`, `/dev/stderr`,
@@ -1000,6 +1126,35 @@ fn setup_app_image(
     // under systemd's RootDirectory chroot (see remove_dev_symlinks doc).
     remove_dev_symlinks(&oci_root, verbose)?;
 
+    // 3d. If the OCI image specifies a non-root user, write the drop_privs
+    // binary so the service can switch UIDs without relying on systemd's
+    // User= (which resolves via host NSS before entering the chroot).
+    let resolved_user = resolve_oci_user(&oci_root, user)?;
+    if let Some(ref ru) = resolved_user {
+        let arch = match std::env::consts::ARCH {
+            "x86_64" => crate::drop_privs::Arch::X86_64,
+            "aarch64" => crate::drop_privs::Arch::Aarch64,
+            other => bail!("unsupported architecture for drop_privs: {other}"),
+        };
+        let elf_bytes = crate::drop_privs::generate(arch);
+        let drop_privs_path = oci_root.join(".sdme-drop-privs");
+        fs::write(&drop_privs_path, &elf_bytes)
+            .with_context(|| format!("failed to write {}", drop_privs_path.display()))?;
+        // Mode 0o111: execute-only for everyone, not readable/writable.
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&drop_privs_path, fs::Permissions::from_mode(0o111)).with_context(
+            || format!("failed to set permissions on {}", drop_privs_path.display()),
+        )?;
+        if verbose {
+            eprintln!(
+                "wrote drop_privs binary for uid={} gid={}: {}",
+                ru.uid,
+                ru.gid,
+                drop_privs_path.display()
+            );
+        }
+    }
+
     // 4. Write OCI env file.
     if let Some(ref env_vars) = config.env {
         if !env_vars.is_empty() {
@@ -1053,6 +1208,37 @@ fn setup_app_image(
         .map(|sig| format!("KillSignal={sig}\n"))
         .unwrap_or_default();
 
+    // Build the [Service] section depending on whether drop_privs is used.
+    let service_section = if let Some(ref ru) = resolved_user {
+        // Non-root user: use drop_privs binary to switch uid/gid and set workdir.
+        // The drop_privs binary does setgroups(0,NULL) → setgid → setuid → chdir → execve.
+        // This avoids systemd's User= which resolves via host NSS before chroot.
+        let drop_privs_exec = format!(
+            "/.sdme-drop-privs {} {} {} {}",
+            ru.uid, ru.gid, working_dir, exec_start
+        );
+        format!(
+            "\
+RootDirectory=/oci/root
+MountAPIVFS=yes
+EnvironmentFile=-/oci/env
+ExecStart={drop_privs_exec}
+{stop_signal_line}"
+        )
+    } else {
+        // Root user: use standard systemd directives.
+        format!(
+            "\
+RootDirectory=/oci/root
+MountAPIVFS=yes
+ExecStart={exec_start}
+WorkingDirectory={working_dir}
+EnvironmentFile=-/oci/env
+User={user}
+{stop_signal_line}"
+        )
+    };
+
     let unit_content = format!(
         r#"# Generated by sdme from OCI image: {image_ref}
 # OCI metadata saved under /oci/:
@@ -1067,13 +1253,7 @@ After=network.target
 
 [Service]
 Type=exec
-RootDirectory=/oci/root
-MountAPIVFS=yes
-ExecStart={exec_start}
-WorkingDirectory={working_dir}
-EnvironmentFile=-/oci/env
-User={user}
-{stop_signal_line}
+{service_section}
 # TODO(sdme): bind-mount declared volumes into the chroot.
 # OCI volumes: {volume_comment}
 # Example: BindPaths=/var/lib/sdme/containers/%i/shared/data:/data
@@ -2351,5 +2531,176 @@ pub(crate) mod tests {
             "expected RawImage, got {kind:?}"
         );
         let _ = fs::remove_file(&path);
+    }
+
+    // --- User resolution tests ---
+
+    fn make_oci_root(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "sdme-test-oci-user-{}-{:?}-{name}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("etc")).unwrap();
+        dir
+    }
+
+    #[test]
+    fn test_lookup_passwd_by_name() {
+        let root = make_oci_root("passwd-name");
+        fs::write(
+            root.join("etc/passwd"),
+            "root:x:0:0:root:/root:/bin/bash\nnginx:x:101:101:nginx:/var/cache/nginx:/sbin/nologin\n",
+        )
+        .unwrap();
+        assert_eq!(
+            lookup_passwd(&root.join("etc/passwd"), "nginx"),
+            Some((101, 101))
+        );
+        assert_eq!(
+            lookup_passwd(&root.join("etc/passwd"), "root"),
+            Some((0, 0))
+        );
+        assert_eq!(lookup_passwd(&root.join("etc/passwd"), "nobody"), None);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_lookup_passwd_by_uid() {
+        let root = make_oci_root("passwd-uid");
+        fs::write(
+            root.join("etc/passwd"),
+            "root:x:0:0:root:/root:/bin/bash\nnginx:x:101:101:nginx:/var/cache/nginx:/sbin/nologin\n",
+        )
+        .unwrap();
+        assert_eq!(
+            lookup_passwd(&root.join("etc/passwd"), "101"),
+            Some((101, 101))
+        );
+        assert_eq!(lookup_passwd(&root.join("etc/passwd"), "999"), None);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_lookup_group_by_name() {
+        let root = make_oci_root("group-name");
+        fs::write(
+            root.join("etc/group"),
+            "root:x:0:\nnginx:x:101:\nwww-data:x:33:\n",
+        )
+        .unwrap();
+        assert_eq!(lookup_group(&root.join("etc/group"), "nginx"), Some(101));
+        assert_eq!(lookup_group(&root.join("etc/group"), "www-data"), Some(33));
+        assert_eq!(lookup_group(&root.join("etc/group"), "missing"), None);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_resolve_oci_user_root() {
+        let root = make_oci_root("resolve-root");
+        // Root user returns None (no drop_privs needed).
+        assert!(resolve_oci_user(&root, "root").unwrap().is_none());
+        assert!(resolve_oci_user(&root, "0").unwrap().is_none());
+        assert!(resolve_oci_user(&root, "").unwrap().is_none());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_resolve_oci_user_root_explicit_group() {
+        let root = make_oci_root("resolve-root-group");
+        assert!(resolve_oci_user(&root, "0:0").unwrap().is_none());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_resolve_oci_user_named() {
+        let root = make_oci_root("resolve-named");
+        fs::write(
+            root.join("etc/passwd"),
+            "root:x:0:0:root:/root:/bin/bash\nnginx:x:101:101:nginx:/nonexistent:/sbin/nologin\n",
+        )
+        .unwrap();
+        let ru = resolve_oci_user(&root, "nginx").unwrap().unwrap();
+        assert_eq!(ru.uid, 101);
+        assert_eq!(ru.gid, 101);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_resolve_oci_user_numeric() {
+        let root = make_oci_root("resolve-numeric");
+        fs::write(
+            root.join("etc/passwd"),
+            "root:x:0:0:root:/root:/bin/bash\nnginx:x:101:101:nginx:/nonexistent:/sbin/nologin\n",
+        )
+        .unwrap();
+        // Numeric UID found in passwd: uses primary GID from passwd.
+        let ru = resolve_oci_user(&root, "101").unwrap().unwrap();
+        assert_eq!(ru.uid, 101);
+        assert_eq!(ru.gid, 101);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_resolve_oci_user_numeric_not_in_passwd() {
+        let root = make_oci_root("resolve-numeric-missing");
+        // No passwd file: falls back to uid==gid.
+        let ru = resolve_oci_user(&root, "1000").unwrap().unwrap();
+        assert_eq!(ru.uid, 1000);
+        assert_eq!(ru.gid, 1000);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_resolve_oci_user_with_explicit_group() {
+        let root = make_oci_root("resolve-group");
+        fs::write(
+            root.join("etc/passwd"),
+            "nginx:x:101:101:nginx:/nonexistent:/sbin/nologin\n",
+        )
+        .unwrap();
+        fs::write(root.join("etc/group"), "www-data:x:33:\n").unwrap();
+        let ru = resolve_oci_user(&root, "nginx:www-data").unwrap().unwrap();
+        assert_eq!(ru.uid, 101);
+        assert_eq!(ru.gid, 33);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_resolve_oci_user_with_numeric_group() {
+        let root = make_oci_root("resolve-numgroup");
+        fs::write(
+            root.join("etc/passwd"),
+            "nginx:x:101:101:nginx:/nonexistent:/sbin/nologin\n",
+        )
+        .unwrap();
+        let ru = resolve_oci_user(&root, "nginx:42").unwrap().unwrap();
+        assert_eq!(ru.uid, 101);
+        assert_eq!(ru.gid, 42);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_resolve_oci_user_named_not_found() {
+        let root = make_oci_root("resolve-notfound");
+        fs::write(root.join("etc/passwd"), "root:x:0:0:root:/root:/bin/bash\n").unwrap();
+        let err = resolve_oci_user(&root, "missing").unwrap_err();
+        assert!(err.to_string().contains("not found"), "unexpected: {err}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_resolve_oci_user_group_not_found() {
+        let root = make_oci_root("resolve-group-notfound");
+        fs::write(
+            root.join("etc/passwd"),
+            "nginx:x:101:101:nginx:/nonexistent:/sbin/nologin\n",
+        )
+        .unwrap();
+        fs::write(root.join("etc/group"), "root:x:0:\n").unwrap();
+        let err = resolve_oci_user(&root, "nginx:missing").unwrap_err();
+        assert!(err.to_string().contains("not found"), "unexpected: {err}");
+        let _ = fs::remove_dir_all(&root);
     }
 }
