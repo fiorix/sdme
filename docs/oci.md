@@ -47,7 +47,9 @@ When an application image is imported, sdme:
 2. Copies the base rootfs (e.g. ubuntu) to the new rootfs directory
 3. Moves the OCI application rootfs to `/oci/root/` inside the base
 4. Creates essential runtime dirs (`/tmp`, `/run`, etc.) inside `/oci/root`
-5. Removes Docker-specific `/dev/stdout` symlinks that break under systemd
+5. Deploys a devfd shim (`/.sdme-devfd-shim.so`) that intercepts `open()` on
+   `/dev/std*` paths to work around ENXIO on journal sockets (see
+   [docs/devfd-shim.md](devfd-shim.md))
 6. Writes OCI metadata under `/oci/`:
    - `/oci/env`: environment variables from the image config
    - `/oci/ports`: exposed ports (for reference)
@@ -55,6 +57,7 @@ When an application image is imported, sdme:
 7. Generates `etc/systemd/system/sdme-oci-app.service` with:
    - `RootDirectory=/oci/root`: chroots into the OCI rootfs
    - `MountAPIVFS=yes`: provides `/proc`, `/sys`, `/dev`
+   - `Environment=LD_PRELOAD=/.sdme-devfd-shim.so`: loads the devfd shim
    - `EnvironmentFile=-/oci/env`: loads the image's environment
    - `ExecStart=` built from the image's Entrypoint + Cmd
    - `User=` from the image config (or root)

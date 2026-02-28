@@ -956,55 +956,6 @@ fn resolve_oci_user(oci_root: &Path, user: &str) -> Result<Option<ResolvedUser>>
 
 // --- OCI application image support ---
 
-/// Recursively remove symlinks that target `/dev/stdout`, `/dev/stderr`,
-/// `/dev/stdin`, or `/dev/fd/*` under `root`.
-///
-/// Docker images commonly create these (e.g. nginx links `/var/log/nginx/access.log`
-/// to `/dev/stdout`). They don't work under systemd's `RootDirectory=` +
-/// `MountAPIVFS=yes` because FDs 1/2 are journal sockets; `open()` on
-/// `/proc/self/fd/2` returns ENXIO.  Removing the symlinks lets apps create
-/// real log files instead.
-fn remove_dev_symlinks(root: &Path, verbose: bool) -> Result<()> {
-    fn walk(dir: &Path, verbose: bool) -> Result<()> {
-        let entries = match fs::read_dir(dir) {
-            Ok(e) => e,
-            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return Ok(()),
-            Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
-        };
-        for entry in entries {
-            let entry = entry?;
-            let ft = entry
-                .file_type()
-                .with_context(|| format!("stat {}", entry.path().display()))?;
-            if ft.is_symlink() {
-                let target = fs::read_link(entry.path())
-                    .with_context(|| format!("readlink {}", entry.path().display()))?;
-                let t = target.to_string_lossy();
-                if t == "/dev/stdout"
-                    || t == "/dev/stderr"
-                    || t == "/dev/stdin"
-                    || t.starts_with("/dev/fd/")
-                {
-                    if verbose {
-                        eprintln!(
-                            "removing symlink {} -> {} (incompatible with systemd chroot)",
-                            entry.path().display(),
-                            t
-                        );
-                    }
-                    fs::remove_file(entry.path()).with_context(|| {
-                        format!("failed to remove symlink {}", entry.path().display())
-                    })?;
-                }
-            } else if ft.is_dir() {
-                walk(&entry.path(), verbose)?;
-            }
-        }
-        Ok(())
-    }
-    walk(root, verbose)
-}
-
 /// Set up an application image by combining a base rootfs with the OCI rootfs.
 ///
 /// The OCI rootfs (already extracted in staging_dir) is moved to `/oci/root`
@@ -1122,20 +1073,34 @@ fn setup_app_image(
         }
     }
 
-    // 3c. Remove symlinks to /dev/stdout, /dev/stderr, etc. that break
-    // under systemd's RootDirectory chroot (see remove_dev_symlinks doc).
-    remove_dev_symlinks(&oci_root, verbose)?;
+    // 3c. Deploy devfd shim for LD_PRELOAD.
+    //
+    // OCI images commonly symlink log files to /dev/stdout or /dev/stderr
+    // (e.g. nginx). Under systemd, FDs 1/2 are journal sockets; open() on
+    // /proc/self/fd/N returns ENXIO for sockets. The shim intercepts
+    // open()/openat() and returns dup(N) for /dev/std{in,out,err},
+    // /dev/fd/{0,1,2}, and /proc/self/fd/{0,1,2}.
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => crate::drop_privs::Arch::X86_64,
+        "aarch64" => crate::drop_privs::Arch::Aarch64,
+        other => bail!("unsupported architecture: {other}"),
+    };
+    let shim_bytes = crate::devfd_shim::generate(arch);
+    let shim_path = oci_root.join(".sdme-devfd-shim.so");
+    fs::write(&shim_path, &shim_bytes)
+        .with_context(|| format!("failed to write {}", shim_path.display()))?;
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&shim_path, fs::Permissions::from_mode(0o444))
+        .with_context(|| format!("failed to set permissions on {}", shim_path.display()))?;
+    if verbose {
+        eprintln!("wrote devfd shim: {}", shim_path.display());
+    }
 
     // 3d. If the OCI image specifies a non-root user, write the drop_privs
     // binary so the service can switch UIDs without relying on systemd's
     // User= (which resolves via host NSS before entering the chroot).
     let resolved_user = resolve_oci_user(&oci_root, user)?;
     if let Some(ref ru) = resolved_user {
-        let arch = match std::env::consts::ARCH {
-            "x86_64" => crate::drop_privs::Arch::X86_64,
-            "aarch64" => crate::drop_privs::Arch::Aarch64,
-            other => bail!("unsupported architecture for drop_privs: {other}"),
-        };
         let elf_bytes = crate::drop_privs::generate(arch);
         let drop_privs_path = oci_root.join(".sdme-drop-privs");
         fs::write(&drop_privs_path, &elf_bytes)
@@ -1221,6 +1186,7 @@ fn setup_app_image(
             "\
 RootDirectory=/oci/root
 MountAPIVFS=yes
+Environment=LD_PRELOAD=/.sdme-devfd-shim.so
 EnvironmentFile=-/oci/env
 ExecStart={drop_privs_exec}
 {stop_signal_line}"
@@ -1231,6 +1197,7 @@ ExecStart={drop_privs_exec}
             "\
 RootDirectory=/oci/root
 MountAPIVFS=yes
+Environment=LD_PRELOAD=/.sdme-devfd-shim.so
 ExecStart={exec_start}
 WorkingDirectory={working_dir}
 EnvironmentFile=-/oci/env

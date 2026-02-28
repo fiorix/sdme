@@ -23,6 +23,7 @@ pub fn generate(arch: Arch) -> Vec<u8> {
 }
 
 /// Target architecture for the generated binary.
+#[derive(Clone, Copy)]
 pub enum Arch {
     X86_64,
     Aarch64,

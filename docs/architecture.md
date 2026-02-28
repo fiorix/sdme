@@ -460,6 +460,26 @@ The OCI `User` field is resolved at import time against `etc/passwd` and
 explicit groups, and `uid:gid` pairs. Full details in
 [docs/drop-privs.md](drop-privs.md).
 
+### /dev/std* shim for journal socket compatibility
+
+OCI images commonly symlink log files to `/dev/stdout` or `/dev/stderr`
+(e.g. `/var/log/nginx/error.log -> /dev/stderr -> /proc/self/fd/2`). Under
+Docker, fds 1/2 are pipes, so `open()` on `/proc/self/fd/N` succeeds. Under
+systemd, fds 1/2 are journal sockets, and the kernel rejects `open()` on
+socket-backed `/proc/self/fd/N` with ENXIO.
+
+sdme solves this with a generated LD_PRELOAD shared library (`devfd_shim`,
+approximately 4 KiB) that intercepts `open()`/`openat()` at the libc symbol
+level. When the path matches `/dev/stdin`, `/dev/stdout`, `/dev/stderr`,
+`/dev/fd/{0,1,2}`, or `/proc/self/fd/{0,1,2}`, the interceptor returns
+`dup(N)` instead of calling the real `open`. All other paths fall through to
+the real syscall.
+
+The shim is written to `/.sdme-devfd-shim.so` inside the OCI root at import
+time, and the generated unit includes `Environment=LD_PRELOAD=/.sdme-devfd-shim.so`.
+This applies to all OCI containers (both root and non-root users). Full details
+in [docs/devfd-shim.md](devfd-shim.md).
+
 ### Future direction
 
 At this point this is all very exploratory. This journey is 1% complete.

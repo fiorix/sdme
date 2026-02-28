@@ -2,6 +2,7 @@ pub mod build;
 pub mod config;
 pub mod containers;
 pub mod copy;
+pub mod devfd_shim;
 pub mod drop_privs;
 pub mod import;
 pub mod mounts;
