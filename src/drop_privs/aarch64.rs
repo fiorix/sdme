@@ -101,7 +101,7 @@ impl Asm {
     fn data(&mut self, bytes: &[u8]) {
         self.code.extend_from_slice(bytes);
         // Pad to 4-byte alignment (aarch64 instructions must be aligned)
-        while self.code.len() % 4 != 0 {
+        while !self.code.len().is_multiple_of(4) {
             self.code.push(0);
         }
     }
@@ -111,7 +111,7 @@ impl Asm {
     /// LDR Xt, [Xn, #imm] — 64-bit load, unsigned offset.
     /// imm must be a multiple of 8, max 32760.
     fn ldr_x(&mut self, rt: u8, rn: u8, imm: u16) {
-        assert!(imm % 8 == 0 && imm <= 32760);
+        assert!(imm.is_multiple_of(8) && imm <= 32760);
         let imm12 = (imm / 8) as u32;
         // 11 111 0 01 01 imm12 Rn Rt
         let insn = 0xF9400000 | (imm12 << 10) | ((rn as u32) << 5) | (rt as u32);
