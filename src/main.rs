@@ -835,14 +835,7 @@ fn main() -> Result<()> {
                 let health_w = entries.iter().map(|e| e.health.len()).max().unwrap().max(6);
                 let os_w = entries.iter().map(|e| e.os.len()).max().unwrap().max(2);
                 let pod_w = if entries.iter().any(|e| !e.pod.is_empty()) {
-                    Some(
-                        entries
-                            .iter()
-                            .map(|e| e.pod.len())
-                            .max()
-                            .unwrap()
-                            .max(3),
-                    )
+                    Some(entries.iter().map(|e| e.pod.len()).max().unwrap().max(3))
                 } else {
                     None
                 };

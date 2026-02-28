@@ -296,8 +296,7 @@ fn do_create(
         // sdme-oci-app.service runs in the pod's network namespace.
         // At start time, the pod's netns is bind-mounted into the container
         // at /run/sdme/oci-pod-netns via --bind-ro=.
-        let dropin_dir = container_dir
-            .join("upper/etc/systemd/system/sdme-oci-app.service.d");
+        let dropin_dir = container_dir.join("upper/etc/systemd/system/sdme-oci-app.service.d");
         fs::create_dir_all(&dropin_dir)
             .with_context(|| format!("failed to create {}", dropin_dir.display()))?;
         let dropin_path = dropin_dir.join("oci-pod-netns.conf");
@@ -838,6 +837,11 @@ pub fn stop(name: &str, mode: StopMode, verbose: bool) -> Result<()> {
 mod tests {
     use super::*;
     use crate::testutil::TempDataDir;
+    use std::sync::Mutex;
+
+    /// umask is process-global; tests that call create() or manipulate the umask
+    /// must hold this lock to avoid racing each other.
+    static UMASK_LOCK: Mutex<()> = Mutex::new(());
 
     fn tmp() -> TempDataDir {
         TempDataDir::new("containers")
@@ -884,6 +888,7 @@ mod tests {
 
     #[test]
     fn test_create_default() {
+        let _lock = UMASK_LOCK.lock().unwrap();
         let tmp = tmp();
         let opts = CreateOptions {
             name: None,
@@ -926,6 +931,7 @@ mod tests {
 
     #[test]
     fn test_create_with_name() {
+        let _lock = UMASK_LOCK.lock().unwrap();
         let tmp = tmp();
         let opts = CreateOptions {
             name: Some("hello".to_string()),
@@ -955,6 +961,7 @@ mod tests {
 
     #[test]
     fn test_create_duplicate_name() {
+        let _lock = UMASK_LOCK.lock().unwrap();
         let tmp = tmp();
         let opts = CreateOptions {
             name: Some("dup".to_string()),
@@ -977,6 +984,7 @@ mod tests {
 
     #[test]
     fn test_create_with_rootfs_missing() {
+        let _lock = UMASK_LOCK.lock().unwrap();
         let tmp = tmp();
         let opts = CreateOptions {
             name: Some("test".to_string()),
@@ -998,6 +1006,7 @@ mod tests {
 
     #[test]
     fn test_create_with_rootfs_exists() {
+        let _lock = UMASK_LOCK.lock().unwrap();
         let tmp = tmp();
         let rootfs_dir = tmp.path().join("fs/myroot");
         fs::create_dir_all(&rootfs_dir).unwrap();
@@ -1022,6 +1031,7 @@ mod tests {
 
     #[test]
     fn test_create_cleanup_on_failure() {
+        let _lock = UMASK_LOCK.lock().unwrap();
         let tmp = tmp();
         // Block state dir by placing a file where the directory should be created.
         let state_path = tmp.path().join("state");
@@ -1047,6 +1057,7 @@ mod tests {
 
     #[test]
     fn test_ensure_exists_ok() {
+        let _lock = UMASK_LOCK.lock().unwrap();
         let tmp = tmp();
         let opts = CreateOptions {
             name: Some("mybox".to_string()),
@@ -1148,6 +1159,7 @@ mod tests {
 
     #[test]
     fn test_create_with_limits() {
+        let _lock = UMASK_LOCK.lock().unwrap();
         let tmp = tmp();
         let limits = crate::ResourceLimits {
             memory: Some("2G".to_string()),
@@ -1176,6 +1188,7 @@ mod tests {
 
     #[test]
     fn test_create_rejects_restrictive_umask() {
+        let _lock = UMASK_LOCK.lock().unwrap();
         // Set a restrictive umask, attempt create, then restore.
         let old = unsafe { libc::umask(0o077) };
         let tmp = tmp();
@@ -1256,6 +1269,7 @@ mod tests {
 
     #[test]
     fn test_create_with_opaque_dirs() {
+        let _lock = UMASK_LOCK.lock().unwrap();
         // Setting trusted.* xattrs requires root; skip if not root.
         if unsafe { libc::geteuid() } != 0 {
             eprintln!("skipping test_create_with_opaque_dirs: requires root");
@@ -1306,6 +1320,7 @@ mod tests {
 
     #[test]
     fn test_create_opaque_dirs_state() {
+        let _lock = UMASK_LOCK.lock().unwrap();
         // Setting trusted.* xattrs requires root; skip if not root.
         if unsafe { libc::geteuid() } != 0 {
             eprintln!("skipping test_create_opaque_dirs_state: requires root");

@@ -135,8 +135,8 @@ pub fn remove(datadir: &Path, name: &str, force: bool, verbose: bool) -> Result<
                 let ct_name = entry.file_name().to_string_lossy().to_string();
                 let ct_state_path = ct_state_dir.join(&ct_name);
                 if let Ok(state) = State::read_from(&ct_state_path) {
-                    let is_referenced = state.get("POD") == Some(name)
-                        || state.get("OCI_POD") == Some(name);
+                    let is_referenced =
+                        state.get("POD") == Some(name) || state.get("OCI_POD") == Some(name);
                     if is_referenced {
                         bail!(
                             "pod '{name}' is referenced by container '{ct_name}'; \
@@ -264,7 +264,7 @@ fn bring_up_loopback() -> Result<()> {
     }
 
     // Get current flags.
-    let ret = unsafe { libc::ioctl(sock, libc::SIOCGIFFLAGS as libc::c_ulong, &mut ifr) };
+    let ret = unsafe { libc::ioctl(sock, libc::SIOCGIFFLAGS as _, &mut ifr) };
     if ret != 0 {
         let err = std::io::Error::last_os_error();
         unsafe { libc::close(sock) };
@@ -274,7 +274,7 @@ fn bring_up_loopback() -> Result<()> {
     // Set IFF_UP.
     unsafe { ifr.ifr_ifru.ifru_flags |= libc::IFF_UP as i16 };
 
-    let ret = unsafe { libc::ioctl(sock, libc::SIOCSIFFLAGS as libc::c_ulong, &ifr) };
+    let ret = unsafe { libc::ioctl(sock, libc::SIOCSIFFLAGS as _, &ifr) };
     let err = std::io::Error::last_os_error();
     unsafe { libc::close(sock) };
     if ret != 0 {
@@ -453,11 +453,7 @@ mod tests {
         // Create container state referencing the pod via POD.
         let ct_dir = tmp.path().join("state");
         fs::create_dir_all(&ct_dir).unwrap();
-        fs::write(
-            ct_dir.join("mycontainer"),
-            "NAME=mycontainer\nPOD=mypod\n",
-        )
-        .unwrap();
+        fs::write(ct_dir.join("mycontainer"), "NAME=mycontainer\nPOD=mypod\n").unwrap();
 
         let err = remove(tmp.path(), "mypod", false, false).unwrap_err();
         assert!(

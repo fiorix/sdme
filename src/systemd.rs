@@ -856,10 +856,7 @@ pub fn write_nspawn_dropin(datadir: &Path, name: &str, verbose: bool) -> Result<
     }
 
     // Pod: entire container runs in the pod's network namespace.
-    let pod = state
-        .get("POD")
-        .filter(|s| !s.is_empty())
-        .map(String::from);
+    let pod = state.get("POD").filter(|s| !s.is_empty()).map(String::from);
     if let Some(ref pod_name) = pod {
         crate::pod::ensure_runtime(datadir, pod_name, verbose)?;
         let netns_path = crate::pod::runtime_path(pod_name);
