@@ -221,7 +221,7 @@ pub fn build(
             adrp_insn |= (immlo << 29) | (immhi << 5);
             code[fixup.aux..fixup.aux + 4].copy_from_slice(&adrp_insn.to_le_bytes());
 
-            // ldr x9, [x9, #page_offset] — 12-bit unsigned offset scaled by 8
+            // ldr x9, [x9, #page_offset] -- 12-bit unsigned offset scaled by 8
             let page_offset = got_entry_vaddr & 0xFFF;
             let imm12 = (page_offset / 8) as u32;
             let mut ldr_insn = u32::from_le_bytes(
@@ -358,7 +358,7 @@ pub fn build(
         let st_name = import_name_offsets[i] as u32;
         let st_info = (STB_GLOBAL << 4) | STT_NOTYPE;
         let st_other = 0u8;
-        let st_shndx: u16 = 0; // SHN_UNDEF — tells linker to resolve externally
+        let st_shndx: u16 = 0; // SHN_UNDEF -- tells linker to resolve externally
         let st_value = 0u64;
         let st_size = 0u64;
 

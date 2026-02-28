@@ -8,7 +8,7 @@
 //
 // If the real openat returns ENXIO, the shim resolves one level of symlink
 // via readlinkat and retries the path matching. This handles cases like
-// nginx opening /var/log/nginx/error.log → /dev/stderr.
+// nginx opening /var/log/nginx/error.log -> /dev/stderr.
 //
 // On error, errno is set properly via __errno_location() (imported through
 // the GOT) and -1 is returned per C convention.

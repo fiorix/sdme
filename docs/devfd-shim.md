@@ -101,6 +101,16 @@ tree for fast matching with zero string function calls:
    and check for `lf/fd/0\0`, `lf/fd/1\0`, `lf/fd/2\0`
 5. No match: call the real `openat` syscall with the original arguments
 
+If the real `openat` syscall returns `-ENXIO`, the interceptor resolves one
+level of symlink via the `readlinkat` syscall and retries the same path matching
+against the resolved target. This handles cases like nginx opening
+`/var/log/nginx/error.log`, which is a symlink to `/dev/stderr`. Without this
+fallback, only direct opens of `/dev/std*` paths would be intercepted.
+
+On error (from `dup` or a non-ENXIO `openat` failure), the shim sets `errno`
+properly via `__errno_location()` (imported through the GOT and resolved by the
+dynamic linker at load time) and returns `-1` per C convention.
+
 The `open()` entry point rewrites its arguments to match the `openat()` calling
 convention (inserting `AT_FDCWD` as the directory fd) and jumps to the `openat`
 entry point. `open64` and `openat64` are aliases (same symbol offsets) since
@@ -149,19 +159,25 @@ User=root
 The generated `.so` is a minimal ET_DYN ELF64 shared library containing:
 
 - ELF header (64 bytes)
-- 3 program headers: PT_LOAD RX (code + metadata), PT_LOAD RW (dynamic
-  section on next page), PT_DYNAMIC
+- 3 program headers: PT_LOAD RX (code + metadata), PT_LOAD RW (GOT +
+  dynamic section on next page), PT_DYNAMIC
 - Machine code (the interceptor logic)
 - SysV hash table (`.hash`) for symbol lookup by the dynamic linker
-- Dynamic symbol table (`.dynsym`): STN_UNDEF + `open`, `openat`, `open64`,
-  `openat64`
+- Dynamic symbol table (`.dynsym`): STN_UNDEF + exported symbols (`open`,
+  `openat`, `open64`, `openat64`) + imported symbols (`__errno_location`)
 - Dynamic string table (`.dynstr`)
+- RELA relocations (`.rela.dyn`): one `R_*_GLOB_DAT` entry per imported
+  symbol, pointing the dynamic linker at the corresponding GOT slot
+- GOT entries (one per import, zeroed; filled by the dynamic linker at
+  load time)
 - Dynamic section: DT_HASH, DT_STRTAB, DT_SYMTAB, DT_STRSZ, DT_SYMENT,
-  DT_NULL
+  DT_RELA, DT_RELASZ, DT_RELAENT, DT_NULL
 - No section headers (not needed at runtime)
 
-The RX segment occupies one page; the RW segment (dynamic section only) sits on
-the next page. Total file size is approximately 4 KiB.
+The RX segment contains the ELF header, program headers, machine code, hash
+table, dynsym, dynstr, and RELA relocations. The RW segment (next page)
+contains the GOT entries and the dynamic section. Total file size is
+approximately 4 KiB.
 
 ## Implementation
 

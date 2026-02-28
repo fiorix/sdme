@@ -5,7 +5,7 @@
 //
 // If the real openat returns ENXIO, the shim uses readlinkat to resolve
 // one level of symlink and retries the path matching. This handles cases
-// like nginx opening /var/log/nginx/error.log → /dev/stderr.
+// like nginx opening /var/log/nginx/error.log -> /dev/stderr.
 //
 // On error, errno is set via __errno_location() (imported through the GOT)
 // and -1 is returned per C convention.
@@ -24,10 +24,10 @@
 //   x30 = link register (clobbered by bl/blr)
 //
 // openat(int dirfd, const char *path, int flags, mode_t mode)
-//   → x0=dirfd, x1=path, x2=flags, x3=mode
+//   -> x0=dirfd, x1=path, x2=flags, x3=mode
 //
 // open(const char *path, int flags, mode_t mode)
-//   → x0=path, x1=flags, x2=mode
+//   -> x0=path, x1=flags, x2=mode
 
 // Syscall numbers (aarch64)
 const SYS_DUP: u16 = 23;
@@ -95,7 +95,7 @@ impl Asm {
 
     // ---- AArch64 instruction emitters ----
 
-    /// LDR Xt, [Xn, #imm] — 64-bit load, unsigned offset (imm must be multiple of 8).
+    /// LDR Xt, [Xn, #imm] -- 64-bit load, unsigned offset (imm must be multiple of 8).
     fn ldr_x(&mut self, rt: u8, rn: u8, imm: u16) {
         assert!(imm.is_multiple_of(8) && imm <= 32760);
         let imm12 = (imm / 8) as u32;
@@ -103,7 +103,7 @@ impl Asm {
         self.emit32(insn);
     }
 
-    /// LDR Wt, [Xn, #imm] — 32-bit load, unsigned offset (imm must be multiple of 4).
+    /// LDR Wt, [Xn, #imm] -- 32-bit load, unsigned offset (imm must be multiple of 4).
     fn ldr_w(&mut self, rt: u8, rn: u8, imm: u16) {
         assert!(imm.is_multiple_of(4) && imm <= 16380);
         let imm12 = (imm / 4) as u32;
@@ -111,7 +111,7 @@ impl Asm {
         self.emit32(insn);
     }
 
-    /// LDRH Wt, [Xn, #imm] — 16-bit load, unsigned offset (imm must be multiple of 2).
+    /// LDRH Wt, [Xn, #imm] -- 16-bit load, unsigned offset (imm must be multiple of 2).
     fn ldrh_w(&mut self, rt: u8, rn: u8, imm: u16) {
         assert!(imm.is_multiple_of(2) && imm <= 8190);
         let imm12 = (imm / 2) as u32;
@@ -119,14 +119,14 @@ impl Asm {
         self.emit32(insn);
     }
 
-    /// STRB Wt, [Xn, Xm] — store byte, register offset.
+    /// STRB Wt, [Xn, Xm] -- store byte, register offset.
     fn strb_reg(&mut self, rt: u8, rn: u8, rm: u8) {
         // STRB Wt, [Xn, Xm] = 0x38206800 | Rm<<16 | Rn<<5 | Rt
         let insn = 0x38206800 | ((rm as u32) << 16) | ((rn as u32) << 5) | (rt as u32);
         self.emit32(insn);
     }
 
-    /// STR Wt, [Xn, #imm] — 32-bit store, unsigned offset (imm must be multiple of 4).
+    /// STR Wt, [Xn, #imm] -- 32-bit store, unsigned offset (imm must be multiple of 4).
     fn str_w(&mut self, rt: u8, rn: u8, imm: u16) {
         assert!(imm.is_multiple_of(4) && imm <= 16380);
         let imm12 = (imm / 4) as u32;
@@ -134,32 +134,32 @@ impl Asm {
         self.emit32(insn);
     }
 
-    /// MOV Xd, Xm — register move (alias for ORR Xd, XZR, Xm).
+    /// MOV Xd, Xm -- register move (alias for ORR Xd, XZR, Xm).
     fn mov_x(&mut self, rd: u8, rm: u8) {
         let insn = 0xAA0003E0 | ((rm as u32) << 16) | (rd as u32);
         self.emit32(insn);
     }
 
-    /// MOV Xd, SP — read stack pointer into Xd (ADD Xd, SP, #0).
+    /// MOV Xd, SP -- read stack pointer into Xd (ADD Xd, SP, #0).
     fn mov_x_sp(&mut self, rd: u8) {
         // ADD Xd, SP, #0: 0x910003E0 | Rd
         let insn = 0x910003E0 | (rd as u32);
         self.emit32(insn);
     }
 
-    /// MOVZ Xd, #imm16 — move 16-bit immediate, zero rest.
+    /// MOVZ Xd, #imm16 -- move 16-bit immediate, zero rest.
     fn movz_x(&mut self, rd: u8, imm: u16) {
         let insn = 0xD2800000 | ((imm as u32) << 5) | (rd as u32);
         self.emit32(insn);
     }
 
-    /// MOVZ Wd, #imm16 — 32-bit move immediate, zero rest.
+    /// MOVZ Wd, #imm16 -- 32-bit move immediate, zero rest.
     fn movz_w(&mut self, rd: u8, imm: u16) {
         let insn = 0x52800000 | ((imm as u32) << 5) | (rd as u32);
         self.emit32(insn);
     }
 
-    /// MOVK Xd, #imm16, LSL #shift — move 16-bit immediate into position, keep rest.
+    /// MOVK Xd, #imm16, LSL #shift -- move 16-bit immediate into position, keep rest.
     fn movk_x(&mut self, rd: u8, imm: u16, shift: u8) {
         assert!(shift == 0 || shift == 16 || shift == 32 || shift == 48);
         let hw = (shift / 16) as u32;
@@ -167,7 +167,7 @@ impl Asm {
         self.emit32(insn);
     }
 
-    /// MOVK Wd, #imm16, LSL #shift — 32-bit move keep.
+    /// MOVK Wd, #imm16, LSL #shift -- 32-bit move keep.
     fn movk_w(&mut self, rd: u8, imm: u16, shift: u8) {
         assert!(shift == 0 || shift == 16);
         let hw = (shift / 16) as u32;
@@ -175,25 +175,25 @@ impl Asm {
         self.emit32(insn);
     }
 
-    /// MOVN Xd, #imm16 — move wide with NOT (for loading negative values).
+    /// MOVN Xd, #imm16 -- move wide with NOT (for loading negative values).
     fn movn_x(&mut self, rd: u8, imm: u16) {
         let insn = 0x92800000 | ((imm as u32) << 5) | (rd as u32);
         self.emit32(insn);
     }
 
-    /// CMP Xn, Xm — compare registers (alias for SUBS XZR, Xn, Xm).
+    /// CMP Xn, Xm -- compare registers (alias for SUBS XZR, Xn, Xm).
     fn cmp_x_reg(&mut self, rn: u8, rm: u8) {
         let insn = 0xEB00001F | ((rm as u32) << 16) | ((rn as u32) << 5);
         self.emit32(insn);
     }
 
-    /// CMP Wn, Wm — 32-bit compare registers.
+    /// CMP Wn, Wm -- 32-bit compare registers.
     fn cmp_w_reg(&mut self, rn: u8, rm: u8) {
         let insn = 0x6B00001F | ((rm as u32) << 16) | ((rn as u32) << 5);
         self.emit32(insn);
     }
 
-    /// CMP Xn, #imm12 — compare with unsigned immediate.
+    /// CMP Xn, #imm12 -- compare with unsigned immediate.
     fn cmp_x_imm(&mut self, rn: u8, imm: u16) {
         assert!(imm < 4096);
         // SUBS XZR, Xn, #imm: 0xF100001F | (imm12 << 10) | (Rn << 5)
@@ -201,36 +201,36 @@ impl Asm {
         self.emit32(insn);
     }
 
-    /// NEG Xd, Xn — negate register (alias for SUB Xd, XZR, Xn).
+    /// NEG Xd, Xn -- negate register (alias for SUB Xd, XZR, Xn).
     fn neg_x(&mut self, rd: u8, rn: u8) {
         let insn = 0xCB0003E0 | ((rn as u32) << 16) | (rd as u32);
         self.emit32(insn);
     }
 
-    /// AND Wd, Wn, #imm — 32-bit AND with bitmask immediate.
+    /// AND Wd, Wn, #imm -- 32-bit AND with bitmask immediate.
     /// Only supports the specific pattern 0x00FFFFFF (N=0, immr=0, imms=23 for 32-bit).
     fn and_w_imm_24bit(&mut self, rd: u8, rn: u8) {
         let insn = 0x12005C00 | ((rn as u32) << 5) | (rd as u32);
         self.emit32(insn);
     }
 
-    /// STP Xt1, Xt2, [SP, #-imm]! — store pair, pre-index (push to stack).
+    /// STP Xt1, Xt2, [SP, #-imm]! -- store pair, pre-index (push to stack).
     fn stp_pre(&mut self, rt1: u8, rt2: u8, imm: i16) {
-        assert!(imm % 8 == 0 && imm >= -512 && imm <= 504);
+        assert!(imm % 8 == 0 && (-512..=504).contains(&imm));
         let imm7 = ((imm / 8) as u32) & 0x7F;
         let insn = 0xA9800000 | (imm7 << 15) | ((rt2 as u32) << 10) | (31 << 5) | (rt1 as u32);
         self.emit32(insn);
     }
 
-    /// LDP Xt1, Xt2, [SP], #imm — load pair, post-index (pop from stack).
+    /// LDP Xt1, Xt2, [SP], #imm -- load pair, post-index (pop from stack).
     fn ldp_post(&mut self, rt1: u8, rt2: u8, imm: i16) {
-        assert!(imm % 8 == 0 && imm >= -512 && imm <= 504);
+        assert!(imm % 8 == 0 && (-512..=504).contains(&imm));
         let imm7 = ((imm / 8) as u32) & 0x7F;
         let insn = 0xA8C00000 | (imm7 << 15) | ((rt2 as u32) << 10) | (31 << 5) | (rt1 as u32);
         self.emit32(insn);
     }
 
-    /// SUB SP, SP, #imm — subtract immediate from stack pointer.
+    /// SUB SP, SP, #imm -- subtract immediate from stack pointer.
     fn sub_sp_imm(&mut self, imm: u16) {
         assert!(imm < 4096);
         // SUB SP, SP, #imm: 0xD10003FF | (imm12 << 10)
@@ -238,7 +238,7 @@ impl Asm {
         self.emit32(insn);
     }
 
-    /// ADD SP, SP, #imm — add immediate to stack pointer.
+    /// ADD SP, SP, #imm -- add immediate to stack pointer.
     fn add_sp_imm(&mut self, imm: u16) {
         assert!(imm < 4096);
         // ADD SP, SP, #imm: 0x910003FF | (imm12 << 10)
@@ -246,7 +246,7 @@ impl Asm {
         self.emit32(insn);
     }
 
-    /// ADRP Xd, #0 — placeholder, to be patched by ELF builder with page offset.
+    /// ADRP Xd, #0 -- placeholder, to be patched by ELF builder with page offset.
     fn adrp(&mut self, rd: u8) -> usize {
         let pos = self.pos();
         // ADRP: 1 immlo[30:29] 10000 immhi[23:5] Rd[4:0]
@@ -256,7 +256,7 @@ impl Asm {
         pos
     }
 
-    /// LDR Xt, [Xn, #0] — placeholder for GOT load, offset patched by ELF builder.
+    /// LDR Xt, [Xn, #0] -- placeholder for GOT load, offset patched by ELF builder.
     fn ldr_x_got_placeholder(&mut self, rt: u8, rn: u8) -> usize {
         let pos = self.pos();
         // LDR Xt, [Xn, #0]: 0xF9400000 | (Rn << 5) | Rt, imm12=0
@@ -265,23 +265,23 @@ impl Asm {
         pos
     }
 
-    /// BLR Xn — branch with link to register.
+    /// BLR Xn -- branch with link to register.
     fn blr(&mut self, rn: u8) {
         let insn = 0xD63F0000 | ((rn as u32) << 5);
         self.emit32(insn);
     }
 
-    /// SVC #0 — supervisor call (syscall).
+    /// SVC #0 -- supervisor call (syscall).
     fn svc(&mut self) {
         self.emit32(0xD4000001);
     }
 
-    /// RET — return via X30.
+    /// RET -- return via X30.
     fn ret(&mut self) {
         self.emit32(0xD65F03C0);
     }
 
-    /// B.cond label — conditional branch.
+    /// B.cond label -- conditional branch.
     fn b_cond(&mut self, cond: u8, target: Label) {
         let offset = self.pos();
         let insn = 0x54000000 | (cond as u32);
@@ -293,7 +293,7 @@ impl Asm {
         });
     }
 
-    /// B label — unconditional branch.
+    /// B label -- unconditional branch.
     fn b(&mut self, target: Label) {
         let offset = self.pos();
         self.emit32(0x14000000);
@@ -407,10 +407,10 @@ fn emit_path_match(
     a.cmp_x_reg(X5, X6);
     a.b_cond(COND_NE, check_dev_fd);
 
-    // Matched "/dev/std" — check suffix at path[8]
+    // Matched "/dev/std" -- check suffix at path[8]
     a.ldr_w(X7, path_reg, 8);
 
-    // Check "in\0" — mask to 24 bits
+    // Check "in\0" -- mask to 24 bits
     a.and_w_imm_24bit(X6, X7);
     load_imm32(a, X5, u32::from_le_bytes([b'i', b'n', 0, 0]));
     a.cmp_w_reg(X6, X5);
@@ -437,7 +437,7 @@ fn emit_path_match(
     a.cmp_x_reg(X5, X6);
     a.b_cond(COND_NE, check_proc);
 
-    // Matched "/dev/fd/" — check digit
+    // Matched "/dev/fd/" -- check digit
     a.ldrh_w(X7, path_reg, 8);
 
     load_imm32(a, X5, u32::from(u16::from_le_bytes([b'0', 0])));
@@ -463,7 +463,7 @@ fn emit_path_match(
     a.cmp_x_reg(X5, X6);
     a.b_cond(COND_NE, no_match);
 
-    // Matched "/proc/se" — check suffix
+    // Matched "/proc/se" -- check suffix
     a.ldr_x(X5, path_reg, 8);
 
     load_imm64(a, X6, u64::from_le_bytes(*b"lf/fd/0\0"));
@@ -497,7 +497,7 @@ pub fn generate() -> (Vec<u8>, Vec<elf::Symbol>, Vec<elf::GotFixup>) {
     let ok = a.label();
     let try_readlink = a.label();
     let readlink_no_match = a.label();
-    let no_match_main = a.label(); // for main path matching → falls through to openat
+    let no_match_main = a.label(); // for main path matching -> falls through to openat
 
     // readlink dup labels (need stack cleanup)
     let rl_dup_fd0 = a.label();
@@ -509,9 +509,9 @@ pub fn generate() -> (Vec<u8>, Vec<elf::Symbol>, Vec<elf::GotFixup>) {
     // Rewrite to: x0=AT_FDCWD, x1=path, x2=flags, x3=mode
     let open_offset = a.pos();
 
-    a.mov_x(X3, X2); // mode → 4th arg
-    a.mov_x(X2, X1); // flags → 3rd arg
-    a.mov_x(X1, X0); // path → 2nd arg
+    a.mov_x(X3, X2); // mode -> 4th arg
+    a.mov_x(X2, X1); // flags -> 3rd arg
+    a.mov_x(X1, X0); // path -> 2nd arg
     a.movn_x(X0, 99); // AT_FDCWD = -100 = ~99
     a.b(do_openat);
 
@@ -593,16 +593,16 @@ pub fn generate() -> (Vec<u8>, Vec<elf::Symbol>, Vec<elf::GotFixup>) {
     a.b_cond(COND_GE, readlink_no_match);
 
     // Null-terminate: buf[x0] = 0
-    // Use x4 as scratch for the SP value (we'll restore x4 later if no match)
-    // Actually, let's use x5 as scratch base
-    a.mov_x_sp(X5); // x5 = sp (buf base)
-    a.strb_reg(WZR, X5, X0); // buf[len] = 0
+    // Reuse x4 for the buffer pointer -- the original path is no longer needed
+    // since we'll either dup or return ENXIO from here.
+    // (emit_path_match clobbers x5 as scratch, so path_reg must not be x5)
+    a.mov_x_sp(X4); // x4 = sp (buf base)
+    a.strb_reg(WZR, X4, X0); // buf[len] = 0
 
-    // Point x5 at the buffer for path matching
-    // emit_path_match uses path_reg for loads, so x5 = sp
+    // Path matching on the readlink result
     emit_path_match(
         &mut a,
-        X5,
+        X4,
         rl_dup_fd0,
         rl_dup_fd1,
         rl_dup_fd2,

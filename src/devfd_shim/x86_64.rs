@@ -7,7 +7,7 @@
 //
 // If the real openat returns ENXIO, the shim uses readlinkat to resolve
 // one level of symlink and retries the path matching. This handles cases
-// like nginx opening /var/log/nginx/error.log → /dev/stderr.
+// like nginx opening /var/log/nginx/error.log -> /dev/stderr.
 //
 // On error, errno is set via __errno_location() (imported through the GOT)
 // and -1 is returned per C convention.
@@ -26,10 +26,10 @@
 //   rax = return value
 //
 // openat(int dirfd, const char *path, int flags, mode_t mode)
-//   → rdi=dirfd, rsi=path, rdx=flags, rcx=mode
+//   -> rdi=dirfd, rsi=path, rdx=flags, rcx=mode
 //
 // open(const char *path, int flags, mode_t mode)
-//   → rdi=path, rsi=flags, rdx=mode
+//   -> rdi=path, rsi=flags, rdx=mode
 
 // Syscall numbers
 const SYS_DUP: u8 = 32;
@@ -206,11 +206,11 @@ pub fn generate() -> (Vec<u8>, Vec<elf::Symbol>, Vec<elf::GotFixup>) {
     // We need:  rdi=AT_FDCWD, rsi=path, rdx=flags, rcx=mode
     let open_offset = a.pos();
 
-    // mov rcx, rdx              ; mode → 4th arg
+    // mov rcx, rdx              ; mode -> 4th arg
     a.emit(&[0x48, 0x89, 0xD1]);
-    // mov rdx, rsi              ; flags → 3rd arg
+    // mov rdx, rsi              ; flags -> 3rd arg
     a.emit(&[0x48, 0x89, 0xF2]);
-    // mov rsi, rdi              ; path → 2nd arg
+    // mov rsi, rdi              ; path -> 2nd arg
     a.emit(&[0x48, 0x89, 0xFE]);
     // mov edi, AT_FDCWD         ; dirfd = AT_FDCWD
     a.emit(&[0xBF]);
@@ -225,7 +225,7 @@ pub fn generate() -> (Vec<u8>, Vec<elf::Symbol>, Vec<elf::GotFixup>) {
 
     // Save arguments for the fallthrough case.
     // The syscall ABI uses r10 for the 4th arg (not rcx).
-    // mov r10, rcx              ; mode → r10 (for syscall later)
+    // mov r10, rcx              ; mode -> r10 (for syscall later)
     a.emit(&[0x49, 0x89, 0xCA]);
 
     // Load first 8 bytes of path for prefix matching.
@@ -241,11 +241,11 @@ pub fn generate() -> (Vec<u8>, Vec<elf::Symbol>, Vec<elf::GotFixup>) {
     // jne check_dev_fd
     a.jcc_near(0x75, check_dev_fd);
 
-    // Matched "/dev/std" — check suffix at path[8].
+    // Matched "/dev/std" -- check suffix at path[8].
     // mov eax, [rsi+8]          ; eax = *(uint32_t*)(path+8)
     a.emit(&[0x8B, 0x46, 0x08]);
 
-    // Check "in\0" — only need 3 bytes. Mask to 24 bits.
+    // Check "in\0" -- only need 3 bytes. Mask to 24 bits.
     // mov ecx, eax
     a.emit(&[0x89, 0xC1]);
     // and ecx, 0x00FFFFFF
@@ -271,7 +271,7 @@ pub fn generate() -> (Vec<u8>, Vec<elf::Symbol>, Vec<elf::GotFixup>) {
     // je dup_fd2
     a.jcc_near(0x74, dup_fd2);
 
-    // No suffix match — fall through to real openat
+    // No suffix match -- fall through to real openat
     a.jmp_near(fallthrough);
 
     // ---- Check "/dev/fd/" prefix (8 bytes) ----
@@ -289,7 +289,7 @@ pub fn generate() -> (Vec<u8>, Vec<elf::Symbol>, Vec<elf::GotFixup>) {
     // jne check_proc
     a.jcc_near(0x75, check_proc);
 
-    // Matched "/dev/fd/" — check path[8..10] for "0\0", "1\0", "2\0"
+    // Matched "/dev/fd/" -- check path[8..10] for "0\0", "1\0", "2\0"
     // movzx eax, word [rsi+8]   ; load 2 bytes
     a.emit(&[0x0F, 0xB7, 0x46, 0x08]);
 
@@ -325,7 +325,7 @@ pub fn generate() -> (Vec<u8>, Vec<elf::Symbol>, Vec<elf::GotFixup>) {
     // jne fallthrough
     a.jcc_near(0x75, fallthrough);
 
-    // Matched "/proc/se" — check suffix "lf/fd/0\0" (8 bytes) at path[8]
+    // Matched "/proc/se" -- check suffix "lf/fd/0\0" (8 bytes) at path[8]
     // mov rax, [rsi+8]
     a.emit(&[0x48, 0x8B, 0x46, 0x08]);
 
@@ -395,7 +395,7 @@ pub fn generate() -> (Vec<u8>, Vec<elf::Symbol>, Vec<elf::GotFixup>) {
     a.emit(&[(-6i8) as u8]); // -6 = 0xFA
     // je try_readlink
     a.jcc_near(0x74, try_readlink);
-    // Not ENXIO — fall through to errno_check
+    // Not ENXIO -- fall through to errno_check
     a.jmp_near(errno_check);
 
     // ========== try_readlink: resolve symlink and retry matching ==========
@@ -419,7 +419,7 @@ pub fn generate() -> (Vec<u8>, Vec<elf::Symbol>, Vec<elf::GotFixup>) {
     // syscall
     a.emit(&[0x0F, 0x05]);
 
-    // Check result: if negative, readlink failed → return ENXIO
+    // Check result: if negative, readlink failed -> return ENXIO
     // test rax, rax
     a.emit(&[0x48, 0x85, 0xC0]);
     // js readlink_no_match       ; negative = error
@@ -451,14 +451,14 @@ pub fn generate() -> (Vec<u8>, Vec<elf::Symbol>, Vec<elf::GotFixup>) {
     a.emit(&[0x48, 0x39, 0xC8]);
     a.jcc_near(0x75, rl_check_dev_fd);
 
-    // Matched "/dev/std" — check suffix
+    // Matched "/dev/std" -- check suffix
     a.emit(&[0x8B, 0x46, 0x08]); // mov eax, [rsi+8]
     a.emit(&[0x89, 0xC1]); // mov ecx, eax
     a.emit(&[0x81, 0xE1]); // and ecx, 0x00FFFFFF
     a.emit(&0x00FFFFFFu32.to_le_bytes());
     a.emit(&[0x81, 0xF9]); // cmp ecx, "in\0"
     a.emit(&u32::from_le_bytes([b'i', b'n', 0, 0]).to_le_bytes());
-    // je → need to deallocate stack and dup fd 0
+    // je -> need to deallocate stack and dup fd 0
     // Since we need to clean up the stack, we can't just jump to dup_fd0.
     // We'll use a pattern: set edi to the fd, add rsp, jmp do_dup
     let rl_dup0 = a.label();
@@ -484,7 +484,7 @@ pub fn generate() -> (Vec<u8>, Vec<elf::Symbol>, Vec<elf::GotFixup>) {
     a.emit(&[0x48, 0x39, 0xC8]); // cmp rax, rcx
     a.jcc_near(0x75, rl_check_proc);
 
-    // Matched "/dev/fd/" — check digit
+    // Matched "/dev/fd/" -- check digit
     a.emit(&[0x0F, 0xB7, 0x46, 0x08]); // movzx eax, word [rsi+8]
 
     a.emit(&[0x66, 0x3D]); // cmp ax, "0\0"
@@ -509,7 +509,7 @@ pub fn generate() -> (Vec<u8>, Vec<elf::Symbol>, Vec<elf::GotFixup>) {
     a.emit(&[0x48, 0x39, 0xC8]); // cmp rax, rcx
     a.jcc_near(0x75, readlink_no_match);
 
-    // Matched "/proc/se" — check suffix
+    // Matched "/proc/se" -- check suffix
     a.emit(&[0x48, 0x8B, 0x46, 0x08]); // mov rax, [rsi+8]
 
     a.emit(&[0x48, 0xB9]);
