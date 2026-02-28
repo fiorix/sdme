@@ -50,17 +50,17 @@ real `open()`. All other paths fall through to the real `openat` syscall.
 
 The intercepted paths are:
 
-| Path | Result |
-|------|--------|
-| `/dev/stdin` | `dup(0)` |
-| `/dev/stdout` | `dup(1)` |
-| `/dev/stderr` | `dup(2)` |
-| `/dev/fd/0` | `dup(0)` |
-| `/dev/fd/1` | `dup(1)` |
-| `/dev/fd/2` | `dup(2)` |
-| `/proc/self/fd/0` | `dup(0)` |
-| `/proc/self/fd/1` | `dup(1)` |
-| `/proc/self/fd/2` | `dup(2)` |
+| Path               | Result   |
+|--------------------|----------|
+| `/dev/stdin`       | `dup(0)` |
+| `/dev/stdout`      | `dup(1)` |
+| `/dev/stderr`      | `dup(2)` |
+| `/dev/fd/0`        | `dup(0)` |
+| `/dev/fd/1`        | `dup(1)` |
+| `/dev/fd/2`        | `dup(2)` |
+| `/proc/self/fd/0`  | `dup(0)` |
+| `/proc/self/fd/1`  | `dup(1)` |
+| `/proc/self/fd/2`  | `dup(2)` |
 
 The `dup()` call returns a new file descriptor that refers to the same
 underlying kernel object (the journal socket). Since `write()` on a socket fd
@@ -79,10 +79,10 @@ that they can close without affecting the original.
 
 The shared library is generated at import time matching the host architecture:
 
-| Architecture | Syscall ABI | Binary Size |
-|---|---|---|
-| x86_64 | `syscall` instruction, rax=nr | ~4 KiB |
-| aarch64 | `svc #0` instruction, x8=nr | ~4 KiB |
+| Architecture | Syscall ABI                   | Binary Size |
+|--------------|-------------------------------|-------------|
+| x86_64       | `syscall` instruction, rax=nr | ~4 KiB      |
+| aarch64      | `svc #0` instruction, x8=nr   | ~4 KiB      |
 
 The binaries are generated purely in Rust (no assembler, no external tools,
 no libc) by the `src/devfd_shim/` module.
@@ -183,12 +183,12 @@ approximately 4 KiB.
 
 The module structure follows the same pattern as `drop_privs`:
 
-| File | Purpose |
-|------|---------|
-| `src/devfd_shim/mod.rs` | Public API: `generate(Arch) -> Vec<u8>` |
-| `src/devfd_shim/elf.rs` | ET_DYN ELF builder with SysV hash table |
-| `src/devfd_shim/x86_64.rs` | x86_64 machine code emitter |
-| `src/devfd_shim/aarch64.rs` | AArch64 machine code emitter |
+| File                        | Purpose                                  |
+|-----------------------------|------------------------------------------|
+| `src/devfd_shim/mod.rs`     | Public API: `generate(Arch) -> Vec<u8>`  |
+| `src/devfd_shim/elf.rs`     | ET_DYN ELF builder with SysV hash table  |
+| `src/devfd_shim/x86_64.rs`  | x86_64 machine code emitter              |
+| `src/devfd_shim/aarch64.rs` | AArch64 machine code emitter             |
 
 Both architecture modules use their own `Asm` struct with a label/fixup system
 tailored to the ISA (x86_64 uses rel8/rel32 fixups for variable-length

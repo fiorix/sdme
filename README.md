@@ -9,7 +9,7 @@ Download a static binary from [fiorix.github.io/sdme](https://fiorix.github.io/s
 Runs on Linux with systemd. Uses kernel overlayfs for copy-on-write storage. By default, containers are overlayfs clones of `/` but you can also import rootfs from other distros (Ubuntu, Debian, Fedora, NixOS; see [docs/nix](docs/nix/)).
 
 **Why does this even exist?**
-Here's my pitch: from a linux system with just systemd and sdme, you can create and run any container and cloud image that exists today. 1 binary.
+Here's my pitch: from a linux system with just systemd and sdme, you can create and run any container and cloud image that exists today.
 
 Check out the [sdme architecture](docs/architecture.md) for details about what this is and how it works. The containers we create are booted systemd containers.
 
@@ -54,13 +54,13 @@ sdme can also run OCI application images (nginx, mysql, etc.) as systemd service
 
 ### Runtime
 
-| Program | Package | Required for |
-|---------|---------|--------------|
-| `systemd` (>= 252) | `systemd` | All commands (D-Bus communication) |
-| `systemd-nspawn` | `systemd-container` | Running containers (`sdme start`) |
-| `machinectl` | `systemd-container` | `sdme join`, `sdme exec`, `sdme new` |
-| `journalctl` | `systemd` | `sdme logs` |
-| `qemu-nbd` | `qemu-utils` | `sdme fs import` (QCOW2 images only) |
+| Program              | Package              | Required for                          |
+|----------------------|----------------------|---------------------------------------|
+| `systemd` (>= 252)   | `systemd`            | All commands (D-Bus communication)    |
+| `systemd-nspawn`     | `systemd-container`  | Running containers (`sdme start`)     |
+| `machinectl`         | `systemd-container`  | `sdme join`, `sdme exec`, `sdme new`  |
+| `journalctl`         | `systemd`            | `sdme logs`                           |
+| `qemu-nbd`           | `qemu-utils`         | `sdme fs import` (QCOW2 images only)  |
 
 ### Install all dependencies (Debian/Ubuntu)
 

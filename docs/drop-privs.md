@@ -44,10 +44,10 @@ Each syscall is checked for errors. On failure, a diagnostic message is written 
 
 The ELF binary is generated at import time matching the host architecture:
 
-| Architecture | Syscall ABI | Binary Size |
-|---|---|---|
-| x86_64 | `syscall` instruction, rax=nr | < 1 KiB |
-| aarch64 | `svc #0` instruction, x8=nr | < 1 KiB |
+| Architecture | Syscall ABI                   | Binary Size |
+|--------------|-------------------------------|-------------|
+| x86_64       | `syscall` instruction, rax=nr | < 1 KiB     |
+| aarch64      | `svc #0` instruction, x8=nr   | < 1 KiB     |
 
 The binaries are generated purely in Rust (no assembler, no external tools) by the `src/drop_privs/` module.
 
@@ -105,10 +105,10 @@ The privilege-dropping sequence is designed to be irreversible:
 
 The OCI `User` field supports several formats:
 
-| Format | Behavior |
-|---|---|
-| `""`, `"root"`, `"0"` | Root; uses standard `User=root` |
-| `"name"` | Resolved via `etc/passwd` in OCI rootfs |
-| `"uid"` | Used directly; primary GID from `etc/passwd` if found, else gid=uid |
-| `"name:group"` | User from `etc/passwd`, group from `etc/group` |
-| `"uid:gid"` | Both used directly |
+| Format                 | Behavior                                                            |
+|------------------------|---------------------------------------------------------------------|
+| `""`, `"root"`, `"0"`  | Root; uses standard `User=root`                                     |
+| `"name"`               | Resolved via `etc/passwd` in OCI rootfs                             |
+| `"uid"`                | Used directly; primary GID from `etc/passwd` if found, else gid=uid |
+| `"name:group"`         | User from `etc/passwd`, group from `etc/group`                      |
+| `"uid:gid"`            | Both used directly                                                  |

@@ -285,12 +285,12 @@ friends.
 **Compression auto-detection** uses magic bytes rather than file extensions.
 The first few bytes of a file reveal its compression format:
 
-| Magic bytes         | Format |
-|---------------------|--------|
-| `1f 8b`             | gzip   |
-| `BZh`               | bzip2  |
-| `fd 37 7a 58 5a 00` | xz     |
-| `28 b5 2f fd`       | zstd   |
+| Magic bytes            | Format |
+|------------------------|--------|
+| `1f 8b`                | gzip   |
+| `BZh`                  | bzip2  |
+| `fd 37 7a 58 5a 00`   | xz     |
+| `28 b5 2f fd`          | zstd   |
 
 This means `sdme fs import ubuntu rootfs.tar.zst` works even if the file is
 named `rootfs.tar`, because the content, not the name, determines the decompressor.
@@ -578,11 +578,11 @@ specs are validated for format (`HOST:CONTAINER[/PROTO]`) and range (1-65535).
 
 sdme exposes three cgroup-based resource controls:
 
-| Flag                      | systemd property | Example                                 |
-|---------------------------|------------------|-----------------------------------------|
-| `--memory <size>`         | `MemoryMax=`     | `--memory 2G`                           |
-| `--cpus <count>`          | `CPUQuota=`      | `--cpus 0.5` (50%), `--cpus 2` (200%)   |
-| `--cpu-weight <1-10000>`  | `CPUWeight=`     | `--cpu-weight 100`                      |
+| Flag                     | systemd property | Example                                |
+|--------------------------|------------------|----------------------------------------|
+| `--memory <size>`        | `MemoryMax=`     | `--memory 2G`                          |
+| `--cpus <count>`         | `CPUQuota=`      | `--cpus 0.5` (50%), `--cpus 2` (200%) |
+| `--cpu-weight <1-10000>` | `CPUWeight=`     | `--cpu-weight 100`                     |
 
 These flags are available on `sdme create`, `sdme new`, and `sdme set`. They
 are applied via a systemd drop-in file (`limits.conf`) installed alongside the
@@ -618,13 +618,13 @@ pipe-separated) and reconstituted into nspawn arguments on every start.
 
 sdme stores its settings in a TOML file at `~/.config/sdme/sdmerc`:
 
-| Setting                    | Default                        | Description                                                            |
-|----------------------------|--------------------------------|------------------------------------------------------------------------|
-| `interactive`              | `true`                         | Enable interactive prompts                                             |
-| `datadir`                  | `/var/lib/sdme`                | Root directory for all container and rootfs data                       |
-| `boot_timeout`             | `60`                           | Seconds to wait for container boot before giving up                    |
-| `join_as_sudo_user`        | `true`                         | Join host-rootfs containers as `$SUDO_USER` instead of root            |
-| `host_rootfs_opaque_dirs`  | `/etc/systemd/system,/var/log` | Default opaque dirs for host-rootfs containers (empty string disables) |
+| Setting                   | Default                        | Description                                                            |
+|---------------------------|--------------------------------|------------------------------------------------------------------------|
+| `interactive`             | `true`                         | Enable interactive prompts                                             |
+| `datadir`                 | `/var/lib/sdme`                | Root directory for all container and rootfs data                       |
+| `boot_timeout`            | `60`                           | Seconds to wait for container boot before giving up                    |
+| `join_as_sudo_user`       | `true`                         | Join host-rootfs containers as `$SUDO_USER` instead of root            |
+| `host_rootfs_opaque_dirs` | `/etc/systemd/system,/var/log` | Default opaque dirs for host-rootfs containers (empty string disables) |
 
 Settings are read with `sdme config get` and written with `sdme config set <key> <value>`.
 

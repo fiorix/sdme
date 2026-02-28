@@ -33,12 +33,12 @@ A systemd service unit (`sdme-oci-app.service`) is generated that chroots into
 
 The `--oci-mode` flag lets you override auto-detection:
 
-| Flag | Behavior |
-|------|----------|
-| `--oci-mode=auto` | Auto-detect from image config (default) |
-| `--oci-mode=base` | Force base OS mode |
-| `--oci-mode=app` | Force application mode (requires `--base-fs`) |
-| `--oci-mode=connector` | Force connector mode (requires `--base-fs`) |
+| Flag                   | Behavior                                      |
+|------------------------|-----------------------------------------------|
+| `--oci-mode=auto`      | Auto-detect from image config (default)        |
+| `--oci-mode=base`      | Force base OS mode                             |
+| `--oci-mode=app`       | Force application mode (requires `--base-fs`)  |
+| `--oci-mode=connector` | Force connector mode (requires `--base-fs`)    |
 
 ## How it works
 
