@@ -345,6 +345,7 @@ pub fn build(
         limits: crate::ResourceLimits::default(),
         network: crate::NetworkConfig::default(),
         opaque_dirs: vec![],
+        pod: None,
         oci_pod: None,
         binds: crate::BindConfig::default(),
         envs: crate::EnvConfig::default(),

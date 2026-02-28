@@ -27,6 +27,7 @@ pub struct CreateOptions {
     pub limits: ResourceLimits,
     pub network: NetworkConfig,
     pub opaque_dirs: Vec<String>,
+    pub pod: Option<String>,
     pub oci_pod: Option<String>,
     pub binds: BindConfig,
     pub envs: EnvConfig,
@@ -285,8 +286,29 @@ fn do_create(
     opts.network.write_to_state(&mut state);
     opts.binds.write_to_state(&mut state);
     opts.envs.write_to_state(&mut state);
+    if let Some(pod) = &opts.pod {
+        state.set("POD", pod.as_str());
+    }
     if let Some(pod) = &opts.oci_pod {
         state.set("OCI_POD", pod.as_str());
+
+        // Write a systemd drop-in inside the overlayfs upper layer so the
+        // sdme-oci-app.service runs in the pod's network namespace.
+        // At start time, the pod's netns is bind-mounted into the container
+        // at /run/sdme/oci-pod-netns via --bind-ro=.
+        let dropin_dir = container_dir
+            .join("upper/etc/systemd/system/sdme-oci-app.service.d");
+        fs::create_dir_all(&dropin_dir)
+            .with_context(|| format!("failed to create {}", dropin_dir.display()))?;
+        let dropin_path = dropin_dir.join("oci-pod-netns.conf");
+        fs::write(
+            &dropin_path,
+            "[Service]\nNetworkNamespacePath=/run/sdme/oci-pod-netns\n",
+        )
+        .with_context(|| format!("failed to write {}", dropin_path.display()))?;
+        if verbose {
+            eprintln!("wrote oci-pod netns drop-in: {}", dropin_path.display());
+        }
     }
     if !opaque_dirs.is_empty() {
         state.set("OPAQUE_DIRS", opaque_dirs.join(","));
@@ -550,6 +572,7 @@ pub struct ContainerInfo {
     pub health: String,
     pub os: String,
     pub shared: PathBuf,
+    pub pod: String,
     pub oci_pod: String,
 }
 
@@ -625,6 +648,11 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
             "stopped"
         };
 
+        let pod = match &state {
+            Ok(s) => s.get("POD").unwrap_or("").to_string(),
+            Err(_) => String::new(),
+        };
+
         let oci_pod = match &state {
             Ok(s) => s.get("OCI_POD").unwrap_or("").to_string(),
             Err(_) => String::new(),
@@ -636,6 +664,7 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
             health,
             os,
             shared,
+            pod,
             oci_pod,
         });
     }
@@ -862,6 +891,7 @@ mod tests {
             limits: Default::default(),
             network: Default::default(),
             opaque_dirs: vec![],
+            pod: None,
             oci_pod: None,
             binds: Default::default(),
             envs: Default::default(),
@@ -903,6 +933,7 @@ mod tests {
             limits: Default::default(),
             network: Default::default(),
             opaque_dirs: vec![],
+            pod: None,
             oci_pod: None,
             binds: Default::default(),
             envs: Default::default(),
@@ -931,6 +962,7 @@ mod tests {
             limits: Default::default(),
             network: Default::default(),
             opaque_dirs: vec![],
+            pod: None,
             oci_pod: None,
             binds: Default::default(),
             envs: Default::default(),
@@ -952,6 +984,7 @@ mod tests {
             limits: Default::default(),
             network: Default::default(),
             opaque_dirs: vec![],
+            pod: None,
             oci_pod: None,
             binds: Default::default(),
             envs: Default::default(),
@@ -975,6 +1008,7 @@ mod tests {
             limits: Default::default(),
             network: Default::default(),
             opaque_dirs: vec![],
+            pod: None,
             oci_pod: None,
             binds: Default::default(),
             envs: Default::default(),
@@ -999,6 +1033,7 @@ mod tests {
             limits: Default::default(),
             network: Default::default(),
             opaque_dirs: vec![],
+            pod: None,
             oci_pod: None,
             binds: Default::default(),
             envs: Default::default(),
@@ -1019,6 +1054,7 @@ mod tests {
             limits: Default::default(),
             network: Default::default(),
             opaque_dirs: vec![],
+            pod: None,
             oci_pod: None,
             binds: Default::default(),
             envs: Default::default(),
@@ -1124,6 +1160,7 @@ mod tests {
             limits,
             network: Default::default(),
             opaque_dirs: vec![],
+            pod: None,
             oci_pod: None,
             binds: Default::default(),
             envs: Default::default(),
@@ -1148,6 +1185,7 @@ mod tests {
             limits: Default::default(),
             network: Default::default(),
             opaque_dirs: vec![],
+            pod: None,
             oci_pod: None,
             binds: Default::default(),
             envs: Default::default(),
@@ -1230,6 +1268,7 @@ mod tests {
             limits: Default::default(),
             network: Default::default(),
             opaque_dirs: vec!["/var".to_string(), "/opt/data".to_string()],
+            pod: None,
             oci_pod: None,
             binds: Default::default(),
             envs: Default::default(),
@@ -1279,6 +1318,7 @@ mod tests {
             limits: Default::default(),
             network: Default::default(),
             opaque_dirs: vec!["/var".to_string(), "/opt".to_string()],
+            pod: None,
             oci_pod: None,
             binds: Default::default(),
             envs: Default::default(),

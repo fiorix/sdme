@@ -52,7 +52,7 @@ The project is a single Rust binary (`src/main.rs`) backed by a shared library (
 | `sdme exec` | Run a one-off command in a running container (`machinectl shell`) |
 | `sdme stop` | Graceful shutdown via `SIGRTMIN+4` (default), `--term` for terminate, `--kill` for force-kill |
 | `sdme rm` | Remove containers (stops if running, deletes state + files) |
-| `sdme ps` | List containers with status, health, OS, OCI pod (if any), and shared directory |
+| `sdme ps` | List containers with status, health, OS, pod/OCI-pod (if any), and shared directory |
 | `sdme logs` | View container logs (exec's `journalctl`) |
 | `sdme fs import` | Import a rootfs from a directory, tarball, URL, OCI image, or QCOW2 disk image |
 | `sdme fs ls` | List imported root filesystems |
@@ -60,9 +60,9 @@ The project is a single Rust binary (`src/main.rs`) backed by a shared library (
 | `sdme fs build` | Build a root filesystem from a build config |
 | `sdme set` | Set resource limits on a container (replaces all limits) |
 | `sdme config get/set` | View or modify configuration |
-| `sdme oci-pod new` | Create a new OCI pod (shared network namespace) |
-| `sdme oci-pod ls` | List OCI pods |
-| `sdme oci-pod rm` | Remove OCI pods |
+| `sdme pod new` | Create a new pod (shared network namespace) |
+| `sdme pod ls` | List pods |
+| `sdme pod rm` | Remove pods |
 | `sdme completions` | Generate shell completions (Bash, Fish, Zsh) |
 
 ### Key Modules
@@ -87,7 +87,7 @@ The project is a single Rust binary (`src/main.rs`) backed by a shared library (
 | `src/copy.rs` | Filesystem tree copying with xattr and special file support |
 | `src/mounts.rs` | Bind mount (`BindConfig`) and environment variable (`EnvConfig`) configuration |
 | `src/network.rs` | Network configuration validation and state serialization |
-| `src/oci_pod.rs` | OCI pod (shared network namespace) lifecycle: create, list, remove, runtime netns management |
+| `src/pod.rs` | Pod (shared network namespace) lifecycle: create, list, remove, runtime netns management |
 | `src/drop_privs/` | Privilege dropping via minimal static ELF binaries (x86_64 and aarch64 machine code emitters, ELF header construction) |
 
 ### Rust Dependencies
@@ -132,7 +132,7 @@ Dependencies are checked at runtime before use via `system_check::check_dependen
 - **Umask check**: `containers::create()` refuses to proceed when the process umask strips read or execute from "other" (`umask & 005 != 0`). A restrictive umask causes files in the overlayfs upper layer to be inaccessible to non-root services (e.g. dbus-daemon as `messagebus`), preventing boot.
 - **Bind mounts and env vars**: `-b`/`--bind` and `-e`/`--env` on `create`/`new` add custom bind mounts and environment variables. Stored in the state file and converted to systemd-nspawn flags at start time. Bind mounts validated (absolute paths, no `..`). Managed by `BindConfig` and `EnvConfig` in `src/mounts.rs`.
 - **OCI registry pulling**: supports pulling from OCI registries (e.g. `docker.io/ubuntu:24.04`). Implements the OCI Distribution Spec in `src/import/registry.rs`; resolves tags to manifests, matches architecture, downloads and extracts layers. Supports `--oci-mode` and `--base-fs` for running OCI app images as systemd services.
-- **OCI pods**: `sdme oci-pod new` creates a shared network namespace (loopback only) that multiple OCI app containers can join via `--oci-pod` on `create`/`new`. The pod netns is created with `unshare(CLONE_NEWNET)` and bind-mounted to `/run/sdme/oci-pods/{name}`. Persistent state lives at `{datadir}/oci-pods/{name}`. At container start, `--network-namespace-path=` is passed to systemd-nspawn so the entire container runs in the pod's netns. Mutually exclusive with `--private-network`. Requires an OCI app rootfs (`sdme-oci-app.service` must exist in the rootfs).
+- **Pods**: `sdme pod new` creates a shared network namespace (loopback only) that multiple containers can join. The pod netns is created with `unshare(CLONE_NEWNET)` and bind-mounted to `/run/sdme/pods/{name}/netns`. Persistent state lives at `{datadir}/pods/{name}/state`. Two join mechanisms: `--pod` puts the entire nspawn container in the pod's netns via `--network-namespace-path=` (mutually exclusive with `--private-network`); `--oci-pod` bind-mounts the pod's netns into the container and uses an inner systemd drop-in (`NetworkNamespacePath=`) so only the OCI app service process enters the pod's netns (requires an OCI app rootfs with `sdme-oci-app.service`). Both flags can be combined on the same container. Container state stores `POD` and/or `OCI_POD` keys. Pod removal checks both keys.
 - **Interrupt handling**: a global `INTERRUPTED` flag (`src/lib.rs`) set by a POSIX `SIGINT` handler (installed without `SA_RESTART`). Import loops, boot-wait loops, and build operations check it for clean Ctrl+C cancellation. Second Ctrl+C force-kills the process. Cleanup paths (e.g. container removal after boot failure in `sdme new`) call `reset_interrupt()` to clear the flag and re-install the handler, ensuring cleanup code that also checks `check_interrupted()` is not short-circuited by a prior Ctrl+C.
 - **Build COPY restrictions**: `sdme fs build` COPY writes to the overlayfs upper layer while stopped. Destinations under tmpfs-mounted dirs (`/tmp`, `/run`, `/dev/shm`) or opaque dirs are rejected. Validation in `check_shadowed_dest()` (`src/build.rs`); errors include config file path and line number.
 - **Boot failure cleanup**: `sdme new` removes the just-created container on boot failure, join failure, or Ctrl+C. `sdme start` stops the container on boot failure or Ctrl+C (preserving it on disk for debugging). Both reset the interrupt flag before cleanup so that the stop/remove operations (which internally call `check_interrupted()`) can complete.

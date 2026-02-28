@@ -144,21 +144,23 @@ configurable via `sdme config set datadir <path>`):
   |   |-- fedora/
   |   |-- nginx/               # OCI app rootfs
   |   +-- .ubuntu.meta         # distro metadata
-  +-- oci-pods/
-      +-- my-pod               # KEY=VALUE pod state (CREATED=...)
+  +-- pods/
+      +-- my-pod/
+          +-- state            # KEY=VALUE pod state (CREATED=...)
 ```
 
-OCI pod runtime state (volatile, recreated after reboot):
+Pod runtime state (volatile, recreated after reboot):
 
 ```
-  /run/sdme/oci-pods/
-  +-- my-pod                   # bind-mount of the pod's netns fd
+  /run/sdme/pods/
+  +-- my-pod/
+      +-- netns                # bind-mount of the pod's netns fd
 ```
 
 **State files** are flat KEY=VALUE text files under `state/`. They record
 everything about a container: name, rootfs, creation timestamp, resource limits,
 network configuration, bind mounts, environment variables, opaque directories,
-and OCI pod membership (`OCI_POD`).
+and pod membership (`POD` and/or `OCI_POD`).
 The format is intentionally simple: readable with `cat`, parseable with `grep`,
 editable with `sed` in an emergency. The `State` type in the code uses a
 `BTreeMap<String, String>` for deterministic key ordering.
@@ -537,72 +539,99 @@ and written into the per-container nspawn drop-in at start time.
 Bridge and zone names are validated (alphanumeric, hyphens, underscores). Port
 specs are validated for format (`HOST:CONTAINER[/PROTO]`) and range (1-65535).
 
-## 10. OCI Pods
+## 10. Pods
 
-OCI pods give multiple OCI app containers a shared network namespace so they
-can reach each other on localhost. The pattern is the same as Kubernetes pods:
-one network namespace, multiple containers.
+Pods give multiple containers a shared network namespace so they can reach
+each other on localhost. The pattern is the same as Kubernetes pods: one
+network namespace, multiple containers.
+
+There are two mechanisms for joining a pod, serving different use cases:
+
+**`--pod` (whole-container):** The entire nspawn container runs in the pod's
+network namespace. All processes (init, services, everything) share the pod's
+network stack. This is the general-purpose option for any container type.
+
+**`--oci-pod` (OCI app only):** The pod's netns is bind-mounted into the
+container and only the OCI app service process enters it via a systemd
+`NetworkNamespacePath=` drop-in. The container's init and other services
+remain in their own network namespace. This is for OCI app containers that
+need pod networking for their application process but want systemd's own
+networking to remain independent. Requires an OCI app rootfs.
+
+Both flags can be combined on the same container (e.g. `--pod=X --oci-pod=Y`
+with different pods).
 
 ```
+  --pod (whole container in pod netns):
+
   +------------------------------------------------------+
   |                     HOST SYSTEM                      |
   |         kernel . systemd . D-Bus . machined          |
   |                                                      |
-  |   /run/sdme/oci-pods/my-pod  (netns bind-mount)      |
+  |   /run/sdme/pods/my-pod/netns  (netns bind-mount)    |
   |          |                                           |
   |          |  +-- loopback only (127.0.0.1) --+        |
   |          |  |                               |        |
   |    +-----+----------+   +------------------+--+      |
   |    | container A     |   | container B        |      |
-  |    | (nginx :8080)   |   | (app :3000)        |      |
+  |    | (db :5432)      |   | (app :8080)        |      |
   |    | nspawn --network|   | nspawn --network   |      |
   |    |  -namespace-    |   |  -namespace-       |      |
   |    |  path=pod-netns |   |  path=pod-netns    |      |
   |    +-----------------+   +--------------------+      |
   +------------------------------------------------------+
 
-  Both containers see 127.0.0.1:8080 (nginx) and
-  127.0.0.1:3000 (app) because they share the netns.
+  Both containers see 127.0.0.1:5432 (db) and
+  127.0.0.1:8080 (app) because they share the netns.
 ```
 
 ### Lifecycle
 
-`sdme oci-pod new <name>` creates the pod:
+`sdme pod new <name>` creates the pod:
 
 1. Validates the name (same rules as container names).
 2. Calls `unshare(CLONE_NEWNET)` to create a new network namespace.
 3. Brings up the loopback interface (`ioctl SIOCSIFFLAGS IFF_UP`).
-4. Bind-mounts `/proc/self/ns/net` to `/run/sdme/oci-pods/<name>`.
+4. Bind-mounts `/proc/self/ns/net` to `/run/sdme/pods/<name>/netns`.
 5. Restores the original network namespace via `setns()`.
-6. Writes a persistent state file at `{datadir}/oci-pods/<name>`.
+6. Writes a persistent state file at `{datadir}/pods/<name>/state`.
 
 The runtime bind-mount under `/run` is volatile and disappears on reboot.
 When a container referencing a pod is started, `ensure_runtime()` checks
 whether the bind-mount still exists and recreates the netns if needed.
 
-`sdme oci-pod ls` lists all pods with their active/inactive status.
+`sdme pod ls` lists all pods with their active/inactive status.
 
-`sdme oci-pod rm <name>` unmounts the netns, removes the runtime file, and
-deletes the persistent state. Removal is refused if any container still
-references the pod (override with `--force`).
+`sdme pod rm <name>` unmounts the netns, removes the runtime directory, and
+deletes the persistent state directory. Removal is refused if any container
+still references the pod via `POD` or `OCI_POD` keys (override with `--force`).
 
 ### Container integration
 
-Containers join a pod at creation time via `--oci-pod=<name>` on `sdme create`
-or `sdme new`. This flag:
+**`--pod=<name>`** on `sdme create` or `sdme new`:
+
+- Works with any container type (host-rootfs or imported rootfs).
+- Is mutually exclusive with `--private-network`.
+- Stores `POD=<name>` in the container's state file.
+- At start time, the nspawn drop-in includes
+  `--network-namespace-path=/run/sdme/pods/<name>/netns`, which makes the
+  entire container (including init and all services) run inside the pod's
+  network namespace.
+
+**`--oci-pod=<name>`** on `sdme create` or `sdme new`:
 
 - Requires an OCI app rootfs (`sdme-oci-app.service` must exist in the rootfs).
-- Is mutually exclusive with `--private-network`.
 - Stores `OCI_POD=<name>` in the container's state file.
+- At create time, writes a systemd drop-in inside the overlayfs upper layer at
+  `upper/etc/systemd/system/sdme-oci-app.service.d/oci-pod-netns.conf` with
+  `NetworkNamespacePath=/run/sdme/oci-pod-netns`.
+- At start time, the nspawn drop-in includes
+  `--bind-ro=/run/sdme/pods/<name>/netns:/run/sdme/oci-pod-netns`, which
+  makes the pod's netns available inside the container. The inner drop-in
+  makes only the OCI app service process enter the pod's netns.
 
-At start time, the nspawn drop-in includes
-`--network-namespace-path=/run/sdme/oci-pods/<name>`, which makes the
-entire container (including its init and all services) run inside the pod's
-network namespace. No inner drop-in or per-service `NetworkNamespacePath=`
-is needed because nspawn itself enters the netns before starting the
-container's init.
-
-`sdme ps` shows an OCI-POD column when any container belongs to a pod.
+`sdme ps` shows a POD column when any container has a `--pod` assignment,
+and an OCI-POD column when any container has an `--oci-pod` assignment.
 
 ### Isolation properties
 
