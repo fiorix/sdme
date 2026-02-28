@@ -343,18 +343,21 @@ mod dbus {
     /// After `wait_for_boot` returns, machined reports the container as
     /// "running", but the container's internal systemd may still be
     /// booting. `machinectl shell` requires the container's D-Bus
-    /// socket, so we poll by attempting to connect to the container's
-    /// system bus via `/proc/{leader}/root/run/dbus/system_bus_socket`
-    /// (the same mechanism `busctl --machine=` uses internally) until
-    /// the connection succeeds or the timeout expires.
+    /// socket, so we poll until the connection succeeds or the timeout
+    /// expires.
     ///
-    /// For containers with `--userns`, the container runs in its own user
-    /// namespace. Connecting to the container's D-Bus socket from the host
-    /// user namespace fails because `SO_PEERCRED` returns the overflow UID
-    /// (65534) and EXTERNAL auth is rejected. We detect this by comparing
-    /// the user namespace inode of the container leader vs the host, and
-    /// temporarily enter the container's user namespace for the connection
-    /// attempt (mirroring what `systemd-machined` does internally).
+    /// For standard containers we connect directly from the host via
+    /// `/proc/{leader}/root/run/dbus/system_bus_socket` using zbus.
+    ///
+    /// For `--userns` containers we use `busctl --machine=` instead.
+    /// Direct access fails because (a) the kernel blocks
+    /// `/proc/{leader}/root/` traversal across user namespace boundaries,
+    /// and (b) `SO_PEERCRED` returns the overflow UID (65534) causing
+    /// EXTERNAL auth rejection. Doing `setns(CLONE_NEWUSER)` in-process
+    /// is not an option either: the kernel requires a single-threaded
+    /// caller and zbus has already spawned background threads by this
+    /// point. `busctl` handles all of this internally (it forks a helper
+    /// child via `bus_container_connect_socket()`).
     pub fn wait_for_dbus(name: &str, timeout: std::time::Duration, verbose: bool) -> Result<()> {
         let conn = connect()?;
         let deadline = std::time::Instant::now() + timeout;
@@ -363,43 +366,69 @@ mod dbus {
         let leader = get_machine_leader(&conn, name)?
             .with_context(|| format!("machine '{name}' not found"))?;
 
-        let socket_path = format!("/proc/{leader}/root/run/dbus/system_bus_socket");
-        let address = format!("unix:path={socket_path}");
+        // Detect whether the container has its own user namespace.
+        let uses_userns = has_foreign_userns(leader);
 
-        // Check if the container has its own user namespace by comparing
-        // inode numbers. If they differ, we need to enter the container's
-        // userns before connecting to its D-Bus socket.
-        let userns_fd = open_foreign_userns(leader);
         if verbose {
-            eprintln!(
-                "waiting for container D-Bus at {socket_path}{}",
-                if userns_fd.is_some() { " (userns)" } else { "" }
-            );
+            if uses_userns {
+                eprintln!("waiting for container D-Bus via busctl --machine={name} (userns)");
+            } else {
+                eprintln!(
+                    "waiting for container D-Bus at /proc/{leader}/root/run/dbus/system_bus_socket"
+                );
+            }
         }
 
-        let result = (|| loop {
+        loop {
             crate::check_interrupted()?;
 
-            let probe_result = match userns_fd {
-                Some(fd) => probe_dbus_in_userns(fd, &address),
-                None => zbus::blocking::connection::Builder::address(address.as_str())
+            let ready = if uses_userns {
+                // Why busctl instead of zbus for userns containers:
+                //
+                // We can't connect to the container's D-Bus socket directly
+                // from the host because:
+                // 1. /proc/{leader}/root/ traversal is blocked by the kernel
+                //    when the container has a foreign user namespace.
+                // 2. Even with a reachable socket, SO_PEERCRED returns UID
+                //    65534 (nobody/overflow) since host UID 0 has no mapping
+                //    in the container's userns, so EXTERNAL auth is rejected.
+                //
+                // The natural fix would be setns(CLONE_NEWUSER) to enter the
+                // container's user namespace before connecting, but the kernel
+                // requires the calling process to be single-threaded for
+                // setns(CLONE_NEWUSER) (returns EINVAL otherwise). By this
+                // point, zbus has spawned internal threads for the host D-Bus
+                // connection used in wait_for_boot, so in-process setns is
+                // impossible.
+                //
+                // busctl solves this: its --machine= flag uses systemd's
+                // bus_container_connect_socket(), which forks a single-threaded
+                // child to do the setns + socket connect. We just exec busctl
+                // and check the exit code.
+                std::process::Command::new("busctl")
+                    .arg(format!("--machine={name}"))
+                    .arg("list")
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false)
+            } else {
+                let address = format!(
+                    "unix:path=/proc/{leader}/root/run/dbus/system_bus_socket"
+                );
+                zbus::blocking::connection::Builder::address(address.as_str())
                     .and_then(|b| b.build())
-                    .map(|_| ())
-                    .map_err(|e| anyhow::anyhow!("{e}")),
+                    .is_ok()
             };
 
-            match probe_result {
-                Ok(()) => {
-                    if verbose {
-                        eprintln!("container '{name}' D-Bus is ready");
-                    }
-                    return Ok(());
+            if ready {
+                if verbose {
+                    eprintln!("container '{name}' D-Bus is ready");
                 }
-                Err(e) => {
-                    if verbose {
-                        eprintln!("container D-Bus not ready: {e}");
-                    }
-                }
+                return Ok(());
+            } else if verbose {
+                eprintln!("container D-Bus not ready");
             }
 
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
@@ -411,77 +440,22 @@ mod dbus {
             }
 
             std::thread::sleep(poll_interval.min(remaining));
-        })();
-
-        if let Some(fd) = userns_fd {
-            unsafe { libc::close(fd) };
         }
-
-        result
     }
 
-    /// Open the container leader's user namespace fd if it differs from the host's.
-    ///
-    /// Returns `Some(fd)` when the container has its own user namespace (userns
-    /// containers), or `None` for standard containers (same userns as host).
-    fn open_foreign_userns(leader: u32) -> Option<i32> {
+    /// Check whether the container leader has a different user namespace
+    /// than the host (i.e., the container was started with `--userns`).
+    fn has_foreign_userns(leader: u32) -> bool {
         use std::os::unix::fs::MetadataExt;
-
-        let host_path = "/proc/self/ns/user";
-        let container_path = format!("/proc/{leader}/ns/user");
-
-        let host_ino = std::fs::metadata(host_path).ok()?.ino();
-        let container_ino = std::fs::metadata(&container_path).ok()?.ino();
-
-        if host_ino == container_ino {
-            return None;
-        }
-
-        let c_path = std::ffi::CString::new(container_path).ok()?;
-        let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
-        if fd < 0 {
-            return None;
-        }
-        Some(fd)
-    }
-
-    /// Attempt a D-Bus connection inside the container's user namespace.
-    ///
-    /// Enters the container's userns via `setns`, attempts the zbus connection,
-    /// then restores the original userns. Follows the same save-fd / setns /
-    /// restore pattern used by `pod::create_netns`.
-    fn probe_dbus_in_userns(userns_fd: i32, address: &str) -> Result<()> {
-        // Save current user namespace.
-        let self_path = std::ffi::CString::new("/proc/self/ns/user").unwrap();
-        let saved_fd = unsafe { libc::open(self_path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
-        if saved_fd < 0 {
-            return Err(std::io::Error::last_os_error())
-                .context("failed to open /proc/self/ns/user");
-        }
-
-        // Enter the container's user namespace.
-        let ret = unsafe { libc::setns(userns_fd, libc::CLONE_NEWUSER) };
-        if ret != 0 {
-            let err = std::io::Error::last_os_error();
-            unsafe { libc::close(saved_fd) };
-            return Err(err).context("setns(CLONE_NEWUSER) failed");
-        }
-
-        // Attempt the D-Bus connection.
-        let probe_result = zbus::blocking::connection::Builder::address(address)
-            .and_then(|b| b.build())
-            .map(|_| ());
-
-        // Restore original user namespace — fatal if this fails.
-        let ret = unsafe { libc::setns(saved_fd, libc::CLONE_NEWUSER) };
-        unsafe { libc::close(saved_fd) };
-        if ret != 0 {
-            let err = std::io::Error::last_os_error();
-            eprintln!("FATAL: failed to restore user namespace: {err}");
-            std::process::exit(1);
-        }
-
-        probe_result.map_err(|e| anyhow::anyhow!("{e}"))
+        let host_ino = match std::fs::metadata("/proc/self/ns/user") {
+            Ok(m) => m.ino(),
+            Err(_) => return false,
+        };
+        let container_ino = match std::fs::metadata(format!("/proc/{leader}/ns/user")) {
+            Ok(m) => m.ino(),
+            Err(_) => return false,
+        };
+        host_ino != container_ino
     }
 
     /// Terminate a machine via org.freedesktop.machine1.

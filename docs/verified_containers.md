@@ -53,12 +53,12 @@ pg_isready, redis-cli ping).
 
 | Test                              | Result  |
 |-----------------------------------|---------|
-| debian boot with --userns         | PENDING |
-| ubuntu boot with --userns         | PENDING |
-| fedora boot with --userns         | PENDING |
-| centos boot with --userns         | PENDING |
-| almalinux boot with --userns      | PENDING |
-| nginx OCI app with --userns       | PENDING |
+| debian boot with --userns         | PASS    |
+| ubuntu boot with --userns         | PASS    |
+| fedora boot with --userns         | PASS    |
+| centos boot with --userns         | PASS    |
+| almalinux boot with --userns      | PASS    |
+| nginx OCI app with --userns       | PASS    |
 
 - **distro boot with --userns**: container created with `--userns`, systemd
   reaches `running` or `degraded` state.

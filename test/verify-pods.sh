@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# verify-pods.sh — end-to-end pod verification
+# verify-pods.sh - end-to-end pod verification
 # Must run as root. Requires a base Ubuntu rootfs imported as "ubuntu".
 #
 # Usage:
 #   sudo sdme fs import ubuntu docker.io/ubuntu:24.04 -v
-#   sudo ./scripts/verify-pods.sh
+#   sudo ./test/verify-pods.sh
 #
 # Tests:
 #   1. nspawn pods (--pod): two host-rootfs containers share localhost via pod netns
