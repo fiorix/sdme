@@ -75,8 +75,6 @@ for target in "${targets[@]}"; do
     cargo "${cargo_args[@]}"
 
     cp "target/$target/release/sdme" "$DIST_DIR/$binary"
-    cp "target/$target/release/sdme-connector-server" "$DIST_DIR/${binary/sdme/sdme-connector-server}"
-    cp "target/$target/release/sdme-connector-client" "$DIST_DIR/${binary/sdme/sdme-connector-client}"
 
     echo "  size: $(du -h "$DIST_DIR/$binary" | cut -f1)"
     echo "  file: $(file "$DIST_DIR/$binary")"

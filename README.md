@@ -48,7 +48,7 @@ sudo sdme fs import debian docker.io/debian
 sudo sdme new -r debian
 ```
 
-sdme can also run OCI application images (nginx, mysql, etc.) as systemd services inside a base container, with optional cross-container access via connectors. See [docs/oci.md](docs/oci.md) for details.
+sdme can also run OCI application images (nginx, mysql, etc.) as systemd services inside a base container. See [docs/oci.md](docs/oci.md) for details.
 
 ## Dependencies
 

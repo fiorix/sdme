@@ -68,8 +68,6 @@ jobs:
           name: target-${{ matrix.target }}
           path: |
             target/${{ matrix.target }}/release/sdme
-            target/${{ matrix.target }}/release/sdme-connector-server
-            target/${{ matrix.target }}/release/sdme-connector-client
 
   package:
     needs: build
@@ -107,7 +105,7 @@ jobs:
           /tmp/sdme-bin/sdme completions fish > dist/completions/sdme.fish
 
       - name: Ensure binaries are executable
-        run: chmod +x target/${{ matrix.target }}/release/sdme target/${{ matrix.target }}/release/sdme-connector-server target/${{ matrix.target }}/release/sdme-connector-client
+        run: chmod +x target/${{ matrix.target }}/release/sdme
 
       - name: Build deb
         run: cargo deb --no-build --no-strip --target ${{ matrix.target }}

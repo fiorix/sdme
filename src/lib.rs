@@ -1,6 +1,5 @@
 pub mod build;
 pub mod config;
-pub mod connectors;
 pub mod containers;
 pub mod copy;
 pub mod devfd_shim;
@@ -9,12 +8,10 @@ pub mod import;
 pub mod mounts;
 pub mod names;
 pub mod network;
-pub mod proxy;
 pub mod rootfs;
 pub mod system_check;
 pub mod systemd;
 
-pub use connectors::ConnectorConfig;
 pub use mounts::{BindConfig, EnvConfig};
 pub use network::NetworkConfig;
 
