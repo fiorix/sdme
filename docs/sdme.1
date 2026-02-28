@@ -37,7 +37,7 @@ Path to config file.
 Default:
 .IR ~/.config/sdme/sdmerc .
 .SH COMMANDS
-.SS sdme new [\fIname\fR] [\-r \fIfs\fR] [\-t \fIseconds\fR] [\fIlimits\fR] [\fInetwork\fR] [\-o \fIdir\fR]... [\-b \fIbind\fR]... [\-e \fIenv\fR]... [\-\-] [\fIcommand\fR...]
+.SS sdme new [\fIname\fR] [\-r \fIfs\fR] [\-t \fIseconds\fR] [\fIlimits\fR] [\fInetwork\fR] [\-o \fIdir\fR]... [\-\-oci\-pod \fIpod\fR] [\-b \fIbind\fR]... [\-e \fIenv\fR]... [\-\-] [\fIcommand\fR...]
 Create, start, and enter a new container.
 If
 .I name
@@ -87,9 +87,15 @@ to set environment variables; see
 .B BIND MOUNTS AND ENVIRONMENT
 below.
 .PP
+Use
+.B \-\-oci\-pod
+to join an OCI pod network namespace; see
+.B OCI PODS
+below.
+.PP
 If boot fails or is interrupted (Ctrl+C), the just\-created container is
 automatically removed.
-.SS sdme create [\fIname\fR] [\-r \fIfs\fR] [\fIlimits\fR] [\fInetwork\fR] [\-o \fIdir\fR]... [\-b \fIbind\fR]... [\-e \fIenv\fR]...
+.SS sdme create [\fIname\fR] [\-r \fIfs\fR] [\fIlimits\fR] [\fInetwork\fR] [\-o \fIdir\fR]... [\-\-oci\-pod \fIpod\fR] [\-b \fIbind\fR]... [\-e \fIenv\fR]...
 Create a new container without starting it.
 Sets up the overlayfs directories and state file.
 Resource limits can be set with
@@ -121,6 +127,11 @@ to add bind mounts and
 .B \-e
 to set environment variables; see
 .B BIND MOUNTS AND ENVIRONMENT
+below.
+Use
+.B \-\-oci\-pod
+to join an OCI pod network namespace; see
+.B OCI PODS
 below.
 Requires a permissive umask (see
 .B NOTES
@@ -186,6 +197,7 @@ Use
 to skip confirmation prompts (useful for scripting).
 .SS sdme ps
 List all containers with their status, health, detected OS, and shared directory path.
+When any container belongs to an OCI pod, an OCI\-POD column is shown.
 Health checks detect broken containers (missing directories, missing rootfs).
 The OS column shows the distro name from the rootfs os\-release file.
 .SS sdme logs \fIname\fR [\fIargs\fR...]
@@ -360,6 +372,23 @@ Use a different path (e.g.\&
 Lines starting with
 .B #
 and blank lines are ignored.
+.SS sdme oci\-pod new \fIname\fR
+Create a new OCI pod network namespace.
+Allocates a network namespace with loopback up, bind\-mounts it to
+.IR /run/sdme/oci\-pods/ name,
+and writes persistent state to
+.IR /var/lib/sdme/oci\-pods/ name.
+.SS sdme oci\-pod ls
+List all OCI pods with their active/inactive status and creation timestamp.
+A pod is active when its runtime bind\-mount exists under
+.IR /run/sdme/oci\-pods/ .
+.SS sdme oci\-pod rm [\-f] \fIname\fR...
+Remove one or more OCI pods.
+Unmounts the runtime netns, removes the runtime file, and deletes the
+persistent state file.
+Refuses if any container references the pod unless
+.B \-f
+is given.
 .SS sdme config get
 Show current configuration values.
 .SS sdme config set \fIkey\fR \fIvalue\fR
@@ -489,8 +518,10 @@ opaque directories
 .RB ( OPAQUE_DIRS ),
 bind mounts
 .RB ( BINDS ),
-and environment variables
-.RB ( ENVS ).
+environment variables
+.RB ( ENVS ),
+and OCI pod membership
+.RB ( OCI_POD ).
 .TP
 .I /var/lib/sdme/containers/\fIname\fR/upper/
 Per\-container overlayfs upper layer (copy\-on\-write modifications).
@@ -503,6 +534,13 @@ Per\-container overlayfs merged mount point.
 .TP
 .I /var/lib/sdme/containers/\fIname\fR/shared/
 Per\-container shared directory (accessible from host and container).
+.TP
+.I /var/lib/sdme/oci\-pods/\fIname\fR
+OCI pod persistent state files (KEY=VALUE format).
+.TP
+.I /run/sdme/oci\-pods/\fIname\fR
+OCI pod runtime bind\-mount of the network namespace fd (volatile, recreated
+after reboot when a container referencing the pod is started).
 .TP
 .I /etc/systemd/system/sdme@.service
 Systemd template unit (auto\-installed and auto\-updated).
@@ -677,6 +715,18 @@ sdme fs build examplefs examplefs.conf
 sdme new \-r examplefs
 .fi
 .RE
+.PP
+Run two OCI app containers in a shared pod network namespace:
+.PP
+.RS
+.nf
+sdme fs import ubuntu docker.io/ubuntu:24.04
+sdme fs import nginx docker.io/nginx \-\-base\-fs=ubuntu
+sdme oci\-pod new my\-pod
+sdme new \-\-oci\-pod=my\-pod \-r nginx web
+# nginx binds port 80 on the pod's loopback
+.fi
+.RE
 .SH RESOURCE LIMITS
 Containers can have per\-container resource limits applied via systemd cgroup
 controls.
@@ -824,6 +874,40 @@ Example:
 .PP
 Bind mounts and environment variables are stored in the container's state file
 and applied at start time via the systemd nspawn drop\-in configuration.
+.SH OCI PODS
+OCI pods provide a shared network namespace for multiple OCI app containers.
+Containers in the same pod can reach each other via localhost.
+.PP
+Create a pod, then assign containers to it:
+.PP
+.RS
+.nf
+sdme oci\-pod new my\-pod
+sdme create \-\-oci\-pod=my\-pod \-r nginx web
+sdme start web
+.fi
+.RE
+.TP
+.BI \-\-oci\-pod " name"
+Join the named OCI pod's network namespace.
+Available on
+.B sdme create
+and
+.BR "sdme new" .
+Requires an OCI app rootfs (the rootfs must contain
+.IR sdme\-oci\-app.service ).
+Mutually exclusive with
+.BR \-\-private\-network .
+.PP
+The pod's network namespace contains only a loopback interface.
+At container start time,
+.B \-\-network\-namespace\-path=
+is passed to
+.BR systemd\-nspawn (1)
+so the entire container runs inside the pod's netns.
+.PP
+Pod membership is stored in the container's state file as
+.BR OCI_POD .
 .SH NOTES
 .SS Umask
 .B sdme create

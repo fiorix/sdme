@@ -6,7 +6,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 use sdme::import::{ImportOptions, InstallPackages, OciMode};
 use sdme::{
-    config, confirm, containers, rootfs, system_check, systemd, BindConfig, EnvConfig,
+    config, confirm, containers, oci_pod, rootfs, system_check, systemd, BindConfig, EnvConfig,
     NetworkConfig, ResourceLimits,
 };
 
@@ -95,6 +95,10 @@ enum Command {
         #[arg(short = 'o', long = "overlayfs-opaque-dirs")]
         opaque_dirs: Vec<String>,
 
+        /// Join an OCI pod network namespace (OCI app rootfs only, mutually exclusive with --private-network)
+        #[arg(long)]
+        oci_pod: Option<String>,
+
         #[command(flatten)]
         network: NetworkArgs,
 
@@ -157,6 +161,10 @@ enum Command {
         /// Make directories opaque in overlayfs (hides lower layer contents, repeatable)
         #[arg(short = 'o', long = "overlayfs-opaque-dirs")]
         opaque_dirs: Vec<String>,
+
+        /// Join an OCI pod network namespace (OCI app rootfs only, mutually exclusive with --private-network)
+        #[arg(long)]
+        oci_pod: Option<String>,
 
         #[command(flatten)]
         network: NetworkArgs,
@@ -235,6 +243,10 @@ enum Command {
     /// Manage root filesystems
     #[command(name = "fs", subcommand)]
     Fs(RootfsCommand),
+
+    /// Manage OCI pod network namespaces
+    #[command(name = "oci-pod", subcommand)]
+    OciPod(OciPodCommand),
 
     /// Generate shell completions
     Completions {
@@ -367,6 +379,25 @@ enum ConfigCommand {
     },
 }
 
+#[derive(Subcommand)]
+enum OciPodCommand {
+    /// Create a new OCI pod network namespace
+    New {
+        /// Pod name
+        name: String,
+    },
+    /// List OCI pods
+    Ls,
+    /// Remove one or more OCI pods
+    Rm {
+        /// Pod names
+        names: Vec<String>,
+        /// Force removal even if containers reference the pod
+        #[arg(short, long)]
+        force: bool,
+    },
+}
+
 fn for_each_container(
     datadir: &std::path::Path,
     targets: &[String],
@@ -477,6 +508,48 @@ fn resolve_opaque_dirs(
     }
 }
 
+/// Validate `--oci-pod` constraints before creating a container.
+///
+/// Checks that:
+/// - The pod exists in the catalogue
+/// - The rootfs is an OCI app rootfs (contains `sdme-oci-app.service`)
+/// - `--oci-pod` is not combined with `--private-network`
+fn validate_oci_pod_args(
+    datadir: &std::path::Path,
+    oci_pod: Option<&str>,
+    rootfs: Option<&str>,
+    network: &NetworkConfig,
+) -> Result<()> {
+    let pod_name = match oci_pod {
+        Some(n) => n,
+        None => return Ok(()),
+    };
+
+    if !oci_pod::exists(datadir, pod_name) {
+        bail!("oci-pod not found: {pod_name}");
+    }
+
+    if network.private_network {
+        bail!("--oci-pod is mutually exclusive with --private-network");
+    }
+
+    // Validate that the rootfs is an OCI app rootfs.
+    let rootfs_name = match rootfs {
+        Some(name) => name,
+        None => bail!("--oci-pod requires an OCI app rootfs (use -r/--fs)"),
+    };
+    let rootfs_path = datadir.join("fs").join(rootfs_name);
+    let service_path = rootfs_path.join("etc/systemd/system/sdme-oci-app.service");
+    if !service_path.exists() {
+        bail!(
+            "--oci-pod requires an OCI app rootfs; \
+             '{rootfs_name}' does not contain sdme-oci-app.service"
+        );
+    }
+
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -561,12 +634,14 @@ fn main() -> Result<()> {
             cpus,
             cpu_weight,
             opaque_dirs,
+            oci_pod,
             network,
             mounts,
         } => {
             system_check::check_systemd_version(252)?;
             let limits = parse_limits(memory, cpus, cpu_weight)?;
             let network = parse_network(network)?;
+            validate_oci_pod_args(&cfg.datadir, oci_pod.as_deref(), fs.as_deref(), &network)?;
             let (binds, envs) = parse_mounts(mounts)?;
             let opaque_dirs = resolve_opaque_dirs(opaque_dirs, fs.is_none(), &cfg);
             let opts = containers::CreateOptions {
@@ -575,6 +650,7 @@ fn main() -> Result<()> {
                 limits,
                 network,
                 opaque_dirs,
+                oci_pod,
                 binds,
                 envs,
             };
@@ -659,6 +735,7 @@ fn main() -> Result<()> {
             cpus,
             cpu_weight,
             opaque_dirs,
+            oci_pod,
             network,
             mounts,
             command,
@@ -666,6 +743,7 @@ fn main() -> Result<()> {
             system_check::check_systemd_version(252)?;
             let limits = parse_limits(memory, cpus, cpu_weight)?;
             let network = parse_network(network)?;
+            validate_oci_pod_args(&cfg.datadir, oci_pod.as_deref(), fs.as_deref(), &network)?;
             let (binds, envs) = parse_mounts(mounts)?;
             let opaque_dirs = resolve_opaque_dirs(opaque_dirs, fs.is_none(), &cfg);
             let opts = containers::CreateOptions {
@@ -674,6 +752,7 @@ fn main() -> Result<()> {
                 limits,
                 network,
                 opaque_dirs,
+                oci_pod,
                 binds,
                 envs,
             };
@@ -720,19 +799,37 @@ fn main() -> Result<()> {
                 let status_w = entries.iter().map(|e| e.status.len()).max().unwrap().max(6);
                 let health_w = entries.iter().map(|e| e.health.len()).max().unwrap().max(6);
                 let os_w = entries.iter().map(|e| e.os.len()).max().unwrap().max(2);
-                println!(
-                    "{:<name_w$}  {:<status_w$}  {:<health_w$}  {:<os_w$}  SHARED",
+                let pod_w = if entries.iter().any(|e| !e.oci_pod.is_empty()) {
+                    Some(
+                        entries
+                            .iter()
+                            .map(|e| e.oci_pod.len())
+                            .max()
+                            .unwrap()
+                            .max(7),
+                    )
+                } else {
+                    None
+                };
+                // Header.
+                print!(
+                    "{:<name_w$}  {:<status_w$}  {:<health_w$}  {:<os_w$}",
                     "NAME", "STATUS", "HEALTH", "OS"
                 );
+                if let Some(pw) = pod_w {
+                    print!("  {:<pw$}", "OCI-POD");
+                }
+                println!("  SHARED");
+                // Rows.
                 for e in &entries {
-                    println!(
-                        "{:<name_w$}  {:<status_w$}  {:<health_w$}  {:<os_w$}  {}",
-                        e.name,
-                        e.status,
-                        e.health,
-                        e.os,
-                        e.shared.display()
+                    print!(
+                        "{:<name_w$}  {:<status_w$}  {:<health_w$}  {:<os_w$}",
+                        e.name, e.status, e.health, e.os
                     );
+                    if let Some(pw) = pod_w {
+                        print!("  {:<pw$}", e.oci_pod);
+                    }
+                    println!("  {}", e.shared.display());
                 }
             }
         }
@@ -815,6 +912,44 @@ fn main() -> Result<()> {
                 containers::stop(name, mode, verbose)
             })?;
         }
+        Command::OciPod(cmd) => match cmd {
+            OciPodCommand::New { name } => {
+                oci_pod::create(&cfg.datadir, &name, cli.verbose)?;
+                eprintln!("created oci-pod '{name}'");
+                println!("{name}");
+            }
+            OciPodCommand::Ls => {
+                let pods = oci_pod::list(&cfg.datadir)?;
+                if pods.is_empty() {
+                    println!("no oci-pods found");
+                } else {
+                    let name_w = pods.iter().map(|p| p.name.len()).max().unwrap().max(4);
+                    println!("{:<name_w$}  ACTIVE  CREATED", "NAME");
+                    for p in &pods {
+                        let active = if p.active { "yes" } else { "no" };
+                        println!("{:<name_w$}  {:<6}  {}", p.name, active, p.created);
+                    }
+                }
+            }
+            OciPodCommand::Rm { names, force } => {
+                if names.is_empty() {
+                    bail!("provide one or more pod names");
+                }
+                let mut failed = false;
+                for name in &names {
+                    eprintln!("removing oci-pod '{name}'");
+                    if let Err(e) = oci_pod::remove(&cfg.datadir, name, force, cli.verbose) {
+                        eprintln!("error: {name}: {e}");
+                        failed = true;
+                    } else {
+                        println!("{name}");
+                    }
+                }
+                if failed {
+                    bail!("some oci-pods could not be removed");
+                }
+            }
+        },
         // Handled before root check above.
         Command::Completions { .. } => unreachable!(),
         Command::Fs(cmd) => match cmd {

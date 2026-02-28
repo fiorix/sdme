@@ -94,7 +94,7 @@ host's systemd manages the container as a service unit; the container's systemd
 manages everything inside. Both talk to their own D-Bus, both write to their own
 journal, but the container's writes land on the overlayfs upper layer and never
 touch the host - well, except that they are stored on the host. This matters,
-and the details are explained in Section 13.
+and the details are explained in Section 14.
 
 **User identity preservation.** When sdme is run via `sudo` and the container
 is a host-rootfs clone (no `-r` flag), it reads `$SUDO_USER` and joins the
@@ -139,16 +139,26 @@ configurable via `sdme config set datadir <path>`):
   |   |   +-- shared/          # host <-> container exchange
   |   +-- container-b/
   |       +-- ...
-  +-- fs/
-      |-- ubuntu/              # imported rootfs
-      |-- fedora/
-      |-- nginx/               # OCI app rootfs
-      +-- .ubuntu.meta         # distro metadata
+  |-- fs/
+  |   |-- ubuntu/              # imported rootfs
+  |   |-- fedora/
+  |   |-- nginx/               # OCI app rootfs
+  |   +-- .ubuntu.meta         # distro metadata
+  +-- oci-pods/
+      +-- my-pod               # KEY=VALUE pod state (CREATED=...)
+```
+
+OCI pod runtime state (volatile, recreated after reboot):
+
+```
+  /run/sdme/oci-pods/
+  +-- my-pod                   # bind-mount of the pod's netns fd
 ```
 
 **State files** are flat KEY=VALUE text files under `state/`. They record
 everything about a container: name, rootfs, creation timestamp, resource limits,
-network configuration, bind mounts, environment variables, opaque directories.
+network configuration, bind mounts, environment variables, opaque directories,
+and OCI pod membership (`OCI_POD`).
 The format is intentionally simple: readable with `cat`, parseable with `grep`,
 editable with `sed` in an emergency. The `State` type in the code uses a
 `BTreeMap<String, String>` for deterministic key ordering.
@@ -527,7 +537,87 @@ and written into the per-container nspawn drop-in at start time.
 Bridge and zone names are validated (alphanumeric, hyphens, underscores). Port
 specs are validated for format (`HOST:CONTAINER[/PROTO]`) and range (1-65535).
 
-## 10. Resource Limits
+## 10. OCI Pods
+
+OCI pods give multiple OCI app containers a shared network namespace so they
+can reach each other on localhost. The pattern is the same as Kubernetes pods:
+one network namespace, multiple containers.
+
+```
+  +------------------------------------------------------+
+  |                     HOST SYSTEM                      |
+  |         kernel . systemd . D-Bus . machined          |
+  |                                                      |
+  |   /run/sdme/oci-pods/my-pod  (netns bind-mount)      |
+  |          |                                           |
+  |          |  +-- loopback only (127.0.0.1) --+        |
+  |          |  |                               |        |
+  |    +-----+----------+   +------------------+--+      |
+  |    | container A     |   | container B        |      |
+  |    | (nginx :8080)   |   | (app :3000)        |      |
+  |    | nspawn --network|   | nspawn --network   |      |
+  |    |  -namespace-    |   |  -namespace-       |      |
+  |    |  path=pod-netns |   |  path=pod-netns    |      |
+  |    +-----------------+   +--------------------+      |
+  +------------------------------------------------------+
+
+  Both containers see 127.0.0.1:8080 (nginx) and
+  127.0.0.1:3000 (app) because they share the netns.
+```
+
+### Lifecycle
+
+`sdme oci-pod new <name>` creates the pod:
+
+1. Validates the name (same rules as container names).
+2. Calls `unshare(CLONE_NEWNET)` to create a new network namespace.
+3. Brings up the loopback interface (`ioctl SIOCSIFFLAGS IFF_UP`).
+4. Bind-mounts `/proc/self/ns/net` to `/run/sdme/oci-pods/<name>`.
+5. Restores the original network namespace via `setns()`.
+6. Writes a persistent state file at `{datadir}/oci-pods/<name>`.
+
+The runtime bind-mount under `/run` is volatile and disappears on reboot.
+When a container referencing a pod is started, `ensure_runtime()` checks
+whether the bind-mount still exists and recreates the netns if needed.
+
+`sdme oci-pod ls` lists all pods with their active/inactive status.
+
+`sdme oci-pod rm <name>` unmounts the netns, removes the runtime file, and
+deletes the persistent state. Removal is refused if any container still
+references the pod (override with `--force`).
+
+### Container integration
+
+Containers join a pod at creation time via `--oci-pod=<name>` on `sdme create`
+or `sdme new`. This flag:
+
+- Requires an OCI app rootfs (`sdme-oci-app.service` must exist in the rootfs).
+- Is mutually exclusive with `--private-network`.
+- Stores `OCI_POD=<name>` in the container's state file.
+
+At start time, the nspawn drop-in includes
+`--network-namespace-path=/run/sdme/oci-pods/<name>`, which makes the
+entire container (including its init and all services) run inside the pod's
+network namespace. No inner drop-in or per-service `NetworkNamespacePath=`
+is needed because nspawn itself enters the netns before starting the
+container's init.
+
+`sdme ps` shows an OCI-POD column when any container belongs to a pod.
+
+### Isolation properties
+
+The pod netns contains only a loopback interface with no routes. Containers
+in the pod can communicate via localhost but have no external connectivity
+unless a veth or bridge is added to the netns externally.
+
+Inside the container, systemd-nspawn's default capability set drops
+`CAP_NET_ADMIN`, so the container's root cannot add interfaces or change
+routes in the shared netns. `CAP_SYS_ADMIN` is present (required by
+systemd inside nspawn) but the container's PID namespace prevents access
+to host process netns references. The OCI app process itself (running as
+a non-root UID) has zero effective capabilities.
+
+## 11. Resource Limits
 
 sdme exposes three cgroup-based resource controls:
 
@@ -550,7 +640,7 @@ means one full core and `0.5` means half a core (converted to systemd's
 `CPUQuota=` percentage internally). CPU weight is an integer from 1 to 10000,
 controlling relative scheduling priority when CPUs are contended.
 
-## 11. Bind Mounts and Environment Variables
+## 12. Bind Mounts and Environment Variables
 
 Custom bind mounts and environment variables are set at creation time with
 `-b`/`--bind` and `-e`/`--env`, available on both `sdme create` and `sdme new`.
@@ -567,7 +657,7 @@ or underscore (no leading digit). At start time, each variable becomes a
 Both are stored in the container's state file (`BINDS=` and `ENVS=`,
 pipe-separated) and reconstituted into nspawn arguments on every start.
 
-## 12. Configuration
+## 13. Configuration
 
 sdme stores its settings in a TOML file at `~/.config/sdme/sdmerc`:
 
@@ -589,7 +679,7 @@ under `/root`. An explicit `-c`/`--config` flag overrides all resolution logic.
 
 Config files are written with mode `0600` and directories with mode `0700`.
 
-## 13. Security
+## 14. Security
 
 sdme runs as root and handles untrusted input: tarballs from the internet, OCI
 images from public registries, QCOW2 disk images from unknown sources. Several
@@ -629,7 +719,7 @@ result in `sdme start` mysteriously misbehaving.
 If you find a way to escape a container, traverse a path, or corrupt the host
 filesystem through sdme, please open an issue.
 
-## 14. Reliability
+## 15. Reliability
 
 Multi-step operations in sdme are designed to fail cleanly rather than leave
 broken state behind.

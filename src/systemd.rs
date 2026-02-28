@@ -840,6 +840,21 @@ pub fn write_nspawn_dropin(datadir: &Path, name: &str, verbose: bool) -> Result<
     let envs = EnvConfig::from_state(&state);
     nspawn_args.extend(envs.to_nspawn_args());
 
+    // OCI pod: run the entire container inside the pod's shared network
+    // namespace via --network-namespace-path=.
+    let oci_pod = state
+        .get("OCI_POD")
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    if let Some(ref pod_name) = oci_pod {
+        crate::oci_pod::ensure_runtime(datadir, pod_name, verbose)?;
+        let netns_path = crate::oci_pod::runtime_path(pod_name);
+        nspawn_args.push(format!("--network-namespace-path={netns_path}"));
+        if verbose {
+            eprintln!("oci-pod '{pod_name}': using netns {netns_path}");
+        }
+    }
+
     if verbose {
         for arg in &nspawn_args {
             eprintln!("nspawn arg: {arg}");
@@ -855,6 +870,7 @@ pub fn write_nspawn_dropin(datadir: &Path, name: &str, verbose: bool) -> Result<
     if write_unit_if_changed(&dropin_path, &content, verbose)? {
         dbus::daemon_reload()?;
     }
+
     Ok(dropin_path)
 }
 
@@ -1084,6 +1100,7 @@ mod tests {
             limits,
             network: Default::default(),
             opaque_dirs: vec![],
+            oci_pod: None,
             binds: Default::default(),
             envs: Default::default(),
         };

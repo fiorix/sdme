@@ -27,6 +27,7 @@ pub struct CreateOptions {
     pub limits: ResourceLimits,
     pub network: NetworkConfig,
     pub opaque_dirs: Vec<String>,
+    pub oci_pod: Option<String>,
     pub binds: BindConfig,
     pub envs: EnvConfig,
 }
@@ -284,6 +285,9 @@ fn do_create(
     opts.network.write_to_state(&mut state);
     opts.binds.write_to_state(&mut state);
     opts.envs.write_to_state(&mut state);
+    if let Some(pod) = &opts.oci_pod {
+        state.set("OCI_POD", pod.as_str());
+    }
     if !opaque_dirs.is_empty() {
         state.set("OPAQUE_DIRS", opaque_dirs.join(","));
     }
@@ -546,6 +550,7 @@ pub struct ContainerInfo {
     pub health: String,
     pub os: String,
     pub shared: PathBuf,
+    pub oci_pod: String,
 }
 
 pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
@@ -620,12 +625,18 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
             "stopped"
         };
 
+        let oci_pod = match &state {
+            Ok(s) => s.get("OCI_POD").unwrap_or("").to_string(),
+            Err(_) => String::new(),
+        };
+
         result.push(ContainerInfo {
             name: name.clone(),
             status: status.to_string(),
             health,
             os,
             shared,
+            oci_pod,
         });
     }
     Ok(result)
@@ -851,9 +862,9 @@ mod tests {
             limits: Default::default(),
             network: Default::default(),
             opaque_dirs: vec![],
+            oci_pod: None,
             binds: Default::default(),
             envs: Default::default(),
-
         };
         let name = create(tmp.path(), &opts, false).unwrap();
         assert!(validate_name(&name).is_ok());
@@ -892,9 +903,9 @@ mod tests {
             limits: Default::default(),
             network: Default::default(),
             opaque_dirs: vec![],
+            oci_pod: None,
             binds: Default::default(),
             envs: Default::default(),
-
         };
         let name = create(tmp.path(), &opts, false).unwrap();
         assert_eq!(name, "hello");
@@ -920,9 +931,9 @@ mod tests {
             limits: Default::default(),
             network: Default::default(),
             opaque_dirs: vec![],
+            oci_pod: None,
             binds: Default::default(),
             envs: Default::default(),
-
         };
         create(tmp.path(), &opts, false).unwrap();
         let err = create(tmp.path(), &opts, false).unwrap_err();
@@ -941,9 +952,9 @@ mod tests {
             limits: Default::default(),
             network: Default::default(),
             opaque_dirs: vec![],
+            oci_pod: None,
             binds: Default::default(),
             envs: Default::default(),
-
         };
         let err = create(tmp.path(), &opts, false).unwrap_err();
         assert!(
@@ -964,9 +975,9 @@ mod tests {
             limits: Default::default(),
             network: Default::default(),
             opaque_dirs: vec![],
+            oci_pod: None,
             binds: Default::default(),
             envs: Default::default(),
-
         };
         let name = create(tmp.path(), &opts, false).unwrap();
         assert_eq!(name, "test");
@@ -988,9 +999,9 @@ mod tests {
             limits: Default::default(),
             network: Default::default(),
             opaque_dirs: vec![],
+            oci_pod: None,
             binds: Default::default(),
             envs: Default::default(),
-
         };
         let err = create(tmp.path(), &opts, false);
         assert!(err.is_err());
@@ -1008,9 +1019,9 @@ mod tests {
             limits: Default::default(),
             network: Default::default(),
             opaque_dirs: vec![],
+            oci_pod: None,
             binds: Default::default(),
             envs: Default::default(),
-
         };
         create(tmp.path(), &opts, false).unwrap();
         assert!(ensure_exists(tmp.path(), "mybox").is_ok());
@@ -1113,9 +1124,9 @@ mod tests {
             limits,
             network: Default::default(),
             opaque_dirs: vec![],
+            oci_pod: None,
             binds: Default::default(),
             envs: Default::default(),
-
         };
         let name = create(tmp.path(), &opts, false).unwrap();
         assert_eq!(name, "limited");
@@ -1137,9 +1148,9 @@ mod tests {
             limits: Default::default(),
             network: Default::default(),
             opaque_dirs: vec![],
+            oci_pod: None,
             binds: Default::default(),
             envs: Default::default(),
-
         };
         let err = create(tmp.path(), &opts, false);
         unsafe { libc::umask(old) };
@@ -1219,9 +1230,9 @@ mod tests {
             limits: Default::default(),
             network: Default::default(),
             opaque_dirs: vec!["/var".to_string(), "/opt/data".to_string()],
+            oci_pod: None,
             binds: Default::default(),
             envs: Default::default(),
-
         };
         let name = create(tmp.path(), &opts, false).unwrap();
         assert_eq!(name, "opaquebox");
@@ -1268,9 +1279,9 @@ mod tests {
             limits: Default::default(),
             network: Default::default(),
             opaque_dirs: vec!["/var".to_string(), "/opt".to_string()],
+            oci_pod: None,
             binds: Default::default(),
             envs: Default::default(),
-
         };
         create(tmp.path(), &opts, false).unwrap();
 
