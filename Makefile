@@ -4,8 +4,10 @@ DESTDIR ?= $(PREFIX)
 all:
 	cargo build --release
 
-install: install-man install-completions
+install:
 	install -Dm755 target/release/sdme $(DESTDIR)/bin/sdme
+
+install-extras: install-man install-completions
 
 install-man:
 	install -Dm644 docs/sdme.1 $(DESTDIR)/share/man/man1/sdme.1
@@ -45,4 +47,4 @@ clean:
 	cargo clean
 	rm -rf dist
 
-.PHONY: all install install-man install-completions uninstall uninstall-man uninstall-completions deb rpm clean
+.PHONY: all install install-extras install-man install-completions uninstall uninstall-man uninstall-completions deb rpm clean
