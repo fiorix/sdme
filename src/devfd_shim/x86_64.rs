@@ -5,6 +5,13 @@
 // or /proc/self/fd/{0,1,2}, the interceptor returns dup(N) for the
 // appropriate fd. All other paths fall through to the real openat syscall.
 //
+// If the real openat returns ENXIO, the shim uses readlinkat to resolve
+// one level of symlink and retries the path matching. This handles cases
+// like nginx opening /var/log/nginx/error.log → /dev/stderr.
+//
+// On error, errno is set via __errno_location() (imported through the GOT)
+// and -1 is returned per C convention.
+//
 // Exported symbols: open, openat, open64, openat64
 // (open64/openat64 are aliases; identical on 64-bit Linux)
 //
@@ -12,6 +19,7 @@
 //   rax = syscall number
 //   rdi, rsi, rdx, r10 = first 4 arguments
 //   syscall instruction; return in rax
+//   Preserved across syscall: all regs except rax, rcx, r11
 //
 // C calling convention (System V AMD64 ABI):
 //   rdi, rsi, rdx, rcx, r8, r9 = arguments
@@ -26,9 +34,16 @@
 // Syscall numbers
 const SYS_DUP: u8 = 32;
 const SYS_OPENAT: u16 = 257;
+const SYS_READLINKAT: u16 = 267;
 
 // AT_FDCWD = -100
 const AT_FDCWD: i32 = -100;
+
+// errno value
+const ENXIO: u8 = 6;
+
+// readlink buffer size
+const READLINK_BUFSZ: u8 = 128;
 
 use super::elf;
 
@@ -159,9 +174,10 @@ impl Asm {
 
 /// Generate the x86_64 machine code and symbol table for the devfd shim.
 ///
-/// Returns `(code_bytes, symbols)` where symbols list the exported
-/// function names and their offsets within `code_bytes`.
-pub fn generate() -> (Vec<u8>, Vec<elf::Symbol>) {
+/// Returns `(code_bytes, symbols, got_fixups)` where symbols list the exported
+/// function names and their offsets within `code_bytes`, and got_fixups list
+/// positions that need patching with GOT addresses by the ELF builder.
+pub fn generate() -> (Vec<u8>, Vec<elf::Symbol>, Vec<elf::GotFixup>) {
     let mut a = Asm::new();
 
     // Forward-declare labels
@@ -173,6 +189,15 @@ pub fn generate() -> (Vec<u8>, Vec<elf::Symbol>) {
     let dup_fd0 = a.label();
     let dup_fd1 = a.label();
     let dup_fd2 = a.label();
+    let errno_check = a.label();
+    let set_errno = a.label();
+    let ok = a.label();
+    let try_readlink = a.label();
+    let readlink_no_match = a.label();
+
+    // Labels for readlink path matching (reuse pattern from main path matching)
+    let rl_check_dev_fd = a.label();
+    let rl_check_proc = a.label();
 
     // ========== open(path, flags, mode) ==========
     // Rewrite as openat(AT_FDCWD, path, flags, mode) and tail-call.
@@ -190,7 +215,7 @@ pub fn generate() -> (Vec<u8>, Vec<elf::Symbol>) {
     // mov edi, AT_FDCWD         ; dirfd = AT_FDCWD
     a.emit(&[0xBF]);
     a.emit(&(AT_FDCWD as u32).to_le_bytes());
-    // jmp do_openat             ; too far for rel8, use near
+    // jmp do_openat
     a.jmp_near(do_openat);
 
     // ========== openat(dirfd, path, flags, mode) ==========
@@ -213,21 +238,17 @@ pub fn generate() -> (Vec<u8>, Vec<elf::Symbol>) {
     a.emit(&u64::from_le_bytes(*b"/dev/std").to_le_bytes());
     // cmp rax, rcx
     a.emit(&[0x48, 0x39, 0xC8]);
-    // jne check_dev_fd          ; too far for rel8
+    // jne check_dev_fd
     a.jcc_near(0x75, check_dev_fd);
 
-    // Matched "/dev/std" --check suffix at path[8].
-    // Check for "in\0" (3 bytes), "out\0" (4 bytes), "err\0" (4 bytes).
-    // Load 4 bytes at path+8 (may read past null, but that's fine since
-    // we already matched the 8-byte prefix so the string is at least 8 bytes).
+    // Matched "/dev/std" — check suffix at path[8].
     // mov eax, [rsi+8]          ; eax = *(uint32_t*)(path+8)
     a.emit(&[0x8B, 0x46, 0x08]);
 
-    // Check "in\0" --only need 3 bytes. Mask to 24 bits.
-    // and eax with 0x00FFFFFF would clobber; use a temp.
+    // Check "in\0" — only need 3 bytes. Mask to 24 bits.
     // mov ecx, eax
     a.emit(&[0x89, 0xC1]);
-    // and ecx, 0x00FFFFFF       ; mask to 3 bytes
+    // and ecx, 0x00FFFFFF
     a.emit(&[0x81, 0xE1]);
     a.emit(&0x00FFFFFFu32.to_le_bytes());
     // cmp ecx, "in\0"
@@ -250,7 +271,7 @@ pub fn generate() -> (Vec<u8>, Vec<elf::Symbol>) {
     // je dup_fd2
     a.jcc_near(0x74, dup_fd2);
 
-    // No suffix match --fall through to real openat
+    // No suffix match — fall through to real openat
     a.jmp_near(fallthrough);
 
     // ---- Check "/dev/fd/" prefix (8 bytes) ----
@@ -265,10 +286,10 @@ pub fn generate() -> (Vec<u8>, Vec<elf::Symbol>) {
     a.emit(&u64::from_le_bytes(*b"/dev/fd/").to_le_bytes());
     // cmp rax, rcx
     a.emit(&[0x48, 0x39, 0xC8]);
-    // jne check_proc            ; too far for rel8
+    // jne check_proc
     a.jcc_near(0x75, check_proc);
 
-    // Matched "/dev/fd/" --check path[8..10] for "0\0", "1\0", "2\0"
+    // Matched "/dev/fd/" — check path[8..10] for "0\0", "1\0", "2\0"
     // movzx eax, word [rsi+8]   ; load 2 bytes
     a.emit(&[0x0F, 0xB7, 0x46, 0x08]);
 
@@ -304,7 +325,7 @@ pub fn generate() -> (Vec<u8>, Vec<elf::Symbol>) {
     // jne fallthrough
     a.jcc_near(0x75, fallthrough);
 
-    // Matched "/proc/se" --check suffix "lf/fd/0\0" (8 bytes) at path[8]
+    // Matched "/proc/se" — check suffix "lf/fd/0\0" (8 bytes) at path[8]
     // mov rax, [rsi+8]
     a.emit(&[0x48, 0x8B, 0x46, 0x08]);
 
@@ -313,24 +334,24 @@ pub fn generate() -> (Vec<u8>, Vec<elf::Symbol>) {
     a.emit(&u64::from_le_bytes(*b"lf/fd/0\0").to_le_bytes());
     // cmp rax, rcx
     a.emit(&[0x48, 0x39, 0xC8]);
-    a.jcc_short(0x74, dup_fd0);
+    a.jcc_near(0x74, dup_fd0);
 
     // movabs rcx, "lf/fd/1\0"
     a.emit(&[0x48, 0xB9]);
     a.emit(&u64::from_le_bytes(*b"lf/fd/1\0").to_le_bytes());
     // cmp rax, rcx
     a.emit(&[0x48, 0x39, 0xC8]);
-    a.jcc_short(0x74, dup_fd1);
+    a.jcc_near(0x74, dup_fd1);
 
     // movabs rcx, "lf/fd/2\0"
     a.emit(&[0x48, 0xB9]);
     a.emit(&u64::from_le_bytes(*b"lf/fd/2\0").to_le_bytes());
     // cmp rax, rcx
     a.emit(&[0x48, 0x39, 0xC8]);
-    a.jcc_short(0x74, dup_fd2);
+    a.jcc_near(0x74, dup_fd2);
 
     // Fall through to real openat
-    a.jmp_short(fallthrough);
+    a.jmp_near(fallthrough);
 
     // ========== dup(N) handlers ==========
     a.bind(dup_fd0);
@@ -355,8 +376,8 @@ pub fn generate() -> (Vec<u8>, Vec<elf::Symbol>) {
     a.emit(&(SYS_DUP as u32).to_le_bytes());
     // syscall
     a.emit(&[0x0F, 0x05]);
-    // ret
-    a.emit(&[0xC3]);
+    // jmp errno_check
+    a.jmp_near(errno_check);
 
     // ========== fallthrough: real openat syscall ==========
     a.bind(fallthrough);
@@ -366,6 +387,215 @@ pub fn generate() -> (Vec<u8>, Vec<elf::Symbol>) {
     a.emit(&(SYS_OPENAT as u32).to_le_bytes());
     // syscall
     a.emit(&[0x0F, 0x05]);
+    // After syscall: rax=result, rdi=dirfd (preserved), rsi=path (preserved)
+
+    // Check if result is -ENXIO (== -6)
+    // cmp rax, -ENXIO
+    a.emit(&[0x48, 0x83, 0xF8]); // cmp rax, imm8 (sign-extended)
+    a.emit(&[(-6i8) as u8]); // -6 = 0xFA
+    // je try_readlink
+    a.jcc_near(0x74, try_readlink);
+    // Not ENXIO — fall through to errno_check
+    a.jmp_near(errno_check);
+
+    // ========== try_readlink: resolve symlink and retry matching ==========
+    a.bind(try_readlink);
+    // rdi=dirfd (preserved by syscall), rsi=path (preserved by syscall)
+    // sub rsp, 128              ; allocate buffer on stack
+    // Use imm32 encoding (0x81) because 128 = 0x80 is negative as imm8.
+    a.emit(&[0x48, 0x81, 0xEC]);
+    a.emit(&(READLINK_BUFSZ as u32).to_le_bytes());
+
+    // readlinkat(dirfd=rdi, path=rsi, buf=rsp, bufsiz=128)
+    // rdi already has dirfd, rsi already has path
+    // mov rdx, rsp              ; buf
+    a.emit(&[0x48, 0x89, 0xE2]);
+    // mov r10d, 128             ; bufsiz
+    a.emit(&[0x41, 0xBA]);
+    a.emit(&(READLINK_BUFSZ as u32).to_le_bytes());
+    // mov eax, SYS_READLINKAT
+    a.emit(&[0xB8]);
+    a.emit(&(SYS_READLINKAT as u32).to_le_bytes());
+    // syscall
+    a.emit(&[0x0F, 0x05]);
+
+    // Check result: if negative, readlink failed → return ENXIO
+    // test rax, rax
+    a.emit(&[0x48, 0x85, 0xC0]);
+    // js readlink_no_match       ; negative = error
+    a.jcc_near(0x78, readlink_no_match);
+
+    // Also check if result >= READLINK_BUFSZ (buffer full, can't null-terminate)
+    // cmp rax, 128 (use imm32: 0x80 is negative as sign-extended imm8)
+    a.emit(&[0x48, 0x3D]); // cmp rax, imm32
+    a.emit(&(READLINK_BUFSZ as u32).to_le_bytes());
+    // jge readlink_no_match
+    a.jcc_near(0x7D, readlink_no_match);
+
+    // Null-terminate the buffer: buf[rax] = 0
+    // mov byte [rsp + rax], 0
+    a.emit(&[0xC6, 0x04, 0x04, 0x00]);
+
+    // Now match the readlink result against our patterns.
+    // rsi = rsp (point to the resolved path buffer)
+    // mov rsi, rsp
+    a.emit(&[0x48, 0x89, 0xE6]);
+
+    // Load first 8 bytes of resolved path
+    // mov rax, [rsi]
+    a.emit(&[0x48, 0x8B, 0x06]);
+
+    // ---- Check "/dev/std" prefix (readlink result) ----
+    a.emit(&[0x48, 0xB9]);
+    a.emit(&u64::from_le_bytes(*b"/dev/std").to_le_bytes());
+    a.emit(&[0x48, 0x39, 0xC8]);
+    a.jcc_near(0x75, rl_check_dev_fd);
+
+    // Matched "/dev/std" — check suffix
+    a.emit(&[0x8B, 0x46, 0x08]); // mov eax, [rsi+8]
+    a.emit(&[0x89, 0xC1]); // mov ecx, eax
+    a.emit(&[0x81, 0xE1]); // and ecx, 0x00FFFFFF
+    a.emit(&0x00FFFFFFu32.to_le_bytes());
+    a.emit(&[0x81, 0xF9]); // cmp ecx, "in\0"
+    a.emit(&u32::from_le_bytes([b'i', b'n', 0, 0]).to_le_bytes());
+    // je → need to deallocate stack and dup fd 0
+    // Since we need to clean up the stack, we can't just jump to dup_fd0.
+    // We'll use a pattern: set edi to the fd, add rsp, jmp do_dup
+    let rl_dup0 = a.label();
+    a.jcc_near(0x74, rl_dup0);
+
+    a.emit(&[0x3D]); // cmp eax, "out\0"
+    a.emit(&u32::from_le_bytes(*b"out\0").to_le_bytes());
+    let rl_dup1 = a.label();
+    a.jcc_near(0x74, rl_dup1);
+
+    a.emit(&[0x3D]); // cmp eax, "err\0"
+    a.emit(&u32::from_le_bytes(*b"err\0").to_le_bytes());
+    let rl_dup2 = a.label();
+    a.jcc_near(0x74, rl_dup2);
+
+    a.jmp_near(readlink_no_match);
+
+    // ---- Check "/dev/fd/" prefix (readlink result) ----
+    a.bind(rl_check_dev_fd);
+    a.emit(&[0x48, 0x8B, 0x06]); // mov rax, [rsi]
+    a.emit(&[0x48, 0xB9]); // movabs rcx, "/dev/fd/"
+    a.emit(&u64::from_le_bytes(*b"/dev/fd/").to_le_bytes());
+    a.emit(&[0x48, 0x39, 0xC8]); // cmp rax, rcx
+    a.jcc_near(0x75, rl_check_proc);
+
+    // Matched "/dev/fd/" — check digit
+    a.emit(&[0x0F, 0xB7, 0x46, 0x08]); // movzx eax, word [rsi+8]
+
+    a.emit(&[0x66, 0x3D]); // cmp ax, "0\0"
+    a.emit(&u16::from_le_bytes([b'0', 0]).to_le_bytes());
+    a.jcc_near(0x74, rl_dup0);
+
+    a.emit(&[0x66, 0x3D]); // cmp ax, "1\0"
+    a.emit(&u16::from_le_bytes([b'1', 0]).to_le_bytes());
+    a.jcc_near(0x74, rl_dup1);
+
+    a.emit(&[0x66, 0x3D]); // cmp ax, "2\0"
+    a.emit(&u16::from_le_bytes([b'2', 0]).to_le_bytes());
+    a.jcc_near(0x74, rl_dup2);
+
+    a.jmp_near(readlink_no_match);
+
+    // ---- Check "/proc/se" prefix (readlink result) ----
+    a.bind(rl_check_proc);
+    a.emit(&[0x48, 0x8B, 0x06]); // mov rax, [rsi]
+    a.emit(&[0x48, 0xB9]); // movabs rcx, "/proc/se"
+    a.emit(&u64::from_le_bytes(*b"/proc/se").to_le_bytes());
+    a.emit(&[0x48, 0x39, 0xC8]); // cmp rax, rcx
+    a.jcc_near(0x75, readlink_no_match);
+
+    // Matched "/proc/se" — check suffix
+    a.emit(&[0x48, 0x8B, 0x46, 0x08]); // mov rax, [rsi+8]
+
+    a.emit(&[0x48, 0xB9]);
+    a.emit(&u64::from_le_bytes(*b"lf/fd/0\0").to_le_bytes());
+    a.emit(&[0x48, 0x39, 0xC8]);
+    a.jcc_short(0x74, rl_dup0);
+
+    a.emit(&[0x48, 0xB9]);
+    a.emit(&u64::from_le_bytes(*b"lf/fd/1\0").to_le_bytes());
+    a.emit(&[0x48, 0x39, 0xC8]);
+    a.jcc_short(0x74, rl_dup1);
+
+    a.emit(&[0x48, 0xB9]);
+    a.emit(&u64::from_le_bytes(*b"lf/fd/2\0").to_le_bytes());
+    a.emit(&[0x48, 0x39, 0xC8]);
+    a.jcc_short(0x74, rl_dup2);
+
+    a.jmp_short(readlink_no_match);
+
+    // ========== readlink dup handlers (deallocate stack, then dup) ==========
+    a.bind(rl_dup0);
+    a.emit(&[0x48, 0x81, 0xC4]); // add rsp, 128 (imm32: 0x80 is negative as imm8)
+    a.emit(&(READLINK_BUFSZ as u32).to_le_bytes());
+    a.emit(&[0x31, 0xFF]); // xor edi, edi
+    a.jmp_near(do_dup);
+
+    a.bind(rl_dup1);
+    a.emit(&[0x48, 0x81, 0xC4]); // add rsp, 128 (imm32: 0x80 is negative as imm8)
+    a.emit(&(READLINK_BUFSZ as u32).to_le_bytes());
+    a.emit(&[0xBF, 0x01, 0x00, 0x00, 0x00]); // mov edi, 1
+    a.jmp_near(do_dup);
+
+    a.bind(rl_dup2);
+    a.emit(&[0x48, 0x81, 0xC4]); // add rsp, 128 (imm32: 0x80 is negative as imm8)
+    a.emit(&(READLINK_BUFSZ as u32).to_le_bytes());
+    a.emit(&[0xBF, 0x02, 0x00, 0x00, 0x00]); // mov edi, 2
+    a.jmp_near(do_dup);
+
+    // ========== readlink_no_match: deallocate stack, return ENXIO ==========
+    a.bind(readlink_no_match);
+    a.emit(&[0x48, 0x81, 0xC4]); // add rsp, 128 (imm32: 0x80 is negative as imm8)
+    a.emit(&(READLINK_BUFSZ as u32).to_le_bytes());
+    // mov edi, ENXIO
+    a.emit(&[0xBF]);
+    a.emit(&(ENXIO as u32).to_le_bytes());
+    a.jmp_near(set_errno);
+
+    // ========== errno_check: convert raw syscall result to C convention ==========
+    // Linux syscalls return -errno on failure (range [-4095, -1]).
+    // If result >= 0, return as-is. Otherwise, set errno and return -1.
+    a.bind(errno_check);
+    // test rax, rax              ; check sign
+    a.emit(&[0x48, 0x85, 0xC0]);
+    // jns .ok                    ; if non-negative, return as-is
+    a.jcc_short(0x79, ok);
+    // neg eax                    ; positive errno value in edi
+    // (neg on 32-bit eax is fine: errno values are small positive ints)
+    a.emit(&[0xF7, 0xD8]); // neg eax
+    // mov edi, eax
+    a.emit(&[0x89, 0xC7]);
+    // fall through to set_errno
+
+    // ========== set_errno: call __errno_location(), set *it = edi, return -1 ==========
+    a.bind(set_errno);
+    // At this point: edi = positive errno value
+    // We need to call __errno_location() via the GOT, then store edi into *rax.
+    //
+    // Stack alignment: on function entry, rsp % 16 == 8 (return addr pushed by caller).
+    // push rdi aligns rsp to 16 and saves the errno value.
+    a.emit(&[0x57]); // push rdi  (saves errno value, aligns stack to 16)
+
+    // call [rip + disp32]        ; call *GOT[__errno_location]
+    // Opcode: FF 15 <disp32>
+    a.emit(&[0xFF, 0x15]);
+    let got_disp_offset = a.pos(); // position of the 4-byte displacement
+    a.emit(&[0x00, 0x00, 0x00, 0x00]); // placeholder, patched by ELF builder
+    let got_disp_end = a.pos(); // instruction end (for RIP-relative calc)
+
+    a.emit(&[0x5F]); // pop rdi   (restore errno value)
+    // mov [rax], edi             ; *errno_location = errno_value
+    a.emit(&[0x89, 0x38]);
+    // mov rax, -1
+    a.emit(&[0x48, 0xC7, 0xC0]);
+    a.emit(&(-1i32 as u32).to_le_bytes());
+    // .ok:
+    a.bind(ok);
     // ret
     a.emit(&[0xC3]);
 
@@ -390,7 +620,13 @@ pub fn generate() -> (Vec<u8>, Vec<elf::Symbol>) {
         },
     ];
 
-    (code, symbols)
+    let got_fixups = vec![elf::GotFixup {
+        slot: 0, // __errno_location is import[0]
+        offset: got_disp_offset,
+        aux: got_disp_end, // instruction end for RIP-relative
+    }];
+
+    (code, symbols, got_fixups)
 }
 
 #[cfg(test)]
@@ -399,14 +635,14 @@ mod tests {
 
     #[test]
     fn code_generates_without_panic() {
-        let (code, _) = generate();
+        let (code, _, _) = generate();
         assert!(code.len() > 50, "code too small: {} bytes", code.len());
-        assert!(code.len() < 1024, "code too large: {} bytes", code.len());
+        assert!(code.len() < 2048, "code too large: {} bytes", code.len());
     }
 
     #[test]
     fn exports_four_symbols() {
-        let (_, symbols) = generate();
+        let (_, symbols, _) = generate();
         assert_eq!(symbols.len(), 4);
         let names: Vec<&str> = symbols.iter().map(|s| s.name).collect();
         assert!(names.contains(&"open"));
@@ -417,7 +653,7 @@ mod tests {
 
     #[test]
     fn symbol_offsets_within_bounds() {
-        let (code, symbols) = generate();
+        let (code, symbols, _) = generate();
         for sym in &symbols {
             assert!(
                 sym.offset < code.len(),
@@ -431,7 +667,7 @@ mod tests {
 
     #[test]
     fn open64_aliases_open() {
-        let (_, symbols) = generate();
+        let (_, symbols, _) = generate();
         let open = symbols.iter().find(|s| s.name == "open").unwrap();
         let open64 = symbols.iter().find(|s| s.name == "open64").unwrap();
         assert_eq!(open.offset, open64.offset);
@@ -439,17 +675,34 @@ mod tests {
 
     #[test]
     fn openat64_aliases_openat() {
-        let (_, symbols) = generate();
+        let (_, symbols, _) = generate();
         let openat = symbols.iter().find(|s| s.name == "openat").unwrap();
         let openat64 = symbols.iter().find(|s| s.name == "openat64").unwrap();
         assert_eq!(openat.offset, openat64.offset);
     }
 
     #[test]
-    fn code_contains_two_syscall_instructions() {
-        let (code, _) = generate();
+    fn code_contains_three_syscall_instructions() {
+        let (code, _, _) = generate();
         let count = code.windows(2).filter(|w| w == &[0x0F, 0x05]).count();
-        // SYS_dup + SYS_openat = 2
-        assert_eq!(count, 2, "expected 2 syscall instructions, got {count}");
+        // SYS_dup + SYS_openat + SYS_readlinkat = 3
+        assert_eq!(count, 3, "expected 3 syscall instructions, got {count}");
+    }
+
+    #[test]
+    fn got_fixups_present_and_valid() {
+        let (code, _, got_fixups) = generate();
+        assert!(!got_fixups.is_empty(), "expected GOT fixups");
+        assert_eq!(got_fixups.len(), 1, "expected 1 GOT fixup");
+        let fixup = &got_fixups[0];
+        assert_eq!(fixup.slot, 0);
+        assert!(
+            fixup.offset + 4 <= code.len(),
+            "GOT fixup offset out of bounds"
+        );
+        assert!(
+            fixup.aux <= code.len(),
+            "GOT fixup aux out of bounds"
+        );
     }
 }

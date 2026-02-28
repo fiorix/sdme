@@ -3,12 +3,12 @@
 // Builds the smallest valid ELF64 shared library (.so): an ELF header,
 // three program headers (PT_LOAD RX, PT_LOAD RW, PT_DYNAMIC), a SysV
 // hash table, dynamic symbol table (.dynsym), dynamic string table
-// (.dynstr), and a dynamic section. No section headers (not needed at
-// runtime).
+// (.dynstr), RELA relocations, and a dynamic section. No section headers
+// (not needed at runtime).
 //
 // The RX segment contains: ELF header, program headers, machine code,
-// hash table, dynsym, and dynstr.
-// The RW segment contains: the dynamic section (on the next page).
+// hash table, dynsym, dynstr, and .rela.dyn.
+// The RW segment contains: GOT entries and the dynamic section.
 
 pub const EM_X86_64: u16 = 62;
 pub const EM_AARCH64: u16 = 183;
@@ -20,6 +20,21 @@ pub struct Symbol {
     pub name: &'static str,
     /// Offset of this symbol within the code blob.
     pub offset: usize,
+}
+
+/// A position in the machine code that needs to be patched with a GOT address.
+///
+/// After the ELF layout is computed, the builder resolves each fixup by
+/// calculating the GOT entry's virtual address relative to the instruction.
+pub struct GotFixup {
+    /// Which GOT slot (index into the `imports` array) this fixup refers to.
+    pub slot: usize,
+    /// Byte offset within the code blob where the fixup value should be written.
+    pub offset: usize,
+    /// Architecture-specific auxiliary value:
+    /// - x86_64: byte offset of the instruction end (for RIP-relative displacement)
+    /// - aarch64: byte offset of the adrp instruction (for page-relative calculation)
+    pub aux: usize,
 }
 
 // ELF constants
@@ -41,13 +56,20 @@ const DT_NULL: u64 = 0;
 const DT_HASH: u64 = 4;
 const DT_STRTAB: u64 = 5;
 const DT_SYMTAB: u64 = 6;
+const DT_RELA: u64 = 7;
+const DT_RELASZ: u64 = 8;
+const DT_RELAENT: u64 = 9;
 const DT_STRSZ: u64 = 10;
 const DT_SYMENT: u64 = 11;
 
 // Symbol table constants
 const STB_GLOBAL: u8 = 1;
 const STT_FUNC: u8 = 2;
-const SHN_ABS: u16 = 0xFFF1;
+const STT_NOTYPE: u8 = 0;
+
+// Relocation types
+const R_X86_64_GLOB_DAT: u32 = 6;
+const R_AARCH64_GLOB_DAT: u32 = 1025;
 
 const PAGE_SIZE: usize = 0x1000;
 
@@ -69,7 +91,19 @@ fn elf_hash(name: &[u8]) -> u32 {
 ///
 /// The returned bytes are a ready-to-use .so: write to a file, chmod +r,
 /// and use via LD_PRELOAD.
-pub fn build(machine: u16, code: &[u8], symbols: &[Symbol]) -> Vec<u8> {
+///
+/// `imports` lists external symbol names (e.g. `["__errno_location"]`) that
+/// will be resolved by the dynamic linker at load time via GOT entries.
+///
+/// `got_fixups` lists positions in the code that need patching with
+/// GOT-relative addresses after the layout is computed.
+pub fn build(
+    machine: u16,
+    mut code: Vec<u8>,
+    symbols: &[Symbol],
+    imports: &[&str],
+    got_fixups: &[GotFixup],
+) -> Vec<u8> {
     // Layout planning:
     //
     // RX segment (page-aligned, starts at vaddr 0):
@@ -79,8 +113,10 @@ pub fn build(machine: u16, code: &[u8], symbols: &[Symbol]) -> Vec<u8> {
     //   [...]    .hash table
     //   [...]    .dynsym table
     //   [...]    .dynstr table
+    //   [...]    .rela.dyn (if imports present)
     //
     // RW segment (next page):
+    //   GOT entries (8 bytes per import)
     //   dynamic section (array of Elf64_Dyn entries)
 
     let ehdr_size = 64usize;
@@ -90,7 +126,7 @@ pub fn build(machine: u16, code: &[u8], symbols: &[Symbol]) -> Vec<u8> {
 
     let code_offset = ehdr_size + phdrs_total;
 
-    // Build dynstr: "\0" + name1 + "\0" + name2 + "\0" + ...
+    // Build dynstr: "\0" + exported names + imported names
     let mut dynstr = vec![0u8]; // initial null byte
     let mut name_offsets: Vec<usize> = Vec::with_capacity(symbols.len());
     for sym in symbols {
@@ -98,9 +134,15 @@ pub fn build(machine: u16, code: &[u8], symbols: &[Symbol]) -> Vec<u8> {
         dynstr.extend_from_slice(sym.name.as_bytes());
         dynstr.push(0);
     }
+    let mut import_name_offsets: Vec<usize> = Vec::with_capacity(imports.len());
+    for name in imports {
+        import_name_offsets.push(dynstr.len());
+        dynstr.extend_from_slice(name.as_bytes());
+        dynstr.push(0);
+    }
 
-    // Symbol count: STN_UNDEF + exported symbols
-    let sym_count = 1 + symbols.len();
+    // Symbol count: STN_UNDEF + exported + imported
+    let sym_count = 1 + symbols.len() + imports.len();
 
     // SysV hash table
     let nbucket = sym_count as u32; // 1 bucket per symbol for fast lookup
@@ -114,17 +156,84 @@ pub fn build(machine: u16, code: &[u8], symbols: &[Symbol]) -> Vec<u8> {
     let dynsym_offset = (hash_offset + hash_size + 7) & !7;
     let dynsym_size = sym_count * 24; // Elf64_Sym is 24 bytes
     let dynstr_offset = dynsym_offset + dynsym_size;
-    let rx_file_size = dynstr_offset + dynstr.len();
+
+    // RELA section (after dynstr)
+    let rela_entry_size = 24usize; // Elf64_Rela = 24 bytes
+    let rela_count = imports.len();
+    let rela_offset = if rela_count > 0 {
+        // Align to 8 bytes
+        (dynstr_offset + dynstr.len() + 7) & !7
+    } else {
+        dynstr_offset + dynstr.len()
+    };
+    let rela_size = rela_count * rela_entry_size;
+    let rx_file_size = rela_offset + rela_size;
 
     // RW segment starts on next page
     let rw_file_offset = (rx_file_size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
     let rw_vaddr = rw_file_offset; // identity-mapped for simplicity
 
-    // Dynamic section: 6 entries (DT_HASH, DT_STRTAB, DT_SYMTAB, DT_STRSZ, DT_SYMENT, DT_NULL)
+    // GOT entries at start of RW segment
+    let got_size = imports.len() * 8;
+    let got_vaddr = rw_vaddr;
+
+    // Dynamic section follows GOT
+    let dynamic_offset = rw_file_offset + got_size;
+    let dynamic_vaddr = rw_vaddr + got_size;
+
+    // Dynamic section entry count depends on whether we have imports
     let dyn_entry_size = 16usize; // Elf64_Dyn = 16 bytes
-    let dyn_count = 6usize;
+    let dyn_count = if rela_count > 0 { 9 } else { 6 };
     let dynamic_size = dyn_count * dyn_entry_size;
-    let total_file_size = rw_file_offset + dynamic_size;
+    let rw_total_size = got_size + dynamic_size;
+    let total_file_size = rw_file_offset + rw_total_size;
+
+    // --- Patch GOT fixups in code before emitting ---
+    for fixup in got_fixups {
+        assert!(fixup.slot < imports.len(), "GOT fixup slot out of range");
+        let got_entry_vaddr = got_vaddr + fixup.slot * 8;
+
+        if machine == EM_X86_64 {
+            // RIP-relative: disp32 = target - instruction_end
+            // The instruction end is at code_offset + fixup.aux
+            let insn_end_vaddr = code_offset + fixup.aux;
+            let disp = got_entry_vaddr as isize - insn_end_vaddr as isize;
+            let disp32 = disp as i32;
+            code[fixup.offset..fixup.offset + 4].copy_from_slice(&disp32.to_le_bytes());
+        } else if machine == EM_AARCH64 {
+            // adrp + ldr pair
+            // fixup.aux = offset of the adrp instruction in code
+            // fixup.offset = offset of the ldr instruction in code
+            let adrp_vaddr = code_offset + fixup.aux;
+            let ldr_offset_in_code = fixup.offset;
+
+            // adrp: page of GOT entry - page of adrp instruction
+            let got_page = got_entry_vaddr & !0xFFF;
+            let adrp_page = adrp_vaddr & !0xFFF;
+            let page_diff = got_page as isize - adrp_page as isize;
+            let page_off = page_diff >> 12;
+
+            // Encode adrp immediate: immlo = bits [1:0] at insn[30:29], immhi = bits [20:2] at insn[23:5]
+            let immlo = (page_off as u32) & 0x3;
+            let immhi = ((page_off as u32) >> 2) & 0x7FFFF;
+            let mut adrp_insn =
+                u32::from_le_bytes(code[fixup.aux..fixup.aux + 4].try_into().unwrap());
+            adrp_insn |= (immlo << 29) | (immhi << 5);
+            code[fixup.aux..fixup.aux + 4].copy_from_slice(&adrp_insn.to_le_bytes());
+
+            // ldr x9, [x9, #page_offset] — 12-bit unsigned offset scaled by 8
+            let page_offset = got_entry_vaddr & 0xFFF;
+            let imm12 = (page_offset / 8) as u32;
+            let mut ldr_insn = u32::from_le_bytes(
+                code[ldr_offset_in_code..ldr_offset_in_code + 4]
+                    .try_into()
+                    .unwrap(),
+            );
+            ldr_insn |= imm12 << 10;
+            code[ldr_offset_in_code..ldr_offset_in_code + 4]
+                .copy_from_slice(&ldr_insn.to_le_bytes());
+        }
+    }
 
     let mut out = Vec::with_capacity(total_file_size);
 
@@ -150,7 +259,7 @@ pub fn build(machine: u16, code: &[u8], symbols: &[Symbol]) -> Vec<u8> {
     out.extend_from_slice(&0u16.to_le_bytes()); // e_shstrndx
     debug_assert_eq!(out.len(), ehdr_size);
 
-    // ---- Program Header 0: PT_LOAD RX (code + hash + dynsym + dynstr) ----
+    // ---- Program Header 0: PT_LOAD RX (code + hash + dynsym + dynstr + rela) ----
     out.extend_from_slice(&PT_LOAD.to_le_bytes()); // p_type
     out.extend_from_slice(&(PF_R | PF_X).to_le_bytes()); // p_flags
     out.extend_from_slice(&0u64.to_le_bytes()); // p_offset
@@ -161,41 +270,47 @@ pub fn build(machine: u16, code: &[u8], symbols: &[Symbol]) -> Vec<u8> {
     out.extend_from_slice(&(PAGE_SIZE as u64).to_le_bytes()); // p_align
     debug_assert_eq!(out.len(), ehdr_size + phdr_size);
 
-    // ---- Program Header 1: PT_LOAD RW (dynamic section) ----
+    // ---- Program Header 1: PT_LOAD RW (GOT + dynamic section) ----
     out.extend_from_slice(&PT_LOAD.to_le_bytes());
     out.extend_from_slice(&(PF_R | PF_W).to_le_bytes());
     out.extend_from_slice(&(rw_file_offset as u64).to_le_bytes()); // p_offset
     out.extend_from_slice(&(rw_vaddr as u64).to_le_bytes()); // p_vaddr
     out.extend_from_slice(&(rw_vaddr as u64).to_le_bytes()); // p_paddr
-    out.extend_from_slice(&(dynamic_size as u64).to_le_bytes()); // p_filesz
-    out.extend_from_slice(&(dynamic_size as u64).to_le_bytes()); // p_memsz
+    out.extend_from_slice(&(rw_total_size as u64).to_le_bytes()); // p_filesz
+    out.extend_from_slice(&(rw_total_size as u64).to_le_bytes()); // p_memsz
     out.extend_from_slice(&(PAGE_SIZE as u64).to_le_bytes()); // p_align
     debug_assert_eq!(out.len(), ehdr_size + 2 * phdr_size);
 
     // ---- Program Header 2: PT_DYNAMIC ----
     out.extend_from_slice(&PT_DYNAMIC.to_le_bytes());
     out.extend_from_slice(&(PF_R | PF_W).to_le_bytes());
-    out.extend_from_slice(&(rw_file_offset as u64).to_le_bytes()); // p_offset
-    out.extend_from_slice(&(rw_vaddr as u64).to_le_bytes()); // p_vaddr
-    out.extend_from_slice(&(rw_vaddr as u64).to_le_bytes()); // p_paddr
+    out.extend_from_slice(&(dynamic_offset as u64).to_le_bytes()); // p_offset
+    out.extend_from_slice(&(dynamic_vaddr as u64).to_le_bytes()); // p_vaddr
+    out.extend_from_slice(&(dynamic_vaddr as u64).to_le_bytes()); // p_paddr
     out.extend_from_slice(&(dynamic_size as u64).to_le_bytes()); // p_filesz
     out.extend_from_slice(&(dynamic_size as u64).to_le_bytes()); // p_memsz
     out.extend_from_slice(&8u64.to_le_bytes()); // p_align
     debug_assert_eq!(out.len(), code_offset);
 
     // ---- Machine code ----
-    out.extend_from_slice(code);
+    out.extend_from_slice(&code);
     debug_assert_eq!(out.len(), hash_offset);
 
     // ---- .hash (SysV hash table) ----
     // Build bucket and chain arrays
     let mut buckets = vec![0u32; nbucket as usize];
     let mut chains = vec![0u32; nchain as usize];
-    // STN_UNDEF (index 0) is never hashed
+    // Hash exported symbols (indices 1..=symbols.len())
     for (i, sym) in symbols.iter().enumerate() {
         let sym_idx = (i + 1) as u32; // +1 because index 0 is STN_UNDEF
         let bucket = elf_hash(sym.name.as_bytes()) % nbucket;
-        // Insert at head of chain for this bucket
+        chains[sym_idx as usize] = buckets[bucket as usize];
+        buckets[bucket as usize] = sym_idx;
+    }
+    // Hash imported symbols (indices symbols.len()+1..)
+    for (i, name) in imports.iter().enumerate() {
+        let sym_idx = (1 + symbols.len() + i) as u32;
+        let bucket = elf_hash(name.as_bytes()) % nbucket;
         chains[sym_idx as usize] = buckets[bucket as usize];
         buckets[bucket as usize] = sym_idx;
     }
@@ -210,7 +325,7 @@ pub fn build(machine: u16, code: &[u8], symbols: &[Symbol]) -> Vec<u8> {
     }
 
     // ---- Padding to align .dynsym to 8 bytes ----
-    while out.len() < code_offset + (dynsym_offset - code_offset) {
+    while out.len() < dynsym_offset {
         out.push(0);
     }
     debug_assert_eq!(out.len(), dynsym_offset);
@@ -219,12 +334,32 @@ pub fn build(machine: u16, code: &[u8], symbols: &[Symbol]) -> Vec<u8> {
     // Entry 0: STN_UNDEF
     out.extend_from_slice(&[0u8; 24]);
 
+    // Exported symbols
     for (i, sym) in symbols.iter().enumerate() {
         let st_name = name_offsets[i] as u32;
         let st_info = (STB_GLOBAL << 4) | STT_FUNC;
         let st_other = 0u8;
-        let st_shndx = SHN_ABS;
-        let st_value = (code_offset + sym.offset) as u64; // vaddr of the symbol
+        // Use a regular section index (not SHN_ABS/SHN_UNDEF/SHN_COMMON)
+        // so the dynamic linker adds the load base to st_value.
+        let st_shndx: u16 = 1;
+        let st_value = (code_offset + sym.offset) as u64;
+        let st_size = 0u64;
+
+        out.extend_from_slice(&st_name.to_le_bytes());
+        out.push(st_info);
+        out.push(st_other);
+        out.extend_from_slice(&st_shndx.to_le_bytes());
+        out.extend_from_slice(&st_value.to_le_bytes());
+        out.extend_from_slice(&st_size.to_le_bytes());
+    }
+
+    // Imported symbols (SHN_UNDEF, resolved by dynamic linker)
+    for (i, _name) in imports.iter().enumerate() {
+        let st_name = import_name_offsets[i] as u32;
+        let st_info = (STB_GLOBAL << 4) | STT_NOTYPE;
+        let st_other = 0u8;
+        let st_shndx: u16 = 0; // SHN_UNDEF — tells linker to resolve externally
+        let st_value = 0u64;
         let st_size = 0u64;
 
         out.extend_from_slice(&st_name.to_le_bytes());
@@ -237,10 +372,46 @@ pub fn build(machine: u16, code: &[u8], symbols: &[Symbol]) -> Vec<u8> {
 
     // ---- .dynstr ----
     out.extend_from_slice(&dynstr);
+
+    // ---- .rela.dyn ----
+    if rela_count > 0 {
+        // Pad to alignment
+        while out.len() < rela_offset {
+            out.push(0);
+        }
+        debug_assert_eq!(out.len(), rela_offset);
+
+        let reloc_type = if machine == EM_X86_64 {
+            R_X86_64_GLOB_DAT
+        } else {
+            R_AARCH64_GLOB_DAT
+        };
+
+        for i in 0..rela_count {
+            // r_offset: virtual address of GOT entry to patch
+            let r_offset = (got_vaddr + i * 8) as u64;
+            // r_info: symbol index in upper 32 bits, type in lower 32 bits
+            let sym_idx = (1 + symbols.len() + i) as u64;
+            let r_info = (sym_idx << 32) | (reloc_type as u64);
+            // r_addend: 0 for GLOB_DAT
+            let r_addend = 0u64;
+
+            out.extend_from_slice(&r_offset.to_le_bytes());
+            out.extend_from_slice(&r_info.to_le_bytes());
+            out.extend_from_slice(&r_addend.to_le_bytes());
+        }
+    }
+
     debug_assert_eq!(out.len(), rx_file_size);
 
     // ---- Padding to RW page boundary ----
     out.resize(rw_file_offset, 0);
+
+    // ---- GOT entries (zeroed, filled by dynamic linker) ----
+    for _ in 0..imports.len() {
+        out.extend_from_slice(&0u64.to_le_bytes());
+    }
+    debug_assert_eq!(out.len(), dynamic_offset);
 
     // ---- Dynamic section ----
     let emit_dyn = |out: &mut Vec<u8>, tag: u64, val: u64| {
@@ -253,6 +424,11 @@ pub fn build(machine: u16, code: &[u8], symbols: &[Symbol]) -> Vec<u8> {
     emit_dyn(&mut out, DT_SYMTAB, dynsym_offset as u64);
     emit_dyn(&mut out, DT_STRSZ, dynstr.len() as u64);
     emit_dyn(&mut out, DT_SYMENT, 24); // sizeof(Elf64_Sym)
+    if rela_count > 0 {
+        emit_dyn(&mut out, DT_RELA, rela_offset as u64);
+        emit_dyn(&mut out, DT_RELASZ, rela_size as u64);
+        emit_dyn(&mut out, DT_RELAENT, rela_entry_size as u64);
+    }
     emit_dyn(&mut out, DT_NULL, 0);
 
     debug_assert_eq!(out.len(), total_file_size);
@@ -292,7 +468,7 @@ mod tests {
     fn elf_header_et_dyn() {
         let code = vec![0xcc; 16];
         let syms = test_symbols();
-        let elf = build(EM_X86_64, &code, &syms);
+        let elf = build(EM_X86_64, code, &syms, &[], &[]);
 
         // Magic
         assert_eq!(&elf[0..4], b"\x7fELF");
@@ -315,7 +491,7 @@ mod tests {
     fn program_headers_correct() {
         let code = vec![0xcc; 16];
         let syms = test_symbols();
-        let elf = build(EM_X86_64, &code, &syms);
+        let elf = build(EM_X86_64, code, &syms, &[], &[]);
 
         // PH0: PT_LOAD RX
         let ph0_type = u32::from_le_bytes(elf[64..68].try_into().unwrap());
@@ -342,7 +518,7 @@ mod tests {
     fn dynamic_section_has_required_tags() {
         let code = vec![0xcc; 16];
         let syms = test_symbols();
-        let elf = build(EM_X86_64, &code, &syms);
+        let elf = build(EM_X86_64, code, &syms, &[], &[]);
 
         // Find the dynamic section via PH2's p_offset
         let ph2_off = 64 + 2 * 56;
@@ -371,14 +547,61 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_section_has_rela_tags_with_imports() {
+        let code = vec![0xcc; 16];
+        let syms = test_symbols();
+        let imports = ["__errno_location"];
+        let elf = build(EM_X86_64, code, &syms, &imports, &[]);
+
+        // Find the dynamic section via PH2's p_offset
+        let ph2_off = 64 + 2 * 56;
+        let dyn_offset =
+            u64::from_le_bytes(elf[ph2_off + 8..ph2_off + 16].try_into().unwrap()) as usize;
+        let dyn_size =
+            u64::from_le_bytes(elf[ph2_off + 32..ph2_off + 40].try_into().unwrap()) as usize;
+
+        let mut tags = Vec::new();
+        let mut pos = dyn_offset;
+        while pos + 16 <= dyn_offset + dyn_size {
+            let tag = u64::from_le_bytes(elf[pos..pos + 8].try_into().unwrap());
+            tags.push(tag);
+            if tag == DT_NULL {
+                break;
+            }
+            pos += 16;
+        }
+
+        assert!(tags.contains(&DT_RELA), "missing DT_RELA");
+        assert!(tags.contains(&DT_RELASZ), "missing DT_RELASZ");
+        assert!(tags.contains(&DT_RELAENT), "missing DT_RELAENT");
+    }
+
+    #[test]
     fn hash_table_counts_match_symbols() {
         let code = vec![0xcc; 16];
         let syms = test_symbols();
         let sym_count = 1 + syms.len(); // STN_UNDEF + 4
-        let elf = build(EM_X86_64, &code, &syms);
+        let elf = build(EM_X86_64, code, &syms, &[], &[]);
 
         // Hash table starts right after code
-        let hash_off = code_offset() + code.len();
+        let hash_off = code_offset() + 16; // 16 = code.len()
+        let nbucket = u32::from_le_bytes(elf[hash_off..hash_off + 4].try_into().unwrap());
+        let nchain =
+            u32::from_le_bytes(elf[hash_off + 4..hash_off + 8].try_into().unwrap());
+
+        assert_eq!(nbucket as usize, sym_count);
+        assert_eq!(nchain as usize, sym_count);
+    }
+
+    #[test]
+    fn hash_table_counts_include_imports() {
+        let code = vec![0xcc; 16];
+        let syms = test_symbols();
+        let imports = ["__errno_location"];
+        let sym_count = 1 + syms.len() + imports.len(); // STN_UNDEF + 4 + 1
+        let elf = build(EM_X86_64, code, &syms, &imports, &[]);
+
+        let hash_off = code_offset() + 16;
         let nbucket = u32::from_le_bytes(elf[hash_off..hash_off + 4].try_into().unwrap());
         let nchain =
             u32::from_le_bytes(elf[hash_off + 4..hash_off + 8].try_into().unwrap());
@@ -391,7 +614,7 @@ mod tests {
     fn aarch64_machine_field() {
         let code = vec![0; 16];
         let syms = test_symbols();
-        let elf = build(EM_AARCH64, &code, &syms);
+        let elf = build(EM_AARCH64, code, &syms, &[], &[]);
         assert_eq!(u16::from_le_bytes([elf[18], elf[19]]), EM_AARCH64);
     }
 
@@ -399,7 +622,7 @@ mod tests {
     fn dynstr_contains_all_names() {
         let code = vec![0xcc; 16];
         let syms = test_symbols();
-        let elf = build(EM_X86_64, &code, &syms);
+        let elf = build(EM_X86_64, code, &syms, &[], &[]);
         let elf_str = String::from_utf8_lossy(&elf);
         for sym in &syms {
             assert!(
@@ -408,6 +631,19 @@ mod tests {
                 sym.name
             );
         }
+    }
+
+    #[test]
+    fn dynstr_contains_import_names() {
+        let code = vec![0xcc; 16];
+        let syms = test_symbols();
+        let imports = ["__errno_location"];
+        let elf = build(EM_X86_64, code, &syms, &imports, &[]);
+        let elf_str = String::from_utf8_lossy(&elf);
+        assert!(
+            elf_str.contains("__errno_location"),
+            "dynstr missing imported symbol"
+        );
     }
 
     #[test]

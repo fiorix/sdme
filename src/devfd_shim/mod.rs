@@ -5,6 +5,13 @@
 // When a path matches, dup(N) is returned instead of calling the real open.
 // This works around ENXIO errors when FDs 0/1/2 are journal sockets (not
 // pipes), which happens under systemd's service management.
+//
+// If the real openat returns ENXIO, the shim resolves one level of symlink
+// via readlinkat and retries the path matching. This handles cases like
+// nginx opening /var/log/nginx/error.log → /dev/stderr.
+//
+// On error, errno is set properly via __errno_location() (imported through
+// the GOT) and -1 is returned per C convention.
 
 mod aarch64;
 mod elf;
@@ -17,17 +24,18 @@ use crate::drop_privs::Arch;
 /// Returns the raw bytes of a ready-to-use .so file. Write to a file,
 /// set readable permissions, and use via LD_PRELOAD.
 pub fn generate(arch: Arch) -> Vec<u8> {
-    let (machine, code, symbols) = match arch {
+    let (machine, code, symbols, got_fixups) = match arch {
         Arch::X86_64 => {
-            let (code, syms) = x86_64::generate();
-            (elf::EM_X86_64, code, syms)
+            let (code, syms, fixups) = x86_64::generate();
+            (elf::EM_X86_64, code, syms, fixups)
         }
         Arch::Aarch64 => {
-            let (code, syms) = aarch64::generate();
-            (elf::EM_AARCH64, code, syms)
+            let (code, syms, fixups) = aarch64::generate();
+            (elf::EM_AARCH64, code, syms, fixups)
         }
     };
-    elf::build(machine, &code, &symbols)
+    let imports = ["__errno_location"];
+    elf::build(machine, code, &symbols, &imports, &got_fixups)
 }
 
 #[cfg(test)]
@@ -65,6 +73,18 @@ mod tests {
                     "dynstr missing symbol: {name}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn dynstr_contains_errno_location() {
+        for arch in [Arch::X86_64, Arch::Aarch64] {
+            let elf = generate(arch);
+            let elf_str = String::from_utf8_lossy(&elf);
+            assert!(
+                elf_str.contains("__errno_location"),
+                "dynstr missing __errno_location"
+            );
         }
     }
 }
