@@ -35,7 +35,7 @@ The project is a single Rust binary (`src/main.rs`) backed by a shared library (
 
 ### Core Concepts
 
-- **Overlayfs CoW storage**: each container gets `upper/work/merged/shared` directories under the datadir. The lower layer is the imported rootfs. Uses kernel overlayfs.
+- **Overlayfs CoW storage**: each container gets `upper/work/merged` directories under the datadir. The lower layer is the imported rootfs. Uses kernel overlayfs.
 - **Systemd integration**: containers are managed as a systemd template unit (`sdme@.service`). Start goes through D-Bus to systemd. The template unit is auto-installed and auto-updated when content changes.
 - **machinectl integration**: `join` and `exec` use `machinectl shell` for container interaction. `stop` uses D-Bus (`KillMachine` for graceful/kill, `TerminateMachine` for terminate).
 - **DNS resolution**: containers share the host's network namespace. `systemd-resolved` is masked in the overlayfs upper layer at creation time so the host's resolver handles DNS. A placeholder `/etc/resolv.conf` regular file is written so `systemd-nspawn --resolv-conf=auto` can populate it at boot.
@@ -52,7 +52,7 @@ The project is a single Rust binary (`src/main.rs`) backed by a shared library (
 | `sdme exec` | Run a one-off command in a running container (`machinectl shell`) |
 | `sdme stop` | Graceful shutdown via `SIGRTMIN+4` (default), `--term` for terminate, `--kill` for force-kill |
 | `sdme rm` | Remove containers (stops if running, deletes state + files) |
-| `sdme ps` | List containers with status, health, OS, pod/OCI-pod (if any), and shared directory |
+| `sdme ps` | List containers with status, health, OS, pod/OCI-pod/userns/binds (if any) |
 | `sdme logs` | View container logs (exec's `journalctl`) |
 | `sdme fs import` | Import a rootfs from a directory, tarball, URL, OCI image, or QCOW2 disk image |
 | `sdme fs ls` | List imported root filesystems |
@@ -133,6 +133,7 @@ Dependencies are checked at runtime before use via `system_check::check_dependen
 - **Bind mounts and env vars**: `-b`/`--bind` and `-e`/`--env` on `create`/`new` add custom bind mounts and environment variables. Stored in the state file and converted to systemd-nspawn flags at start time. Bind mounts validated (absolute paths, no `..`). Managed by `BindConfig` and `EnvConfig` in `src/mounts.rs`.
 - **OCI registry pulling**: supports pulling from OCI registries (e.g. `docker.io/ubuntu:24.04`). Implements the OCI Distribution Spec in `src/import/registry.rs`; resolves tags to manifests, matches architecture, downloads and extracts layers. Supports `--oci-mode` and `--base-fs` for running OCI app images as systemd services.
 - **Pods**: `sdme pod new` creates a shared network namespace (loopback only) that multiple containers can join. The pod netns is created with `unshare(CLONE_NEWNET)` and bind-mounted to `/run/sdme/pods/{name}/netns`. Persistent state lives at `{datadir}/pods/{name}/state`. Two join mechanisms: `--pod` puts the entire nspawn container in the pod's netns via `--network-namespace-path=` (mutually exclusive with `--private-network`); `--oci-pod` bind-mounts the pod's netns into the container and uses an inner systemd drop-in (`NetworkNamespacePath=`) so only the OCI app service process enters the pod's netns (requires an OCI app rootfs with `sdme-oci-app.service`). Both flags can be combined on the same container. Container state stores `POD` and/or `OCI_POD` keys. Pod removal checks both keys.
+- **User namespace isolation**: `-u`/`--userns` on `create`/`new` enables user namespace isolation via `--private-users=pick --private-users-ownership=auto`. Container root maps to a high UID on the host (524288+ range, deterministically hashed from machine name). On kernel 6.6+, overlayfs supports idmapped mounts (zero overhead, files stay UID 0 on disk). Stored as `USERNS=yes` in the container state file.
 - **Interrupt handling**: a global `INTERRUPTED` flag (`src/lib.rs`) set by a POSIX `SIGINT` handler (installed without `SA_RESTART`). Import loops, boot-wait loops, and build operations check it for clean Ctrl+C cancellation. Second Ctrl+C force-kills the process. Cleanup paths (e.g. container removal after boot failure in `sdme new`) call `reset_interrupt()` to clear the flag and re-install the handler, ensuring cleanup code that also checks `check_interrupted()` is not short-circuited by a prior Ctrl+C.
 - **Build COPY restrictions**: `sdme fs build` COPY writes to the overlayfs upper layer while stopped. Destinations under tmpfs-mounted dirs (`/tmp`, `/run`, `/dev/shm`) or opaque dirs are rejected. Validation in `check_shadowed_dest()` (`src/build.rs`); errors include config file path and line number.
 - **Boot failure cleanup**: `sdme new` removes the just-created container on boot failure, join failure, or Ctrl+C. `sdme start` stops the container on boot failure or Ctrl+C (preserving it on disk for debugging). Both reset the interrupt flag before cleanup so that the stop/remove operations (which internally call `check_interrupted()`) can complete.

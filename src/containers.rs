@@ -1,6 +1,6 @@
 //! Internal API for container filesystem, state, and runtime management.
 //!
-//! Each container gets an overlayfs directory tree (`upper/work/merged/shared`)
+//! Each container gets an overlayfs directory tree (`upper/work/merged`)
 //! under the configured data directory and a KEY=VALUE state file that tracks
 //! its metadata. All mutating operations follow a transaction-style pattern:
 //! work is performed step-by-step and, on failure, partially-created artifacts
@@ -21,6 +21,7 @@ use crate::{
     State,
 };
 
+#[derive(Default)]
 pub struct CreateOptions {
     pub name: Option<String>,
     pub rootfs: Option<String>,
@@ -31,6 +32,7 @@ pub struct CreateOptions {
     pub oci_pod: Option<String>,
     pub binds: BindConfig,
     pub envs: EnvConfig,
+    pub userns: bool,
 }
 
 /// Read the current process umask. There is no "get umask" syscall, so
@@ -129,12 +131,7 @@ fn do_create(
     // container (e.g. dbus-daemon running as messagebus) cannot traverse the
     // filesystem. The merged mount point also needs 0o755. The work directory
     // is overlayfs-internal and can stay restricted.
-    for (sub, mode) in &[
-        ("upper", 0o755),
-        ("work", 0o700),
-        ("merged", 0o755),
-        ("shared", 0o755),
-    ] {
+    for (sub, mode) in &[("upper", 0o755), ("work", 0o700), ("merged", 0o755)] {
         let dir = container_dir.join(sub);
         fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
         set_dir_permissions(&dir, *mode)?;
@@ -309,6 +306,9 @@ fn do_create(
             eprintln!("wrote oci-pod netns drop-in: {}", dropin_path.display());
         }
     }
+    if opts.userns {
+        state.set("USERNS", "yes");
+    }
     if !opaque_dirs.is_empty() {
         state.set("OPAQUE_DIRS", opaque_dirs.join(","));
     }
@@ -470,7 +470,7 @@ pub fn ensure_exists(datadir: &Path, name: &str) -> Result<()> {
 /// old containers work without requiring manual intervention or recreation.
 pub fn ensure_permissions(datadir: &Path, name: &str) -> Result<()> {
     let container_dir = datadir.join("containers").join(name);
-    for (sub, mode) in &[("upper", 0o755), ("merged", 0o755), ("shared", 0o755)] {
+    for (sub, mode) in &[("upper", 0o755), ("merged", 0o755)] {
         let dir = container_dir.join(sub);
         if dir.exists() {
             set_dir_permissions(&dir, *mode)?;
@@ -487,7 +487,6 @@ fn unix_timestamp() -> u64 {
 }
 
 fn set_dir_permissions(path: &Path, mode: u32) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(mode))
         .with_context(|| format!("failed to set permissions on {}", path.display()))
 }
@@ -570,9 +569,39 @@ pub struct ContainerInfo {
     pub status: String,
     pub health: String,
     pub os: String,
-    pub shared: PathBuf,
     pub pod: String,
     pub oci_pod: String,
+    pub userns: bool,
+    pub binds: String,
+}
+
+impl ContainerInfo {
+    /// Format bind mounts for display in `sdme ps`.
+    ///
+    /// Shows container-side mount points with `(ro)` suffix for read-only binds.
+    /// Example: `/mnt/data,/etc/app(ro)`
+    pub fn binds_display(&self) -> String {
+        if self.binds.is_empty() {
+            return String::new();
+        }
+        self.binds
+            .split('|')
+            .filter_map(|spec| {
+                let parts: Vec<&str> = spec.split(':').collect();
+                if parts.len() < 3 {
+                    return None;
+                }
+                let container = parts[1];
+                let mode = parts[2];
+                if mode == "ro" {
+                    Some(format!("{container}(ro)"))
+                } else {
+                    Some(container.to_string())
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    }
 }
 
 pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
@@ -596,7 +625,6 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
     let mut result = Vec::new();
     for name in &entries {
         let container_dir = datadir.join("containers").join(name);
-        let shared = container_dir.join("shared");
 
         // Health checks.
         let mut problems = Vec::new();
@@ -605,16 +633,24 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
         }
         let state_path = state_dir.join(name);
         let state = State::read_from(&state_path);
-        match &state {
-            Ok(s) => {
-                let rootfs_name = s.rootfs();
-                if !rootfs_name.is_empty() && !datadir.join("fs").join(rootfs_name).exists() {
-                    problems.push("missing fs");
-                }
-            }
+
+        // Extract all state-dependent fields at once.
+        let (rootfs_name, pod, oci_pod, userns, binds) = match &state {
+            Ok(s) => (
+                s.rootfs().to_string(),
+                s.get("POD").unwrap_or("").to_string(),
+                s.get("OCI_POD").unwrap_or("").to_string(),
+                s.is_yes("USERNS"),
+                s.get("BINDS").unwrap_or("").to_string(),
+            ),
             Err(_) => {
                 problems.push("unreadable state file");
+                (String::new(), String::new(), String::new(), false, String::new())
             }
+        };
+
+        if !rootfs_name.is_empty() && !datadir.join("fs").join(&rootfs_name).exists() {
+            problems.push("missing fs");
         }
 
         let health = if problems.is_empty() {
@@ -624,17 +660,10 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
         };
 
         // OS detection from rootfs.
-        let os = match &state {
-            Ok(s) => {
-                let rootfs_name = s.rootfs();
-                if rootfs_name.is_empty() {
-                    String::new()
-                } else {
-                    let rootfs_path = datadir.join("fs").join(rootfs_name);
-                    rootfs::detect_distro(&rootfs_path)
-                }
-            }
-            Err(_) => String::new(),
+        let os = if rootfs_name.is_empty() {
+            String::new()
+        } else {
+            rootfs::detect_distro(&datadir.join("fs").join(&rootfs_name))
         };
 
         // Status (running/stopped).
@@ -647,24 +676,15 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
             "stopped"
         };
 
-        let pod = match &state {
-            Ok(s) => s.get("POD").unwrap_or("").to_string(),
-            Err(_) => String::new(),
-        };
-
-        let oci_pod = match &state {
-            Ok(s) => s.get("OCI_POD").unwrap_or("").to_string(),
-            Err(_) => String::new(),
-        };
-
         result.push(ContainerInfo {
             name: name.clone(),
             status: status.to_string(),
             health,
             os,
-            shared,
             pod,
             oci_pod,
+            userns,
+            binds,
         });
     }
     Ok(result)
@@ -891,15 +911,7 @@ mod tests {
         let _lock = UMASK_LOCK.lock().unwrap();
         let tmp = tmp();
         let opts = CreateOptions {
-            name: None,
-            rootfs: None,
-            limits: Default::default(),
-            network: Default::default(),
-            opaque_dirs: vec![],
-            pod: None,
-            oci_pod: None,
-            binds: Default::default(),
-            envs: Default::default(),
+            ..Default::default()
         };
         let name = create(tmp.path(), &opts, false).unwrap();
         assert!(validate_name(&name).is_ok());
@@ -909,7 +921,6 @@ mod tests {
         assert!(container_dir.join("upper").is_dir());
         assert!(container_dir.join("work").is_dir());
         assert!(container_dir.join("merged").is_dir());
-        assert!(container_dir.join("shared").is_dir());
 
         // Verify hostname.
         let hostname = fs::read_to_string(container_dir.join("upper/etc/hostname")).unwrap();
@@ -935,14 +946,7 @@ mod tests {
         let tmp = tmp();
         let opts = CreateOptions {
             name: Some("hello".to_string()),
-            rootfs: None,
-            limits: Default::default(),
-            network: Default::default(),
-            opaque_dirs: vec![],
-            pod: None,
-            oci_pod: None,
-            binds: Default::default(),
-            envs: Default::default(),
+            ..Default::default()
         };
         let name = create(tmp.path(), &opts, false).unwrap();
         assert_eq!(name, "hello");
@@ -965,14 +969,7 @@ mod tests {
         let tmp = tmp();
         let opts = CreateOptions {
             name: Some("dup".to_string()),
-            rootfs: None,
-            limits: Default::default(),
-            network: Default::default(),
-            opaque_dirs: vec![],
-            pod: None,
-            oci_pod: None,
-            binds: Default::default(),
-            envs: Default::default(),
+            ..Default::default()
         };
         create(tmp.path(), &opts, false).unwrap();
         let err = create(tmp.path(), &opts, false).unwrap_err();
@@ -989,13 +986,7 @@ mod tests {
         let opts = CreateOptions {
             name: Some("test".to_string()),
             rootfs: Some("nonexistent".to_string()),
-            limits: Default::default(),
-            network: Default::default(),
-            opaque_dirs: vec![],
-            pod: None,
-            oci_pod: None,
-            binds: Default::default(),
-            envs: Default::default(),
+            ..Default::default()
         };
         let err = create(tmp.path(), &opts, false).unwrap_err();
         assert!(
@@ -1014,13 +1005,7 @@ mod tests {
         let opts = CreateOptions {
             name: Some("test".to_string()),
             rootfs: Some("myroot".to_string()),
-            limits: Default::default(),
-            network: Default::default(),
-            opaque_dirs: vec![],
-            pod: None,
-            oci_pod: None,
-            binds: Default::default(),
-            envs: Default::default(),
+            ..Default::default()
         };
         let name = create(tmp.path(), &opts, false).unwrap();
         assert_eq!(name, "test");
@@ -1039,14 +1024,7 @@ mod tests {
 
         let opts = CreateOptions {
             name: Some("fail".to_string()),
-            rootfs: None,
-            limits: Default::default(),
-            network: Default::default(),
-            opaque_dirs: vec![],
-            pod: None,
-            oci_pod: None,
-            binds: Default::default(),
-            envs: Default::default(),
+            ..Default::default()
         };
         let err = create(tmp.path(), &opts, false);
         assert!(err.is_err());
@@ -1061,14 +1039,7 @@ mod tests {
         let tmp = tmp();
         let opts = CreateOptions {
             name: Some("mybox".to_string()),
-            rootfs: None,
-            limits: Default::default(),
-            network: Default::default(),
-            opaque_dirs: vec![],
-            pod: None,
-            oci_pod: None,
-            binds: Default::default(),
-            envs: Default::default(),
+            ..Default::default()
         };
         create(tmp.path(), &opts, false).unwrap();
         assert!(ensure_exists(tmp.path(), "mybox").is_ok());
@@ -1092,7 +1063,6 @@ mod tests {
         fs::create_dir_all(container_dir.join("upper")).unwrap();
         fs::create_dir_all(container_dir.join("work")).unwrap();
         fs::create_dir_all(container_dir.join("merged")).unwrap();
-        fs::create_dir_all(container_dir.join("shared")).unwrap();
     }
 
     #[test]
@@ -1168,14 +1138,8 @@ mod tests {
         };
         let opts = CreateOptions {
             name: Some("limited".to_string()),
-            rootfs: None,
             limits,
-            network: Default::default(),
-            opaque_dirs: vec![],
-            pod: None,
-            oci_pod: None,
-            binds: Default::default(),
-            envs: Default::default(),
+            ..Default::default()
         };
         let name = create(tmp.path(), &opts, false).unwrap();
         assert_eq!(name, "limited");
@@ -1194,20 +1158,43 @@ mod tests {
         let tmp = tmp();
         let opts = CreateOptions {
             name: Some("umasktest".to_string()),
-            rootfs: None,
-            limits: Default::default(),
-            network: Default::default(),
-            opaque_dirs: vec![],
-            pod: None,
-            oci_pod: None,
-            binds: Default::default(),
-            envs: Default::default(),
+            ..Default::default()
         };
         let err = create(tmp.path(), &opts, false);
         unsafe { libc::umask(old) };
 
         let err = err.unwrap_err();
         assert!(err.to_string().contains("umask"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_create_with_userns() {
+        let _lock = UMASK_LOCK.lock().unwrap();
+        let tmp = tmp();
+        let opts = CreateOptions {
+            name: Some("usernsbox".to_string()),
+            userns: true,
+            ..Default::default()
+        };
+        let name = create(tmp.path(), &opts, false).unwrap();
+        assert_eq!(name, "usernsbox");
+
+        let state = State::read_from(&tmp.path().join("state/usernsbox")).unwrap();
+        assert_eq!(state.get("USERNS"), Some("yes"));
+    }
+
+    #[test]
+    fn test_create_without_userns() {
+        let _lock = UMASK_LOCK.lock().unwrap();
+        let tmp = tmp();
+        let opts = CreateOptions {
+            name: Some("nouserns".to_string()),
+            ..Default::default()
+        };
+        create(tmp.path(), &opts, false).unwrap();
+
+        let state = State::read_from(&tmp.path().join("state/nouserns")).unwrap();
+        assert_eq!(state.get("USERNS"), None);
     }
 
     // --- validate_opaque_dirs tests ---
@@ -1278,14 +1265,8 @@ mod tests {
         let tmp = tmp();
         let opts = CreateOptions {
             name: Some("opaquebox".to_string()),
-            rootfs: None,
-            limits: Default::default(),
-            network: Default::default(),
             opaque_dirs: vec!["/var".to_string(), "/opt/data".to_string()],
-            pod: None,
-            oci_pod: None,
-            binds: Default::default(),
-            envs: Default::default(),
+            ..Default::default()
         };
         let name = create(tmp.path(), &opts, false).unwrap();
         assert_eq!(name, "opaquebox");
@@ -1329,14 +1310,8 @@ mod tests {
         let tmp = tmp();
         let opts = CreateOptions {
             name: Some("statebox".to_string()),
-            rootfs: None,
-            limits: Default::default(),
-            network: Default::default(),
             opaque_dirs: vec!["/var".to_string(), "/opt".to_string()],
-            pod: None,
-            oci_pod: None,
-            binds: Default::default(),
-            envs: Default::default(),
+            ..Default::default()
         };
         create(tmp.path(), &opts, false).unwrap();
 

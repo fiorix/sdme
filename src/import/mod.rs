@@ -1223,7 +1223,7 @@ Type=exec
 {service_section}
 # TODO(sdme): bind-mount declared volumes into the chroot.
 # OCI volumes: {volume_comment}
-# Example: BindPaths=/var/lib/sdme/containers/%i/shared/data:/data
+# Use: sdme create -b /host/path:/container/path -r <this-rootfs>
 
 # TODO(sdme): wire up port forwarding from host to container.
 # OCI ports: {port_comment}

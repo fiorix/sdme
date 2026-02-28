@@ -103,6 +103,10 @@ enum Command {
         #[arg(long)]
         oci_pod: Option<String>,
 
+        /// Enable user namespace isolation (container root != host root)
+        #[arg(short = 'u', long)]
+        userns: bool,
+
         #[command(flatten)]
         network: NetworkArgs,
 
@@ -173,6 +177,10 @@ enum Command {
         /// Join a pod network namespace for the OCI app process only (requires OCI app rootfs)
         #[arg(long)]
         oci_pod: Option<String>,
+
+        /// Enable user namespace isolation (container root != host root)
+        #[arg(short = 'u', long)]
+        userns: bool,
 
         #[command(flatten)]
         network: NetworkArgs,
@@ -665,6 +673,7 @@ fn main() -> Result<()> {
             opaque_dirs,
             pod,
             oci_pod,
+            userns,
             network,
             mounts,
         } => {
@@ -685,6 +694,7 @@ fn main() -> Result<()> {
                 oci_pod,
                 binds,
                 envs,
+                userns,
             };
             let name = containers::create(&cfg.datadir, &opts, cli.verbose)?;
             eprintln!("creating '{name}'");
@@ -769,6 +779,7 @@ fn main() -> Result<()> {
             opaque_dirs,
             pod,
             oci_pod,
+            userns,
             network,
             mounts,
             command,
@@ -790,6 +801,7 @@ fn main() -> Result<()> {
                 oci_pod,
                 binds,
                 envs,
+                userns,
             };
             let name = containers::create(&cfg.datadir, &opts, cli.verbose)?;
             eprintln!("creating '{name}'");
@@ -851,6 +863,21 @@ fn main() -> Result<()> {
                 } else {
                     None
                 };
+                let show_userns = entries.iter().any(|e| e.userns);
+                let binds_display: Vec<String> =
+                    entries.iter().map(|e| e.binds_display()).collect();
+                let binds_w = if binds_display.iter().any(|b| !b.is_empty()) {
+                    Some(
+                        binds_display
+                            .iter()
+                            .map(|b| b.len())
+                            .max()
+                            .unwrap()
+                            .max(5),
+                    )
+                } else {
+                    None
+                };
                 // Header.
                 print!(
                     "{:<name_w$}  {:<status_w$}  {:<health_w$}  {:<os_w$}",
@@ -862,9 +889,15 @@ fn main() -> Result<()> {
                 if let Some(pw) = oci_pod_w {
                     print!("  {:<pw$}", "OCI-POD");
                 }
-                println!("  SHARED");
+                if show_userns {
+                    print!("  USERNS");
+                }
+                if let Some(bw) = binds_w {
+                    print!("  {:<bw$}", "BINDS");
+                }
+                println!();
                 // Rows.
-                for e in &entries {
+                for (i, e) in entries.iter().enumerate() {
                     print!(
                         "{:<name_w$}  {:<status_w$}  {:<health_w$}  {:<os_w$}",
                         e.name, e.status, e.health, e.os
@@ -875,7 +908,13 @@ fn main() -> Result<()> {
                     if let Some(pw) = oci_pod_w {
                         print!("  {:<pw$}", e.oci_pod);
                     }
-                    println!("  {}", e.shared.display());
+                    if show_userns {
+                        print!("  {:<6}", if e.userns { "yes" } else { "" });
+                    }
+                    if let Some(bw) = binds_w {
+                        print!("  {:<bw$}", binds_display[i]);
+                    }
+                    println!();
                 }
             }
         }

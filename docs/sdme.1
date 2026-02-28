@@ -37,7 +37,7 @@ Path to config file.
 Default:
 .IR ~/.config/sdme/sdmerc .
 .SH COMMANDS
-.SS sdme new [\fIname\fR] [\-r \fIfs\fR] [\-t \fIseconds\fR] [\fIlimits\fR] [\fInetwork\fR] [\-o \fIdir\fR]... [\-\-pod \fIpod\fR] [\-\-oci\-pod \fIpod\fR] [\-b \fIbind\fR]... [\-e \fIenv\fR]... [\-\-] [\fIcommand\fR...]
+.SS sdme new [\fIname\fR] [\-r \fIfs\fR] [\-t \fIseconds\fR] [\-u] [\fIlimits\fR] [\fInetwork\fR] [\-o \fIdir\fR]... [\-\-pod \fIpod\fR] [\-\-oci\-pod \fIpod\fR] [\-b \fIbind\fR]... [\-e \fIenv\fR]... [\-\-] [\fIcommand\fR...]
 Create, start, and enter a new container.
 If
 .I name
@@ -98,9 +98,17 @@ to join a pod network namespace for the OCI app process only; see
 .B PODS
 below.
 .PP
+Use
+.B \-u
+/
+.B \-\-userns
+to enable user namespace isolation; see
+.B USER NAMESPACES
+below.
+.PP
 If boot fails or is interrupted (Ctrl+C), the just\-created container is
 automatically removed.
-.SS sdme create [\fIname\fR] [\-r \fIfs\fR] [\fIlimits\fR] [\fInetwork\fR] [\-o \fIdir\fR]... [\-\-pod \fIpod\fR] [\-\-oci\-pod \fIpod\fR] [\-b \fIbind\fR]... [\-e \fIenv\fR]...
+.SS sdme create [\fIname\fR] [\-r \fIfs\fR] [\-u] [\fIlimits\fR] [\fInetwork\fR] [\-o \fIdir\fR]... [\-\-pod \fIpod\fR] [\-\-oci\-pod \fIpod\fR] [\-b \fIbind\fR]... [\-e \fIenv\fR]...
 Create a new container without starting it.
 Sets up the overlayfs directories and state file.
 Resource limits can be set with
@@ -142,6 +150,13 @@ Use
 .B \-\-oci\-pod
 to join a pod network namespace for the OCI app process only; see
 .B PODS
+below.
+Use
+.B \-u
+/
+.B \-\-userns
+to enable user namespace isolation; see
+.B USER NAMESPACES
 below.
 Requires a permissive umask (see
 .B NOTES
@@ -206,9 +221,11 @@ Use
 .B \-f
 to skip confirmation prompts (useful for scripting).
 .SS sdme ps
-List all containers with their status, health, detected OS, and shared directory path.
+List all containers with their status, health, and detected OS.
 A POD column is shown when any container uses \fB\-\-pod\fR.
 An OCI\-POD column is shown when any container uses \fB\-\-oci\-pod\fR.
+A USERNS column is shown when any container uses \fB\-\-userns\fR.
+A BINDS column is shown when any container has bind mounts configured.
 Health checks detect broken containers (missing directories, missing rootfs).
 The OS column shows the distro name from the rootfs os\-release file.
 .SS sdme logs \fIname\fR [\fIargs\fR...]
@@ -535,8 +552,10 @@ bind mounts
 .RB ( BINDS ),
 environment variables
 .RB ( ENVS ),
-and pod membership
-.RB ( POD ", " OCI_POD ).
+pod membership
+.RB ( POD ", " OCI_POD ),
+and user namespace isolation
+.RB ( USERNS ).
 .TP
 .I /var/lib/sdme/containers/\fIname\fR/upper/
 Per\-container overlayfs upper layer (copy\-on\-write modifications).
@@ -546,9 +565,6 @@ Per\-container overlayfs work directory.
 .TP
 .I /var/lib/sdme/containers/\fIname\fR/merged/
 Per\-container overlayfs merged mount point.
-.TP
-.I /var/lib/sdme/containers/\fIname\fR/shared/
-Per\-container shared directory (accessible from host and container).
 .TP
 .I /var/lib/sdme/pods/\fIname\fR/state
 Pod persistent state file (KEY=VALUE format).
@@ -948,6 +964,30 @@ and
 .BR "sdme new" .
 They can be combined on the same container with different pods.
 The pod's network namespace contains only a loopback interface.
+.SH USER NAMESPACES
+.TP
+.BR \-u ", " \-\-userns
+Enable user namespace isolation.
+When enabled, container root (UID 0) maps to an unprivileged high UID on the
+host (524288+, deterministically hashed from the container's machine name).
+This prevents a container escape from gaining host root privileges.
+.PP
+Uses
+.BR systemd\-nspawn (1)
+flags
+.B \-\-private\-users=pick
+and
+.BR \-\-private\-users\-ownership=auto .
+On kernel 6.6+, overlayfs supports idmapped mounts, so files in the upper layer
+stay UID 0 on disk while the container runs as a high UID on the host (zero
+overhead).
+On older kernels,
+.B auto
+falls back to recursive chown.
+.PP
+User namespace isolation is set at creation time and stored in the container's
+state file as
+.BR USERNS=yes .
 .SH NOTES
 .SS Umask
 .B sdme create

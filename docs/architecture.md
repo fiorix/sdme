@@ -135,8 +135,7 @@ configurable via `sdme config set datadir <path>`):
   |   |-- container-a/
   |   |   |-- upper/           # CoW writes
   |   |   |-- work/            # overlayfs workdir
-  |   |   |-- merged/          # mount point
-  |   |   +-- shared/          # host <-> container exchange
+  |   |   +-- merged/          # mount point
   |   +-- container-b/
   |       +-- ...
   |-- fs/
@@ -191,7 +190,7 @@ both sdme containers and any other nspawn machines on the system.
     |     StartUnit (D-Bus)      --kill:   KillMachine SIGKILL
     |     wait for boot
     |
-    +-- mkdir upper/ work/ merged/ shared/
+    +-- mkdir upper/ work/ merged/
     +-- mask systemd-resolved (host-rootfs only; imported rootfs patched at import)
     +-- write /etc/resolv.conf placeholder
     +-- set opaque dirs (xattr)
@@ -631,7 +630,9 @@ still references the pod via `POD` or `OCI_POD` keys (override with `--force`).
   makes only the OCI app service process enter the pod's netns.
 
 `sdme ps` shows a POD column when any container has a `--pod` assignment,
-and an OCI-POD column when any container has an `--oci-pod` assignment.
+an OCI-POD column when any container has an `--oci-pod` assignment,
+a USERNS column when any container has `--userns` enabled, and a BINDS
+column when any container has bind mounts configured.
 
 ### Isolation properties
 

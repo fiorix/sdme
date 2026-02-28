@@ -6,7 +6,7 @@
 
 sdme delegates all container isolation to systemd-nspawn. It does not add
 security layers on top: no custom seccomp profiles, no AppArmor or SELinux
-policy, no user namespace remapping. What nspawn provides is what you get.
+policy. What nspawn provides is what you get.
 
 This is a deliberate choice. sdme is a single-binary tool for spinning up
 disposable containers on a single-tenant machine. Out of the box, its
@@ -26,8 +26,8 @@ gap when stronger isolation is needed.
 If your threat model requires protection against a malicious root inside the
 container (a container escape scenario), sdme needs additional hardening
 beyond its defaults. Docker with user namespace remapping and Podman rootless
-provide this out of the box. With sdme, you get namespace and seccomp
-isolation from nspawn, but user namespace remapping is not currently used,
+provide this out of the box. With sdme, you can enable user namespace
+isolation via `--userns` (see Section 8), but it is not on by default,
 so the remaining layers (network isolation, MAC confinement, resource limits)
 become more important. See Section 8 for specific recommendations.
 
@@ -57,8 +57,10 @@ Every nspawn container gets its own:
   `--network-namespace-path=`. Without either flag, containers share the
   host's network namespace (same interfaces, same ports, no isolation).
   sdme defaults to host networking.
-- **User namespace** -- only with `--private-users`, which sdme does not
-  use. UID 0 inside the container is UID 0 on the host.
+- **User namespace** -- only with `--private-users`. sdme supports this via
+  `--userns` on `create`/`new`, which passes `--private-users=pick
+  --private-users-ownership=auto`. Without `--userns`, UID 0 inside the
+  container is UID 0 on the host.
 - **Cgroup namespace** -- partial isolation via `Delegate=yes` in the
   template unit. The container's systemd gets its own cgroup subtree
   (`machine.slice/sdme@<name>.service`) but can see the host cgroup hierarchy
@@ -129,9 +131,9 @@ while Docker blocks them.
 - **No SELinux labels.** Docker and Podman assign `svirt` labels to
   containers, providing type enforcement even if a container escapes its
   namespaces. nspawn does not label containers.
-- **No user namespace remapping.** `--private-users` is available but sdme
-  does not use it. UID 0 inside the container maps directly to UID 0 on the
-  host.
+- **No user namespace remapping by default.** `--private-users` is available
+  and sdme exposes it via `--userns`. Without `--userns`, UID 0 inside the
+  container maps directly to UID 0 on the host.
 - **No `no_new_privs`.** This flag is off by default in nspawn (`--no-new-
   privileges=false`). Setuid binaries inside the container function normally,
   meaning a process can gain privileges through `execve()` of a setuid binary.
@@ -153,7 +155,7 @@ default configuration), and Podman (rootless, default configuration).
 | UTS namespace         | Yes                        | Yes                        | Yes                        |
 | Mount namespace       | Yes                        | Yes                        | Yes                        |
 | Network namespace     | Optional (host default)    | Yes (bridge default)       | Yes (slirp4netns/pasta)    |
-| User namespace        | No                         | Optional                   | Yes (default)              |
+| User namespace        | Optional (--userns)        | Optional                   | Yes (default)              |
 | Cgroup namespace      | Partial (Delegate=yes)     | Yes                        | Yes                        |
 | Capabilities          | ~26 incl. SYS_ADMIN        | ~14, no SYS_ADMIN          | Same as Docker             |
 | Seccomp               | nspawn allowlist           | OCI default (~44 blocked)  | Same as Docker             |
@@ -175,12 +177,13 @@ on the host's network stack. Docker creates a private bridge network by
 default, providing network isolation out of the box. Podman rootless uses
 slirp4netns or pasta for unprivileged network namespace setup.
 
-**User namespace.** This is the biggest single difference. Without user
-namespace remapping, UID 0 inside the container is UID 0 on the host. A
-container escape (e.g. via a kernel vulnerability) gives the attacker full
-root access. Podman rootless runs the entire container runtime as an
-unprivileged user, so even a complete container escape lands in an
-unprivileged user context.
+**User namespace.** Without `--userns`, UID 0 inside the container is UID 0
+on the host. A container escape gives the attacker full root access. With
+`--userns`, container root maps to a high UID on the host (524288+ range),
+so an escape lands in an unprivileged context. On kernel 6.6+, overlayfs
+supports idmapped mounts, so `--userns` has zero overhead and files on the
+upper layer stay UID 0 on disk. Podman rootless runs the entire container
+runtime as an unprivileged user, providing similar protection by default.
 
 **Capabilities.** Docker retains roughly 14 capabilities (the minimum needed
 for typical application containers). nspawn retains 26, including
@@ -316,10 +319,11 @@ missing feature.
 No port mapping to remember, no bridge to configure. The user opts into
 network isolation explicitly.
 
-**No user namespace remapping.** Full systemd inside the container requires
-a real UID 0 for many operations (mounting filesystems, managing cgroups,
-starting services as different UIDs). User namespace remapping would break
-much of what makes nspawn containers useful as full Linux environments.
+**User namespace isolation opt-in.** `--userns` is available but off by
+default. On kernel 6.6+, `--private-users=pick --private-users-ownership=auto`
+uses idmapped mounts with zero overhead and full systemd compatibility.
+On older kernels, `auto` falls back to recursive chown, which is slower
+but still functional.
 
 **Full systemd in container.** This is the entire point of sdme: a real
 systemd environment with journald, service management, and cgroup control.
@@ -365,12 +369,10 @@ gives container processes significant kernel interaction surface. Docker's
 
 ### Filesystem surface
 
-Without user namespace remapping, UID 0 inside the container is UID 0 on
-the host. The overlayfs upper layer files are owned by real host UIDs.
-
-The `/shared` bind-mount (`{datadir}/containers/{name}/shared`) is the
-designated host-container exchange point. It is writable by both sides.
-Files placed there by the container are owned by real host UIDs.
+Without `--userns`, UID 0 inside the container is UID 0 on the host. The
+overlayfs upper layer files are owned by real host UIDs. With `--userns`,
+container root maps to a high UID, so files are owned by that UID on the
+host (or stay UID 0 on disk with idmapped mounts on kernel 6.6+).
 
 Custom bind mounts (`-b`/`--bind`) expose host directories directly into
 the container. A read-write bind mount gives container root full access to
@@ -430,6 +432,13 @@ by its own policy.
 ## 8. Hardening Recommendations
 
 If you want to tighten isolation beyond sdme's defaults:
+
+**Use `--userns`.** This enables user namespace isolation so that container
+root maps to a high unprivileged UID on the host. A container escape no
+longer gives the attacker host root access. On kernel 6.6+, overlayfs
+supports idmapped mounts, making this zero-overhead. On older kernels,
+`--private-users-ownership=auto` falls back to recursive chown on first
+boot.
 
 **Use `--private-network`.** This is the single most impactful change.
 It gives the container its own network namespace, eliminating the largest

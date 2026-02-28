@@ -339,16 +339,11 @@ pub fn build(
     // Create a staging container.
     let staging_name = format!("build-{name}");
     eprintln!("creating build container '{staging_name}'");
+    // Staging container runs as root for package installation and file copying.
     let create_opts = containers::CreateOptions {
         name: Some(staging_name.clone()),
         rootfs: Some(config.rootfs.clone()),
-        limits: crate::ResourceLimits::default(),
-        network: crate::NetworkConfig::default(),
-        opaque_dirs: vec![],
-        pod: None,
-        oci_pod: None,
-        binds: crate::BindConfig::default(),
-        envs: crate::EnvConfig::default(),
+        ..Default::default()
     };
     containers::create(datadir, &create_opts, verbose)?;
 

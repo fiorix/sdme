@@ -746,9 +746,6 @@ pub fn nspawn_dropin(
         "    --directory={datadir}/containers/{name}/merged \\",
     ));
     lines.push(format!("    --machine={name} \\",));
-    lines.push(format!(
-        "    --bind={datadir}/containers/{name}/shared:/shared \\",
-    ));
 
     for arg in nspawn_args {
         lines.push(format!("    {} \\", escape_exec_arg(arg)));
@@ -853,6 +850,12 @@ pub fn write_nspawn_dropin(datadir: &Path, name: &str, verbose: bool) -> Result<
         if verbose {
             eprintln!("oci-pod '{pod_name}': bind-mounting netns {netns_path} into container");
         }
+    }
+
+    // User namespace isolation.
+    if state.is_yes("USERNS") {
+        nspawn_args.push("--private-users=pick".to_string());
+        nspawn_args.push("--private-users-ownership=auto".to_string());
     }
 
     // Pod: entire container runs in the pod's network namespace.
@@ -1013,12 +1016,30 @@ mod tests {
         assert!(content.contains("workdir=/var/lib/sdme/containers/mybox/work"));
         assert!(content.contains("/var/lib/sdme/containers/mybox/merged"));
         assert!(content.contains("--machine=mybox"));
-        assert!(content.contains("--bind=/var/lib/sdme/containers/mybox/shared:/shared"));
         assert!(content.contains("--resolv-conf=auto"));
         assert!(content.contains("--boot"));
         assert!(content.contains("/usr/bin/systemd-nspawn"));
         assert!(content.contains("/usr/bin/mount"));
         assert!(content.contains("/usr/bin/umount"));
+    }
+
+    #[test]
+    fn test_nspawn_dropin_with_userns() {
+        let paths = test_paths();
+        let content = nspawn_dropin(
+            "/var/lib/sdme",
+            "mybox",
+            "/",
+            &paths,
+            &[
+                "--resolv-conf=auto".to_string(),
+                "--private-users=pick".to_string(),
+                "--private-users-ownership=auto".to_string(),
+            ],
+        );
+        assert!(content.contains("--private-users=pick"));
+        assert!(content.contains("--private-users-ownership=auto"));
+        assert!(content.contains("--boot"));
     }
 
     #[test]
@@ -1107,14 +1128,8 @@ mod tests {
         };
         let opts = CreateOptions {
             name: Some("limitbox".to_string()),
-            rootfs: None,
             limits,
-            network: Default::default(),
-            opaque_dirs: vec![],
-            pod: None,
-            oci_pod: None,
-            binds: Default::default(),
-            envs: Default::default(),
+            ..Default::default()
         };
         create(tmp.path(), &opts, false).unwrap();
 

@@ -50,21 +50,6 @@ apt-get update && apt-get install -y build-essential devscripts
 service in isolation. Containers boot in seconds and cost almost nothing
 (overlayfs means you only store the diff).
 
-**The /shared directory.** Every container gets a `/shared` directory that is
-bind-mounted from the host at
-`/var/lib/sdme/containers/<name>/shared/`. Drop files in from the host,
-pick them up inside the container, and vice versa. This is useful for moving
-build artifacts, config files, or anything else between host and container
-without setting up extra bind mounts.
-
-```bash
-# from the host, copy a source tarball into the container's shared dir
-cp my-project.tar.gz /var/lib/sdme/containers/builder/shared/
-
-# inside the container
-cd /shared && tar xf my-project.tar.gz && make
-```
-
 ## OCI application images
 
 This is where sdme gets interesting. OCI application images (nginx, mysql,

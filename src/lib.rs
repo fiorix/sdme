@@ -193,6 +193,11 @@ impl State {
         self.get("ROOTFS").unwrap_or("")
     }
 
+    /// Returns true if the given key is set to `"yes"`.
+    pub fn is_yes(&self, key: &str) -> bool {
+        self.get(key) == Some("yes")
+    }
+
     pub fn remove(&mut self, key: &str) {
         self.entries.remove(key);
     }
