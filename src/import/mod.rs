@@ -1414,19 +1414,12 @@ fn setup_proxy_image(
         .with_context(|| format!("failed to create {}", connector_dir.display()))?;
 
     // Create busybox-style client symlinks for the entrypoint basename.
-    let entrypoint_basename = exec_args[0]
-        .rsplit('/')
-        .next()
-        .unwrap_or(&exec_args[0]);
+    let entrypoint_basename = exec_args[0].rsplit('/').next().unwrap_or(&exec_args[0]);
     std::os::unix::fs::symlink(
         "/usr/libexec/sdme-connector-client",
         connector_dir.join(entrypoint_basename),
     )
-    .with_context(|| {
-        format!(
-            "failed to create client symlink for {entrypoint_basename}"
-        )
-    })?;
+    .with_context(|| format!("failed to create client symlink for {entrypoint_basename}"))?;
 
     if verbose {
         eprintln!(

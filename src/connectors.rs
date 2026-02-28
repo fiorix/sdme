@@ -54,8 +54,7 @@ impl ConnectorConfig {
     pub fn validate(&self, datadir: &Path) -> Result<()> {
         let mut seen = std::collections::HashSet::new();
         for name in &self.connectors {
-            validate_name(name)
-                .map_err(|_| anyhow::anyhow!("invalid connector name: {name}"))?;
+            validate_name(name).map_err(|_| anyhow::anyhow!("invalid connector name: {name}"))?;
             if !seen.insert(name.clone()) {
                 bail!("duplicate connector: {name}");
             }

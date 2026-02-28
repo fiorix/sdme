@@ -689,7 +689,7 @@ pub fn generate() -> (Vec<u8>, Vec<elf::Symbol>, Vec<elf::GotFixup>) {
     ];
 
     let got_fixups = vec![elf::GotFixup {
-        slot: 0,      // __errno_location is import[0]
+        slot: 0,         // __errno_location is import[0]
         offset: ldr_pos, // position of the ldr instruction
         aux: adrp_pos,   // position of the adrp instruction
     }];

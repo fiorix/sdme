@@ -45,9 +45,8 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
 
     let (connector_dir, name, client_argv) = if basename != "sdme-connector-client" {
         // Busybox-style: name from argv[0], args are everything after.
-        let dir = std::env::var("SDME_CONNECTOR_DIR").map_err(|_| {
-            "SDME_CONNECTOR_DIR not set (required for busybox-style invocation)"
-        })?;
+        let dir = std::env::var("SDME_CONNECTOR_DIR")
+            .map_err(|_| "SDME_CONNECTOR_DIR not set (required for busybox-style invocation)")?;
         (dir, basename, raw_args[1..].to_vec())
     } else {
         // Explicit mode: parse --connector-dir and --name flags.
@@ -71,9 +70,7 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
     // Wait for the response.
     let mut buf = [0u8; 4096];
     let n = {
-        let ret = unsafe {
-            libc::recv(conn, buf.as_mut_ptr() as *mut libc::c_void, buf.len(), 0)
-        };
+        let ret = unsafe { libc::recv(conn, buf.as_mut_ptr() as *mut libc::c_void, buf.len(), 0) };
         if ret < 0 {
             return Err(format!("recv failed: {}", std::io::Error::last_os_error()).into());
         }
@@ -136,7 +133,8 @@ fn parse_explicit_args(
         rest_start = i;
     }
 
-    let connector_dir = connector_dir.or_else(|| std::env::var("SDME_CONNECTOR_DIR").ok())
+    let connector_dir = connector_dir
+        .or_else(|| std::env::var("SDME_CONNECTOR_DIR").ok())
         .ok_or("--connector-dir or SDME_CONNECTOR_DIR required")?;
     let name = name.ok_or("--name required in explicit mode")?;
 
@@ -158,7 +156,11 @@ fn connect_unix(path: &str) -> Result<RawFd, Box<dyn std::error::Error>> {
     // sun_path is 108 bytes on Linux.
     if path_bytes.len() > 108 {
         proxy::close_fd(sock);
-        return Err(format!("socket path too long ({} bytes, max 108): {path}", path_bytes.len()).into());
+        return Err(format!(
+            "socket path too long ({} bytes, max 108): {path}",
+            path_bytes.len()
+        )
+        .into());
     }
 
     let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };

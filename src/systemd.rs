@@ -709,7 +709,12 @@ pub fn find_proxy_binaries() -> Result<ProxyBinaries> {
     }
 
     // Check well-known paths.
-    for dir in &["/usr/libexec", "/usr/local/libexec", "/usr/bin", "/usr/local/bin"] {
+    for dir in &[
+        "/usr/libexec",
+        "/usr/local/libexec",
+        "/usr/bin",
+        "/usr/local/bin",
+    ] {
         let server = PathBuf::from(dir).join("sdme-connector-server");
         let client = PathBuf::from(dir).join("sdme-connector-client");
         if server.exists() && client.exists() {
@@ -718,10 +723,10 @@ pub fn find_proxy_binaries() -> Result<ProxyBinaries> {
     }
 
     // Fall back to PATH.
-    let server = find_program("sdme-connector-server")
-        .context("sdme-connector-server not found")?;
-    let client = find_program("sdme-connector-client")
-        .context("sdme-connector-client not found")?;
+    let server =
+        find_program("sdme-connector-server").context("sdme-connector-server not found")?;
+    let client =
+        find_program("sdme-connector-client").context("sdme-connector-client not found")?;
     Ok(ProxyBinaries { server, client })
 }
 

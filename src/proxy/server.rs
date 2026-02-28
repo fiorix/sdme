@@ -52,7 +52,8 @@ fn main() -> ExitCode {
 
     // Accept loop: one connection at a time.
     loop {
-        let conn = unsafe { libc::accept(SD_LISTEN_FD, std::ptr::null_mut(), std::ptr::null_mut()) };
+        let conn =
+            unsafe { libc::accept(SD_LISTEN_FD, std::ptr::null_mut(), std::ptr::null_mut()) };
         if conn < 0 {
             let err = std::io::Error::last_os_error();
             // EINTR: check if we should exit.
@@ -220,14 +221,8 @@ fn handle_connection(conn: RawFd, entrypoint: &[String]) -> Result<(), Box<dyn s
     frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
     frame.extend_from_slice(&payload);
 
-    let written = unsafe {
-        libc::send(
-            conn,
-            frame.as_ptr() as *const libc::c_void,
-            frame.len(),
-            0,
-        )
-    };
+    let written =
+        unsafe { libc::send(conn, frame.as_ptr() as *const libc::c_void, frame.len(), 0) };
     if written < 0 {
         // Client may have disconnected; log but don't fail.
         let err = std::io::Error::last_os_error();

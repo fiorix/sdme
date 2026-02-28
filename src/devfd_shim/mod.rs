@@ -68,10 +68,7 @@ mod tests {
             let elf = generate(arch);
             let elf_str = String::from_utf8_lossy(&elf);
             for name in &["open", "openat", "open64", "openat64"] {
-                assert!(
-                    elf_str.contains(name),
-                    "dynstr missing symbol: {name}"
-                );
+                assert!(elf_str.contains(name), "dynstr missing symbol: {name}");
             }
         }
     }

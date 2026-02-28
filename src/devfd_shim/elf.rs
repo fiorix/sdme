@@ -586,8 +586,7 @@ mod tests {
         // Hash table starts right after code
         let hash_off = code_offset() + 16; // 16 = code.len()
         let nbucket = u32::from_le_bytes(elf[hash_off..hash_off + 4].try_into().unwrap());
-        let nchain =
-            u32::from_le_bytes(elf[hash_off + 4..hash_off + 8].try_into().unwrap());
+        let nchain = u32::from_le_bytes(elf[hash_off + 4..hash_off + 8].try_into().unwrap());
 
         assert_eq!(nbucket as usize, sym_count);
         assert_eq!(nchain as usize, sym_count);
@@ -603,8 +602,7 @@ mod tests {
 
         let hash_off = code_offset() + 16;
         let nbucket = u32::from_le_bytes(elf[hash_off..hash_off + 4].try_into().unwrap());
-        let nchain =
-            u32::from_le_bytes(elf[hash_off + 4..hash_off + 8].try_into().unwrap());
+        let nchain = u32::from_le_bytes(elf[hash_off + 4..hash_off + 8].try_into().unwrap());
 
         assert_eq!(nbucket as usize, sym_count);
         assert_eq!(nchain as usize, sym_count);

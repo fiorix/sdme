@@ -393,7 +393,7 @@ pub fn generate() -> (Vec<u8>, Vec<elf::Symbol>, Vec<elf::GotFixup>) {
     // cmp rax, -ENXIO
     a.emit(&[0x48, 0x83, 0xF8]); // cmp rax, imm8 (sign-extended)
     a.emit(&[(-6i8) as u8]); // -6 = 0xFA
-    // je try_readlink
+                             // je try_readlink
     a.jcc_near(0x74, try_readlink);
     // Not ENXIO -- fall through to errno_check
     a.jmp_near(errno_check);
@@ -568,7 +568,7 @@ pub fn generate() -> (Vec<u8>, Vec<elf::Symbol>, Vec<elf::GotFixup>) {
     // neg eax                    ; positive errno value in edi
     // (neg on 32-bit eax is fine: errno values are small positive ints)
     a.emit(&[0xF7, 0xD8]); // neg eax
-    // mov edi, eax
+                           // mov edi, eax
     a.emit(&[0x89, 0xC7]);
     // fall through to set_errno
 
@@ -589,7 +589,7 @@ pub fn generate() -> (Vec<u8>, Vec<elf::Symbol>, Vec<elf::GotFixup>) {
     let got_disp_end = a.pos(); // instruction end (for RIP-relative calc)
 
     a.emit(&[0x5F]); // pop rdi   (restore errno value)
-    // mov [rax], edi             ; *errno_location = errno_value
+                     // mov [rax], edi             ; *errno_location = errno_value
     a.emit(&[0x89, 0x38]);
     // mov rax, -1
     a.emit(&[0x48, 0xC7, 0xC0]);
@@ -700,9 +700,6 @@ mod tests {
             fixup.offset + 4 <= code.len(),
             "GOT fixup offset out of bounds"
         );
-        assert!(
-            fixup.aux <= code.len(),
-            "GOT fixup aux out of bounds"
-        );
+        assert!(fixup.aux <= code.len(), "GOT fixup aux out of bounds");
     }
 }

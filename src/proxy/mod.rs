@@ -94,11 +94,7 @@ pub fn send_with_fds(sock: RawFd, data: &[u8], fds: &[RawFd]) -> io::Result<()> 
         (*cmsg).cmsg_level = libc::SOL_SOCKET;
         (*cmsg).cmsg_type = libc::SCM_RIGHTS;
         (*cmsg).cmsg_len = libc::CMSG_LEN(fds_size as u32) as _;
-        ptr::copy_nonoverlapping(
-            fds.as_ptr() as *const u8,
-            libc::CMSG_DATA(cmsg),
-            fds_size,
-        );
+        ptr::copy_nonoverlapping(fds.as_ptr() as *const u8, libc::CMSG_DATA(cmsg), fds_size);
     }
 
     let sent = unsafe { libc::sendmsg(sock, &msg, 0) };
@@ -158,12 +154,10 @@ pub fn recv_with_fds(
         unsafe {
             if (*cmsg).cmsg_level == libc::SOL_SOCKET && (*cmsg).cmsg_type == libc::SCM_RIGHTS {
                 let data_ptr = libc::CMSG_DATA(cmsg);
-                let data_len =
-                    (*cmsg).cmsg_len as usize - libc::CMSG_LEN(0) as usize;
+                let data_len = (*cmsg).cmsg_len as usize - libc::CMSG_LEN(0) as usize;
                 let num_fds = data_len / mem::size_of::<RawFd>();
                 for i in 0..num_fds {
-                    let fd_ptr =
-                        data_ptr.add(i * mem::size_of::<RawFd>()) as *const RawFd;
+                    let fd_ptr = data_ptr.add(i * mem::size_of::<RawFd>()) as *const RawFd;
                     fds.push(fd_ptr.read_unaligned());
                 }
             }
@@ -242,7 +236,8 @@ mod tests {
     fn test_scm_rights_roundtrip() {
         // Create a Unix socketpair and send/receive fds.
         let mut fds = [0i32; 2];
-        let ret = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
+        let ret =
+            unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
         assert_eq!(ret, 0, "socketpair failed");
 
         let (sender, receiver) = (fds[0], fds[1]);
