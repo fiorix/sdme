@@ -5,6 +5,8 @@
 //! the container's state file and converted to systemd-nspawn flags (or systemd
 //! unit directives) at start time.
 
+use std::io::Write;
+
 use anyhow::{bail, Result};
 
 use crate::State;
@@ -296,6 +298,158 @@ pub const HARDENED_DROP_CAPS: &[&str] = &[
     "CAP_SYS_BOOT",
 ];
 
+/// Capabilities dropped by `--strict`.
+///
+/// `--strict` implies `--hardened` and adds Docker-equivalent cap drops.
+/// Retains only the ~14 capabilities Docker grants plus `CAP_SYS_ADMIN`
+/// (required for systemd init inside nspawn). Everything else is dropped,
+/// including `CAP_NET_RAW` (which Docker retains but `--hardened` drops).
+///
+/// Docker's default retained set:
+///   AUDIT_WRITE, CHOWN, DAC_OVERRIDE, FOWNER, FSETID, KILL,
+///   MKNOD, NET_BIND_SERVICE, NET_RAW, SETFCAP, SETGID, SETPCAP,
+///   SETUID, SYS_CHROOT
+///
+/// sdme additionally retains CAP_SYS_ADMIN for nspawn/systemd but
+/// drops CAP_NET_RAW (carried over from --hardened).
+pub const STRICT_DROP_CAPS: &[&str] = &[
+    "CAP_AUDIT_CONTROL",
+    "CAP_AUDIT_READ",
+    "CAP_BLOCK_SUSPEND",
+    "CAP_BPF",
+    "CAP_CHECKPOINT_RESTORE",
+    "CAP_DAC_READ_SEARCH",
+    "CAP_IPC_LOCK",
+    "CAP_IPC_OWNER",
+    "CAP_LEASE",
+    "CAP_LINUX_IMMUTABLE",
+    "CAP_MAC_ADMIN",
+    "CAP_MAC_OVERRIDE",
+    "CAP_NET_ADMIN",
+    "CAP_NET_BROADCAST",
+    "CAP_NET_RAW",
+    "CAP_PERFMON",
+    "CAP_SYS_BOOT",
+    "CAP_SYS_MODULE",
+    "CAP_SYS_NICE",
+    "CAP_SYS_PACCT",
+    "CAP_SYS_PTRACE",
+    "CAP_SYS_RAWIO",
+    "CAP_SYS_RESOURCE",
+    "CAP_SYS_TIME",
+    "CAP_SYS_TTY_CONFIG",
+    "CAP_SYSLOG",
+    "CAP_WAKE_ALARM",
+];
+
+/// Seccomp syscall filter groups applied by `--strict`.
+///
+/// These deny groups layer on top of nspawn's built-in seccomp filter.
+/// Matches Docker's restrictions where possible without breaking systemd.
+pub const STRICT_SYSCALL_FILTERS: &[&str] =
+    &["~@cpu-emulation", "~@debug", "~@obsolete", "~@raw-io"];
+
+/// Default AppArmor profile name used by `--strict`.
+pub const STRICT_APPARMOR_PROFILE: &str = "sdme-default";
+
+/// Default AppArmor profile for sdme containers.
+///
+/// This profile is designed for systemd-nspawn system containers running a
+/// full init (systemd). It allows the operations required for systemd boot
+/// and container services while denying dangerous host-level access.
+///
+/// The profile is intentionally more permissive than Docker's docker-default
+/// profile because sdme containers run a full init system that requires
+/// mount, pivot_root, and other operations Docker containers don't need.
+pub const APPARMOR_PROFILE: &str = r#"# AppArmor profile for sdme systemd-nspawn containers.
+#
+# This profile confines containers started with:
+#   sdme create mybox --apparmor-profile sdme-default
+#   sdme create mybox --strict
+#
+# Install:
+#   sdme apparmor-profile > /etc/apparmor.d/sdme-default
+#   apparmor_parser -r /etc/apparmor.d/sdme-default
+#
+# The profile is applied via AppArmorProfile= in the systemd service
+# unit drop-in, confining the nspawn process and all its children.
+
+abi <abi/4.0>,
+
+include <tunables/global>
+
+profile sdme-default flags=(attach_disconnected,mediate_deleted) {
+  include <abstractions/base>
+  include <abstractions/nameservice>
+
+  # Allow most filesystem operations inside the container's overlayfs.
+  # The container has its own mount namespace so these are scoped.
+  /** rwlkix,
+
+  # Allow mount/umount inside the container's mount namespace.
+  # Required for systemd to set up /proc, /sys, tmpfs mounts at boot.
+  mount,
+  umount,
+  pivot_root,
+
+  # Allow signal delivery within the container.
+  signal,
+
+  # Allow ptrace within the container (for systemd-logind, etc.).
+  # --strict drops CAP_SYS_PTRACE so this is capability-gated.
+  ptrace,
+
+  # Allow unix socket communication (D-Bus, journald, etc.).
+  unix,
+
+  # Allow network operations (scoped by network namespace).
+  network,
+
+  # Deny writes to /proc and /sys that could affect the host.
+  # nspawn already mounts most of these read-only, but this adds
+  # MAC-level enforcement.
+  deny /proc/sys/kernel/modprobe w,
+  deny /proc/sys/kernel/core_pattern w,
+  deny /proc/sys/kernel/hostname w,
+  deny /proc/sys/kernel/domainname w,
+  deny /proc/sys/kernel/shmmax w,
+  deny /proc/sysrq-trigger w,
+  deny /proc/kcore r,
+
+  # Deny access to host hardware and raw devices.
+  deny /dev/sd* rw,
+  deny /dev/nvme* rw,
+  deny /dev/vd* rw,
+  deny /dev/loop* rw,
+  deny /dev/mem rw,
+  deny /dev/kmem rw,
+  deny /dev/port rw,
+
+  # Deny loading kernel modules.
+  deny /lib/modules/** w,
+  deny /usr/lib/modules/** w,
+
+  # Allow reading /proc and /sys for systemd and monitoring.
+  @{PROC}/** r,
+  @{sys}/** r,
+
+  # Allow dbus communication.
+  dbus,
+
+  # Capabilities: allow the set that nspawn grants.
+  # Individual capabilities are further restricted by the bounding set
+  # configured via --drop-capability / --strict / --hardened.
+  capability,
+}
+"#;
+
+/// Print the default AppArmor profile to stdout.
+pub fn print_apparmor_profile() -> Result<()> {
+    std::io::stdout()
+        .write_all(APPARMOR_PROFILE.as_bytes())
+        .map_err(|e| anyhow::anyhow!("failed to write profile: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -451,5 +605,57 @@ mod tests {
                 "hardened cap should be valid: {cap}"
             );
         }
+    }
+
+    #[test]
+    fn test_strict_drop_caps_are_valid() {
+        for cap in STRICT_DROP_CAPS {
+            assert!(
+                validate_capability(cap).is_ok(),
+                "strict cap should be valid: {cap}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_strict_drop_caps_excludes_sys_admin() {
+        // CAP_SYS_ADMIN must NOT be in the drop list (nspawn needs it).
+        assert!(
+            !STRICT_DROP_CAPS.contains(&"CAP_SYS_ADMIN"),
+            "CAP_SYS_ADMIN must not be dropped by --strict"
+        );
+    }
+
+    #[test]
+    fn test_strict_drop_caps_is_superset_of_hardened() {
+        // Every cap in HARDENED_DROP_CAPS should also be in STRICT_DROP_CAPS.
+        for cap in HARDENED_DROP_CAPS {
+            assert!(
+                STRICT_DROP_CAPS.contains(cap),
+                "hardened cap {cap} should be in strict drop list"
+            );
+        }
+        // And strict drops more caps overall.
+        assert!(STRICT_DROP_CAPS.len() > HARDENED_DROP_CAPS.len());
+    }
+
+    #[test]
+    fn test_strict_syscall_filters_are_valid() {
+        for filter in STRICT_SYSCALL_FILTERS {
+            assert!(
+                validate_syscall_filter(filter).is_ok(),
+                "strict filter should be valid: {filter}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_strict_apparmor_profile_is_valid() {
+        assert!(validate_apparmor_profile(STRICT_APPARMOR_PROFILE).is_ok());
+    }
+
+    #[test]
+    fn test_apparmor_profile_contains_profile_name() {
+        assert!(APPARMOR_PROFILE.contains("profile sdme-default"));
     }
 }

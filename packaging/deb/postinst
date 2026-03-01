@@ -1,0 +1,7 @@
+#!/bin/sh
+set -e
+
+# Load the sdme AppArmor profile if AppArmor is available.
+if command -v apparmor_parser >/dev/null 2>&1; then
+    apparmor_parser -r /etc/apparmor.d/sdme-default 2>/dev/null || true
+fi

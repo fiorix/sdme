@@ -610,7 +610,10 @@ still references the pod via `POD` or `OCI_POD` keys (override with `--force`).
 **`--pod=<name>`** on `sdme create` or `sdme new`:
 
 - Works with any container type (host-rootfs or imported rootfs).
-- Compatible with `--hardened` (and `--private-network`): the pod's netns
+- Incompatible with `--userns` and `--hardened`: the kernel blocks
+  `setns(CLONE_NEWNET)` from a child user namespace into the pod's netns
+  (owned by the init userns). Use `--oci-pod` for hardened pods.
+- Compatible with `--private-network` (without userns): the pod's netns
   already provides equivalent isolation (loopback only), so `--private-network`
   is automatically omitted from the nspawn invocation when a pod is used.
 - Stores `POD=<name>` in the container's state file.

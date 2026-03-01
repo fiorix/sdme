@@ -96,13 +96,14 @@ jobs:
           name: target-x86_64-unknown-linux-musl
           path: /tmp/sdme-bin
 
-      - name: Generate completions
+      - name: Generate completions and AppArmor profile
         run: |
           chmod +x /tmp/sdme-bin/sdme
-          mkdir -p dist/completions
+          mkdir -p dist/completions dist/apparmor
           /tmp/sdme-bin/sdme completions bash > dist/completions/sdme.bash
           /tmp/sdme-bin/sdme completions zsh > dist/completions/_sdme
           /tmp/sdme-bin/sdme completions fish > dist/completions/sdme.fish
+          /tmp/sdme-bin/sdme apparmor-profile > dist/apparmor/sdme-default
 
       - name: Ensure binaries are executable
         run: chmod +x target/${{ matrix.target }}/release/sdme

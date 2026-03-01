@@ -1,6 +1,6 @@
 # Verified Containers
 
-Last verified: 2026-02-28
+Last verified: 2026-03-01
 
 System: Linux 6.17.0-14-generic, systemd 257 (257.9-0ubuntu2.1), sdme 0.1.6
 
@@ -33,24 +33,31 @@ pg_isready, redis-cli ping).
 
 ## Pod Tests
 
-| Test                          | Result |
-|-------------------------------|--------|
-| nspawn pod loopback           | PASS   |
-| --pod + --hardened            | PASS   |
-| --oci-pod without OCI rootfs  | PASS   |
-| --pod=nonexistent             | PASS   |
-| --oci-pod + --hardened        | PASS   |
+| Test                                          | Result |
+|-----------------------------------------------|--------|
+| nspawn pod loopback                           | PASS   |
+| --pod + --private-network drop-in             | PASS   |
+| --pod + --private-network loopback            | PASS   |
+| --pod + --hardened rejected                   | PASS   |
+| --pod + --userns rejected                     | PASS   |
+| --oci-pod without OCI rootfs rejected         | PASS   |
+| --pod=nonexistent rejected                    | PASS   |
+| --oci-pod + --hardened not rejected           | PASS   |
 
 - **nspawn pod loopback**: two `--pod` containers share localhost
   via a Python listener/client on port 9999.
-- **--pod + --hardened**: combined successfully; `--private-network`
-  is omitted from nspawn args since the pod's netns provides equivalent
-  loopback-only isolation.
+- **--pod + --private-network**: `--private-network` is silently
+  dropped since the pod's netns provides equivalent loopback-only
+  isolation. Verifies drop-in omits `--private-network` and loopback
+  connectivity works.
+- **--pod + --hardened/--userns rejected**: the kernel blocks
+  `setns(CLONE_NEWNET)` from a child user namespace into the pod's
+  netns (owned by init userns). Use `--oci-pod` for hardened pods.
 - **--oci-pod without OCI rootfs**: error correctly rejected.
 - **--pod=nonexistent**: non-existent pod correctly rejected.
-- **--oci-pod + --hardened**: combined successfully; `--private-network`
-  applies to the nspawn container while the OCI app service enters the
-  pod's netns via its systemd drop-in.
+- **--oci-pod + --hardened**: combined successfully; the OCI app
+  service enters the pod's netns via its inner systemd drop-in
+  (`NetworkNamespacePath=`), avoiding the cross-userns restriction.
 
 ## User Namespace Tests
 
@@ -68,27 +75,72 @@ pg_isready, redis-cli ping).
 - **nginx OCI app with --userns**: nginx imported as OCI app on ubuntu base,
   container created with `--userns`, `sdme-oci-app.service` is active.
 
+## Hardened Boot Matrix
+
+| Distro    | Create  | systemd |
+|-----------|---------|---------|
+| debian    | PENDING | PENDING |
+| ubuntu    | PENDING | PENDING |
+| fedora    | PENDING | PENDING |
+| centos    | PENDING | PENDING |
+| almalinux | PENDING | PENDING |
+
+Each distro is created with `--hardened` and verified to reach `running`
+or `degraded` state. Hardened enables user namespace isolation,
+private network, no-new-privileges, and drops
+`CAP_SYS_PTRACE,CAP_NET_RAW,CAP_SYS_RAWIO,CAP_SYS_BOOT`.
+
+## Hardened OCI App Matrix
+
+| App      | Distro    | Boot    | Service |
+|----------|-----------|---------|---------|
+| nginx    | debian    | PENDING | PENDING |
+| nginx    | ubuntu    | PENDING | PENDING |
+| nginx    | fedora    | PENDING | PENDING |
+| nginx    | centos    | PENDING | PENDING |
+| nginx    | almalinux | PENDING | PENDING |
+| mysql    | debian    | PENDING | PENDING |
+| mysql    | ubuntu    | PENDING | PENDING |
+| mysql    | fedora    | PENDING | PENDING |
+| mysql    | centos    | PENDING | PENDING |
+| mysql    | almalinux | PENDING | PENDING |
+| postgres | debian    | PENDING | PENDING |
+| postgres | ubuntu    | PENDING | PENDING |
+| postgres | fedora    | PENDING | PENDING |
+| postgres | centos    | PENDING | PENDING |
+| postgres | almalinux | PENDING | PENDING |
+| redis    | debian    | PENDING | PENDING |
+| redis    | ubuntu    | PENDING | PENDING |
+| redis    | fedora    | PENDING | PENDING |
+| redis    | centos    | PENDING | PENDING |
+| redis    | almalinux | PENDING | PENDING |
+
+Each cell verifies: container created with `--hardened`, boots
+successfully, and `sdme-oci-app.service` is active. App-specific
+health checks (HTTP, CLI) are skipped because `--hardened` enables
+private network, blocking host-side connectivity.
+
 ## Security Hardening Tests
 
-| Test                                    | Result  |
-|-----------------------------------------|---------|
-| CLI: unknown capability rejected        | PENDING |
-| CLI: invalid syscall filter rejected    | PENDING |
-| CLI: contradictory caps rejected        | PENDING |
-| CLI: invalid AppArmor profile rejected  | PENDING |
-| CLI: empty syscall filter rejected      | PENDING |
-| State: all security fields persisted    | PENDING |
-| --drop-capability removes cap           | PENDING |
-| --capability adds cap                   | PENDING |
-| --no-new-privileges blocks escalation   | PENDING |
-| --read-only makes rootfs read-only      | PENDING |
-| --system-call-filter state + drop-in    | PENDING |
-| --hardened bundle (state check)         | PENDING |
-| --hardened with --capability override   | PENDING |
-| --apparmor-profile persistence          | PENDING |
-| --hardened container boots              | PENDING |
-| --hardened network is private           | PENDING |
-| sdme ps shows container                 | PENDING |
+| Test                                    | Result |
+|-----------------------------------------|--------|
+| CLI: unknown capability rejected        | PASS   |
+| CLI: invalid syscall filter rejected    | PASS   |
+| CLI: contradictory caps rejected        | PASS   |
+| CLI: invalid AppArmor profile rejected  | PASS   |
+| CLI: empty syscall filter rejected      | PASS   |
+| State: all security fields persisted    | PASS   |
+| --drop-capability removes cap           | PASS   |
+| --capability adds cap                   | PASS   |
+| --no-new-privileges blocks escalation   | PASS   |
+| --read-only makes rootfs read-only      | PASS   |
+| --system-call-filter state + drop-in    | PASS   |
+| --hardened bundle (state check)         | PASS   |
+| --hardened with --capability override   | PASS   |
+| --apparmor-profile persistence          | PASS   |
+| --hardened container boots              | PASS   |
+| --hardened runtime enforcement          | PASS   |
+| sdme ps shows container                 | PASS   |
 
 - **CLI validation**: verifies that invalid capability names, syscall filter
   syntax, contradictory caps, and bad AppArmor profile names are rejected

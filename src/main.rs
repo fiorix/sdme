@@ -99,6 +99,12 @@ struct SecurityArgs {
     /// drops CAP_SYS_PTRACE, CAP_NET_RAW, CAP_SYS_RAWIO, CAP_SYS_BOOT)
     #[arg(long)]
     hardened: bool,
+
+    /// Maximum security (hardened + Docker-equivalent cap drops, seccomp, AppArmor).
+    /// Retains CAP_SYS_ADMIN for systemd init. Requires the sdme-default AppArmor
+    /// profile to be loaded (see: sdme apparmor-profile --help)
+    #[arg(long)]
+    strict: bool,
 }
 
 #[derive(Subcommand)]
@@ -298,6 +304,30 @@ enum Command {
     /// Manage pod network namespaces
     #[command(name = "pod", subcommand)]
     Pod(PodCommand),
+
+    /// Print the default AppArmor profile for sdme containers
+    #[command(
+        name = "apparmor-profile",
+        after_long_help = "\
+INSTALLATION:
+    Save the profile and load it into AppArmor:
+
+        sdme apparmor-profile > /etc/apparmor.d/sdme-default
+        apparmor_parser -r /etc/apparmor.d/sdme-default
+
+    To verify the profile is loaded:
+
+        aa-status | grep sdme-default
+
+    The profile is automatically applied when using --strict, or can
+    be applied manually with --apparmor-profile sdme-default.
+
+    The deb and rpm packages install and load the profile automatically.
+
+APPARMOR DOCUMENTATION:
+    https://gitlab.com/apparmor/apparmor/-/wikis/Documentation"
+    )]
+    AppArmorProfile,
 
     /// Generate shell completions
     Completions {
@@ -535,8 +565,9 @@ fn parse_mounts(args: MountArgs) -> Result<(BindConfig, EnvConfig)> {
 /// Build a `SecurityConfig` from CLI flags (for `create` / `new`).
 ///
 /// When `--hardened` is set, merges the config's `hardened_drop_caps` with
-/// any explicit flags. Explicit `--capability` and `--drop-capability`
-/// flags take priority.
+/// any explicit flags. When `--strict` is set, applies Docker-equivalent
+/// restrictions (implies `--hardened`). Explicit `--capability` and
+/// `--drop-capability` flags take priority over both presets.
 fn parse_security(args: SecurityArgs, cfg: &config::Config) -> Result<(SecurityConfig, bool)> {
     let mut drop_caps: Vec<String> = args
         .drop_caps
@@ -550,10 +581,38 @@ fn parse_security(args: SecurityArgs, cfg: &config::Config) -> Result<(SecurityC
         .collect();
     let mut userns = args.userns;
     let mut no_new_privileges = args.no_new_privileges;
+    let mut system_call_filter = args.system_call_filter;
+    let mut apparmor_profile = args.apparmor_profile;
 
-    // --hardened expands into sensible defaults (overridable by explicit flags).
-    let hardened = args.hardened;
-    if hardened {
+    // --strict implies --hardened and adds Docker-equivalent restrictions.
+    let strict = args.strict;
+    let hardened = args.hardened || strict;
+
+    if strict {
+        userns = true;
+        no_new_privileges = true;
+
+        // Drop all caps except Docker's default set + CAP_SYS_ADMIN.
+        for cap in security::STRICT_DROP_CAPS {
+            let cap = cap.to_string();
+            if !add_caps.contains(&cap) && !drop_caps.contains(&cap) {
+                drop_caps.push(cap);
+            }
+        }
+
+        // Add seccomp filters if none were explicitly provided.
+        if system_call_filter.is_empty() {
+            system_call_filter = security::STRICT_SYSCALL_FILTERS
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+        }
+
+        // Set AppArmor profile if not explicitly provided.
+        if apparmor_profile.is_none() {
+            apparmor_profile = Some(security::STRICT_APPARMOR_PROFILE.to_string());
+        }
+    } else if hardened {
         userns = true;
         no_new_privileges = true;
 
@@ -580,8 +639,8 @@ fn parse_security(args: SecurityArgs, cfg: &config::Config) -> Result<(SecurityC
         add_caps,
         no_new_privileges,
         read_only: args.read_only,
-        system_call_filter: args.system_call_filter,
-        apparmor_profile: args.apparmor_profile,
+        system_call_filter,
+        apparmor_profile,
     };
     sec.validate()?;
     Ok((sec, hardened))
@@ -618,7 +677,16 @@ fn resolve_opaque_dirs(
 ///
 /// Checks that:
 /// - The pod exists in the catalogue
-fn validate_pod_args(datadir: &std::path::Path, pod_name: Option<&str>) -> Result<()> {
+/// - `--pod` is not combined with user namespace isolation (`--userns`,
+///   `--hardened`). The kernel blocks `setns(CLONE_NEWNET)` from a child
+///   user namespace into the pod's netns (owned by the init userns).
+///   Use `--oci-pod` instead — its inner systemd drop-in joins the pod
+///   netns from inside the container, avoiding the cross-userns restriction.
+fn validate_pod_args(
+    datadir: &std::path::Path,
+    pod_name: Option<&str>,
+    userns: bool,
+) -> Result<()> {
     let pod_name = match pod_name {
         Some(n) => n,
         None => return Ok(()),
@@ -626,6 +694,14 @@ fn validate_pod_args(datadir: &std::path::Path, pod_name: Option<&str>) -> Resul
 
     if !pod::exists(datadir, pod_name) {
         bail!("pod not found: {pod_name}");
+    }
+
+    if userns {
+        bail!(
+            "--pod is incompatible with user namespace isolation (--userns, --hardened);\n\
+             the kernel blocks setns(CLONE_NEWNET) across user namespace boundaries.\n\
+             Use --oci-pod instead, which joins the pod netns from inside the container."
+        );
     }
 
     Ok(())
@@ -670,10 +746,16 @@ fn validate_oci_pod_args(
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Handle completions before root check (no privileges needed).
-    if let Command::Completions { shell } = cli.command {
-        clap_complete::generate(shell, &mut Cli::command(), "sdme", &mut std::io::stdout());
-        return Ok(());
+    // Handle commands that don't require root.
+    match cli.command {
+        Command::Completions { shell } => {
+            clap_complete::generate(shell, &mut Cli::command(), "sdme", &mut std::io::stdout());
+            return Ok(());
+        }
+        Command::AppArmorProfile => {
+            return security::print_apparmor_profile();
+        }
+        _ => {}
     }
 
     if unsafe { libc::geteuid() } != 0 {
@@ -778,7 +860,7 @@ fn main() -> Result<()> {
             if hardened && !network.private_network {
                 network.private_network = true;
             }
-            validate_pod_args(&cfg.datadir, pod.as_deref())?;
+            validate_pod_args(&cfg.datadir, pod.as_deref(), sec.userns)?;
             validate_oci_pod_args(&cfg.datadir, oci_pod.as_deref(), fs.as_deref())?;
             let (binds, envs) = parse_mounts(mounts)?;
             let opaque_dirs = resolve_opaque_dirs(opaque_dirs, fs.is_none(), &cfg);
@@ -889,7 +971,7 @@ fn main() -> Result<()> {
             if hardened && !network.private_network {
                 network.private_network = true;
             }
-            validate_pod_args(&cfg.datadir, pod.as_deref())?;
+            validate_pod_args(&cfg.datadir, pod.as_deref(), sec.userns)?;
             validate_oci_pod_args(&cfg.datadir, oci_pod.as_deref(), fs.as_deref())?;
             let (binds, envs) = parse_mounts(mounts)?;
             let opaque_dirs = resolve_opaque_dirs(opaque_dirs, fs.is_none(), &cfg);
@@ -1131,6 +1213,7 @@ fn main() -> Result<()> {
             }
         },
         // Handled before root check above.
+        Command::AppArmorProfile => unreachable!(),
         Command::Completions { .. } => unreachable!(),
         Command::Fs(cmd) => match cmd {
             RootfsCommand::Import {
