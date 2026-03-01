@@ -987,8 +987,15 @@ fn main() -> Result<()> {
                 envs,
                 security: sec,
             };
+            let is_host_rootfs = opts.rootfs.is_none();
             let name = containers::create(&cfg.datadir, &opts, cli.verbose)?;
             eprintln!("creating '{name}'");
+
+            // Warn about hardened/strict implications for interactive use.
+            if hardened && is_host_rootfs {
+                eprintln!("note: --private-network is active; the container has no internet");
+                eprintln!("note: --no-new-privileges is active; sudo/su will not work inside");
+            }
 
             eprintln!("starting '{name}'");
             let boot_result = (|| -> Result<()> {

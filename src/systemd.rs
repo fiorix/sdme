@@ -948,6 +948,7 @@ pub fn write_nspawn_dropin(datadir: &Path, name: &str, verbose: bool) -> Result<
     // Service-level directives (not nspawn flags).
     let mut service_directives = Vec::new();
     if let Some(profile) = &security.apparmor_profile {
+        crate::security::check_apparmor_loaded(profile)?;
         service_directives.push(format!("AppArmorProfile={profile}"));
         if verbose {
             eprintln!("apparmor profile: {profile}");

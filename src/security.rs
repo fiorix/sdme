@@ -290,6 +290,48 @@ fn validate_apparmor_profile(profile: &str) -> Result<()> {
     Ok(())
 }
 
+/// Check that an AppArmor profile is loaded in the kernel.
+///
+/// Reads `/sys/kernel/security/apparmor/profiles` and verifies the named
+/// profile appears. Returns an error with installation instructions if
+/// the profile is not found, or if AppArmor is not available.
+pub fn check_apparmor_loaded(profile: &str) -> Result<()> {
+    let profiles_path = "/sys/kernel/security/apparmor/profiles";
+    let content = match std::fs::read_to_string(profiles_path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            bail!(
+                "AppArmor is not available on this system (no {profiles_path}).\n\
+                 The container is configured with --apparmor-profile {profile},\n\
+                 which requires AppArmor to be enabled in the kernel.\n\
+                 Install AppArmor: apt install apparmor"
+            );
+        }
+        Err(e) => {
+            bail!("failed to read {profiles_path}: {e}");
+        }
+    };
+
+    // Each line is: "profile_name (mode)" e.g. "sdme-default (enforce)"
+    let found = content
+        .lines()
+        .any(|line| line.starts_with(profile) && line[profile.len()..].starts_with(" ("));
+
+    if !found {
+        bail!(
+            "AppArmor profile '{profile}' is not loaded.\n\
+             Install and load it with:\n\
+             \n\
+             \x20 sdme apparmor-profile > /etc/apparmor.d/{profile}\n\
+             \x20 apparmor_parser -r /etc/apparmor.d/{profile}\n\
+             \n\
+             See: sdme apparmor-profile --help"
+        );
+    }
+
+    Ok(())
+}
+
 /// Capabilities dropped by `--hardened`.
 pub const HARDENED_DROP_CAPS: &[&str] = &[
     "CAP_SYS_PTRACE",
