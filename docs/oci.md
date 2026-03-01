@@ -77,6 +77,12 @@ and installs systemd if it's missing. The result is a first-class sdme rootfs.
 non-shell command, or exposed ports. sdme places the application rootfs under
 `/oci/root` inside a copy of a base rootfs you specify with `--base-fs`.
 
+To avoid passing `--base-fs` every time, set a default:
+
+```bash
+sudo sdme config set default_base_fs ubuntu
+```
+
 The `--oci-mode` flag lets you override auto-detection:
 
 | Flag                   | Behavior                                      |

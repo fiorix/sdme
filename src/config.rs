@@ -30,6 +30,10 @@ pub struct Config {
     /// Comma-separated capabilities dropped by `--hardened`.
     #[serde(default = "default_hardened_drop_caps")]
     pub hardened_drop_caps: String,
+
+    /// Default base rootfs for OCI application images.
+    #[serde(default)]
+    pub default_base_fs: String,
 }
 
 fn default_interactive() -> bool {
@@ -65,6 +69,7 @@ impl Default for Config {
             join_as_sudo_user: default_join_as_sudo_user(),
             host_rootfs_opaque_dirs: default_host_rootfs_opaque_dirs(),
             hardened_drop_caps: default_hardened_drop_caps(),
+            default_base_fs: String::new(),
         }
     }
 }
@@ -79,6 +84,7 @@ impl Config {
         println!("join_as_sudo_user = {join_as_sudo_user}");
         println!("host_rootfs_opaque_dirs = {}", self.host_rootfs_opaque_dirs);
         println!("hardened_drop_caps = {}", self.hardened_drop_caps);
+        println!("default_base_fs = {}", self.default_base_fs);
     }
 }
 
@@ -295,6 +301,24 @@ mod tests {
         save(&config, None).unwrap();
         let loaded = load(None).unwrap();
         assert_eq!(loaded.host_rootfs_opaque_dirs, "");
+    }
+
+    #[test]
+    fn test_default_base_fs_empty_by_default() {
+        let config = Config::default();
+        assert_eq!(config.default_base_fs, "");
+    }
+
+    #[test]
+    fn test_save_and_load_default_base_fs() {
+        let _tmp = TempConfig::new();
+        let config = Config {
+            default_base_fs: "ubuntu".to_string(),
+            ..Config::default()
+        };
+        save(&config, None).unwrap();
+        let loaded = load(None).unwrap();
+        assert_eq!(loaded.default_base_fs, "ubuntu");
     }
 
     #[test]

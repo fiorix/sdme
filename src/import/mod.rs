@@ -1411,6 +1411,7 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
                             "image appears to be an application container \
                              (Entrypoint: {ep_str}, Cmd: {cmd_str}); \
                              specify --base-fs=<rootfs> to use a systemd-capable base, \
+                             set a default with: sdme config set default_base_fs <rootfs>, \
                              or -f to import the raw rootfs"
                         );
                     }

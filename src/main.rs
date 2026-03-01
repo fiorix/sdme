@@ -833,6 +833,12 @@ fn main() -> Result<()> {
                             cfg.hardened_drop_caps = caps.join(",");
                         }
                     }
+                    "default_base_fs" => {
+                        if !value.is_empty() {
+                            sdme::validate_name(&value)?;
+                        }
+                        cfg.default_base_fs = value;
+                    }
                     _ => bail!("unknown config key: {key}"),
                 }
                 config::save(&cfg, config_path)?;
@@ -1230,7 +1236,15 @@ fn main() -> Result<()> {
                 base_fs,
             } => {
                 system_check::check_systemd_version(252)?;
-                if base_fs.is_some() && oci_mode == OciMode::Base {
+                // Fall back to config default_base_fs when --base-fs is not given.
+                let effective_base_fs = base_fs.or_else(|| {
+                    if cfg.default_base_fs.is_empty() {
+                        None
+                    } else {
+                        Some(cfg.default_base_fs.clone())
+                    }
+                });
+                if effective_base_fs.is_some() && oci_mode == OciMode::Base {
                     bail!("--base-fs cannot be used with --oci-mode=base");
                 }
                 rootfs::import(
@@ -1243,7 +1257,7 @@ fn main() -> Result<()> {
                         interactive,
                         install_packages,
                         oci_mode,
-                        base_fs: base_fs.as_deref(),
+                        base_fs: effective_base_fs.as_deref(),
                     },
                 )?;
                 println!("{name}");
