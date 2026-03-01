@@ -649,6 +649,8 @@ mod dbus {
         let poll_interval = std::time::Duration::from_millis(200);
 
         loop {
+            crate::check_interrupted()?;
+
             match get_unit_active_state(conn, unit) {
                 Some(state) => {
                     if verbose {
