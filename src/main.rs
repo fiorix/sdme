@@ -13,6 +13,7 @@ use sdme::{
 #[derive(Parser)]
 #[command(
     name = "sdme",
+    version,
     about = "Lightweight systemd-nspawn containers with overlayfs"
 )]
 struct Cli {
