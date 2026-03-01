@@ -6,7 +6,7 @@ System: Linux 6.17.0-14-generic, systemd 257 (257.9-0ubuntu2.1), sdme 0.1.6
 
 ## 1. Unit Tests
 
-sdme has 320 unit tests across 14 modules, all inline in the source files
+sdme has 322 unit tests across 14 modules, all inline in the source files
 they test. No external test dependencies are required.
 
 ### Running unit tests
@@ -33,7 +33,7 @@ cargo test -- --list          # list all tests without running
 | lib          | 16    | Utility: sudo_user, resource limits, interrupts  |
 | drop_privs   | 16    | Privilege drop ELF generation (x86_64, aarch64)  |
 | systemd      | 15    | D-Bus unit management, boot wait, lifecycle      |
-| config       | 12    | Config loading/saving, defaults, path resolution |
+| config       | 14    | Config loading/saving, defaults, path resolution |
 | pod          | 11    | Pod creation, netns sharing, state persistence   |
 | network      | 11    | Network config validation, state serialization   |
 | names        | 5     | Name generation, collision avoidance             |
@@ -53,7 +53,7 @@ The CI pipeline (`.github/workflows/rust.yml`) runs on every push to
 1. `cargo fmt --check` (formatting)
 2. `cargo clippy --locked -- -D warnings` (lints)
 3. `cargo build --locked --verbose` (build)
-4. `cargo test --locked --verbose` (all 320 unit tests)
+4. `cargo test --locked --verbose` (all 322 unit tests)
 
 Release builds (`.github/workflows/release.yml`, triggered by `v*` tags)
 additionally cross-compile musl binaries for x86_64 and aarch64.
@@ -122,29 +122,31 @@ sudo ./test/verify-security.sh
 
 ### Unit tests
 
-Current status: 317 passed, 0 failed, 3 ignored.
+Current status: 319 passed, 0 failed, 3 ignored.
 
 ### Base OS Import and Boot
 
-| Distro    | Image                          | Import | Boot |
-|-----------|--------------------------------|--------|------|
-| debian    | docker.io/debian:stable        | PASS   | PASS |
-| ubuntu    | docker.io/ubuntu:24.04         | PASS   | PASS |
-| fedora    | docker.io/fedora:41            | PASS   | PASS |
-| centos    | quay.io/centos/centos:stream9  | PASS   | PASS |
-| almalinux | docker.io/almalinux:9          | PASS   | PASS |
+| Distro    | Image                            | Import | Boot |
+|-----------|----------------------------------|--------|------|
+| debian    | docker.io/debian:stable          | PASS   | PASS |
+| ubuntu    | docker.io/ubuntu:24.04           | PASS   | PASS |
+| fedora    | quay.io/fedora/fedora:41         | PASS   | PASS |
+| centos    | quay.io/centos/centos:stream9    | PASS   | PASS |
+| almalinux | quay.io/almalinuxorg/almalinux:9 | PASS   | PASS |
 
 Boot tests verify: container create, systemd reaching `running` state,
 journalctl access, and systemctl unit listing.
 
 ### OCI App Matrix
 
-| App      | Image              | debian | ubuntu | fedora | centos | alma |
-|----------|--------------------|--------|--------|--------|--------|------|
-| nginx    | docker.io/nginx    | PASS   | PASS   | PASS   | PASS   | PASS |
-| mysql    | docker.io/mysql    | PASS   | PASS   | PASS   | PASS   | PASS |
-| postgres | docker.io/postgres | PASS   | PASS   | PASS   | PASS   | PASS |
-| redis    | docker.io/redis    | PASS   | PASS   | PASS   | PASS   | PASS |
+| App      | Image              | debian | ubuntu | fedora | centos | alma   |
+|----------|--------------------|--------|--------|--------|--------|--------|
+| nginx    | docker.io/nginx    | PASS   | SKIP*  | PASS   | PASS   | PASS   |
+| mysql    | docker.io/mysql    | PASS   | PASS   | PASS   | PASS   | SKIP*  |
+| postgres | docker.io/postgres | PASS   | PASS   | PASS   | PASS   | PASS   |
+| redis    | docker.io/redis    | PASS   | PASS   | PASS   | PASS   | PASS   |
+
+\* Docker Hub network timeout during blob download (transient).
 
 Each cell verifies: app import with `--base-fs`, container boot,
 `sdme-oci-app.service` active, journal and status accessible, and
@@ -227,13 +229,13 @@ pg_isready, redis-cli ping).
 
 ### Hardened Boot Matrix
 
-| Distro    | Create  | systemd |
-|-----------|---------|---------|
-| debian    | PENDING | PENDING |
-| ubuntu    | PENDING | PENDING |
-| fedora    | PENDING | PENDING |
-| centos    | PENDING | PENDING |
-| almalinux | PENDING | PENDING |
+| Distro    | Create | systemd |
+|-----------|--------|---------|
+| debian    | PASS   | PASS    |
+| ubuntu    | PASS   | PASS    |
+| fedora    | PASS   | PASS    |
+| centos    | PASS   | PASS    |
+| almalinux | PASS   | PASS    |
 
 Each distro is created with `--hardened` and verified to reach `running`
 or `degraded` state. Hardened enables user namespace isolation,
@@ -242,28 +244,30 @@ private network, no-new-privileges, and drops
 
 ### Hardened OCI App Matrix
 
-| App      | Distro    | Boot    | Service |
-|----------|-----------|---------|---------|
-| nginx    | debian    | PENDING | PENDING |
-| nginx    | ubuntu    | PENDING | PENDING |
-| nginx    | fedora    | PENDING | PENDING |
-| nginx    | centos    | PENDING | PENDING |
-| nginx    | almalinux | PENDING | PENDING |
-| mysql    | debian    | PENDING | PENDING |
-| mysql    | ubuntu    | PENDING | PENDING |
-| mysql    | fedora    | PENDING | PENDING |
-| mysql    | centos    | PENDING | PENDING |
-| mysql    | almalinux | PENDING | PENDING |
-| postgres | debian    | PENDING | PENDING |
-| postgres | ubuntu    | PENDING | PENDING |
-| postgres | fedora    | PENDING | PENDING |
-| postgres | centos    | PENDING | PENDING |
-| postgres | almalinux | PENDING | PENDING |
-| redis    | debian    | PENDING | PENDING |
-| redis    | ubuntu    | PENDING | PENDING |
-| redis    | fedora    | PENDING | PENDING |
-| redis    | centos    | PENDING | PENDING |
-| redis    | almalinux | PENDING | PENDING |
+| App      | Distro    | Boot   | Service |
+|----------|-----------|--------|---------|
+| nginx    | debian    | PASS   | PASS    |
+| nginx    | ubuntu    | SKIP*  | SKIP*   |
+| nginx    | fedora    | PASS   | PASS    |
+| nginx    | centos    | PASS   | PASS    |
+| nginx    | almalinux | PASS   | PASS    |
+| mysql    | debian    | PASS   | PASS    |
+| mysql    | ubuntu    | PASS   | PASS    |
+| mysql    | fedora    | PASS   | PASS    |
+| mysql    | centos    | PASS   | PASS    |
+| mysql    | almalinux | SKIP*  | SKIP*   |
+| postgres | debian    | PASS   | PASS    |
+| postgres | ubuntu    | PASS   | PASS    |
+| postgres | fedora    | PASS   | PASS    |
+| postgres | centos    | PASS   | PASS    |
+| postgres | almalinux | PASS   | PASS    |
+| redis    | debian    | PASS   | PASS    |
+| redis    | ubuntu    | PASS   | PASS    |
+| redis    | fedora    | PASS   | PASS    |
+| redis    | centos    | PASS   | PASS    |
+| redis    | almalinux | PASS   | PASS    |
+
+\* Skipped due to transient Docker Hub network failure during OCI app import.
 
 Each cell verifies: container created with `--hardened`, boots
 successfully, and `sdme-oci-app.service` is active. App-specific

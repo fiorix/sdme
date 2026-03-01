@@ -365,7 +365,7 @@ namespace references through `/proc`.
 
 sdme containers run a full systemd init system: PID 1 is systemd, with
 journald, logind, dbus-daemon, and any enabled services. A typical container
-has 10-20 processes at idle. Docker containers typically run a single
+has ~10 processes at idle. Docker containers typically run a single
 application process (PID 1).
 
 More processes means more potential targets for exploitation, but also means
@@ -425,6 +425,31 @@ sdme create mybox --hardened
 sdme new mybox --hardened
 ```
 
+**When cloning the host rootfs** (no `-r` flag), `--hardened` has several
+visible effects because the container inherits the host's installed
+binaries and enabled services:
+
+- **No internet.** `--private-network` gives the container only a
+  loopback interface. Host services that assume network access (sshd,
+  NTP, avahi, etc.) will fail or retry indefinitely.
+- **`sudo`/`su` silently fail.** `--no-new-privileges` prevents setuid
+  escalation. The binaries exist and appear normal, but the kernel
+  blocks the privilege transition.
+- **`ping` and raw-socket tools fail.** `CAP_NET_RAW` is dropped.
+- **`strace`/`gdb` fail.** `CAP_SYS_PTRACE` is dropped.
+
+`sdme new` prints notes about `--private-network` and
+`--no-new-privileges` when cloning the host rootfs. For imported rootfs
+(e.g. `-r ubuntu`), these effects are less surprising because the rootfs
+was built for container use.
+
+For a host-rootfs container where these side effects matter, apply
+individual flags instead:
+
+```
+sdme create mybox --userns --drop-capability CAP_SYS_RAWIO
+```
+
 ### Composable with fine-grained flags
 
 `--hardened` sets a baseline that individual flags can override or extend:
@@ -482,6 +507,29 @@ It implies `--hardened` and adds:
 sdme create mybox --strict
 sdme new mybox --strict
 ```
+
+**When cloning the host rootfs**, `--strict` compounds the effects of
+`--hardened` (above) with additional restrictions:
+
+- **`systemd-networkd` and `NetworkManager` fail.**
+  `CAP_NET_ADMIN` is dropped.
+- **`systemd-timesyncd` cannot set the clock.** `CAP_SYS_TIME` is
+  dropped.
+- **Logging to `/dev/kmsg` is denied.** `CAP_SYSLOG` is dropped.
+- **Nice/priority adjustments fail.** `CAP_SYS_NICE` is dropped.
+- **AppArmor profile must be installed first.** The `sdme-default`
+  profile is checked at `start` time; if it is not loaded, the
+  container fails to start with instructions for installation.
+
+For host-rootfs use, `--hardened` with selective additions is often
+more practical than `--strict`:
+
+```
+sdme create mybox --hardened --system-call-filter ~@raw-io
+```
+
+`--strict` is best suited for imported rootfs images where the service
+set is known and controlled.
 
 ### Why `CAP_SYS_ADMIN` is retained
 
@@ -587,7 +635,8 @@ is confined inside that environment as a systemd service
 add custom services, configure systemd units. These services run alongside
 the OCI workload but outside it, in the same container. Docker and Podman
 have no equivalent — you either run one process per container or build
-increasingly complex entrypoint scripts.
+increasingly complex entrypoint scripts and agents around the container,
+not in it. This sidecar functionality for your rootfs + OCI is key.
 
 ### OCI packaging, systemd management
 
@@ -621,7 +670,7 @@ preserving these benefits.
 **sdme** is appropriate when:
 
 - You want a full systemd environment (service management, journald, cgroups).
-- You want disposable containers that boot in seconds with no daemon.
+- You want disposable containers that boot quickly, with no daemon.
 - You are comfortable with root-level operation.
 - You use `--strict` for Docker-equivalent security, or `--hardened` for
   defense-in-depth.

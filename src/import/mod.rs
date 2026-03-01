@@ -1527,6 +1527,10 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
         }
     }
 
+    // TODO: optionally install the sdme AppArmor profile into the imported
+    // rootfs (e.g. /etc/apparmor.d/sdme-default) so that --strict works
+    // out of the box without a separate host-side installation step.
+
     // Patch systemd services for nspawn compatibility (mask resolved,
     // unmask logind, install missing machinectl shell dependencies).
     if !skip_systemd_check && has_systemd(&staging_dir, &family) {

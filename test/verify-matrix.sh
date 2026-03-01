@@ -10,9 +10,9 @@ APPS=(nginx mysql postgres redis)
 declare -A DISTRO_IMAGES=(
     [debian]="docker.io/debian:stable"
     [ubuntu]="docker.io/ubuntu:24.04"
-    [fedora]="docker.io/fedora:41"
+    [fedora]="quay.io/fedora/fedora:41"
     [centos]="quay.io/centos/centos:stream9"
-    [almalinux]="docker.io/almalinux:9"
+    [almalinux]="quay.io/almalinuxorg/almalinux:9"
 )
 
 declare -A APP_IMAGES=(
