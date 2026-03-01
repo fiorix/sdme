@@ -100,10 +100,10 @@ jobs:
         run: |
           chmod +x /tmp/sdme-bin/sdme
           mkdir -p dist/completions dist/apparmor
-          /tmp/sdme-bin/sdme completions bash > dist/completions/sdme.bash
-          /tmp/sdme-bin/sdme completions zsh > dist/completions/_sdme
-          /tmp/sdme-bin/sdme completions fish > dist/completions/sdme.fish
-          /tmp/sdme-bin/sdme apparmor-profile > dist/apparmor/sdme-default
+          /tmp/sdme-bin/sdme config completions bash > dist/completions/sdme.bash
+          /tmp/sdme-bin/sdme config completions zsh > dist/completions/_sdme
+          /tmp/sdme-bin/sdme config completions fish > dist/completions/sdme.fish
+          /tmp/sdme-bin/sdme config apparmor-profile > dist/apparmor/sdme-default
 
       - name: Ensure binaries are executable
         run: chmod +x target/${{ matrix.target }}/release/sdme
