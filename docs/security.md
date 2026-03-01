@@ -246,9 +246,13 @@ ptrace.
 **Podman** has strong SELinux integration with `svirt` type enforcement
 labels on Fedora/RHEL. AppArmor is used where available (Debian/Ubuntu).
 
-On SELinux-only systems (Fedora, RHEL), sdme has no MAC confinement.
-Docker and Podman provide MAC confinement out of the box on both AppArmor
-and SELinux systems. No SELinux support is provided by sdme.
+**SELinux is not supported.** sdme has no SELinux integration and does
+not provide MAC confinement on SELinux-only systems (Fedora, RHEL).
+During rootfs import (`sdme fs import`), `security.selinux` extended
+attributes are explicitly skipped because they do not transfer
+meaningfully between filesystems and would cause label conflicts on
+the host. Docker and Podman provide MAC confinement out of the box on
+both AppArmor and SELinux systems.
 
 ## 6. Privilege Escalation Prevention
 

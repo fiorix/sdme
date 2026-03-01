@@ -1,8 +1,11 @@
 # Using sdme on macOS
 
-sdme requires Linux with systemd. On a Mac, you can get a local Linux VM using [lima-vm](https://lima-vm.io/).
+sdme requires Linux with systemd. On a Mac, you can get a local Linux VM
+using [lima-vm](https://lima-vm.io/).
 
-> **Note:** If your Mac has an Apple Silicon chip (M1, M2, etc.), the VM runs Linux on aarch64. Not all binaries and container images will work out of the box. Make sure what you're running supports `arm64`/`aarch64`.
+> **Note:** If your Mac has an Apple Silicon chip (M1, M2, etc.), the VM
+> runs Linux on aarch64. Not all binaries and container images will work
+> out of the box. Make sure what you're running supports `arm64`/`aarch64`.
 
 ## Set up a Linux VM
 
@@ -19,7 +22,8 @@ limactl create --name=dev template:ubuntu
 limactl start dev
 ```
 
-You can pick other distros. Run `limactl create` interactively to see available templates.
+You can pick other distros. Run `limactl create` interactively to see
+available templates.
 
 Shell into the VM:
 
@@ -46,4 +50,3 @@ Check that systemd is running inside the container:
 ```bash
 systemctl status
 ```
-

@@ -81,8 +81,8 @@ sudo ./test/verify-matrix.sh --keep                       # keep artifacts
 
 Each cell verifies: app import with `--base-fs`, container boot,
 `sdme-oci-app.service` active, journal and status accessible, and
-app-specific health check (HTTP 200 for nginx, mysqladmin status,
-pg_isready, redis-cli ping).
+app-specific health check (HTTP 200 for nginx, redis-cli ping,
+mysqladmin status, pg_isready).
 
 See `./test/verify-matrix.sh --help` for all options.
 
@@ -139,19 +139,19 @@ journalctl access, and systemctl unit listing.
 
 ### OCI App Matrix
 
-| App      | Image              | debian | ubuntu | fedora | centos | alma   |
-|----------|--------------------|--------|--------|--------|--------|--------|
-| nginx    | docker.io/nginx    | PASS   | SKIP*  | PASS   | PASS   | PASS   |
-| mysql    | docker.io/mysql    | PASS   | PASS   | PASS   | PASS   | SKIP*  |
-| postgres | docker.io/postgres | PASS   | PASS   | PASS   | PASS   | PASS   |
-| redis    | docker.io/redis    | PASS   | PASS   | PASS   | PASS   | PASS   |
+| App        | Image                | debian | ubuntu | fedora | centos | alma   |
+|------------|----------------------|--------|--------|--------|--------|--------|
+| nginx      | docker.io/nginx      | PASS   | SKIP*  | PASS   | PASS   | PASS   |
+| redis      | docker.io/redis      | PASS   | PASS   | PASS   | PASS   | PASS   |
+| mysql      | docker.io/mysql      | PASS   | PASS   | PASS   | PASS   | SKIP*  |
+| postgresql | docker.io/postgres   | PASS   | PASS   | PASS   | PASS   | PASS   |
 
 \* Docker Hub network timeout during blob download (transient).
 
 Each cell verifies: app import with `--base-fs`, container boot,
 `sdme-oci-app.service` active, journal and status accessible, and
-app-specific health check (HTTP 200 for nginx, mysqladmin status,
-pg_isready, redis-cli ping).
+app-specific health check (HTTP 200 for nginx, redis-cli ping,
+mysqladmin status, pg_isready).
 
 ### Pod Tests
 
@@ -244,28 +244,28 @@ private network, no-new-privileges, and drops
 
 ### Hardened OCI App Matrix
 
-| App      | Distro    | Boot   | Service |
-|----------|-----------|--------|---------|
-| nginx    | debian    | PASS   | PASS    |
-| nginx    | ubuntu    | SKIP*  | SKIP*   |
-| nginx    | fedora    | PASS   | PASS    |
-| nginx    | centos    | PASS   | PASS    |
-| nginx    | almalinux | PASS   | PASS    |
-| mysql    | debian    | PASS   | PASS    |
-| mysql    | ubuntu    | PASS   | PASS    |
-| mysql    | fedora    | PASS   | PASS    |
-| mysql    | centos    | PASS   | PASS    |
-| mysql    | almalinux | SKIP*  | SKIP*   |
-| postgres | debian    | PASS   | PASS    |
-| postgres | ubuntu    | PASS   | PASS    |
-| postgres | fedora    | PASS   | PASS    |
-| postgres | centos    | PASS   | PASS    |
-| postgres | almalinux | PASS   | PASS    |
-| redis    | debian    | PASS   | PASS    |
-| redis    | ubuntu    | PASS   | PASS    |
-| redis    | fedora    | PASS   | PASS    |
-| redis    | centos    | PASS   | PASS    |
-| redis    | almalinux | PASS   | PASS    |
+| App        | Distro    | Boot   | Service |
+|------------|-----------|--------|---------|
+| nginx      | debian    | PASS   | PASS    |
+| nginx      | ubuntu    | SKIP*  | SKIP*   |
+| nginx      | fedora    | PASS   | PASS    |
+| nginx      | centos    | PASS   | PASS    |
+| nginx      | almalinux | PASS   | PASS    |
+| redis      | debian    | PASS   | PASS    |
+| redis      | ubuntu    | PASS   | PASS    |
+| redis      | fedora    | PASS   | PASS    |
+| redis      | centos    | PASS   | PASS    |
+| redis      | almalinux | PASS   | PASS    |
+| mysql      | debian    | PASS   | PASS    |
+| mysql      | ubuntu    | PASS   | PASS    |
+| mysql      | fedora    | PASS   | PASS    |
+| mysql      | centos    | PASS   | PASS    |
+| mysql      | almalinux | SKIP*  | SKIP*   |
+| postgresql | debian    | PASS   | PASS    |
+| postgresql | ubuntu    | PASS   | PASS    |
+| postgresql | fedora    | PASS   | PASS    |
+| postgresql | centos    | PASS   | PASS    |
+| postgresql | almalinux | PASS   | PASS    |
 
 \* Skipped due to transient Docker Hub network failure during OCI app import.
 
