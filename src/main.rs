@@ -508,10 +508,6 @@ fn for_each_container(
     Ok(())
 }
 
-fn await_boot(name: &str, timeout: std::time::Duration, verbose: bool) -> Result<()> {
-    systemd::await_boot(name, timeout, verbose)
-}
-
 /// Build a `ResourceLimits` from CLI flags (for `create` / `new`).
 ///
 /// `None` means the flag was not provided; the limit is left unset.
@@ -915,7 +911,7 @@ fn main() -> Result<()> {
             eprintln!("starting '{name}'");
             systemd::start(&cfg.datadir, &name, cli.verbose)?;
             let boot_timeout = std::time::Duration::from_secs(timeout.unwrap_or(cfg.boot_timeout));
-            if let Err(e) = await_boot(&name, boot_timeout, cli.verbose) {
+            if let Err(e) = systemd::await_boot(&name, boot_timeout, cli.verbose) {
                 sdme::reset_interrupt();
                 eprintln!("boot failed, stopping '{name}'");
                 let _ = containers::stop(&name, containers::StopMode::Terminate, cli.verbose);
@@ -1009,7 +1005,7 @@ fn main() -> Result<()> {
                 systemd::start(&cfg.datadir, &name, cli.verbose)?;
                 let boot_timeout =
                     std::time::Duration::from_secs(timeout.unwrap_or(cfg.boot_timeout));
-                await_boot(&name, boot_timeout, cli.verbose)?;
+                systemd::await_boot(&name, boot_timeout, cli.verbose)?;
                 Ok(())
             })();
 

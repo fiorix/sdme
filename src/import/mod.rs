@@ -319,6 +319,22 @@ pub(super) fn detect_compression_magic(magic: &[u8]) -> Result<Compression> {
     }
 }
 
+/// Detect compression from a file's magic bytes and return a decompression reader.
+///
+/// Opens the file, reads the first 6 bytes to detect compression, then reopens
+/// the file and wraps it in the appropriate decoder. This avoids seeking (which
+/// not all readers support) by using a cheap reopen.
+pub(super) fn open_decoder(path: &Path) -> Result<Box<dyn Read>> {
+    let mut file =
+        File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let mut magic = [0u8; 6];
+    let n = file.read(&mut magic)?;
+    drop(file);
+    let file = File::open(path)?;
+    let compression = detect_compression_magic(&magic[..n])?;
+    get_decoder(file, &compression)
+}
+
 /// Get a decompression reader wrapping the given reader.
 pub(super) fn get_decoder(
     reader: impl Read + 'static,
@@ -665,6 +681,31 @@ impl Drop for ChrootGuard {
     }
 }
 
+/// Run a sequence of shell commands inside a rootfs via chroot.
+///
+/// Each command is executed as `/bin/sh -c <cmd>` inside the rootfs. The
+/// function checks for interrupts between commands and bails on failure.
+fn run_chroot_commands(rootfs: &Path, commands: &[&str], verbose: bool) -> Result<()> {
+    for cmd_str in commands {
+        check_interrupted()?;
+        if verbose {
+            eprintln!("chroot: {cmd_str}");
+        }
+        let status = Command::new("chroot")
+            .arg(rootfs)
+            .args(["/bin/sh", "-c", cmd_str])
+            .status()
+            .with_context(|| format!("failed to run chroot command: {cmd_str}"))?;
+        if !status.success() {
+            bail!(
+                "chroot command failed (exit {}): {cmd_str}",
+                status.code().unwrap_or(-1)
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Return the shell commands that would be run to install systemd packages.
 fn install_commands(family: &DistroFamily) -> Vec<&'static str> {
     match family {
@@ -693,31 +734,8 @@ fn install_systemd_packages(rootfs: &Path, family: &DistroFamily, verbose: bool)
     }
 
     let mut chroot_guard = ChrootGuard::setup(rootfs)?;
-
-    let result = (|| -> Result<()> {
-        for cmd_str in &commands {
-            check_interrupted()?;
-            if verbose {
-                eprintln!("chroot: {cmd_str}");
-            }
-            let status = Command::new("chroot")
-                .arg(rootfs)
-                .args(["/bin/sh", "-c", cmd_str])
-                .status()
-                .with_context(|| format!("failed to run chroot command: {cmd_str}"))?;
-            if !status.success() {
-                bail!(
-                    "chroot command failed (exit {}): {cmd_str}",
-                    status.code().unwrap_or(-1)
-                );
-            }
-        }
-        Ok(())
-    })();
-
-    // Explicit cleanup before returning the result so errors propagate cleanly.
+    let result = run_chroot_commands(rootfs, &commands, verbose);
     chroot_guard.cleanup();
-
     result
 }
 
@@ -769,26 +787,7 @@ fn patch_rootfs_services(rootfs: &Path, family: &DistroFamily, verbose: bool) ->
         if !commands.is_empty() {
             eprintln!("installing packages for machinectl shell support");
             let mut chroot_guard = ChrootGuard::setup(rootfs)?;
-            let result = (|| -> Result<()> {
-                for cmd_str in &commands {
-                    check_interrupted()?;
-                    if verbose {
-                        eprintln!("chroot: {cmd_str}");
-                    }
-                    let status = Command::new("chroot")
-                        .arg(rootfs)
-                        .args(["/bin/sh", "-c", cmd_str])
-                        .status()
-                        .with_context(|| format!("failed to run chroot command: {cmd_str}"))?;
-                    if !status.success() {
-                        bail!(
-                            "chroot command failed (exit {}): {cmd_str}",
-                            status.code().unwrap_or(-1)
-                        );
-                    }
-                }
-                Ok(())
-            })();
+            let result = run_chroot_commands(rootfs, &commands, verbose);
             chroot_guard.cleanup();
             result?;
         } else if verbose {

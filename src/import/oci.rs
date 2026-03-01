@@ -2,14 +2,14 @@
 
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
-use std::fs::{self, File};
+use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::check_interrupted;
 use crate::copy::{make_removable, sanitize_dest_path};
 
-use super::{detect_compression_magic, get_decoder};
+use super::open_decoder;
 
 #[derive(Deserialize)]
 pub(super) struct OciLayout {
@@ -149,17 +149,8 @@ pub(super) fn import_oci_layout(oci_dir: &Path, staging_dir: &Path, verbose: boo
             );
         }
 
-        // Detect compression from magic bytes of the blob.
-        let mut blob_file = File::open(&blob_path)
-            .with_context(|| format!("failed to open blob {}", blob_path.display()))?;
-        let mut magic = [0u8; 6];
-        let n = blob_file.read(&mut magic)?;
-        // Seek back to the start.
-        drop(blob_file);
-        let blob_file = File::open(&blob_path)?;
-
-        let compression = detect_compression_magic(&magic[..n])?;
-        unpack_oci_layer(get_decoder(blob_file, &compression)?, staging_dir)?;
+        let decoder = open_decoder(&blob_path)?;
+        unpack_oci_layer(decoder, staging_dir)?;
     }
 
     Ok(())
@@ -273,6 +264,7 @@ pub(super) fn unpack_oci_layer<R: Read>(reader: R, dest: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::File;
     use std::os::unix::fs as unix_fs;
 
     use crate::import::tests::{test_run, tmp, INTERRUPT_LOCK};

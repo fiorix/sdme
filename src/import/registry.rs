@@ -15,10 +15,7 @@ use sha2::{Digest, Sha256};
 use crate::check_interrupted;
 
 use super::oci::unpack_oci_layer;
-use super::{
-    build_http_agent, detect_compression_magic, get_decoder, proxy_from_env, sorted_keys_csv,
-    MAX_DOWNLOAD_SIZE,
-};
+use super::{build_http_agent, open_decoder, proxy_from_env, sorted_keys_csv, MAX_DOWNLOAD_SIZE};
 
 /// Parsed OCI image reference (e.g. `quay.io/centos/centos:stream10`).
 #[derive(Debug, PartialEq)]
@@ -715,17 +712,7 @@ pub(super) fn import_registry_image(
                 verbose,
             )?;
 
-            // Detect compression from magic bytes.
-            let mut file = File::open(&temp_path)
-                .with_context(|| format!("failed to open {}", temp_path.display()))?;
-            let mut magic = [0u8; 6];
-            let n = file.read(&mut magic)?;
-            drop(file);
-
-            let compression = detect_compression_magic(&magic[..n])?;
-            let file = File::open(&temp_path)?;
-            let decoder = get_decoder(file, &compression)?;
-
+            let decoder = open_decoder(&temp_path)?;
             unpack_oci_layer(decoder, staging_dir)?;
 
             Ok(())
