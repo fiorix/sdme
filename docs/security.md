@@ -233,7 +233,7 @@ operations entirely; sdme must allow them for systemd to set up `/proc`,
 To install the profile:
 
 ```
-sdme apparmor-profile > /etc/apparmor.d/sdme-default
+sdme config apparmor-profile > /etc/apparmor.d/sdme-default
 apparmor_parser -r /etc/apparmor.d/sdme-default
 ```
 
@@ -316,15 +316,9 @@ This is closest to Docker's default networking model.
 
 ### Pod networking
 
-Pods give multiple containers a shared network namespace. The implementation
-uses raw syscalls:
-
-```
-1. unshare(CLONE_NEWNET)    -- create new network namespace
-2. ioctl(SIOCSIFFLAGS)      -- bring up loopback
-3. bind-mount /proc/self/ns/net to /run/sdme/pods/<name>/netns
-4. setns() to restore original netns
-```
+Pods give multiple containers a shared network namespace (see
+[architecture.md, Section 10](architecture.md#10-pods) for implementation
+details and lifecycle management).
 
 Two mechanisms for joining a pod:
 
@@ -649,10 +643,3 @@ preserving these benefits.
 - You want a daemonless runtime with Docker-compatible CLI.
 - You need Kubernetes-style pod semantics with full external connectivity.
 
-## 14. Input Sanitization
-
-sdme runs as root and handles untrusted input from the network (OCI
-registries, URL downloads) and from the filesystem (tarballs, disk images).
-The input sanitization measures (path traversal prevention, digest
-validation, download size caps, umask enforcement, permission hardening)
-are documented in [architecture.md, Section 14](architecture.md#14-security).

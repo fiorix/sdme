@@ -304,37 +304,6 @@ enum Command {
     /// Manage pod network namespaces
     #[command(name = "pod", subcommand)]
     Pod(PodCommand),
-
-    /// Print the default AppArmor profile for sdme containers
-    #[command(
-        name = "apparmor-profile",
-        after_long_help = "\
-INSTALLATION:
-    Save the profile and load it into AppArmor:
-
-        sdme apparmor-profile > /etc/apparmor.d/sdme-default
-        apparmor_parser -r /etc/apparmor.d/sdme-default
-
-    To verify the profile is loaded:
-
-        aa-status | grep sdme-default
-
-    The profile is automatically applied when using --strict, or can
-    be applied manually with --apparmor-profile sdme-default.
-
-    The deb and rpm packages install and load the profile automatically.
-
-APPARMOR DOCUMENTATION:
-    https://gitlab.com/apparmor/apparmor/-/wikis/Documentation"
-    )]
-    AppArmorProfile,
-
-    /// Generate shell completions
-    Completions {
-        /// Shell to generate completions for
-        #[arg(value_enum)]
-        shell: Shell,
-    },
 }
 
 #[derive(Subcommand)]
@@ -457,6 +426,35 @@ enum ConfigCommand {
         key: String,
         /// Configuration value
         value: String,
+    },
+    /// Print the default AppArmor profile for sdme containers
+    #[command(
+        name = "apparmor-profile",
+        after_long_help = "\
+INSTALLATION:
+    Save the profile and load it into AppArmor:
+
+        sdme config apparmor-profile > /etc/apparmor.d/sdme-default
+        apparmor_parser -r /etc/apparmor.d/sdme-default
+
+    To verify the profile is loaded:
+
+        aa-status | grep sdme-default
+
+    The profile is automatically applied when using --strict, or can
+    be applied manually with --apparmor-profile sdme-default.
+
+    The deb and rpm packages install and load the profile automatically.
+
+APPARMOR DOCUMENTATION:
+    https://gitlab.com/apparmor/apparmor/-/wikis/Documentation"
+    )]
+    AppArmorProfile,
+    /// Generate shell completions
+    Completions {
+        /// Shell to generate completions for
+        #[arg(value_enum)]
+        shell: Shell,
     },
 }
 
@@ -748,11 +746,11 @@ fn main() -> Result<()> {
 
     // Handle commands that don't require root.
     match cli.command {
-        Command::Completions { shell } => {
+        Command::Config(ConfigCommand::Completions { shell }) => {
             clap_complete::generate(shell, &mut Cli::command(), "sdme", &mut std::io::stdout());
             return Ok(());
         }
-        Command::AppArmorProfile => {
+        Command::Config(ConfigCommand::AppArmorProfile) => {
             return security::print_apparmor_profile();
         }
         _ => {}
@@ -839,6 +837,9 @@ fn main() -> Result<()> {
                 }
                 config::save(&cfg, config_path)?;
             }
+            // Handled before root check above.
+            ConfigCommand::AppArmorProfile => unreachable!(),
+            ConfigCommand::Completions { .. } => unreachable!(),
         },
         Command::Create {
             name,
@@ -1219,9 +1220,6 @@ fn main() -> Result<()> {
                 }
             }
         },
-        // Handled before root check above.
-        Command::AppArmorProfile => unreachable!(),
-        Command::Completions { .. } => unreachable!(),
         Command::Fs(cmd) => match cmd {
             RootfsCommand::Import {
                 source,

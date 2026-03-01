@@ -273,6 +273,38 @@ sdme pod rm my-pod           # remove (fails if containers reference it)
 sdme pod rm -f my-pod        # force remove
 ```
 
+## Security
+
+sdme provides opt-in security hardening for containers. The two main flags:
+
+**`--hardened`** enables user namespace isolation, private network,
+no-new-privileges, and drops several capabilities:
+
+```bash
+sudo sdme new -r nginx --hardened
+```
+
+**`--strict`** implies `--hardened` and adds Docker-equivalent capability
+drops, seccomp filters, and the `sdme-default` AppArmor profile:
+
+```bash
+sudo sdme new -r nginx --strict
+```
+
+Individual flags (`--drop-capability`, `--capability`, `--no-new-privileges`,
+`--read-only`, `--system-call-filter`, `--apparmor-profile`) are also
+available for fine-grained control.
+
+User namespace isolation (`--userns`) works with OCI app containers. It
+maps container root to a high unprivileged UID on the host:
+
+```bash
+sudo sdme new -r nginx --userns
+```
+
+See [security.md](security.md) for a full analysis of sdme's isolation
+model and comparisons with Docker and Podman.
+
 ## Limitations
 
 - **Port bindings are not wired up.** The `/oci/ports` file records exposed
@@ -305,5 +337,7 @@ sdme pod rm -f my-pod        # force remove
 
 - [Architecture and design](architecture.md): internals of how sdme, OCI
   capsules, and pods work under the hood
-- [Privilege dropping](drop-privs.md): how non-root OCI users are handled
-- [Dev fd shim](devfd-shim.md): /dev/stdout compatibility for OCI images
+- [OCI-to-nspawn bridging](hacks.md): how non-root OCI users and
+  /dev/stdout compatibility are handled
+- [Security](security.md): isolation model, hardening flags, and
+  comparison with Docker and Podman

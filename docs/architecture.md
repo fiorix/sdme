@@ -469,7 +469,7 @@ both. For root users, the standard `User=root` unit is generated unchanged.
 The OCI `User` field is resolved at import time against `etc/passwd` and
 `etc/group` inside the OCI rootfs, supporting named users, numeric UIDs,
 explicit groups, and `uid:gid` pairs. Full details in
-[docs/drop-privs.md](drop-privs.md).
+[docs/hacks.md](hacks.md).
 
 ### /dev/std* shim for journal socket compatibility
 
@@ -489,7 +489,7 @@ the real syscall.
 The shim is written to `/.sdme-devfd-shim.so` inside the OCI root at import
 time, and the generated unit includes `Environment=LD_PRELOAD=/.sdme-devfd-shim.so`.
 This applies to all OCI containers (both root and non-root users). Full details
-in [docs/devfd-shim.md](devfd-shim.md).
+in [docs/hacks.md](hacks.md).
 
 ### Future direction
 
@@ -715,6 +715,12 @@ under `/root`. An explicit `-c`/`--config` flag overrides all resolution logic.
 Config files are written with mode `0600` and directories with mode `0700`.
 
 ## 14. Security
+
+For a comprehensive analysis of sdme's isolation model, including namespace
+isolation, capability bounding sets, seccomp filtering, AppArmor, and
+comparisons with Docker and Podman, see [docs/security.md](security.md).
+
+This section covers input sanitization for untrusted data.
 
 sdme runs as root and handles untrusted input: tarballs from the internet, OCI
 images from public registries, QCOW2 disk images from unknown sources. Several

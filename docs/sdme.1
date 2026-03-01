@@ -1,4 +1,4 @@
-.TH SDME 1 "2026-02-23" "sdme" "User Commands"
+.TH SDME 1 "2026-03-01" "sdme" "User Commands"
 .SH NAME
 sdme \- lightweight systemd\-nspawn containers with overlayfs
 .SH SYNOPSIS
@@ -37,7 +37,7 @@ Path to config file.
 Default:
 .IR ~/.config/sdme/sdmerc .
 .SH COMMANDS
-.SS sdme new [\fIname\fR] [\-r \fIfs\fR] [\-t \fIseconds\fR] [\-u] [\fIlimits\fR] [\fInetwork\fR] [\-o \fIdir\fR]... [\-\-pod \fIpod\fR] [\-\-oci\-pod \fIpod\fR] [\-b \fIbind\fR]... [\-e \fIenv\fR]... [\-\-] [\fIcommand\fR...]
+.SS sdme new [\fIname\fR] [\-r \fIfs\fR] [\-t \fIseconds\fR] [\-u] [\fIlimits\fR] [\fInetwork\fR] [\fIsecurity\fR] [\-o \fIdir\fR]... [\-\-pod \fIpod\fR] [\-\-oci\-pod \fIpod\fR] [\-b \fIbind\fR]... [\-e \fIenv\fR]... [\-\-] [\fIcommand\fR...]
 Create, start, and enter a new container.
 If
 .I name
@@ -106,9 +106,23 @@ to enable user namespace isolation; see
 .B USER NAMESPACES
 below.
 .PP
+Security hardening options can be set with
+.BR \-\-strict ,
+.BR \-\-hardened ,
+.BR \-\-drop\-capability ,
+.BR \-\-capability ,
+.BR \-\-no\-new\-privileges ,
+.BR \-\-read\-only ,
+.BR \-\-system\-call\-filter ,
+and
+.BR \-\-apparmor\-profile ;
+see
+.B SECURITY HARDENING
+below.
+.PP
 If boot fails or is interrupted (Ctrl+C), the just\-created container is
 automatically removed.
-.SS sdme create [\fIname\fR] [\-r \fIfs\fR] [\-u] [\fIlimits\fR] [\fInetwork\fR] [\-o \fIdir\fR]... [\-\-pod \fIpod\fR] [\-\-oci\-pod \fIpod\fR] [\-b \fIbind\fR]... [\-e \fIenv\fR]...
+.SS sdme create [\fIname\fR] [\-r \fIfs\fR] [\-u] [\fIlimits\fR] [\fInetwork\fR] [\fIsecurity\fR] [\-o \fIdir\fR]... [\-\-pod \fIpod\fR] [\-\-oci\-pod \fIpod\fR] [\-b \fIbind\fR]... [\-e \fIenv\fR]...
 Create a new container without starting it.
 Sets up the overlayfs directories and state file.
 Resource limits can be set with
@@ -158,6 +172,21 @@ Use
 to enable user namespace isolation; see
 .B USER NAMESPACES
 below.
+.PP
+Security hardening options can be set with
+.BR \-\-strict ,
+.BR \-\-hardened ,
+.BR \-\-drop\-capability ,
+.BR \-\-capability ,
+.BR \-\-no\-new\-privileges ,
+.BR \-\-read\-only ,
+.BR \-\-system\-call\-filter ,
+and
+.BR \-\-apparmor\-profile ;
+see
+.B SECURITY HARDENING
+below.
+.PP
 Requires a permissive umask (see
 .B NOTES
 below).
@@ -423,6 +452,38 @@ keys) unless
 is given.
 .SS sdme config get
 Show current configuration values.
+.SS sdme config apparmor\-profile
+Print the default AppArmor profile for sdme containers to stdout.
+The profile is named
+.B sdme\-default
+and is designed for systemd\-nspawn system containers.
+To install:
+.PP
+.RS
+.nf
+sdme config apparmor\-profile > /etc/apparmor.d/sdme\-default
+apparmor_parser \-r /etc/apparmor.d/sdme\-default
+.fi
+.RE
+.PP
+The profile is automatically applied when using
+.BR \-\-strict .
+It can also be applied manually with
+.BR "\-\-apparmor\-profile sdme\-default" .
+The deb and rpm packages install and load the profile automatically.
+.SS sdme config completions \fIshell\fR
+Generate shell completions for the specified shell.
+Supported shells:
+.BR bash ", " fish ", " zsh .
+Example:
+.PP
+.RS
+.nf
+sdme config completions bash > /etc/bash_completion.d/sdme
+sdme config completions zsh > /usr/local/share/zsh/site\-functions/_sdme
+sdme config completions fish > ~/.config/fish/completions/sdme.fish
+.fi
+.RE
 .SS sdme config set \fIkey\fR \fIvalue\fR
 Set a configuration value.
 Valid keys:
@@ -465,6 +526,14 @@ flags override this setting.
 Set to an empty string to disable.
 Default:
 .BR /etc/systemd/system,/var/log .
+.TP
+.B hardened_drop_caps
+Comma\-separated list of capabilities to drop when
+.B \-\-hardened
+is used.
+Set to an empty string to disable all hardened capability drops.
+Default:
+.BR CAP_SYS_PTRACE,CAP_NET_RAW,CAP_SYS_RAWIO,CAP_SYS_BOOT .
 .RE
 .SH CONFIGURATION
 The configuration file is in TOML format, located at
@@ -530,6 +599,16 @@ Containers created with an imported rootfs are unaffected.
 Set to an empty string to disable default opaque dirs.
 Default:
 .BR /etc/systemd/system,/var/log .
+.TP
+.B hardened_drop_caps
+String.
+Comma\-separated list of Linux capabilities to drop when
+.B \-\-hardened
+is used.
+Capabilities are validated against the known set.
+Set to an empty string to disable all hardened capability drops.
+Default:
+.BR CAP_SYS_PTRACE,CAP_NET_RAW,CAP_SYS_RAWIO,CAP_SYS_BOOT .
 .SH FILES
 .TP
 .I /var/lib/sdme/
@@ -554,8 +633,10 @@ environment variables
 .RB ( ENVS ),
 pod membership
 .RB ( POD ", " OCI_POD ),
-and user namespace isolation
-.RB ( USERNS ).
+user namespace isolation
+.RB ( USERNS ),
+and security hardening
+.RB ( DROP_CAPS ", " ADD_CAPS ", " NO_NEW_PRIVS ", " READ_ONLY ", " SYSCALL_FILTER ", " APPARMOR_PROFILE ).
 .TP
 .I /var/lib/sdme/containers/\fIname\fR/upper/
 Per\-container overlayfs upper layer (copy\-on\-write modifications).
@@ -744,6 +825,30 @@ EOF
 # Build the new rootfs and create a container
 sdme fs build examplefs examplefs.conf
 sdme new \-r examplefs
+.fi
+.RE
+.PP
+Create a hardened container with user namespace isolation and private network:
+.PP
+.RS
+.nf
+sdme new \-\-hardened \-r ubuntu
+.fi
+.RE
+.PP
+Create a container with maximum security (Docker\-equivalent restrictions):
+.PP
+.RS
+.nf
+sdme new \-\-strict \-r ubuntu
+.fi
+.RE
+.PP
+Create a container with fine\-grained security controls:
+.PP
+.RS
+.nf
+sdme new \-\-drop\-capability CAP_NET_RAW \-\-no\-new\-privileges \-\-read\-only \-r ubuntu
 .fi
 .RE
 .PP
@@ -988,6 +1093,110 @@ falls back to recursive chown.
 User namespace isolation is set at creation time and stored in the container's
 state file as
 .BR USERNS=yes .
+.SH SECURITY HARDENING
+Security hardening flags are available on
+.B sdme create
+and
+.BR "sdme new" .
+They are stored in the container's state file and applied at start time.
+.TP
+.B \-\-strict
+Maximum security.
+Implies
+.B \-\-hardened
+and adds Docker\-equivalent capability drops (retains only ~14 capabilities
+plus
+.B CAP_SYS_ADMIN
+for systemd init), seccomp filters
+.RB ( ~@cpu\-emulation ", " ~@debug ", " ~@obsolete ", " ~@raw\-io ),
+and the
+.B sdme\-default
+AppArmor profile.
+The AppArmor profile must be loaded before use; see
+.BR "sdme config apparmor\-profile" .
+.TP
+.B \-\-hardened
+Enable defense\-in\-depth defaults: user namespace isolation
+.RB ( \-\-private\-users=pick ),
+private network namespace, no\-new\-privileges, and capability drops
+(configurable via the
+.B hardened_drop_caps
+config key; default:
+.BR CAP_SYS_PTRACE,CAP_NET_RAW,CAP_SYS_RAWIO,CAP_SYS_BOOT ).
+.TP
+.BI \-\-drop\-capability " cap"
+Drop a capability from the container's bounding set.
+Accepts names with or without the
+.B CAP_
+prefix.
+Can be specified multiple times.
+Example:
+.BR CAP_SYS_PTRACE ", " NET_RAW .
+.TP
+.BI \-\-capability " cap"
+Add a capability to the container's bounding set (for capabilities not in
+the default nspawn set).
+Accepts names with or without the
+.B CAP_
+prefix.
+Can be specified multiple times.
+Specifying the same capability in both
+.B \-\-drop\-capability
+and
+.B \-\-capability
+is rejected.
+Example:
+.BR CAP_NET_ADMIN .
+.TP
+.B \-\-no\-new\-privileges
+Prevent processes inside the container from gaining privileges via setuid
+binaries or file capabilities.
+Passes
+.B \-\-no\-new\-privileges=yes
+to
+.BR systemd\-nspawn (1).
+Note that this breaks
+.BR sudo (8)
+and
+.BR su (1)
+inside the container.
+.TP
+.B \-\-read\-only
+Mount the container's overlayfs merged view as read\-only.
+Applications that need writable areas should use bind mounts
+.RB ( \-b ).
+.TP
+.BI \-\-system\-call\-filter " filter"
+Apply an additional seccomp filter on top of nspawn's baseline.
+Uses systemd's group syntax:
+.B @group
+to allow,
+.B ~@group
+to deny.
+Can be specified multiple times.
+Example:
+.BR ~@raw\-io ", " ~@cpu\-emulation .
+Note that
+.B ~@mount
+will break systemd inside the container.
+.TP
+.BI \-\-apparmor\-profile " name"
+Apply an AppArmor profile to the container via the
+.B AppArmorProfile=
+directive in the systemd service unit drop\-in.
+The profile must be loaded into the kernel before use.
+Example:
+.BR sdme\-default .
+.PP
+.B \-\-strict
+and
+.B \-\-hardened
+set baselines that individual flags can override.
+For example,
+.B \-\-hardened \-\-capability CAP_NET_RAW
+re\-enables a capability that
+.B \-\-hardened
+would otherwise drop.
 .SH NOTES
 .SS Umask
 .B sdme create
