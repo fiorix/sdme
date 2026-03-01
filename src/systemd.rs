@@ -414,9 +414,7 @@ mod dbus {
                     .map(|s| s.success())
                     .unwrap_or(false)
             } else {
-                let address = format!(
-                    "unix:path=/proc/{leader}/root/run/dbus/system_bus_socket"
-                );
+                let address = format!("unix:path=/proc/{leader}/root/run/dbus/system_bus_socket");
                 zbus::blocking::connection::Builder::address(address.as_str())
                     .and_then(|b| b.build())
                     .is_ok()
@@ -899,8 +897,17 @@ pub fn write_nspawn_dropin(datadir: &Path, name: &str, verbose: bool) -> Result<
     // Collect all nspawn arguments from state.
     let mut nspawn_args = Vec::new();
 
+    let has_pod = state.get("POD").is_some_and(|s| !s.is_empty());
+
     let network = NetworkConfig::from_state(&state);
-    nspawn_args.extend(network.to_nspawn_args());
+    let mut net_args = network.to_nspawn_args();
+    // When a pod provides the network namespace, --private-network must be
+    // omitted because nspawn rejects it together with --network-namespace-path.
+    // The pod's netns already provides equivalent isolation (loopback only).
+    if has_pod {
+        net_args.retain(|a| a != "--private-network");
+    }
+    nspawn_args.extend(net_args);
 
     let binds = BindConfig::from_state(&state);
     nspawn_args.extend(binds.to_nspawn_args());

@@ -36,18 +36,21 @@ pg_isready, redis-cli ping).
 | Test                          | Result |
 |-------------------------------|--------|
 | nspawn pod loopback           | PASS   |
-| --pod + --private-network     | PASS   |
+| --pod + --hardened            | PASS   |
 | --oci-pod without OCI rootfs  | PASS   |
 | --pod=nonexistent             | PASS   |
-| --oci-pod + --private-network | PASS   |
+| --oci-pod + --hardened        | PASS   |
 
 - **nspawn pod loopback**: two `--pod` containers share localhost
   via a Python listener/client on port 9999.
-- **--pod + --private-network**: mutual exclusion correctly rejected.
+- **--pod + --hardened**: combined successfully; `--private-network`
+  is omitted from nspawn args since the pod's netns provides equivalent
+  loopback-only isolation.
 - **--oci-pod without OCI rootfs**: error correctly rejected.
 - **--pod=nonexistent**: non-existent pod correctly rejected.
-- **--oci-pod + --private-network**: no mutual exclusion; the error
-  is about missing OCI rootfs, not a network conflict.
+- **--oci-pod + --hardened**: combined successfully; `--private-network`
+  applies to the nspawn container while the OCI app service enters the
+  pod's netns via its systemd drop-in.
 
 ## User Namespace Tests
 

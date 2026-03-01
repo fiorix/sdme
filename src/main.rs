@@ -618,12 +618,7 @@ fn resolve_opaque_dirs(
 ///
 /// Checks that:
 /// - The pod exists in the catalogue
-/// - `--pod` is not combined with `--private-network`
-fn validate_pod_args(
-    datadir: &std::path::Path,
-    pod_name: Option<&str>,
-    network: &NetworkConfig,
-) -> Result<()> {
+fn validate_pod_args(datadir: &std::path::Path, pod_name: Option<&str>) -> Result<()> {
     let pod_name = match pod_name {
         Some(n) => n,
         None => return Ok(()),
@@ -631,10 +626,6 @@ fn validate_pod_args(
 
     if !pod::exists(datadir, pod_name) {
         bail!("pod not found: {pod_name}");
-    }
-
-    if network.private_network {
-        bail!("--pod is mutually exclusive with --private-network");
     }
 
     Ok(())
@@ -645,7 +636,6 @@ fn validate_pod_args(
 /// Checks that:
 /// - The pod exists in the catalogue
 /// - The rootfs is an OCI app rootfs (contains `sdme-oci-app.service`)
-/// - `--oci-pod` is not combined with `--private-network`
 fn validate_oci_pod_args(
     datadir: &std::path::Path,
     oci_pod: Option<&str>,
@@ -788,7 +778,7 @@ fn main() -> Result<()> {
             if hardened && !network.private_network {
                 network.private_network = true;
             }
-            validate_pod_args(&cfg.datadir, pod.as_deref(), &network)?;
+            validate_pod_args(&cfg.datadir, pod.as_deref())?;
             validate_oci_pod_args(&cfg.datadir, oci_pod.as_deref(), fs.as_deref())?;
             let (binds, envs) = parse_mounts(mounts)?;
             let opaque_dirs = resolve_opaque_dirs(opaque_dirs, fs.is_none(), &cfg);
@@ -899,7 +889,7 @@ fn main() -> Result<()> {
             if hardened && !network.private_network {
                 network.private_network = true;
             }
-            validate_pod_args(&cfg.datadir, pod.as_deref(), &network)?;
+            validate_pod_args(&cfg.datadir, pod.as_deref())?;
             validate_oci_pod_args(&cfg.datadir, oci_pod.as_deref(), fs.as_deref())?;
             let (binds, envs) = parse_mounts(mounts)?;
             let opaque_dirs = resolve_opaque_dirs(opaque_dirs, fs.is_none(), &cfg);
