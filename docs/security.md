@@ -1,72 +1,106 @@
 # sdme: Container Isolation and Security
 
-**Alexandre Fiori, February 2026**
+**Alexandre Fiori, March 2026**
 
 ## 1. Design Philosophy and Scope
 
-sdme delegates all container isolation to systemd-nspawn. It does not add
-security layers on top: no custom seccomp profiles, no AppArmor or SELinux
-policy. What nspawn provides is what you get.
+sdme, Docker, and Podman take fundamentally different approaches to container
+security.
 
-This is a deliberate choice. sdme is a single-binary tool for spinning up
-disposable containers on a single-tenant machine. Out of the box, its
-isolation model works well for developer workstations and trusted workloads.
-Running truly isolated untrusted workloads is possible but requires specific
-hardening (private networking, pod netns, resource limits, and optionally
-external MAC profiles) compared to Docker and Podman, which apply several
-of these layers by default.
+**sdme** delegates baseline isolation to systemd-nspawn and provides opt-in
+hardening layers: `--hardened` as a one-flag defense-in-depth bundle, plus
+fine-grained controls for capabilities, seccomp, AppArmor, privilege
+escalation, and read-only rootfs. It is designed for single-tenant machines
+running full systemd inside containers. It requires root for all operations
+and has no persistent daemon.
 
-Docker and Podman use defense-in-depth: namespaces + reduced capabilities +
-a strict seccomp profile + MAC confinement (AppArmor or SELinux) + optional
-user namespace remapping. sdme's model is simpler: kernel namespace isolation
-from nspawn, nspawn's default capability bounding set, and nspawn's built-in
-seccomp filter. The hardening section (Section 8) covers how to close the
-gap when stronger isolation is needed.
+**Docker** applies defense-in-depth by default: reduced capabilities, a
+restrictive seccomp profile, a default AppArmor profile, and optional user
+namespace remapping. It is daemon-based (containerd) and designed for
+application containers that typically run a single process.
 
-If your threat model requires protection against a malicious root inside the
-container (a container escape scenario), sdme needs additional hardening
-beyond its defaults. Docker with user namespace remapping and Podman rootless
-provide this out of the box. With sdme, you can enable user namespace
-isolation via `--userns` (see Section 8), but it is not on by default,
-so the remaining layers (network isolation, MAC confinement, resource limits)
-become more important. See Section 8 for specific recommendations.
+**Podman** provides similar defense-in-depth with rootless execution by
+default, SELinux integration on Fedora/RHEL, and a daemonless architecture.
+It is designed for OCI-compatible workflows and Docker CLI compatibility.
 
-## 2. What systemd-nspawn Provides
+The key philosophical difference: Docker and Podman apply security layers by
+default and require explicit opt-out. sdme provides the layers but requires
+explicit opt-in (or `--hardened` for a sensible bundle). Out of the box,
+sdme trusts its workloads; Docker and Podman do not.
 
-sdme runs containers with `systemd-nspawn --boot`, letting nspawn handle
-namespace creation, capability bounding, and seccomp filtering. Here is what
-nspawn provides by default (systemd >= 252).
+## 2. Namespace Isolation
+
+Every container runtime uses Linux namespaces for isolation. The table below
+compares which namespaces each runtime enables and how.
+
+```
++-----------------------+----------------------------+----------------------------+----------------------------+
+| Namespace             | sdme (nspawn)              | Docker (runc, rootful)     | Podman (crun, rootless)    |
++-----------------------+----------------------------+----------------------------+----------------------------+
+| PID                   | Always                     | Always                     | Always                     |
+| IPC                   | Always                     | Always                     | Always                     |
+| UTS                   | Always                     | Always                     | Always                     |
+| Mount                 | Always                     | Always                     | Always                     |
+| Network               | Optional (host default)    | Yes (bridge default)       | Yes (slirp4netns/pasta)    |
+| User                  | Optional                   | Optional                   | Yes (default)              |
+| Cgroup                | Partial (Delegate=yes)     | Yes                        | Yes                        |
++-----------------------+----------------------------+----------------------------+----------------------------+
+```
 
 ### Always-on namespaces
 
-Every nspawn container gets its own:
+All three runtimes always create PID, IPC, UTS, and mount namespaces. In
+sdme, PID 1 inside the container is the container's systemd init, not the
+host's. Processes inside cannot see or signal host processes, IPC objects are
+isolated, the container has its own hostname, and the mount table is
+independent (built from an overlayfs mount on top of the rootfs).
 
-- **PID namespace** -- processes inside cannot see or signal host processes.
-  PID 1 inside the container is the container's systemd init, not the host's.
-- **IPC namespace** -- System V IPC objects and POSIX message queues are
-  isolated. Containers cannot interfere with each other's shared memory.
-- **UTS namespace** -- the container has its own hostname (set to the
-  machine name). Changes to hostname inside the container are invisible to
-  the host.
-- **Mount namespace** -- the container has its own mount table. sdme builds
-  this from an overlayfs mount on top of the rootfs.
+### Network namespace
 
-### Conditional namespaces
+sdme shares the host's network namespace by default for simplicity: no port
+mapping, no bridge configuration, containers just work on the host's network
+stack. This is equivalent to `docker run --net=host`.
 
-- **Network namespace** -- only with `--private-network` or
-  `--network-namespace-path=`. Without either flag, containers share the
-  host's network namespace (same interfaces, same ports, no isolation).
-  sdme defaults to host networking.
-- **User namespace** -- only with `--private-users`. sdme supports this via
-  `--userns` on `create`/`new`, which passes `--private-users=pick
-  --private-users-ownership=auto`. Without `--userns`, UID 0 inside the
-  container is UID 0 on the host.
-- **Cgroup namespace** -- partial isolation via `Delegate=yes` in the
-  template unit. The container's systemd gets its own cgroup subtree
-  (`machine.slice/sdme@<name>.service`) but can see the host cgroup hierarchy
-  structure.
+Docker creates a private bridge network by default, providing network
+isolation out of the box. Podman rootless uses slirp4netns or pasta for
+unprivileged network namespace setup.
 
-### Capability bounding set
+sdme provides network isolation via `--private-network` (or `--hardened`,
+which enables it automatically). With `--private-network`, the container
+gets its own network namespace with only a loopback interface. Connectivity
+options (`--network-veth`, `--network-bridge`, `--network-zone`, `--port`)
+build on top of that.
+
+### User namespace
+
+Without `--userns`, UID 0 inside the container is UID 0 on the host. A
+container escape gives the attacker full root access. This is the default
+for both sdme and rootful Docker.
+
+With `--userns` (or `--hardened`), sdme passes `--private-users=pick
+--private-users-ownership=auto` to nspawn. Container root maps to a high
+unprivileged UID on the host (524288+ range, deterministically hashed from
+the machine name). An escape lands in an unprivileged context. On kernel
+6.6+, overlayfs supports idmapped mounts, making this zero-overhead (files
+stay UID 0 on disk). On older kernels, `auto` falls back to recursive chown
+on first boot.
+
+Podman rootless gets user namespace remapping by default — the entire
+container runtime runs as an unprivileged user.
+
+### Cgroup namespace
+
+sdme uses `Delegate=yes` in the systemd template unit. The container's
+systemd gets its own cgroup subtree (`machine.slice/sdme@<name>.service`)
+but can see the host cgroup hierarchy structure. Docker and Podman provide
+full cgroup namespace isolation.
+
+## 3. Capability Bounding Set
+
+Capabilities determine what privileged operations a container's root user
+can perform.
+
+### nspawn defaults (sdme)
 
 nspawn retains 26 capabilities by default:
 
@@ -87,21 +121,52 @@ it is safe to grant when the container has its own network namespace
 (changes only affect the isolated namespace, not the host).
 
 `CAP_SYS_ADMIN` is the most significant capability in this set. It is
-required for systemd to function inside the container (mounting filesystems,
-configuring cgroups, managing namespaces for its own services). Docker drops
-`CAP_SYS_ADMIN` by default, but Docker containers do not run a full init
-system.
+required for systemd to function inside the container: mounting filesystems,
+configuring cgroups, managing namespaces for its own services. This cannot
+be dropped without breaking the systemd-inside-nspawn model.
 
-Capabilities not retained include: `CAP_SYS_MODULE` (no kernel module
-loading), `CAP_SYS_RAWIO` (no raw I/O port access), `CAP_SYS_TIME` (no
-system clock modification), `CAP_BPF` (no BPF program loading),
-`CAP_SYSLOG`, and `CAP_IPC_LOCK`.
+Notable exclusions: `CAP_SYS_MODULE` (no kernel module loading),
+`CAP_SYS_RAWIO` (no raw I/O port access), `CAP_SYS_TIME` (no system clock
+modification), `CAP_BPF` (no BPF program loading), `CAP_SYSLOG`, and
+`CAP_IPC_LOCK`.
 
-### Seccomp filter
+### Docker and Podman defaults
 
-nspawn applies a built-in allowlist-based seccomp filter (defined in
-`nspawn-seccomp.c`). Syscalls not on the allowlist are blocked with `EPERM`
-(for known syscalls) or `ENOSYS` (for unknown ones).
+Docker retains roughly 14 capabilities — the minimum needed for typical
+application containers. Notably, `CAP_SYS_ADMIN` is excluded. Podman uses
+the same default set as Docker.
+
+Docker doesn't need `CAP_SYS_ADMIN` because Docker containers don't run a
+full init system. This is a fundamental consequence of the different design:
+sdme runs full systemd (requiring broad capabilities), while Docker runs
+single-purpose application processes (requiring minimal capabilities).
+
+### sdme's capability controls
+
+sdme provides fine-grained capability management:
+
+- `--drop-capability CAP_X` — drop individual capabilities from nspawn's
+  default set. Accepts names with or without the `CAP_` prefix.
+- `--capability CAP_X` — add capabilities not in the default set (e.g.
+  `CAP_NET_ADMIN` for containers with `--private-network`).
+- `--hardened` drops `CAP_SYS_PTRACE`, `CAP_NET_RAW`, `CAP_SYS_RAWIO`,
+  and `CAP_SYS_BOOT` (configurable via `hardened_drop_caps` in the config),
+  reducing from 26 to 22 retained capabilities.
+
+Both `--drop-capability` and `--capability` are repeatable and validated
+against a known set of Linux capabilities. Specifying the same capability
+in both is rejected as contradictory.
+
+## 4. Seccomp Filtering
+
+All three runtimes apply seccomp system call filters. The baseline
+restrictiveness differs because of their different design goals.
+
+### nspawn (sdme baseline)
+
+nspawn applies a built-in allowlist-based seccomp filter. Syscalls not on
+the allowlist are blocked with `EPERM` (for known syscalls) or `ENOSYS`
+(for unknown ones).
 
 Allowed by default: `@basic-io`, `@file-system`, `@io-event`, `@ipc`,
 `@mount`, `@network-io`, `@process`, `@resources`, `@setuid`, `@signal`,
@@ -116,99 +181,88 @@ Capability-gated: `@clock` requires `CAP_SYS_TIME`, `@module` requires
 capabilities are in the default bounding set, these syscall groups are
 effectively blocked.
 
-This filter is less restrictive than Docker's OCI default profile (which
-blocks roughly 44 syscalls and uses a more conservative allowlist) but
-provides a meaningful baseline. The key difference is that nspawn's filter
-allows `@mount` syscalls (required for systemd's own mount management),
-while Docker blocks them.
+### Docker and Podman
 
-### What nspawn does NOT provide by default
+Docker's OCI default seccomp profile is more restrictive, blocking roughly
+44 syscalls with a more conservative allowlist. Podman uses the same OCI
+default profile. The most significant difference: Docker blocks `mount()`
+and related syscalls, while nspawn must allow `@mount` because systemd
+needs them during boot.
 
-- **No AppArmor profile.** Docker ships a default AppArmor profile that
-  restricts mount operations, write access to `/proc` and `/sys`, and
-  prevents `ptrace` across containers. nspawn applies no MAC confinement
-  unless the administrator configures it externally.
-- **No SELinux labels.** Docker and Podman assign `svirt` labels to
-  containers, providing type enforcement even if a container escapes its
-  namespaces. nspawn does not label containers.
-- **No user namespace remapping by default.** `--private-users` is available
-  and sdme exposes it via `--userns`. Without `--userns`, UID 0 inside the
-  container maps directly to UID 0 on the host.
-- **No `no_new_privs`.** This flag is off by default in nspawn (`--no-new-
-  privileges=false`). Setuid binaries inside the container function normally,
-  meaning a process can gain privileges through `execve()` of a setuid binary.
-  Docker sets `no_new_privs` by default.
-- **No read-only root enforcement.** The overlayfs merged view is writable.
-  Docker supports `--read-only` to make the root filesystem read-only.
+This means a compromised process inside sdme has access to more kernel
+surface than inside Docker. This is an inherent trade-off of running a
+full init system.
 
-## 3. Isolation Comparison
+### sdme's additional seccomp controls
 
-This table maps every major isolation mechanism across sdme, Docker (rootful,
-default configuration), and Podman (rootless, default configuration).
+`--system-call-filter` layers additional seccomp filters on top of nspawn's
+baseline. It uses systemd's group syntax:
+
+- `@group` — allow a syscall group
+- `~@group` — deny a syscall group
 
 ```
-+-----------------------+----------------------------+----------------------------+----------------------------+
-| Mechanism             | sdme (nspawn)              | Docker (runc, rootful)     | Podman (crun, rootless)    |
-+-----------------------+----------------------------+----------------------------+----------------------------+
-| PID namespace         | Yes                        | Yes                        | Yes                        |
-| IPC namespace         | Yes                        | Yes                        | Yes                        |
-| UTS namespace         | Yes                        | Yes                        | Yes                        |
-| Mount namespace       | Yes                        | Yes                        | Yes                        |
-| Network namespace     | Optional (host default)    | Yes (bridge default)       | Yes (slirp4netns/pasta)    |
-| User namespace        | Optional (--userns)        | Optional                   | Yes (default)              |
-| Cgroup namespace      | Partial (Delegate=yes)     | Yes                        | Yes                        |
-| Capabilities          | ~26 incl. SYS_ADMIN        | ~14, no SYS_ADMIN          | Same as Docker             |
-| Seccomp               | nspawn allowlist           | OCI default (~44 blocked)  | Same as Docker             |
-| AppArmor              | None                       | Default profile            | Where available            |
-| SELinux               | None                       | svirt labels               | Strong integration         |
-| no_new_privs          | No                         | Yes                        | Yes                        |
-| Read-only rootfs      | No                         | Optional                   | Optional                   |
-| Rootless              | No (root-only)             | Optional                   | Default                    |
-| Daemon                | None                       | containerd socket          | None                       |
-| Init in container     | Full systemd (always)      | Optional (--init)          | Optional (--init)          |
-+-----------------------+----------------------------+----------------------------+----------------------------+
+sdme create mybox --system-call-filter ~@raw-io
+sdme create mybox --system-call-filter ~@cpu-emulation
 ```
 
-### Key differences explained
+The flag is repeatable. Note that `~@mount` breaks systemd inside the
+container — the same reason nspawn allows it in the first place.
 
-**Network namespace.** sdme shares the host network by default for
-simplicity: no port mapping, no bridge configuration, containers just work
-on the host's network stack. Docker creates a private bridge network by
-default, providing network isolation out of the box. Podman rootless uses
-slirp4netns or pasta for unprivileged network namespace setup.
+## 5. Mandatory Access Control (MAC)
 
-**User namespace.** Without `--userns`, UID 0 inside the container is UID 0
-on the host. A container escape gives the attacker full root access. With
-`--userns`, container root maps to a high UID on the host (524288+ range),
-so an escape lands in an unprivileged context. On kernel 6.6+, overlayfs
-supports idmapped mounts, so `--userns` has zero overhead and files on the
-upper layer stay UID 0 on disk. Podman rootless runs the entire container
-runtime as an unprivileged user, providing similar protection by default.
+This is the most significant remaining difference between sdme and
+Docker/Podman.
 
-**Capabilities.** Docker retains roughly 14 capabilities (the minimum needed
-for typical application containers). nspawn retains 26, including
-`CAP_SYS_ADMIN`, because full systemd inside the container requires it for
-mount management, cgroup delegation, and namespace operations. This is not
-something sdme can change without breaking the systemd-inside-nspawn model.
+**sdme** supports AppArmor via `--apparmor-profile NAME`. The profile is
+applied as `AppArmorProfile=` in the systemd service unit drop-in (not as
+an nspawn flag). The user must write and load the profile — sdme does not
+ship a default. No SELinux support is provided.
 
-**Seccomp.** Docker's OCI default profile is more restrictive, particularly
-around mount-related syscalls. nspawn must allow `mount()` and related
-syscalls because systemd needs them during boot. The practical difference
-is that a compromised process inside an sdme container has more syscalls
-available than inside a Docker container.
+**Docker** ships a default AppArmor profile (`docker-default`) that
+restricts mount operations, `/proc`/`/sys` writes, and cross-container
+ptrace. This provides a second layer of defense: even if a process escapes
+its namespaces, the AppArmor policy restricts what it can access on the
+host.
 
-**MAC confinement.** Docker's default AppArmor profile and Podman's SELinux
-integration provide a second layer of defense: even if a process escapes its
-namespaces, MAC policy restricts what it can access on the host. sdme has no
-MAC layer. This is the most significant gap for security-sensitive
-deployments.
+**Podman** has strong SELinux integration with `svirt` type enforcement
+labels on Fedora/RHEL. AppArmor is used where available (Debian/Ubuntu).
 
-**Rootless operation.** sdme requires root because overlayfs with
-`trusted.*` xattrs, bind mounts, and nspawn itself all require root
-privileges. Podman's rootless mode is a fundamentally different security
-posture: the container runtime itself is unprivileged.
+On SELinux-only systems (Fedora, RHEL), sdme has no MAC confinement at all.
+Docker and Podman provide MAC confinement out of the box on both AppArmor
+and SELinux systems. For security-sensitive deployments, users should write
+and apply an AppArmor profile when using sdme:
 
-## 4. Network Namespace Deep Dive
+```
+sdme create mybox --apparmor-profile sdme-container
+```
+
+## 6. Privilege Escalation Prevention
+
+### no_new_privs
+
+**sdme**: off by default. `--no-new-privileges` (or `--hardened`) passes
+`--no-new-privileges=yes` to nspawn. Off by default because interactive
+containers typically want `sudo`/`su` to work — `no_new_privs` blocks
+privilege escalation via setuid binaries and file capabilities.
+
+**Docker**: enabled by default. Setuid binaries inside the container cannot
+escalate privileges.
+
+**Podman**: enabled by default.
+
+### Read-only rootfs
+
+**sdme**: `--read-only` makes the overlayfs merged view read-only.
+Applications needing writable areas use bind mounts (`-b`).
+
+**Docker**: `--read-only` flag, same concept.
+
+**Podman**: `--read-only` flag, same concept.
+
+All three provide read-only rootfs as an opt-in flag.
+
+## 7. Network Isolation Deep Dive
 
 ### Default mode (host networking)
 
@@ -228,10 +282,10 @@ only a loopback interface (no external connectivity). This is the foundation
 for all other network options.
 
 ```
-  sdme create mybox --private-network
-  sdme create mybox --private-network --network-veth
-  sdme create mybox --private-network --network-zone=myzone
-  sdme create mybox --private-network --port=8080:80
+sdme create mybox --private-network
+sdme create mybox --private-network --network-veth
+sdme create mybox --private-network --network-zone=myzone
+sdme create mybox --private-network --port=8080:80
 ```
 
 When `--private-network` is active:
@@ -245,16 +299,18 @@ When `--private-network` is active:
 
 This is closest to Docker's default networking model.
 
+`--hardened` enables `--private-network` automatically.
+
 ### Pod networking
 
 Pods give multiple containers a shared network namespace. The implementation
 uses raw syscalls:
 
 ```
-  1. unshare(CLONE_NEWNET)    -- create new network namespace
-  2. ioctl(SIOCSIFFLAGS)      -- bring up loopback
-  3. bind-mount /proc/self/ns/net to /run/sdme/pods/<name>/netns
-  4. setns() to restore original netns
+1. unshare(CLONE_NEWNET)    -- create new network namespace
+2. ioctl(SIOCSIFFLAGS)      -- bring up loopback
+3. bind-mount /proc/self/ns/net to /run/sdme/pods/<name>/netns
+4. setns() to restore original netns
 ```
 
 Two mechanisms for joining a pod:
@@ -296,62 +352,7 @@ rules in the shared netns. `CAP_SYS_ADMIN` is present (required for systemd)
 but the container's PID namespace prevents access to the host's network
 namespace references through `/proc`.
 
-The OCI app process (running as a non-root UID via `drop_privs`) has zero
-effective capabilities.
-
-Contrast with Podman rootless: `CAP_SYS_ADMIN` inside a user-namespace-
-remapped container is meaningless against host resources because the user
-namespace maps it to an unprivileged UID on the host. In sdme, `CAP_SYS_ADMIN`
-is real root `CAP_SYS_ADMIN`, constrained only by namespace boundaries and
-the seccomp filter.
-
-## 5. Intentional Trade-offs vs. Genuine Gaps
-
-### Intentional trade-offs (by design)
-
-**Root-only execution.** Overlayfs with `trusted.*` xattrs, bind mounts,
-and systemd-nspawn all require root. Rootless overlayfs exists (with
-user xattrs) but systemd-nspawn itself requires root for most of its
-functionality. This is a fundamental architectural constraint, not a
-missing feature.
-
-**Host network sharing by default.** Simplicity for development containers.
-No port mapping to remember, no bridge to configure. The user opts into
-network isolation explicitly.
-
-**User namespace isolation opt-in.** `--userns` is available but off by
-default. On kernel 6.6+, `--private-users=pick --private-users-ownership=auto`
-uses idmapped mounts with zero overhead and full systemd compatibility.
-On older kernels, `auto` falls back to recursive chown, which is slower
-but still functional.
-
-**Full systemd in container.** This is the entire point of sdme: a real
-systemd environment with journald, service management, and cgroup control.
-This requires `CAP_SYS_ADMIN`, which in turn means a larger capability set
-than application-only containers need.
-
-### Genuine gaps relative to Docker/Podman defaults
-
-**`CAP_SYS_ADMIN` retained.** Docker drops it by default. In an sdme
-container, a root process has `CAP_SYS_ADMIN`, which gives it mount, cgroup,
-and namespace manipulation capabilities. These are constrained by the PID
-and mount namespaces, but `CAP_SYS_ADMIN` remains the most dangerous
-capability to grant.
-
-**No MAC confinement.** Neither AppArmor nor SELinux profiles are applied.
-A process that escapes namespace isolation has no MAC layer to contain it.
-
-**No `no_new_privs`.** Setuid binaries inside the container function
-normally. A process running as a non-root user can escalate to root via
-a setuid binary (e.g. `sudo`, `su`, `passwd`). This is by design for
-interactive containers (you want `sudo` to work) but is a gap for
-hardened deployments.
-
-**Weaker seccomp profile.** nspawn's allowlist permits mount-related
-syscalls that Docker blocks. A compromised process has access to more kernel
-attack surface.
-
-## 6. Attack Surface
+## 8. Attack Surface
 
 ### Process-level surface
 
@@ -362,10 +363,6 @@ application process (PID 1).
 
 More processes means more potential targets for exploitation, but also means
 familiar operational tooling: `systemctl`, `journalctl`, `loginctl`.
-
-The capability bounding set (26 capabilities including `CAP_SYS_ADMIN`)
-gives container processes significant kernel interaction surface. Docker's
-14-capability set is deliberately minimal.
 
 ### Filesystem surface
 
@@ -389,12 +386,10 @@ network stack. A compromised container process can:
 - Sniff traffic on host interfaces (via `CAP_NET_RAW`)
 - Access host-local services on `127.0.0.1`
 
-With `--private-network` or `--pod`, the container is limited to its own
-network namespace. Network-level attacks are confined to that namespace
-(loopback only in a pod, or whatever connectivity is configured via veth/
-bridge/zone).
+With `--private-network`, `--hardened`, or `--pod`, the container is limited
+to its own network namespace.
 
-### Host daemon exposure
+### Daemon surface
 
 sdme has no persistent daemon. There is no equivalent of Docker's
 `containerd` socket, which is a well-known privilege escalation vector
@@ -402,23 +397,111 @@ sdme has no persistent daemon. There is no equivalent of Docker's
 with systemd over the system D-Bus, which is already present and secured
 by its own policy.
 
-## 7. When to Use What
+## 9. The `--hardened` Flag
+
+`--hardened` is sdme's one-flag defense-in-depth bundle. It enables multiple
+security layers at once:
+
+- **User namespace isolation** (`--private-users=pick
+  --private-users-ownership=auto`) — container root maps to a high
+  unprivileged UID on the host.
+- **Private network namespace** (`--private-network`) — the container gets
+  its own network namespace with loopback only.
+- **`--no-new-privileges=yes`** — blocks privilege escalation via setuid
+  binaries and file capabilities.
+- **Drops capabilities**: `CAP_SYS_PTRACE`, `CAP_NET_RAW`,
+  `CAP_SYS_RAWIO`, `CAP_SYS_BOOT` — reducing from 26 to 22 retained
+  capabilities.
+
+```
+sdme create mybox --hardened
+sdme new mybox --hardened
+```
+
+### Composable with fine-grained flags
+
+`--hardened` sets a baseline that individual flags can override or extend:
+
+```
+sdme create mybox --hardened --capability CAP_NET_RAW    # re-enable a dropped cap
+sdme create mybox --hardened --system-call-filter ~@raw-io  # add seccomp filter
+sdme create mybox --hardened --apparmor-profile myprofile   # add MAC confinement
+sdme create mybox --hardened --read-only                    # read-only rootfs
+```
+
+### Configurable
+
+The capabilities dropped by `--hardened` are controlled by the
+`hardened_drop_caps` config key:
+
+```
+sdme config set hardened_drop_caps CAP_SYS_PTRACE,CAP_NET_RAW
+```
+
+### How `--hardened` compares to Docker/Podman defaults
+
+`--hardened` covers user namespace isolation, network isolation,
+`no_new_privs`, and capability reduction. The remaining gaps versus
+Docker/Podman defaults are:
+
+- **No default MAC confinement.** Docker ships a default AppArmor profile.
+  sdme supports `--apparmor-profile` but the user must provide the policy.
+- **Less restrictive seccomp baseline.** nspawn's allowlist permits
+  `@mount` and more syscall groups than Docker's OCI default profile.
+- **More capabilities retained.** Even after `--hardened` drops 4
+  capabilities, 22 remain (including `CAP_SYS_ADMIN`), compared to
+  Docker's ~14.
+
+These gaps are inherent to running a full init system inside the container.
+
+## 10. Isolation Summary Table
+
+```
++-----------------------+----------------------------+----------------------------+----------------------------+
+| Mechanism             | sdme (nspawn)              | Docker (runc, rootful)     | Podman (crun, rootless)    |
++-----------------------+----------------------------+----------------------------+----------------------------+
+| PID namespace         | Yes                        | Yes                        | Yes                        |
+| IPC namespace         | Yes                        | Yes                        | Yes                        |
+| UTS namespace         | Yes                        | Yes                        | Yes                        |
+| Mount namespace       | Yes                        | Yes                        | Yes                        |
+| Network namespace     | Optional (host default)    | Yes (bridge default)       | Yes (slirp4netns/pasta)    |
+| User namespace        | Optional                   | Optional                   | Yes (default)              |
+| Cgroup namespace      | Partial (Delegate=yes)     | Yes                        | Yes                        |
+| Capabilities          | ~26 incl. SYS_ADMIN        | ~14, no SYS_ADMIN          | Same as Docker             |
+| Seccomp               | nspawn allowlist + optional| OCI default (~44 blocked)  | Same as Docker             |
+| AppArmor              | Optional (no default)      | Default profile            | Where available            |
+| SELinux               | None                       | svirt labels               | Strong integration         |
+| no_new_privs          | Optional                   | Yes (default)              | Yes (default)              |
+| Read-only rootfs      | Optional                   | Optional                   | Optional                   |
+| Rootless              | No (root-only)             | Optional                   | Default                    |
+| Daemon                | None                       | containerd socket          | None                       |
+| Init in container     | Full systemd (always)      | Optional (--init)          | Optional (--init)          |
++-----------------------+----------------------------+----------------------------+----------------------------+
+```
+
+Each "Optional" cell means the feature is available but not on by default.
+For sdme, the enabling flags are: `--private-network` or `--hardened` for
+network namespace, `--userns` or `--hardened` for user namespace,
+`--no-new-privileges` or `--hardened` for no_new_privs, `--read-only` for
+read-only rootfs, `--apparmor-profile` for AppArmor, and
+`--system-call-filter` for additional seccomp rules.
+
+## 11. When to Use What
 
 **sdme** is appropriate when:
 
 - You want a full systemd environment (service management, journald, cgroups).
-- You want disposable, ephemeral containers that boot in seconds.
-- You want to avoid installing a container runtime daemon.
+- You want disposable containers that boot in seconds with no daemon.
 - You are comfortable with root-level operation.
-- You are running trusted workloads, or you have applied the hardening
-  measures in Section 8 (private networking, pod netns, resource limits).
+- You are running trusted workloads, or you use `--hardened` for
+  defense-in-depth.
 
 **Docker or Podman** is appropriate when:
 
 - You need defense-in-depth out of the box for untrusted workloads.
 - You need rootless execution (especially Podman).
 - You need OCI-compatible image building and distribution workflows.
-- You need MAC confinement (AppArmor or SELinux).
+- You need MAC confinement (AppArmor or SELinux) out of the box.
 - You operate in a multi-tenant environment.
 - Compliance requirements specify specific isolation standards.
 
@@ -429,46 +512,7 @@ by its own policy.
 - You want a daemonless runtime with Docker-compatible CLI.
 - You need Kubernetes-style pod semantics with full external connectivity.
 
-## 8. Hardening Recommendations
-
-If you want to tighten isolation beyond sdme's defaults:
-
-**Use `--userns`.** This enables user namespace isolation so that container
-root maps to a high unprivileged UID on the host. A container escape no
-longer gives the attacker host root access. On kernel 6.6+, overlayfs
-supports idmapped mounts, making this zero-overhead. On older kernels,
-`--private-users-ownership=auto` falls back to recursive chown on first
-boot.
-
-**Use `--private-network`.** This is the single most impactful change.
-It gives the container its own network namespace, eliminating the largest
-attack surface (shared host networking). Use `--port` for specific port
-forwarding or `--network-zone` for controlled inter-container networking.
-
-**Use `--pod` for inter-container communication.** Pods provide shared
-localhost networking between containers without exposing any of them to the
-host network. This is the recommended pattern for multi-container setups
-(e.g. database + application).
-
-**Apply resource limits.** Use `--memory`, `--cpus`, and `--cpu-weight`
-to prevent a container from exhausting host resources. Without limits, a
-container can consume all available memory and CPU.
-
-**Keep systemd updated.** nspawn's seccomp filter and capability handling
-evolve with systemd releases. Running a current systemd version ensures you
-get the latest security fixes and improvements.
-
-**Consider custom AppArmor or SELinux profiles.** While sdme does not ship
-MAC profiles, you can apply them to the `sdme@.service` template unit.
-For example, an AppArmor profile on the nspawn process would restrict what
-the container can access even if it escapes namespace isolation. This
-requires writing and maintaining the profile yourself.
-
-**Use read-only bind mounts.** When sharing host directories with a
-container (`-b`/`--bind`), append `:ro` unless the container genuinely
-needs write access: `-b /data:/data:ro`.
-
-## 9. Input Sanitization
+## 12. Input Sanitization
 
 sdme runs as root and handles untrusted input from the network (OCI
 registries, URL downloads) and from the filesystem (tarballs, disk images).
