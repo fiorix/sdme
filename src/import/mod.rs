@@ -586,6 +586,33 @@ fn has_systemd(rootfs: &Path, family: &DistroFamily) -> bool {
     false
 }
 
+/// Collect proxy-related environment variables for forwarding to chroot commands.
+///
+/// Returns all set, non-empty proxy variables. These are explicitly passed to
+/// chroot commands so that package managers (apt-get, dnf) can reach
+/// repositories through a proxy.
+fn proxy_env_vars() -> Vec<(String, String)> {
+    let names = [
+        "https_proxy",
+        "HTTPS_PROXY",
+        "http_proxy",
+        "HTTP_PROXY",
+        "all_proxy",
+        "ALL_PROXY",
+        "no_proxy",
+        "NO_PROXY",
+    ];
+    names
+        .iter()
+        .filter_map(|&name| {
+            std::env::var(name)
+                .ok()
+                .filter(|v| !v.is_empty())
+                .map(|val| (name.to_string(), val))
+        })
+        .collect()
+}
+
 /// RAII guard for bind mounts into a chroot environment.
 ///
 /// Manages `/proc`, `/sys`, `/dev`, `/dev/pts` bind mounts and
@@ -598,7 +625,7 @@ struct ChrootGuard {
 
 impl ChrootGuard {
     /// Set up bind mounts and resolv.conf for chroot package installation.
-    fn setup(rootfs: &Path) -> Result<Self> {
+    fn setup(rootfs: &Path, verbose: bool) -> Result<Self> {
         let mut guard = Self {
             rootfs: rootfs.to_path_buf(),
             mounts: Vec::new(),
@@ -653,6 +680,20 @@ impl ChrootGuard {
             eprintln!("warning: could not copy /etc/resolv.conf to chroot: {e}");
         }
 
+        if verbose {
+            match fs::read_to_string("/etc/resolv.conf") {
+                Ok(content) => {
+                    eprintln!("chroot: host /etc/resolv.conf:");
+                    for line in content.lines() {
+                        if line.starts_with("nameserver") || line.starts_with("search") {
+                            eprintln!("  {line}");
+                        }
+                    }
+                }
+                Err(e) => eprintln!("chroot: could not read host /etc/resolv.conf: {e}"),
+            }
+        }
+
         Ok(guard)
     }
 
@@ -683,9 +724,29 @@ impl Drop for ChrootGuard {
 
 /// Run a sequence of shell commands inside a rootfs via chroot.
 ///
-/// Each command is executed as `/bin/sh -c <cmd>` inside the rootfs. The
-/// function checks for interrupts between commands and bails on failure.
-fn run_chroot_commands(rootfs: &Path, commands: &[&str], verbose: bool) -> Result<()> {
+/// Each command is executed as `/bin/sh -c <cmd>` inside the rootfs. Proxy
+/// environment variables are logged when verbose. The parent environment is
+/// inherited by the chroot process, so proxy vars set in the parent are
+/// automatically available to package managers (apt-get, dnf).
+/// The function checks for interrupts between commands and bails on failure.
+fn run_chroot_commands(rootfs: &Path, commands: &[String], verbose: bool) -> Result<()> {
+    if verbose {
+        let proxy_vars = proxy_env_vars();
+        if proxy_vars.is_empty() {
+            eprintln!("chroot: no proxy environment variables set");
+        } else {
+            eprintln!("chroot: proxy environment:");
+            for (k, v) in &proxy_vars {
+                let display = if k == "no_proxy" || k == "NO_PROXY" {
+                    v.clone()
+                } else {
+                    redact_proxy_credentials(v)
+                };
+                eprintln!("  {k}={display}");
+            }
+        }
+    }
+
     for cmd_str in commands {
         check_interrupted()?;
         if verbose {
@@ -706,15 +767,30 @@ fn run_chroot_commands(rootfs: &Path, commands: &[&str], verbose: bool) -> Resul
     Ok(())
 }
 
+/// Apt option to disable the privilege-dropping sandbox.
+///
+/// By default apt drops privileges to the `_apt` user for network operations.
+/// In a chroot the sandboxed user may lack network access (e.g. on IPv6-only
+/// networks where the `_apt` user cannot reach the proxy). Since we are
+/// already running as root in a throwaway chroot, disabling the sandbox is safe.
+const APT_NO_SANDBOX: &str = r#"-o APT::Sandbox::User="""#;
+
 /// Return the shell commands that would be run to install systemd packages.
-fn install_commands(family: &DistroFamily) -> Vec<&'static str> {
+fn install_commands(family: &DistroFamily) -> Vec<String> {
+    let s = APT_NO_SANDBOX;
     match family {
         DistroFamily::Debian => vec![
-            "apt-get update",
-            "DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC apt-get -y install tzdata",
-            "apt-get install -y dbus systemd; apt-get autoremove -y -f && apt-get clean && rm -rf /var/lib/apt/lists/*",
+            format!("apt-get {s} update"),
+            format!("DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC apt-get {s} -y install tzdata"),
+            format!(
+                "apt-get {s} install -y dbus systemd; \
+                 apt-get autoremove -y -f && apt-get clean && \
+                 rm -rf /var/lib/apt/lists/*"
+            ),
         ],
-        DistroFamily::Fedora => vec!["dnf install -y systemd dbus util-linux pam; dnf clean all"],
+        DistroFamily::Fedora => {
+            vec!["dnf install -y systemd dbus util-linux pam; dnf clean all".into()]
+        }
         _ => vec![],
     }
 }
@@ -733,7 +809,7 @@ fn install_systemd_packages(rootfs: &Path, family: &DistroFamily, verbose: bool)
         eprintln!("setting up chroot environment for package installation");
     }
 
-    let mut chroot_guard = ChrootGuard::setup(rootfs)?;
+    let mut chroot_guard = ChrootGuard::setup(rootfs, verbose)?;
     let result = run_chroot_commands(rootfs, &commands, verbose);
     chroot_guard.cleanup();
     result
@@ -786,7 +862,7 @@ fn patch_rootfs_services(rootfs: &Path, family: &DistroFamily, verbose: bool) ->
         let commands = machinectl_fix_commands(family);
         if !commands.is_empty() {
             eprintln!("installing packages for machinectl shell support");
-            let mut chroot_guard = ChrootGuard::setup(rootfs)?;
+            let mut chroot_guard = ChrootGuard::setup(rootfs, verbose)?;
             let result = run_chroot_commands(rootfs, &commands, verbose);
             chroot_guard.cleanup();
             result?;
@@ -805,10 +881,16 @@ fn patch_rootfs_services(rootfs: &Path, family: &DistroFamily, verbose: bool) ->
 ///
 /// These are only needed when the rootfs has systemd but is missing
 /// /etc/pam.d/login (typical of minimal RHEL-family container images).
-fn machinectl_fix_commands(family: &DistroFamily) -> Vec<&'static str> {
+fn machinectl_fix_commands(family: &DistroFamily) -> Vec<String> {
+    let s = APT_NO_SANDBOX;
     match family {
-        DistroFamily::Fedora => vec!["dnf install -y util-linux pam; dnf clean all"],
-        DistroFamily::Debian => vec!["apt-get update && apt-get install -y login && apt-get clean && rm -rf /var/lib/apt/lists/*"],
+        DistroFamily::Fedora => {
+            vec!["dnf install -y util-linux pam; dnf clean all".into()]
+        }
+        DistroFamily::Debian => vec![format!(
+            "apt-get {s} update && apt-get {s} install -y login && \
+             apt-get clean && rm -rf /var/lib/apt/lists/*"
+        )],
         _ => vec![],
     }
 }
