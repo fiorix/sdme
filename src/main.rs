@@ -67,6 +67,10 @@ struct MountArgs {
 /// Security hardening CLI arguments (shared by create/new).
 #[derive(clap::Args, Default)]
 struct SecurityArgs {
+    /// Enable user namespace isolation (container root != host root)
+    #[arg(short = 'u', long)]
+    userns: bool,
+
     /// Drop a capability (e.g. CAP_SYS_PTRACE, repeatable)
     #[arg(long = "drop-capability")]
     drop_caps: Vec<String>,
@@ -135,10 +139,6 @@ enum Command {
         /// Join a pod network namespace for the OCI app process only (requires OCI app rootfs)
         #[arg(long)]
         oci_pod: Option<String>,
-
-        /// Enable user namespace isolation (container root != host root)
-        #[arg(short = 'u', long)]
-        userns: bool,
 
         #[command(flatten)]
         network: NetworkArgs,
@@ -213,10 +213,6 @@ enum Command {
         /// Join a pod network namespace for the OCI app process only (requires OCI app rootfs)
         #[arg(long)]
         oci_pod: Option<String>,
-
-        /// Enable user namespace isolation (container root != host root)
-        #[arg(short = 'u', long)]
-        userns: bool,
 
         #[command(flatten)]
         network: NetworkArgs,
@@ -552,11 +548,15 @@ fn parse_security(args: SecurityArgs, cfg: &config::Config) -> Result<(SecurityC
         .iter()
         .map(|c| security::normalize_cap(c))
         .collect();
+    let mut userns = args.userns;
     let mut no_new_privileges = args.no_new_privileges;
 
     // --hardened expands into sensible defaults (overridable by explicit flags).
     let hardened = args.hardened;
     if hardened {
+        userns = true;
+        no_new_privileges = true;
+
         // Merge hardened drop_caps from config.
         let hardened_caps: Vec<String> = if cfg.hardened_drop_caps.is_empty() {
             Vec::new()
@@ -572,12 +572,10 @@ fn parse_security(args: SecurityArgs, cfg: &config::Config) -> Result<(SecurityC
                 drop_caps.push(cap);
             }
         }
-        // --hardened implies --no-new-privileges unless explicitly unset
-        // (there's no --new-privileges flag, so this always applies).
-        no_new_privileges = true;
     }
 
     let sec = SecurityConfig {
+        userns,
         drop_caps,
         add_caps,
         no_new_privileges,
@@ -779,7 +777,6 @@ fn main() -> Result<()> {
             opaque_dirs,
             pod,
             oci_pod,
-            userns,
             network,
             mounts,
             security,
@@ -805,7 +802,6 @@ fn main() -> Result<()> {
                 oci_pod,
                 binds,
                 envs,
-                userns: userns || hardened,
                 security: sec,
             };
             let name = containers::create(&cfg.datadir, &opts, cli.verbose)?;
@@ -891,7 +887,6 @@ fn main() -> Result<()> {
             opaque_dirs,
             pod,
             oci_pod,
-            userns,
             network,
             mounts,
             security,
@@ -918,7 +913,6 @@ fn main() -> Result<()> {
                 oci_pod,
                 binds,
                 envs,
-                userns: userns || hardened,
                 security: sec,
             };
             let name = containers::create(&cfg.datadir, &opts, cli.verbose)?;

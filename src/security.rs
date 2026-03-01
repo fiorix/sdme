@@ -59,6 +59,8 @@ const KNOWN_CAPS: &[&str] = &[
 /// All fields are optional; unset fields mean "use nspawn defaults".
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct SecurityConfig {
+    /// Enable user namespace isolation (`--private-users=pick`).
+    pub userns: bool,
     /// Capabilities to drop (e.g. `CAP_SYS_PTRACE`).
     pub drop_caps: Vec<String>,
     /// Capabilities to add back (e.g. `CAP_NET_ADMIN`).
@@ -76,7 +78,8 @@ pub struct SecurityConfig {
 impl SecurityConfig {
     /// Returns true if no security options are set.
     pub fn is_empty(&self) -> bool {
-        self.drop_caps.is_empty()
+        !self.userns
+            && self.drop_caps.is_empty()
             && self.add_caps.is_empty()
             && !self.no_new_privileges
             && !self.read_only
@@ -87,6 +90,7 @@ impl SecurityConfig {
     /// Read security config from a container's state file.
     pub fn from_state(state: &State) -> Self {
         Self {
+            userns: state.is_yes("USERNS"),
             drop_caps: state
                 .get("DROP_CAPS")
                 .filter(|s| !s.is_empty())
@@ -113,6 +117,12 @@ impl SecurityConfig {
 
     /// Write security config into a container's state file.
     pub fn write_to_state(&self, state: &mut State) {
+        if self.userns {
+            state.set("USERNS", "yes");
+        } else {
+            state.remove("USERNS");
+        }
+
         if self.drop_caps.is_empty() {
             state.remove("DROP_CAPS");
         } else {
@@ -155,6 +165,11 @@ impl SecurityConfig {
     /// as `AppArmorProfile=`, not as an nspawn flag.
     pub fn to_nspawn_args(&self) -> Vec<String> {
         let mut args = Vec::new();
+
+        if self.userns {
+            args.push("--private-users=pick".to_string());
+            args.push("--private-users-ownership=auto".to_string());
+        }
 
         for cap in &self.drop_caps {
             args.push(format!("--drop-capability={cap}"));
@@ -360,6 +375,7 @@ mod tests {
     #[test]
     fn test_to_nspawn_args() {
         let sec = SecurityConfig {
+            userns: true,
             drop_caps: vec!["CAP_SYS_PTRACE".to_string(), "CAP_NET_RAW".to_string()],
             add_caps: vec!["CAP_NET_ADMIN".to_string()],
             no_new_privileges: true,
@@ -371,6 +387,8 @@ mod tests {
         assert_eq!(
             args,
             vec![
+                "--private-users=pick",
+                "--private-users-ownership=auto",
                 "--drop-capability=CAP_SYS_PTRACE",
                 "--drop-capability=CAP_NET_RAW",
                 "--capability=CAP_NET_ADMIN",
@@ -387,6 +405,7 @@ mod tests {
     #[test]
     fn test_state_roundtrip() {
         let sec = SecurityConfig {
+            userns: true,
             drop_caps: vec!["CAP_SYS_PTRACE".to_string()],
             add_caps: vec!["CAP_NET_ADMIN".to_string()],
             no_new_privileges: true,

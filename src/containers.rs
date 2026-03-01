@@ -32,7 +32,6 @@ pub struct CreateOptions {
     pub oci_pod: Option<String>,
     pub binds: BindConfig,
     pub envs: EnvConfig,
-    pub userns: bool,
     pub security: SecurityConfig,
 }
 
@@ -306,9 +305,6 @@ fn do_create(
         if verbose {
             eprintln!("wrote oci-pod netns drop-in: {}", dropin_path.display());
         }
-    }
-    if opts.userns {
-        state.set("USERNS", "yes");
     }
     opts.security.write_to_state(&mut state);
     if !opaque_dirs.is_empty() {
@@ -1181,7 +1177,10 @@ mod tests {
         let tmp = tmp();
         let opts = CreateOptions {
             name: Some("usernsbox".to_string()),
-            userns: true,
+            security: crate::SecurityConfig {
+                userns: true,
+                ..Default::default()
+            },
             ..Default::default()
         };
         let name = create(tmp.path(), &opts, false).unwrap();

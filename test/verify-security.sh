@@ -3,6 +3,8 @@ set -euo pipefail
 
 # verify-security.sh - end-to-end security hardening verification
 # Must run as root. Requires a base Ubuntu rootfs imported as "ubuntu".
+# For multi-distro userns tests, also requires vfy-{debian,ubuntu,fedora,...}
+# rootfs from verify-matrix.sh --keep.
 #
 # Usage:
 #   sudo sdme fs import ubuntu docker.io/ubuntu:24.04 -v --install-packages=yes
@@ -19,6 +21,10 @@ set -euo pipefail
 #   8. --hardened: bundle applies userns + private-network + no-new-privs + cap drops
 #   9. --hardened with overrides: explicit --capability suppresses hardened drop
 #  10. --apparmor-profile: profile name persists in state (enforcement is AppArmor-dependent)
+#  11. --hardened boot: container boots with full hardened profile
+#  12. sdme ps shows security info
+#  13. --userns boot: each distro boots with user namespace isolation
+#  14. --userns OCI app: nginx on ubuntu with user namespace isolation
 
 SDME="${SDME:-sdme}"
 VERBOSE="${VERBOSE:-}"
@@ -57,12 +63,13 @@ cleanup_container() {
 }
 
 cleanup_all() {
-    echo "Cleaning up sec- artifacts..."
+    echo "Cleaning up sec-/usrns- artifacts..."
     local names
-    names=$("$SDME" ps 2>/dev/null | awk 'NR>1 {print $1}' | grep '^sec-' || true)
+    names=$("$SDME" ps 2>/dev/null | awk 'NR>1 {print $1}' | grep -E '^(sec-|usrns-)' || true)
     for name in $names; do
         cleanup_container "$name"
     done
+    "$SDME" fs rm usrns-nginx-on-ubuntu 2>/dev/null || true
 }
 
 trap cleanup_all EXIT INT TERM
@@ -485,13 +492,64 @@ fi
 cleanup_container sec-apparmor
 
 # ===========================================================================
-# Test 11: --hardened container boots and runs
+# Test 11: --hardened container boots and reaches running/degraded
 # ===========================================================================
 echo "=== Test 11: --hardened boot test ==="
 
-# --hardened implies --userns which currently has boot issues (wait_for_boot
-# doesn't work with userns yet). Skip the live boot test for now.
-skipped "hardened boot test (userns boot not yet stable)"
+cleanup_container sec-hardboot
+
+if ! output=$(timeout "$TIMEOUT_BOOT" "$SDME" create -r ubuntu --hardened sec-hardboot "${VFLAG[@]}" 2>&1); then
+    fail "hardened-boot: create failed: $output"
+else
+    if ! output=$(timeout "$TIMEOUT_BOOT" "$SDME" start sec-hardboot -t "$TIMEOUT_BOOT" "${VFLAG[@]}" 2>&1); then
+        fail "hardened-boot: start failed: $output"
+    else
+        # Verify systemd reaches running/degraded.
+        if output=$(timeout "$TIMEOUT_TEST" "$SDME" exec sec-hardboot \
+                /usr/bin/systemctl is-system-running --wait 2>&1); then
+            ok "hardened: systemd running"
+        else
+            if [[ "$output" == *"degraded"* ]]; then
+                ok "hardened: systemd degraded (acceptable)"
+            else
+                fail "hardened: systemd not running: $output"
+            fi
+        fi
+
+        # Verify hardened properties are enforced at runtime.
+        hardened_rt_ok=true
+
+        # NoNewPrivs should be 1.
+        nnp=$(timeout "$TIMEOUT_TEST" "$SDME" exec sec-hardboot \
+            /bin/sh -c "grep '^NoNewPrivs:' /proc/self/status | awk '{print \$2}'" 2>&1 || true)
+        if [[ "$nnp" != *"1"* ]]; then
+            fail "hardened-boot: NoNewPrivs not set (got: '$nnp')"
+            hardened_rt_ok=false
+        fi
+
+        # CAP_NET_RAW (bit 13) should be dropped.
+        raw=$(timeout "$TIMEOUT_TEST" "$SDME" exec sec-hardboot \
+            /bin/sh -c "grep '^CapBnd:' /proc/1/status" 2>&1 || true)
+        capbnd=$(echo "$raw" | grep '^CapBnd:' | awk '{print $2}' | tr -d '[:space:]')
+        if [[ -n "$capbnd" ]]; then
+            capbnd_dec=$((16#${capbnd}))
+            cap_net_raw_bit=$((1 << 13))
+            if (( (capbnd_dec & cap_net_raw_bit) != 0 )); then
+                fail "hardened-boot: CAP_NET_RAW still in bounding set"
+                hardened_rt_ok=false
+            fi
+        else
+            fail "hardened-boot: could not read CapBnd"
+            hardened_rt_ok=false
+        fi
+
+        if $hardened_rt_ok; then
+            ok "hardened: runtime properties verified (no-new-privs, cap drops)"
+        fi
+    fi
+fi
+
+cleanup_container sec-hardboot
 
 # ===========================================================================
 # Test 12: sdme ps shows security info
@@ -511,6 +569,98 @@ else
 fi
 
 cleanup_container sec-pschk
+
+# ===========================================================================
+# Test 13: --userns boot with multiple distros
+# ===========================================================================
+echo "=== Test 13: --userns multi-distro boot ==="
+
+USERNS_DISTROS=(debian ubuntu fedora centos almalinux)
+userns_any=false
+
+for distro in "${USERNS_DISTROS[@]}"; do
+    fs_name="vfy-$distro"
+    ct_name="usrns-$distro"
+
+    # Check rootfs exists; skip if not.
+    if ! "$SDME" fs ls 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "$fs_name"; then
+        skipped "$distro userns: rootfs $fs_name not found (run verify-matrix.sh --keep)"
+        continue
+    fi
+
+    userns_any=true
+    cleanup_container "$ct_name"
+
+    if ! output=$(timeout "$TIMEOUT_BOOT" "$SDME" create -r "$fs_name" --userns "$ct_name" "${VFLAG[@]}" 2>&1); then
+        fail "$distro userns: create failed: $output"
+        continue
+    fi
+
+    if ! output=$(timeout "$TIMEOUT_BOOT" "$SDME" start "$ct_name" -t 120 "${VFLAG[@]}" 2>&1); then
+        fail "$distro userns: start failed: $output"
+        cleanup_container "$ct_name"
+        continue
+    fi
+
+    # Verify systemd reaches running/degraded.
+    if output=$(timeout "$TIMEOUT_TEST" "$SDME" exec "$ct_name" \
+            /usr/bin/systemctl is-system-running --wait 2>&1); then
+        ok "$distro userns: systemd running"
+    else
+        if [[ "$output" == *"degraded"* ]]; then
+            ok "$distro userns: systemd degraded (acceptable)"
+        else
+            fail "$distro userns: systemd not running: $output"
+        fi
+    fi
+
+    cleanup_container "$ct_name"
+done
+
+if ! $userns_any; then
+    skipped "no vfy-* rootfs found for multi-distro userns tests"
+fi
+
+# ===========================================================================
+# Test 14: --userns OCI app (nginx on ubuntu)
+# ===========================================================================
+echo "=== Test 14: --userns OCI app (nginx on ubuntu) ==="
+
+fs_name="usrns-nginx-on-ubuntu"
+ct_name="usrns-oci-nginx"
+
+if ! "$SDME" fs ls 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "vfy-ubuntu"; then
+    skipped "nginx userns OCI: rootfs vfy-ubuntu not found (run verify-matrix.sh --keep)"
+else
+    cleanup_container "$ct_name"
+    "$SDME" fs rm "$fs_name" 2>/dev/null || true
+
+    if ! output=$(timeout 600 "$SDME" fs import "$fs_name" docker.io/nginx \
+            --base-fs=vfy-ubuntu --oci-mode=app -v --install-packages=yes -f 2>&1); then
+        fail "nginx userns OCI: import failed: $output"
+    else
+        if ! output=$(timeout "$TIMEOUT_BOOT" "$SDME" create -r "$fs_name" --userns "$ct_name" "${VFLAG[@]}" 2>&1); then
+            fail "nginx userns OCI: create failed: $output"
+        else
+            if ! output=$(timeout "$TIMEOUT_BOOT" "$SDME" start "$ct_name" -t 120 "${VFLAG[@]}" 2>&1); then
+                fail "nginx userns OCI: start failed: $output"
+            else
+                sleep 3
+
+                if output=$(timeout "$TIMEOUT_TEST" "$SDME" exec "$ct_name" \
+                        /usr/bin/systemctl is-active sdme-oci-app.service 2>&1); then
+                    ok "nginx userns OCI: sdme-oci-app.service active"
+                else
+                    fail "nginx userns OCI: sdme-oci-app.service not active: $output"
+                fi
+            fi
+
+            cleanup_container "$ct_name"
+        fi
+
+        "$SDME" fs rm "$fs_name" 2>/dev/null || true
+    fi
+fi
 
 # ===========================================================================
 # Summary

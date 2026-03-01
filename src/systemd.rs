@@ -921,13 +921,7 @@ pub fn write_nspawn_dropin(datadir: &Path, name: &str, verbose: bool) -> Result<
         }
     }
 
-    // User namespace isolation.
-    if state.is_yes("USERNS") {
-        nspawn_args.push("--private-users=pick".to_string());
-        nspawn_args.push("--private-users-ownership=auto".to_string());
-    }
-
-    // Security: capabilities, seccomp, no-new-privileges, read-only.
+    // Security: userns, capabilities, seccomp, no-new-privileges, read-only.
     let security = SecurityConfig::from_state(&state);
     nspawn_args.extend(security.to_nspawn_args());
 
@@ -1290,6 +1284,7 @@ mod tests {
             read_only: true,
             system_call_filter: vec!["@system-service".to_string(), "~@mount".to_string()],
             apparmor_profile: Some("sdme-default".to_string()),
+            ..Default::default()
         };
         let opts = CreateOptions {
             name: Some("secbox".to_string()),
