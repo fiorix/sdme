@@ -21,10 +21,11 @@ set -euo pipefail
 #   8. --hardened: bundle applies userns + private-network + no-new-privs + cap drops
 #   9. --hardened with overrides: explicit --capability suppresses hardened drop
 #  10. --apparmor-profile: profile name persists in state (enforcement is AppArmor-dependent)
-#  11. --hardened boot: container boots with full hardened profile
-#  12. sdme ps shows security info
-#  13. --userns boot: each distro boots with user namespace isolation
-#  14. --userns OCI app: nginx on ubuntu with user namespace isolation
+#  11. --apparmor-profile enforcement: boots with sdme-default profile and verifies enforcement
+#  12. --hardened boot: container boots with full hardened profile
+#  13. sdme ps shows security info
+#  14. --userns boot: each distro boots with user namespace isolation
+#  15. --userns OCI app: nginx on ubuntu with user namespace isolation
 
 SDME="${SDME:-sdme}"
 VERBOSE="${VERBOSE:-}"
@@ -492,9 +493,85 @@ fi
 cleanup_container sec-apparmor
 
 # ===========================================================================
-# Test 11: --hardened container boots and reaches running/degraded
+# Test 11: --apparmor-profile enforcement (boot with sdme-default)
 # ===========================================================================
-echo "=== Test 11: --hardened boot test ==="
+echo "=== Test 11: --apparmor-profile enforcement ==="
+
+# Skip if AppArmor is not available on this system.
+if [[ ! -f /sys/kernel/security/apparmor/profiles ]]; then
+    skipped "AppArmor not available on this system"
+else
+    # Install the sdme-default profile on the host.
+    apparmor_installed=false
+    profile_file="/etc/apparmor.d/sdme-default"
+
+    if "$SDME" config apparmor-profile > "$profile_file" 2>/dev/null; then
+        if apparmor_parser -r "$profile_file" 2>/dev/null; then
+            apparmor_installed=true
+            ok "sdme-default AppArmor profile installed and loaded"
+        else
+            fail "apparmor enforcement: apparmor_parser failed to load profile"
+        fi
+    else
+        fail "apparmor enforcement: could not generate profile"
+    fi
+
+    if $apparmor_installed; then
+        cleanup_container sec-aa-enforce
+
+        if ! output=$(timeout "$TIMEOUT_BOOT" "$SDME" create -r ubuntu \
+                --apparmor-profile=sdme-default sec-aa-enforce "${VFLAG[@]}" 2>&1); then
+            fail "apparmor enforcement: create failed: $output"
+        else
+            if ! output=$(timeout "$TIMEOUT_BOOT" "$SDME" start sec-aa-enforce \
+                    -t "$TIMEOUT_BOOT" "${VFLAG[@]}" 2>&1); then
+                fail "apparmor enforcement: start failed: $output"
+            else
+                # Verify systemd reaches running/degraded.
+                if output=$(timeout "$TIMEOUT_TEST" "$SDME" exec sec-aa-enforce \
+                        /usr/bin/systemctl is-system-running --wait 2>&1); then
+                    ok "apparmor enforcement: systemd running"
+                else
+                    if [[ "$output" == *"degraded"* ]]; then
+                        ok "apparmor enforcement: systemd degraded (acceptable)"
+                    else
+                        fail "apparmor enforcement: systemd not running: $output"
+                    fi
+                fi
+
+                # Verify the sdme-default profile is enforced on PID 1.
+                # /proc/1/attr/apparmor/current shows "sdme-default (enforce)"
+                aa_current=$(timeout "$TIMEOUT_TEST" "$SDME" exec sec-aa-enforce \
+                    /bin/sh -c "cat /proc/1/attr/apparmor/current 2>/dev/null || cat /proc/1/attr/current 2>/dev/null" \
+                    2>&1 || true)
+
+                if echo "$aa_current" | grep -q "sdme-default (enforce)"; then
+                    ok "apparmor enforcement: PID 1 confined by sdme-default (enforce)"
+                else
+                    fail "apparmor enforcement: unexpected profile on PID 1: '$aa_current'"
+                fi
+
+                # Verify a denied write is blocked (e.g. /proc/sysrq-trigger).
+                sysrq_result=$(timeout "$TIMEOUT_TEST" "$SDME" exec sec-aa-enforce \
+                    /bin/sh -c "echo h > /proc/sysrq-trigger 2>&1 || echo DENIED" \
+                    2>&1 || true)
+
+                if echo "$sysrq_result" | grep -q "DENIED\|Permission denied\|denied"; then
+                    ok "apparmor enforcement: write to /proc/sysrq-trigger denied"
+                else
+                    fail "apparmor enforcement: /proc/sysrq-trigger write not blocked: '$sysrq_result'"
+                fi
+            fi
+
+            cleanup_container sec-aa-enforce
+        fi
+    fi
+fi
+
+# ===========================================================================
+# Test 12: --hardened container boots and reaches running/degraded
+# ===========================================================================
+echo "=== Test 12: --hardened boot test ==="
 
 cleanup_container sec-hardboot
 
@@ -552,9 +629,9 @@ fi
 cleanup_container sec-hardboot
 
 # ===========================================================================
-# Test 12: sdme ps shows security info
+# Test 13: sdme ps shows security info
 # ===========================================================================
-echo "=== Test 12: sdme ps with security flags ==="
+echo "=== Test 13: sdme ps with security flags ==="
 
 cleanup_container sec-pschk
 
@@ -571,9 +648,9 @@ fi
 cleanup_container sec-pschk
 
 # ===========================================================================
-# Test 13: --userns boot with multiple distros
+# Test 14: --userns boot with multiple distros
 # ===========================================================================
-echo "=== Test 13: --userns multi-distro boot ==="
+echo "=== Test 14: --userns multi-distro boot ==="
 
 USERNS_DISTROS=(debian ubuntu fedora centos almalinux)
 userns_any=false
@@ -622,9 +699,9 @@ if ! $userns_any; then
 fi
 
 # ===========================================================================
-# Test 14: --userns OCI app (nginx on ubuntu)
+# Test 15: --userns OCI app (nginx on ubuntu)
 # ===========================================================================
-echo "=== Test 14: --userns OCI app (nginx on ubuntu) ==="
+echo "=== Test 15: --userns OCI app (nginx on ubuntu) ==="
 
 fs_name="usrns-nginx-on-ubuntu"
 ct_name="usrns-oci-nginx"

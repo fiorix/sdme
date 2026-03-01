@@ -5,7 +5,7 @@ set -uo pipefail
 # Run as root. Uses vfy- prefix for all artifacts.
 
 DISTROS=(debian ubuntu fedora centos almalinux)
-APPS=(nginx mysql postgres redis)
+APPS=(nginx redis mysql postgres)
 
 declare -A DISTRO_IMAGES=(
     [debian]="docker.io/debian:stable"

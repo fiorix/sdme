@@ -71,7 +71,7 @@ output on any script.
 
 Full distro x OCI app verification matrix. Imports 5 distro rootfs from
 OCI registries, then tests 4 OCI applications on each distro (20 test
-cells, 145 checks total).
+cells, 195 checks total).
 
 ```bash
 sudo ./test/verify-matrix.sh
@@ -122,7 +122,7 @@ sudo ./test/verify-security.sh
 
 ### Unit tests
 
-Current status: 319 passed, 0 failed, 3 ignored.
+319 passed, 0 failed, 3 ignored.
 
 ### Base OS Import and Boot
 
@@ -139,14 +139,12 @@ journalctl access, and systemctl unit listing.
 
 ### OCI App Matrix
 
-| App        | Image                | debian | ubuntu | fedora | centos | alma   |
-|------------|----------------------|--------|--------|--------|--------|--------|
-| nginx      | docker.io/nginx      | PASS   | SKIP*  | PASS   | PASS   | PASS   |
-| redis      | docker.io/redis      | PASS   | PASS   | PASS   | PASS   | PASS   |
-| mysql      | docker.io/mysql      | PASS   | PASS   | PASS   | PASS   | SKIP*  |
-| postgresql | docker.io/postgres   | PASS   | PASS   | PASS   | PASS   | PASS   |
-
-\* Docker Hub network timeout during blob download (transient).
+| App        | Image              | debian | ubuntu | fedora | centos | alma |
+|------------|--------------------|--------|--------|--------|--------|------|
+| nginx      | docker.io/nginx    | PASS   | PASS   | PASS   | PASS   | PASS |
+| redis      | docker.io/redis    | PASS   | PASS   | PASS   | PASS   | PASS |
+| mysql      | docker.io/mysql    | PASS   | PASS   | PASS   | PASS   | PASS |
+| postgresql | docker.io/postgres | PASS   | PASS   | PASS   | PASS   | PASS |
 
 Each cell verifies: app import with `--base-fs`, container boot,
 `sdme-oci-app.service` active, journal and status accessible, and
@@ -199,6 +197,9 @@ mysqladmin status, pg_isready).
 | --hardened bundle (state check)         | PASS   |
 | --hardened with --capability override   | PASS   |
 | --apparmor-profile persistence          | PASS   |
+| --apparmor-profile enforcement: boot    | PASS   |
+| --apparmor-profile enforcement: profile | PASS   |
+| --apparmor-profile enforcement: deny    | PASS   |
 | --hardened container boots              | PASS   |
 | --hardened runtime enforcement          | PASS   |
 | sdme ps shows container                 | PASS   |
@@ -217,11 +218,16 @@ mysqladmin status, pg_isready).
 - **Runtime enforcement**: boots containers with individual security flags
   and verifies enforcement from inside (CapBnd bitmask, NoNewPrivs,
   read-only writes, seccomp-blocked mount).
-- **--hardened bundle**: verifies the combined effect (userns, private-network,
-  no-new-privileges, cap drops) and that explicit `--capability` overrides
-  suppress the corresponding hardened drop.
-- **AppArmor**: verifies profile name persists in state and the
-  `AppArmorProfile=` directive appears in the systemd drop-in.
+- **--hardened bundle**: verifies the combined effect (userns,
+  private-network, no-new-privileges, cap drops) and that explicit
+  `--capability` overrides suppress the corresponding hardened drop.
+- **AppArmor**: verifies profile name persists in state and
+  drop-in. Enforcement test installs the `sdme-default` profile
+  on the host, boots a container with
+  `--apparmor-profile=sdme-default`, verifies PID 1 shows
+  `sdme-default (enforce)` in `/proc/1/attr/apparmor/current`,
+  and confirms denied writes (e.g. `/proc/sysrq-trigger`) are
+  blocked.
 - **--userns boot**: each distro boots with `--userns`, systemd reaches
   `running` or `degraded` state.
 - **--userns OCI app**: nginx imported as OCI app on ubuntu base, container
@@ -244,30 +250,28 @@ private network, no-new-privileges, and drops
 
 ### Hardened OCI App Matrix
 
-| App        | Distro    | Boot   | Service |
-|------------|-----------|--------|---------|
-| nginx      | debian    | PASS   | PASS    |
-| nginx      | ubuntu    | SKIP*  | SKIP*   |
-| nginx      | fedora    | PASS   | PASS    |
-| nginx      | centos    | PASS   | PASS    |
-| nginx      | almalinux | PASS   | PASS    |
-| redis      | debian    | PASS   | PASS    |
-| redis      | ubuntu    | PASS   | PASS    |
-| redis      | fedora    | PASS   | PASS    |
-| redis      | centos    | PASS   | PASS    |
-| redis      | almalinux | PASS   | PASS    |
-| mysql      | debian    | PASS   | PASS    |
-| mysql      | ubuntu    | PASS   | PASS    |
-| mysql      | fedora    | PASS   | PASS    |
-| mysql      | centos    | PASS   | PASS    |
-| mysql      | almalinux | SKIP*  | SKIP*   |
-| postgresql | debian    | PASS   | PASS    |
-| postgresql | ubuntu    | PASS   | PASS    |
-| postgresql | fedora    | PASS   | PASS    |
-| postgresql | centos    | PASS   | PASS    |
-| postgresql | almalinux | PASS   | PASS    |
-
-\* Skipped due to transient Docker Hub network failure during OCI app import.
+| App        | Distro    | Boot | Service |
+|------------|-----------|------|---------|
+| nginx      | debian    | PASS | PASS    |
+| nginx      | ubuntu    | PASS | PASS    |
+| nginx      | fedora    | PASS | PASS    |
+| nginx      | centos    | PASS | PASS    |
+| nginx      | almalinux | PASS | PASS    |
+| redis      | debian    | PASS | PASS    |
+| redis      | ubuntu    | PASS | PASS    |
+| redis      | fedora    | PASS | PASS    |
+| redis      | centos    | PASS | PASS    |
+| redis      | almalinux | PASS | PASS    |
+| mysql      | debian    | PASS | PASS    |
+| mysql      | ubuntu    | PASS | PASS    |
+| mysql      | fedora    | PASS | PASS    |
+| mysql      | centos    | PASS | PASS    |
+| mysql      | almalinux | PASS | PASS    |
+| postgresql | debian    | PASS | PASS    |
+| postgresql | ubuntu    | PASS | PASS    |
+| postgresql | fedora    | PASS | PASS    |
+| postgresql | centos    | PASS | PASS    |
+| postgresql | almalinux | PASS | PASS    |
 
 Each cell verifies: container created with `--hardened`, boots
 successfully, and `sdme-oci-app.service` is active. App-specific
