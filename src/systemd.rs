@@ -761,7 +761,9 @@ Description=sdme container %i
 After=network.target local-fs.target
 
 [Service]
-Type=simple
+Type=notify
+RestartForceExitStatus=133
+SuccessExitStatus=133
 ExecStart=/bin/false
 KillMode=mixed
 Delegate=yes
@@ -769,6 +771,7 @@ TasksMax=16384
 DevicePolicy=closed
 DeviceAllow=/dev/net/tun rwm
 DeviceAllow=char-pts rw
+TimeoutStartSec=2min
 "#
     .to_string()
 }
@@ -1088,7 +1091,11 @@ mod tests {
     fn test_unit_template() {
         let template = unit_template();
         assert!(template.contains("Description=sdme container %i"));
-        assert!(template.contains("Type=simple"));
+        assert!(template.contains("Type=notify"));
+        assert!(!template.contains("Type=simple"));
+        assert!(template.contains("RestartForceExitStatus=133"));
+        assert!(template.contains("SuccessExitStatus=133"));
+        assert!(template.contains("TimeoutStartSec=2min"));
         assert!(template.contains("ExecStart=/bin/false"));
         assert!(template.contains("KillMode=mixed"));
         assert!(template.contains("Delegate=yes"));
