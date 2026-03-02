@@ -178,6 +178,7 @@ impl ResourceLimits {
 
         if let Some(mem) = &self.memory {
             lines.push(format!("MemoryMax={mem}"));
+            lines.push(format!("MemorySwapMax={mem}"));
             has_any = true;
         }
         if let Some(cpus) = &self.cpus {
@@ -372,7 +373,7 @@ mod tests {
     fn test_limits_dropin_content_memory_only() {
         let limits = ResourceLimits { memory: Some("2G".to_string()), ..Default::default() };
         let content = limits.dropin_content().unwrap();
-        assert_eq!(content, "[Service]\nMemoryMax=2G\n");
+        assert_eq!(content, "[Service]\nMemoryMax=2G\nMemorySwapMax=2G\n");
     }
 
     #[test]
@@ -400,6 +401,18 @@ mod tests {
         assert!(content.contains("MemoryMax=1G"));
         assert!(content.contains("CPUQuota=400%"));
         assert!(content.contains("CPUWeight=50"));
+    }
+
+    #[test]
+    fn test_dropin_memory_includes_swap_max() {
+        let limits = ResourceLimits {
+            memory: Some("2G".to_string()),
+            cpus: None,
+            cpu_weight: None,
+        };
+        let content = limits.dropin_content().unwrap();
+        assert!(content.contains("MemoryMax=2G"));
+        assert!(content.contains("MemorySwapMax=2G"));
     }
 
     #[test]
