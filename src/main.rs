@@ -707,10 +707,14 @@ fn validate_pod_args(
 /// Checks that:
 /// - The pod exists in the catalogue
 /// - The rootfs is an OCI app rootfs (contains `sdme-oci-app.service`)
+/// - Private network is enabled (required for `NetworkNamespacePath=` inside
+///   the container; nspawn strips `CAP_NET_ADMIN` on host-network containers,
+///   which prevents systemd from calling `setns(CLONE_NEWNET)`)
 fn validate_oci_pod_args(
     datadir: &std::path::Path,
     oci_pod: Option<&str>,
     rootfs: Option<&str>,
+    private_network: bool,
 ) -> Result<()> {
     let pod_name = match oci_pod {
         Some(n) => n,
@@ -719,6 +723,14 @@ fn validate_oci_pod_args(
 
     if !pod::exists(datadir, pod_name) {
         bail!("pod not found: {pod_name}");
+    }
+
+    if !private_network {
+        bail!(
+            "--oci-pod requires --private-network (or --hardened/--strict which imply it); \
+             without a private network namespace, systemd-nspawn strips CAP_NET_ADMIN \
+             and the inner NetworkNamespacePath= directive cannot work"
+        );
     }
 
     // Validate that the rootfs is an OCI app rootfs.
@@ -865,7 +877,12 @@ fn main() -> Result<()> {
                 network.private_network = true;
             }
             validate_pod_args(&cfg.datadir, pod.as_deref(), sec.userns)?;
-            validate_oci_pod_args(&cfg.datadir, oci_pod.as_deref(), fs.as_deref())?;
+            validate_oci_pod_args(
+                &cfg.datadir,
+                oci_pod.as_deref(),
+                fs.as_deref(),
+                network.private_network,
+            )?;
             let (binds, envs) = parse_mounts(mounts)?;
             let opaque_dirs = resolve_opaque_dirs(opaque_dirs, fs.is_none(), &cfg);
             let opts = containers::CreateOptions {
@@ -976,7 +993,12 @@ fn main() -> Result<()> {
                 network.private_network = true;
             }
             validate_pod_args(&cfg.datadir, pod.as_deref(), sec.userns)?;
-            validate_oci_pod_args(&cfg.datadir, oci_pod.as_deref(), fs.as_deref())?;
+            validate_oci_pod_args(
+                &cfg.datadir,
+                oci_pod.as_deref(),
+                fs.as_deref(),
+                network.private_network,
+            )?;
             let (binds, envs) = parse_mounts(mounts)?;
             let opaque_dirs = resolve_opaque_dirs(opaque_dirs, fs.is_none(), &cfg);
             let opts = containers::CreateOptions {

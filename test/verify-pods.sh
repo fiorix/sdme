@@ -11,7 +11,7 @@ set -euo pipefail
 # Tests:
 #   1. nspawn pods (--pod): two host-rootfs containers share localhost via pod netns
 #   2. --pod + --private-network: private-network silently dropped, loopback works
-#   3. Validation: error cases (--pod + userns, --oci-pod w/o rootfs, etc.)
+#   3. Validation: error cases (--oci-pod w/o --private-network, --pod + userns, etc.)
 
 SDME="${SDME:-sdme}"
 VERBOSE="${VERBOSE:-}"
@@ -199,16 +199,34 @@ else
     fi
 fi
 
-# 3c: --oci-pod without OCI app rootfs → should error
+# 3c: --oci-pod without --private-network → should error (nspawn strips
+# CAP_NET_ADMIN on host-network containers, breaking NetworkNamespacePath=)
 $SDME pod new valpod 2>/dev/null || true
-if $SDME create --oci-pod=valpod val-err1 2>/dev/null; then
-    fail "--oci-pod without OCI rootfs should error"
+if err=$($SDME create --oci-pod=valpod -r ubuntu val-err1 2>&1); then
+    fail "--oci-pod without --private-network should error"
     cleanup_container val-err1
 else
-    ok "--oci-pod without OCI rootfs rejected"
+    if echo "$err" | grep -q "requires --private-network"; then
+        ok "--oci-pod without --private-network rejected"
+    else
+        fail "--oci-pod without --private-network: unexpected error: $err"
+    fi
 fi
 
-# 3d: --pod=nonexistent → should error
+# 3d: --oci-pod without OCI app rootfs → should error (needs --hardened to
+# pass the --private-network check first)
+if err=$($SDME create --oci-pod=valpod --hardened val-err1b 2>&1); then
+    fail "--oci-pod without OCI rootfs should error"
+    cleanup_container val-err1b
+else
+    if echo "$err" | grep -q "requires an OCI app rootfs"; then
+        ok "--oci-pod without OCI rootfs rejected"
+    else
+        fail "--oci-pod without OCI rootfs: unexpected error: $err"
+    fi
+fi
+
+# 3e: --pod=nonexistent → should error
 if $SDME create --pod=nonexistent val-err2 2>/dev/null; then
     fail "--pod=nonexistent should error"
     cleanup_container val-err2
@@ -216,10 +234,11 @@ else
     ok "--pod=nonexistent rejected"
 fi
 
-# 3e: --oci-pod + --hardened → should succeed (OCI app enters pod netns via
-# inner systemd drop-in, not via nspawn's --network-namespace-path, so userns
-# is not a problem). Without an OCI app rootfs the error should be about the
-# rootfs, not about network/userns conflicts.
+# 3f: --oci-pod + --hardened → should succeed (--hardened implies
+# --private-network, satisfying the CAP_NET_ADMIN requirement; OCI app
+# enters pod netns via inner systemd drop-in NetworkNamespacePath=).
+# Without an OCI app rootfs the error should be about the rootfs, not
+# about network/userns conflicts.
 err_msg=$($SDME create --oci-pod=valpod --hardened val-err3 2>&1 || true)
 if echo "$err_msg" | grep -q "requires an OCI app rootfs"; then
     ok "--oci-pod + --hardened not rejected for network conflict"

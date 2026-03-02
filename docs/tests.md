@@ -1,6 +1,6 @@
 # sdme: Tests
 
-Last verified: 2026-03-01
+Last verified: 2026-03-02
 
 System: Linux 6.17.0-14-generic, systemd 257 (257.9-0ubuntu2.1), sdme 0.1.6
 
@@ -160,6 +160,7 @@ mysqladmin status, pg_isready).
 | --pod + --private-network loopback            | PASS   |
 | --pod + --hardened rejected                   | PASS   |
 | --pod + --userns rejected                     | PASS   |
+| --oci-pod without --private-network rejected  | PASS   |
 | --oci-pod without OCI rootfs rejected         | PASS   |
 | --pod=nonexistent rejected                    | PASS   |
 | --oci-pod + --hardened not rejected           | PASS   |
@@ -173,11 +174,18 @@ mysqladmin status, pg_isready).
 - **--pod + --hardened/--userns rejected**: the kernel blocks
   `setns(CLONE_NEWNET)` from a child user namespace into the pod's
   netns (owned by init userns). Use `--oci-pod` for hardened pods.
+- **--oci-pod without --private-network rejected**: `--oci-pod`
+  requires `--private-network` (or `--hardened`/`--strict` which
+  imply it) because systemd-nspawn strips `CAP_NET_ADMIN` on
+  host-network containers, which prevents the inner
+  `NetworkNamespacePath=` directive from calling
+  `setns(CLONE_NEWNET)`.
 - **--oci-pod without OCI rootfs**: error correctly rejected.
 - **--pod=nonexistent**: non-existent pod correctly rejected.
-- **--oci-pod + --hardened**: combined successfully; the OCI app
-  service enters the pod's netns via its inner systemd drop-in
-  (`NetworkNamespacePath=`), avoiding the cross-userns restriction.
+- **--oci-pod + --hardened**: combined successfully; `--hardened`
+  implies `--private-network`, satisfying the `CAP_NET_ADMIN`
+  requirement. The OCI app service enters the pod's netns via its
+  inner systemd drop-in (`NetworkNamespacePath=`).
 
 ### Security Hardening Tests
 
