@@ -1054,6 +1054,7 @@ pub fn start(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
     }
     if let Err(e) = dbus::start_unit(&service_name(name)) {
         let _ = fs::remove_file(&nspawn_dropin_path);
+        let _ = remove_limits_dropin(name, verbose);
         return Err(e);
     }
 
