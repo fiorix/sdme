@@ -36,7 +36,7 @@ The project is a single Rust binary (`src/main.rs`) backed by a shared library (
 ### Core Concepts
 
 - **Overlayfs CoW storage**: each container gets `upper/work/merged` directories under the datadir. The lower layer is the imported rootfs. Uses kernel overlayfs.
-- **Systemd integration**: containers are managed as a systemd template unit (`sdme@.service`). Start goes through D-Bus to systemd. The template unit is auto-installed and auto-updated when content changes.
+- **Systemd integration**: containers are managed as a systemd template unit (`sdme@.service`) with `Type=notify`. Start goes through D-Bus to systemd; the unit is considered active only after `systemd-nspawn` sends `sd_notify(READY=1)`. A 2-minute startup timeout (`TimeoutStartSec=2min`) catches hung boots. Exit code 133 is treated as a successful clean shutdown (`SuccessExitStatus=133`, `RestartForceExitStatus=133`). The template unit is auto-installed and auto-updated when content changes.
 - **machinectl integration**: `join` and `exec` use `machinectl shell` for container interaction. `stop` uses D-Bus (`KillMachine` for graceful/kill, `TerminateMachine` for terminate).
 - **DNS resolution**: containers share the host's network namespace. `systemd-resolved` is masked in the overlayfs upper layer at creation time so the host's resolver handles DNS. A placeholder `/etc/resolv.conf` regular file is written so `systemd-nspawn --resolv-conf=auto` can populate it at boot.
 - **State files**: container metadata persisted as KEY=VALUE files under `{datadir}/state/{name}`.
@@ -73,7 +73,7 @@ The project is a single Rust binary (`src/main.rs`) backed by a shared library (
 | `src/main.rs` | CLI entry point (clap derive), command dispatch |
 | `src/lib.rs` | Shared types: `State` (KEY=VALUE), `validate_name`, `sudo_user`, global interrupt handler (`INTERRUPTED`, `check_interrupted`, `install_interrupt_handler`) |
 | `src/containers.rs` | Container create/remove/join/exec/stop/list, overlayfs directory management, DNS setup |
-| `src/systemd.rs` | D-Bus helpers (start/status/stop), template unit generation, env files, boot/shutdown waiting |
+| `src/systemd.rs` | D-Bus helpers (start/status/stop), template unit generation (`Type=notify`), env files, boot/shutdown waiting |
 | `src/system_check.rs` | Version checks (systemd), dependency checks (`find_program`) |
 | `src/rootfs.rs` | Rootfs listing, removal, os-release parsing, distro detection |
 | `src/import/mod.rs` | Rootfs import orchestration: source detection, URL download (with proxy support), systemd detection |
