@@ -159,6 +159,10 @@ enum Command {
         /// Do not auto-forward ports declared in the OCI image
         #[arg(long)]
         no_oci_ports: bool,
+
+        /// Do not auto-mount volumes declared in the OCI image
+        #[arg(long)]
+        no_oci_volumes: bool,
     },
 
     /// Run a command in a running container
@@ -237,6 +241,10 @@ enum Command {
         /// Do not auto-forward ports declared in the OCI image
         #[arg(long)]
         no_oci_ports: bool,
+
+        /// Do not auto-mount volumes declared in the OCI image
+        #[arg(long)]
+        no_oci_volumes: bool,
 
         /// Command to run inside the container (default: login shell)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -742,6 +750,30 @@ fn auto_wire_oci_ports(rootfs_path: &std::path::Path, network: &mut NetworkConfi
     }
 }
 
+/// Read OCI volume paths from a rootfs, or return an empty vec.
+///
+/// Resolves the rootfs path and reads `/oci/volumes`. Prints the
+/// auto-mounting message when volumes are found.
+fn read_oci_volumes_for_rootfs(
+    datadir: &std::path::Path,
+    rootfs_name: Option<&str>,
+    no_oci_volumes: bool,
+) -> Result<Vec<String>> {
+    if no_oci_volumes {
+        return Ok(Vec::new());
+    }
+    let rootfs_name = match rootfs_name {
+        Some(n) => n,
+        None => return Ok(Vec::new()),
+    };
+    let rootfs_path = containers::resolve_rootfs(datadir, Some(rootfs_name))?;
+    let volumes = containers::read_oci_volumes(&rootfs_path);
+    if !volumes.is_empty() {
+        eprintln!("auto-mounting OCI volumes: {}", volumes.join(", "));
+    }
+    Ok(volumes)
+}
+
 /// Validate `--pod` constraints before creating a container.
 ///
 /// Checks that:
@@ -943,6 +975,7 @@ fn main() -> Result<()> {
             mounts,
             security,
             no_oci_ports,
+            no_oci_volumes,
         } => {
             system_check::check_systemd_version(252)?;
             let limits = parse_limits(memory, cpus, cpu_weight)?;
@@ -969,6 +1002,10 @@ fn main() -> Result<()> {
                 }
             }
 
+            // Read OCI volumes from the rootfs if applicable.
+            let oci_volumes =
+                read_oci_volumes_for_rootfs(&cfg.datadir, fs.as_deref(), no_oci_volumes)?;
+
             let opts = containers::CreateOptions {
                 name,
                 rootfs: fs,
@@ -980,6 +1017,7 @@ fn main() -> Result<()> {
                 binds,
                 envs,
                 security: sec,
+                oci_volumes,
             };
             let name = containers::create(&cfg.datadir, &opts, cli.verbose)?;
             eprintln!("creating '{name}'");
@@ -1088,6 +1126,7 @@ fn main() -> Result<()> {
             mounts,
             security,
             no_oci_ports,
+            no_oci_volumes,
             command,
         } => {
             system_check::check_systemd_version(252)?;
@@ -1115,6 +1154,10 @@ fn main() -> Result<()> {
                 }
             }
 
+            // Read OCI volumes from the rootfs if applicable.
+            let oci_volumes =
+                read_oci_volumes_for_rootfs(&cfg.datadir, fs.as_deref(), no_oci_volumes)?;
+
             let opts = containers::CreateOptions {
                 name,
                 rootfs: fs,
@@ -1126,6 +1169,7 @@ fn main() -> Result<()> {
                 binds,
                 envs,
                 security: sec,
+                oci_volumes,
             };
             let is_host_rootfs = opts.rootfs.is_none();
             let name = containers::create(&cfg.datadir, &opts, cli.verbose)?;

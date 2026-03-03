@@ -43,7 +43,7 @@ Path to config file.
 Default:
 .IR ~/.config/sdme/sdmerc .
 .SH COMMANDS
-.SS sdme new [\fIname\fR] [\-r \fIfs\fR] [\-t \fIseconds\fR] [\-u] [\fIlimits\fR] [\fInetwork\fR] [\fIsecurity\fR] [\-o \fIdir\fR]... [\-\-pod \fIpod\fR] [\-\-oci\-pod \fIpod\fR] [\-b \fIbind\fR]... [\-e \fIenv\fR]... [\-\-no\-oci\-ports] [\-\-] [\fIcommand\fR...]
+.SS sdme new [\fIname\fR] [\-r \fIfs\fR] [\-t \fIseconds\fR] [\-u] [\fIlimits\fR] [\fInetwork\fR] [\fIsecurity\fR] [\-o \fIdir\fR]... [\-\-pod \fIpod\fR] [\-\-oci\-pod \fIpod\fR] [\-b \fIbind\fR]... [\-e \fIenv\fR]... [\-\-no\-oci\-ports] [\-\-no\-oci\-volumes] [\-\-] [\fIcommand\fR...]
 Create, start, and enter a new container.
 If
 .I name
@@ -128,7 +128,7 @@ below.
 .PP
 If boot fails or is interrupted (Ctrl+C), the just\-created container is
 automatically removed.
-.SS sdme create [\fIname\fR] [\-r \fIfs\fR] [\-u] [\fIlimits\fR] [\fInetwork\fR] [\fIsecurity\fR] [\-o \fIdir\fR]... [\-\-pod \fIpod\fR] [\-\-oci\-pod \fIpod\fR] [\-b \fIbind\fR]... [\-e \fIenv\fR]... [\-\-no\-oci\-ports]
+.SS sdme create [\fIname\fR] [\-r \fIfs\fR] [\-u] [\fIlimits\fR] [\fInetwork\fR] [\fIsecurity\fR] [\-o \fIdir\fR]... [\-\-pod \fIpod\fR] [\-\-oci\-pod \fIpod\fR] [\-b \fIbind\fR]... [\-e \fIenv\fR]... [\-\-no\-oci\-ports] [\-\-no\-oci\-volumes]
 Create a new container without starting it.
 Sets up the overlayfs directories and state file.
 Resource limits can be set with
@@ -647,8 +647,15 @@ pod membership
 .RB ( POD ", " OCI_POD ),
 user namespace isolation
 .RB ( USERNS ),
+OCI volumes
+.RB ( OCI_VOLUMES ),
 and security hardening
 .RB ( DROP_CAPS ", " ADD_CAPS ", " NO_NEW_PRIVS ", " READ_ONLY ", " SYSCALL_FILTER ", " APPARMOR_PROFILE ).
+.TP
+.I /var/lib/sdme/volumes/\fIname\fR/
+Per\-container OCI volume data (created automatically for OCI images that
+declare volumes).
+Survives container removal; must be deleted manually to reclaim disk space.
 .TP
 .I /var/lib/sdme/containers/\fIname\fR/upper/
 Per\-container overlayfs upper layer (copy\-on\-write modifications).
@@ -1066,6 +1073,36 @@ An informational message listing the exposed ports is printed instead.
 Suppress automatic port forwarding from OCI image metadata.
 Ports declared in the image's
 .I /oci/ports
+file are ignored.
+.SH OCI VOLUME MOUNTS
+When creating a container from an OCI app rootfs that declares volumes
+(in
+.IR /oci/volumes ),
+sdme automatically creates persistent host\-side directories and adds bind
+mounts for each volume.
+.PP
+For each declared volume path (e.g.\&
+.IR /var/lib/mysql ),
+a host directory is created at
+.IR /var/lib/sdme/volumes/ name / vol\-name
+and bind\-mounted to
+.IR /oci/root /var/lib/mysql
+inside the container.
+Volume data persists across container removal; when
+.B sdme rm
+deletes a container with OCI volumes, the volume directory path is printed
+but the data is not deleted.
+.PP
+User\-supplied
+.B \-\-bind
+flags take priority: if you bind\-mount to the same container path that an
+OCI volume targets, the auto\-mount for that path is skipped.
+.TP
+.B \-\-no\-oci\-volumes
+Suppress automatic volume mounting from OCI image metadata.
+Volumes declared in the image's
+.I /oci/volumes
+file are ignored.
 file are ignored.
 .SH PODS
 Pods provide a shared network namespace for multiple containers.

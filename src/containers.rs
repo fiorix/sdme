@@ -33,6 +33,7 @@ pub struct CreateOptions {
     pub binds: BindConfig,
     pub envs: EnvConfig,
     pub security: SecurityConfig,
+    pub oci_volumes: Vec<String>,
 }
 
 /// Read the current process umask. There is no "get umask" syscall, so
@@ -281,7 +282,43 @@ fn do_create(
     state.set("ROOTFS", rootfs_value);
     opts.limits.write_to_state(&mut state);
     opts.network.write_to_state(&mut state);
-    opts.binds.write_to_state(&mut state);
+
+    // Auto-wire OCI volume bind mounts. For each declared volume, create
+    // a host-side directory and add a bind entry unless the user already
+    // supplied one targeting the same container path.
+    let mut binds = opts.binds.clone();
+    if !opts.oci_volumes.is_empty() {
+        let vol_base = volumes_dir(datadir, name);
+        for vol_path in &opts.oci_volumes {
+            let container_path = format!("/oci/root{vol_path}");
+            // Skip if user already binds to this container path.
+            // Bind format is "host:container:mode".
+            let already_bound = binds
+                .binds
+                .iter()
+                .any(|b| b.split(':').nth(1).is_some_and(|cp| cp == container_path));
+            if already_bound {
+                continue;
+            }
+            let safe_name = sanitize_volume_name(vol_path);
+            let host_dir = vol_base.join(&safe_name);
+            fs::create_dir_all(&host_dir)
+                .with_context(|| format!("failed to create volume dir {}", host_dir.display()))?;
+            fs::set_permissions(&host_dir, fs::Permissions::from_mode(0o755))
+                .with_context(|| format!("failed to set permissions on {}", host_dir.display()))?;
+            if verbose {
+                eprintln!(
+                    "created volume dir: {} -> {container_path}",
+                    host_dir.display()
+                );
+            }
+            binds
+                .binds
+                .push(format!("{}:{container_path}:rw", host_dir.display()));
+        }
+        state.set("OCI_VOLUMES", opts.oci_volumes.join(","));
+    }
+    binds.write_to_state(&mut state);
     opts.envs.write_to_state(&mut state);
     if let Some(pod) = &opts.pod {
         state.set("POD", pod.as_str());
@@ -444,6 +481,50 @@ pub fn read_oci_ports(rootfs: &Path) -> Vec<String> {
     result
 }
 
+/// Read `/oci/volumes` from a rootfs and return volume paths.
+///
+/// Each line in the file is an absolute path (e.g. `/var/lib/mysql`).
+/// Returns an empty vec if the file doesn't exist or is empty.
+pub fn read_oci_volumes(rootfs: &Path) -> Vec<String> {
+    let volumes_path = rootfs.join("oci/volumes");
+    let content = match fs::read_to_string(&volumes_path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    let mut result = Vec::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let path = Path::new(line);
+        if !path.is_absolute() {
+            eprintln!("warning: invalid OCI volume path (not absolute): {line}");
+            continue;
+        }
+        if path.components().any(|c| c == Component::ParentDir) {
+            eprintln!("warning: invalid OCI volume path (contains ..): {line}");
+            continue;
+        }
+        result.push(line.to_string());
+    }
+    result
+}
+
+/// Return the volume storage directory for a container.
+pub fn volumes_dir(datadir: &Path, name: &str) -> PathBuf {
+    datadir.join("volumes").join(name)
+}
+
+/// Convert an OCI volume path to a directory-safe name.
+///
+/// Strips the leading `/` and replaces remaining `/` with `-`.
+/// E.g. `/var/lib/mysql` → `var-lib-mysql`.
+fn sanitize_volume_name(path: &str) -> String {
+    let stripped = path.strip_prefix('/').unwrap_or(path);
+    stripped.replace('/', "-")
+}
+
 /// Resolve a (possibly abbreviated) container name to the full name.
 ///
 /// Exact matches take priority. If `input` is not an exact match, all
@@ -570,6 +651,17 @@ fn mask_host_mount_units(upper_systemd_dir: &Path, verbose: bool) -> Result<()> 
 pub fn remove(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
     ensure_exists(datadir, name)?;
 
+    // Read state before removal to check for OCI volumes.
+    let state_file = datadir.join("state").join(name);
+    let has_oci_volumes = if state_file.exists() {
+        State::read_from(&state_file)
+            .ok()
+            .and_then(|s| s.get("OCI_VOLUMES").map(|v| !v.is_empty()))
+            .unwrap_or(false)
+    } else {
+        false
+    };
+
     if systemd::is_active(name)? {
         if verbose {
             eprintln!("stopping container '{name}'");
@@ -586,7 +678,6 @@ pub fn remove(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
         }
     }
 
-    let state_file = datadir.join("state").join(name);
     if state_file.exists() {
         fs::remove_file(&state_file)
             .with_context(|| format!("failed to remove {}", state_file.display()))?;
@@ -596,6 +687,13 @@ pub fn remove(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
     }
 
     systemd::remove_limits_dropin(name, verbose)?;
+
+    if has_oci_volumes {
+        let vol_dir = volumes_dir(datadir, name);
+        if vol_dir.exists() {
+            eprintln!("volume data retained at {}", vol_dir.display());
+        }
+    }
 
     Ok(())
 }
@@ -1444,5 +1542,100 @@ mod tests {
         fs::write(rootfs.join("oci/ports"), "53/udp\n").unwrap();
         let ports = read_oci_ports(&rootfs);
         assert_eq!(ports, vec!["53:53/udp"]);
+    }
+
+    // --- read_oci_volumes tests ---
+
+    #[test]
+    fn test_read_oci_volumes_missing_file() {
+        let tmp = tmp();
+        let rootfs = tmp.path().join("fs/nonexistent");
+        assert!(read_oci_volumes(&rootfs).is_empty());
+    }
+
+    #[test]
+    fn test_read_oci_volumes_empty_file() {
+        let tmp = tmp();
+        let rootfs = tmp.path().join("fs/myroot");
+        fs::create_dir_all(rootfs.join("oci")).unwrap();
+        fs::write(rootfs.join("oci/volumes"), "").unwrap();
+        assert!(read_oci_volumes(&rootfs).is_empty());
+    }
+
+    #[test]
+    fn test_read_oci_volumes_valid() {
+        let tmp = tmp();
+        let rootfs = tmp.path().join("fs/myroot");
+        fs::create_dir_all(rootfs.join("oci")).unwrap();
+        fs::write(rootfs.join("oci/volumes"), "/var/lib/mysql\n/data\n").unwrap();
+        let vols = read_oci_volumes(&rootfs);
+        assert_eq!(vols, vec!["/var/lib/mysql", "/data"]);
+    }
+
+    #[test]
+    fn test_read_oci_volumes_skips_invalid() {
+        let tmp = tmp();
+        let rootfs = tmp.path().join("fs/myroot");
+        fs::create_dir_all(rootfs.join("oci")).unwrap();
+        fs::write(
+            rootfs.join("oci/volumes"),
+            "/var/lib/mysql\nrelative/path\n/ok/../bad\n/good\n",
+        )
+        .unwrap();
+        let vols = read_oci_volumes(&rootfs);
+        assert_eq!(vols, vec!["/var/lib/mysql", "/good"]);
+    }
+
+    // --- sanitize_volume_name tests ---
+
+    #[test]
+    fn test_sanitize_volume_name() {
+        assert_eq!(sanitize_volume_name("/var/lib/mysql"), "var-lib-mysql");
+        assert_eq!(sanitize_volume_name("/data"), "data");
+        assert_eq!(sanitize_volume_name("/a/b/c"), "a-b-c");
+    }
+
+    // --- volumes_dir test ---
+
+    #[test]
+    fn test_volumes_dir() {
+        let datadir = Path::new("/var/lib/sdme");
+        let dir = volumes_dir(datadir, "mycontainer");
+        assert_eq!(dir, PathBuf::from("/var/lib/sdme/volumes/mycontainer"));
+    }
+
+    // --- OCI volumes wiring in create ---
+
+    #[test]
+    fn test_create_with_oci_volumes() {
+        let _lock = UMASK_LOCK.lock().unwrap();
+        let tmp = tmp();
+        // Create a rootfs with oci/volumes
+        let rootfs_dir = tmp.path().join("fs/myoci");
+        fs::create_dir_all(rootfs_dir.join("oci")).unwrap();
+        fs::write(rootfs_dir.join("oci/volumes"), "/var/lib/mysql\n/data\n").unwrap();
+
+        let opts = CreateOptions {
+            name: Some("voltest".to_string()),
+            rootfs: Some("myoci".to_string()),
+            oci_volumes: vec!["/var/lib/mysql".to_string(), "/data".to_string()],
+            ..Default::default()
+        };
+        let name = create(tmp.path(), &opts, false).unwrap();
+        assert_eq!(name, "voltest");
+
+        // Check state has OCI_VOLUMES
+        let state = State::read_from(&tmp.path().join("state/voltest")).unwrap();
+        assert_eq!(state.get("OCI_VOLUMES"), Some("/var/lib/mysql,/data"));
+
+        // Check bind entries were added
+        let binds_str = state.get("BINDS").expect("BINDS should be set");
+        assert!(binds_str.contains("/oci/root/var/lib/mysql:rw"));
+        assert!(binds_str.contains("/oci/root/data:rw"));
+
+        // Check volume directories were created
+        let vol_base = tmp.path().join("volumes/voltest");
+        assert!(vol_base.join("var-lib-mysql").exists());
+        assert!(vol_base.join("data").exists());
     }
 }

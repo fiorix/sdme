@@ -303,6 +303,65 @@ network, and capability restrictions. `--oci-pod` requires
 See [security.md](security.md) for the full details on hardening
 flags and comparisons with Docker and Podman.
 
+## Volume mounts
+
+OCI images declare volumes in their image config (e.g. mysql declares
+`/var/lib/mysql`). sdme reads these from the `/oci/volumes` file in
+the rootfs and auto-creates persistent bind mounts when creating a
+container.
+
+### How it works
+
+When you create a container from an OCI app rootfs, sdme checks for
+`/oci/volumes` in the rootfs. For each declared volume:
+
+1. A host-side directory is created at
+   `{datadir}/volumes/{container}/{volume-name}` (e.g.
+   `/var/lib/sdme/volumes/mydb/var-lib-mysql`)
+2. A bind mount is added mapping the host dir to
+   `/oci/root{volume-path}` inside the container
+
+```bash
+# mysql declares /var/lib/mysql; sdme auto-mounts it
+sudo sdme create -r mysql
+# equivalent to:
+# sudo sdme create -r mysql --bind /var/lib/sdme/volumes/{name}/var-lib-mysql:/oci/root/var/lib/mysql
+```
+
+### Data persistence
+
+Volume data survives container removal. When you `sdme rm` a
+container that has OCI volumes, sdme prints the volume data location
+but does not delete it:
+
+```
+volume data retained at /var/lib/sdme/volumes/mydb/
+```
+
+To reclaim disk space, manually remove the volume directory:
+
+```bash
+sudo rm -rf /var/lib/sdme/volumes/mydb/
+```
+
+### Opting out
+
+Use `--no-oci-volumes` to suppress auto-mounting:
+
+```bash
+sudo sdme create -r mysql --no-oci-volumes
+```
+
+### Manual override
+
+User `--bind` flags take priority. If you bind-mount to the same
+container path that an OCI volume targets, the auto-mount is skipped:
+
+```bash
+# Use a custom host path for mysql data
+sudo sdme create -r mysql --bind /srv/mysql-data:/oci/root/var/lib/mysql
+```
+
 ## Port forwarding
 
 OCI images declare exposed ports in their image config (e.g. nginx
@@ -359,14 +418,6 @@ sudo sdme create -r nginx --hardened --port 8080:80/tcp --no-oci-ports
 ```
 
 ## Limitations
-
-- **Volume bindings are not wired up.** The `/oci/volumes` file
-  records declared volumes, but sdme doesn't create bind mounts for
-  them. You can manually bind-mount host paths into the container
-  using `--bind`:
-  ```bash
-  sudo sdme create -r mysql --bind /srv/mysql-data:/oci/root/var/lib/mysql
-  ```
 
 - **One OCI service per container.** Each imported rootfs generates a
   single `sdme-oci-app.service`. Running multiple OCI services in one
