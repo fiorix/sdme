@@ -303,13 +303,62 @@ network, and capability restrictions. `--oci-pod` requires
 See [security.md](security.md) for the full details on hardening
 flags and comparisons with Docker and Podman.
 
-## Limitations
+## Port forwarding
 
-- **Port bindings are not wired up.** The `/oci/ports` file records
-  exposed ports, but sdme doesn't configure any forwarding. Since
-  containers share the host network by default, services bind
-  directly to the host's interfaces. With `--private-network`, you'd
-  need manual iptables rules.
+OCI images declare exposed ports in their image config (e.g. nginx
+exposes 80/tcp, mysql exposes 3306/tcp). sdme reads these from the
+`/oci/ports` file in the rootfs and auto-forwards them when creating
+a container with `--private-network`, `--hardened`, or `--strict`.
+
+### How it works
+
+When you create a container from an OCI app rootfs, sdme checks for
+`/oci/ports` in the rootfs. If ports are declared and the container
+uses a private network namespace, sdme automatically adds `--port`
+rules mapping each OCI port to the same host port:
+
+```bash
+# nginx exposes 80/tcp; sdme auto-forwards it
+sudo sdme create -r nginx --hardened
+# equivalent to: sudo sdme create -r nginx --hardened --port 80:80/tcp
+```
+
+### Network modes
+
+**Private network** (`--private-network`, `--hardened`, `--strict`):
+OCI ports are auto-forwarded. The host port matches the container
+port (e.g. 80:80/tcp). User `--port` flags take priority — if you
+specify `--port 8080:80/tcp`, the auto-forward for port 80 is
+skipped.
+
+**Host network** (default, no `--private-network`): Services bind
+directly to the host's interfaces, so no forwarding is needed. sdme
+prints an informational message listing the exposed ports.
+
+**Pod networking** (`--pod`): The container runs in the pod's
+network namespace. Ports are accessible from other containers in the
+same pod via localhost. No auto-forwarding is applied since there is
+no private network namespace.
+
+### Opting out
+
+Use `--no-oci-ports` to suppress auto-forwarding:
+
+```bash
+sudo sdme create -r nginx --hardened --no-oci-ports
+```
+
+### Manual override
+
+User `--port` flags always take priority. To map a different host
+port:
+
+```bash
+# Map host port 8080 to container port 80
+sudo sdme create -r nginx --hardened --port 8080:80/tcp --no-oci-ports
+```
+
+## Limitations
 
 - **Volume bindings are not wired up.** The `/oci/volumes` file
   records declared volumes, but sdme doesn't create bind mounts for

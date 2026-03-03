@@ -37,7 +37,7 @@ Path to config file.
 Default:
 .IR ~/.config/sdme/sdmerc .
 .SH COMMANDS
-.SS sdme new [\fIname\fR] [\-r \fIfs\fR] [\-t \fIseconds\fR] [\-u] [\fIlimits\fR] [\fInetwork\fR] [\fIsecurity\fR] [\-o \fIdir\fR]... [\-\-pod \fIpod\fR] [\-\-oci\-pod \fIpod\fR] [\-b \fIbind\fR]... [\-e \fIenv\fR]... [\-\-] [\fIcommand\fR...]
+.SS sdme new [\fIname\fR] [\-r \fIfs\fR] [\-t \fIseconds\fR] [\-u] [\fIlimits\fR] [\fInetwork\fR] [\fIsecurity\fR] [\-o \fIdir\fR]... [\-\-pod \fIpod\fR] [\-\-oci\-pod \fIpod\fR] [\-b \fIbind\fR]... [\-e \fIenv\fR]... [\-\-no\-oci\-ports] [\-\-] [\fIcommand\fR...]
 Create, start, and enter a new container.
 If
 .I name
@@ -122,7 +122,7 @@ below.
 .PP
 If boot fails or is interrupted (Ctrl+C), the just\-created container is
 automatically removed.
-.SS sdme create [\fIname\fR] [\-r \fIfs\fR] [\-u] [\fIlimits\fR] [\fInetwork\fR] [\fIsecurity\fR] [\-o \fIdir\fR]... [\-\-pod \fIpod\fR] [\-\-oci\-pod \fIpod\fR] [\-b \fIbind\fR]... [\-e \fIenv\fR]...
+.SS sdme create [\fIname\fR] [\-r \fIfs\fR] [\-u] [\fIlimits\fR] [\fInetwork\fR] [\fIsecurity\fR] [\-o \fIdir\fR]... [\-\-pod \fIpod\fR] [\-\-oci\-pod \fIpod\fR] [\-b \fIbind\fR]... [\-e \fIenv\fR]... [\-\-no\-oci\-ports]
 Create a new container without starting it.
 Sets up the overlayfs directories and state file.
 Resource limits can be set with
@@ -1027,6 +1027,34 @@ Example:
 .PP
 Bind mounts and environment variables are stored in the container's state file
 and applied at start time via the systemd nspawn drop\-in configuration.
+.SH OCI PORT FORWARDING
+When creating a container from an OCI app rootfs that declares exposed ports
+(in
+.IR /oci/ports ),
+sdme automatically adds port forwarding rules if the container has a private
+network namespace (via
+.BR \-\-private\-network ,
+.BR \-\-hardened ,
+or
+.BR \-\-strict ).
+Each OCI port is mapped from the same host port to the same container port
+(e.g.\& 80:80/tcp).
+.PP
+User\-supplied
+.B \-\-port
+flags take priority: if you map a container port manually, the auto\-forward
+for that port is skipped.
+.PP
+When the container uses host networking (no
+.BR \-\-private\-network ),
+ports are not forwarded (services bind directly to the host's interfaces).
+An informational message listing the exposed ports is printed instead.
+.TP
+.B \-\-no\-oci\-ports
+Suppress automatic port forwarding from OCI image metadata.
+Ports declared in the image's
+.I /oci/ports
+file are ignored.
 .SH PODS
 Pods provide a shared network namespace for multiple containers.
 Containers in the same pod can reach each other via localhost.

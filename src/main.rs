@@ -155,6 +155,10 @@ enum Command {
 
         #[command(flatten)]
         security: SecurityArgs,
+
+        /// Do not auto-forward ports declared in the OCI image
+        #[arg(long)]
+        no_oci_ports: bool,
     },
 
     /// Run a command in a running container
@@ -229,6 +233,10 @@ enum Command {
 
         #[command(flatten)]
         security: SecurityArgs,
+
+        /// Do not auto-forward ports declared in the OCI image
+        #[arg(long)]
+        no_oci_ports: bool,
 
         /// Command to run inside the container (default: login shell)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -677,6 +685,63 @@ fn resolve_opaque_dirs(
     }
 }
 
+/// Auto-wire OCI port forwarding from the rootfs `/oci/ports` file.
+///
+/// When private network is enabled, merges OCI-declared ports into the
+/// network config (skipping any already covered by user `--port` flags).
+/// When using host network, prints an informational message instead.
+fn auto_wire_oci_ports(rootfs_path: &std::path::Path, network: &mut NetworkConfig) {
+    let oci_ports = containers::read_oci_ports(rootfs_path);
+    if oci_ports.is_empty() {
+        return;
+    }
+
+    if network.private_network {
+        // Collect container port numbers already specified by the user.
+        let user_container_ports: std::collections::HashSet<u16> = network
+            .ports
+            .iter()
+            .filter_map(|p| {
+                // Port format: "HOST:CONTAINER[/PROTO]"
+                let port_part = p.split('/').next().unwrap_or(p);
+                port_part
+                    .split(':')
+                    .nth(1)
+                    .and_then(|s| s.parse::<u16>().ok())
+            })
+            .collect();
+
+        let mut added = Vec::new();
+        for port in &oci_ports {
+            // Extract container port number from "PORT:PORT/PROTO"
+            let container_port: Option<u16> = port
+                .split('/')
+                .next()
+                .and_then(|s| s.split(':').nth(1))
+                .and_then(|s| s.parse().ok());
+            if let Some(cp) = container_port {
+                if !user_container_ports.contains(&cp) {
+                    network.ports.push(port.clone());
+                    added.push(port.clone());
+                }
+            }
+        }
+
+        if !added.is_empty() {
+            eprintln!("auto-forwarding OCI ports: {}", added.join(", "));
+        }
+    } else {
+        let display: Vec<&str> = oci_ports
+            .iter()
+            .filter_map(|p| p.split_once(':').map(|(_, rest)| rest))
+            .collect();
+        eprintln!(
+            "OCI image exposes ports: {} (host network, no forwarding needed)",
+            display.join(", ")
+        );
+    }
+}
+
 /// Validate `--pod` constraints before creating a container.
 ///
 /// Checks that:
@@ -877,6 +942,7 @@ fn main() -> Result<()> {
             network,
             mounts,
             security,
+            no_oci_ports,
         } => {
             system_check::check_systemd_version(252)?;
             let limits = parse_limits(memory, cpus, cpu_weight)?;
@@ -894,6 +960,15 @@ fn main() -> Result<()> {
             )?;
             let (binds, envs) = parse_mounts(mounts)?;
             let opaque_dirs = resolve_opaque_dirs(opaque_dirs, fs.is_none(), &cfg);
+
+            // Auto-wire OCI ports if the rootfs declares them.
+            if !no_oci_ports {
+                if let Some(ref rootfs_name) = fs {
+                    let rootfs_path = containers::resolve_rootfs(&cfg.datadir, Some(rootfs_name))?;
+                    auto_wire_oci_ports(&rootfs_path, &mut network);
+                }
+            }
+
             let opts = containers::CreateOptions {
                 name,
                 rootfs: fs,
@@ -1012,6 +1087,7 @@ fn main() -> Result<()> {
             network,
             mounts,
             security,
+            no_oci_ports,
             command,
         } => {
             system_check::check_systemd_version(252)?;
@@ -1030,6 +1106,15 @@ fn main() -> Result<()> {
             )?;
             let (binds, envs) = parse_mounts(mounts)?;
             let opaque_dirs = resolve_opaque_dirs(opaque_dirs, fs.is_none(), &cfg);
+
+            // Auto-wire OCI ports if the rootfs declares them.
+            if !no_oci_ports {
+                if let Some(ref rootfs_name) = fs {
+                    let rootfs_path = containers::resolve_rootfs(&cfg.datadir, Some(rootfs_name))?;
+                    auto_wire_oci_ports(&rootfs_path, &mut network);
+                }
+            }
+
             let opts = containers::CreateOptions {
                 name,
                 rootfs: fs,

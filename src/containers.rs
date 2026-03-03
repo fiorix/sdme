@@ -392,7 +392,7 @@ fn check_conflicts(datadir: &Path, name: &str) -> Result<()> {
 
 // NOTE: "rootfs" is the internal name; the CLI command is "fs" and the
 // on-disk path is {datadir}/fs/.
-fn resolve_rootfs(datadir: &Path, rootfs: Option<&str>) -> Result<PathBuf> {
+pub fn resolve_rootfs(datadir: &Path, rootfs: Option<&str>) -> Result<PathBuf> {
     match rootfs {
         None => Ok(PathBuf::from("/")),
         Some(name) => {
@@ -404,6 +404,44 @@ fn resolve_rootfs(datadir: &Path, rootfs: Option<&str>) -> Result<PathBuf> {
             Ok(path)
         }
     }
+}
+
+/// Read `/oci/ports` from a rootfs and return port forwarding rules.
+///
+/// Each line in the file is `PORT/PROTO` (e.g. `80/tcp`). Returns
+/// `"PORT:PORT/PROTO"` entries mapping the same port on host and container.
+/// Returns an empty vec if the file doesn't exist or is empty.
+pub fn read_oci_ports(rootfs: &Path) -> Vec<String> {
+    let ports_path = rootfs.join("oci/ports");
+    let content = match fs::read_to_string(&ports_path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    let mut result = Vec::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        // Expect "PORT/PROTO" format
+        let (port_str, _proto) = match line.split_once('/') {
+            Some((p, proto)) => (p, proto),
+            None => {
+                eprintln!("warning: invalid OCI port entry (no protocol): {line}");
+                continue;
+            }
+        };
+        let port: u16 = match port_str.parse() {
+            Ok(p) if p > 0 => p,
+            _ => {
+                eprintln!("warning: invalid OCI port number: {line}");
+                continue;
+            }
+        };
+        // Map same port on host and container
+        result.push(format!("{port}:{line}"));
+    }
+    result
 }
 
 /// Resolve a (possibly abbreviated) container name to the full name.
@@ -1354,5 +1392,57 @@ mod tests {
 
         let state = State::read_from(&tmp.path().join("state/statebox")).unwrap();
         assert_eq!(state.get("OPAQUE_DIRS"), Some("/var,/opt"));
+    }
+
+    // --- read_oci_ports tests ---
+
+    #[test]
+    fn test_read_oci_ports_missing_file() {
+        let tmp = tmp();
+        let rootfs = tmp.path().join("fs/nonexistent");
+        assert!(read_oci_ports(&rootfs).is_empty());
+    }
+
+    #[test]
+    fn test_read_oci_ports_empty_file() {
+        let tmp = tmp();
+        let rootfs = tmp.path().join("fs/myroot");
+        fs::create_dir_all(rootfs.join("oci")).unwrap();
+        fs::write(rootfs.join("oci/ports"), "").unwrap();
+        assert!(read_oci_ports(&rootfs).is_empty());
+    }
+
+    #[test]
+    fn test_read_oci_ports_valid() {
+        let tmp = tmp();
+        let rootfs = tmp.path().join("fs/myroot");
+        fs::create_dir_all(rootfs.join("oci")).unwrap();
+        fs::write(rootfs.join("oci/ports"), "80/tcp\n3306/tcp\n").unwrap();
+        let ports = read_oci_ports(&rootfs);
+        assert_eq!(ports, vec!["80:80/tcp", "3306:3306/tcp"]);
+    }
+
+    #[test]
+    fn test_read_oci_ports_skips_invalid() {
+        let tmp = tmp();
+        let rootfs = tmp.path().join("fs/myroot");
+        fs::create_dir_all(rootfs.join("oci")).unwrap();
+        fs::write(
+            rootfs.join("oci/ports"),
+            "80/tcp\nbadline\n0/tcp\n443/tcp\n",
+        )
+        .unwrap();
+        let ports = read_oci_ports(&rootfs);
+        assert_eq!(ports, vec!["80:80/tcp", "443:443/tcp"]);
+    }
+
+    #[test]
+    fn test_read_oci_ports_udp() {
+        let tmp = tmp();
+        let rootfs = tmp.path().join("fs/myroot");
+        fs::create_dir_all(rootfs.join("oci")).unwrap();
+        fs::write(rootfs.join("oci/ports"), "53/udp\n").unwrap();
+        let ports = read_oci_ports(&rootfs);
+        assert_eq!(ports, vec!["53:53/udp"]);
     }
 }
