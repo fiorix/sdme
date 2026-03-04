@@ -150,10 +150,16 @@ fn run_in_container(name: &str, command: &str, verbose: bool) -> Result<()> {
     if verbose {
         eprintln!("run: {command}");
     }
-    let status = std::process::Command::new("machinectl")
-        .args(["shell", name, "/bin/sh", "-c", command])
+    let status = std::process::Command::new("systemd-run")
+        .args([
+            "--machine", name,
+            "--pipe",
+            "--wait",
+            "--quiet",
+            "/bin/sh", "-c", command,
+        ])
         .status()
-        .context("failed to run machinectl shell")?;
+        .context("failed to run systemd-run")?;
     if !status.success() {
         bail!(
             "command failed with exit code {}",
