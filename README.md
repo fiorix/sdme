@@ -6,6 +6,9 @@ The tool in here, the systemd machine editor (sdme), manages containers
 built on systemd-nspawn and overlayfs. It cooperates with machined,
 D-Bus, and the broader systemd ecosystem.
 
+It was inspired by [virtme-ng](https://github.com/arighi/virtme-ng),
+but instead of booting a VM, it boots up a systemd-nspawn container.
+
 Learn about the tool from the [usage](docs/usage.md) documentation. In
 there you will find a practical guide for installing and using sdme as a
 beginner or experienced user.
