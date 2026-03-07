@@ -3,7 +3,11 @@
 //! Parses a build config with FROM, COPY, and RUN directives, creates a
 //! temporary staging container, executes build operations sequentially,
 //! then captures the resulting merged filesystem as a new rootfs.
+//!
+//! Supports multi-stage builds: multiple FROM directives, where each stage can
+//! be named with `AS <alias>` and referenced by a later `COPY --from=<alias>`.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -15,15 +19,23 @@ use crate::{check_interrupted, containers, copy, rootfs, systemd, validate_name,
 // --- Config types ---
 
 #[derive(Debug)]
+struct Stage {
+    from: String,
+    alias: Option<String>,
+    ops: Vec<BuildOp>,
+}
+
+#[derive(Debug)]
 struct BuildConfig {
     path: PathBuf,
-    rootfs: String,
-    ops: Vec<BuildOp>,
+    stages: Vec<Stage>,
 }
 
 #[derive(Debug)]
 enum BuildOp {
     Copy {
+        /// Non-None when `COPY --from=<stage>` copies from a prior stage.
+        from_stage: Option<String>,
         src: PathBuf,
         dst: PathBuf,
         lineno: usize,
@@ -40,8 +52,11 @@ fn parse_build_config(path: &Path) -> Result<BuildConfig> {
     let content =
         fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
 
-    let mut rootfs: Option<String> = None;
-    let mut ops = Vec::new();
+    let mut stages: Vec<Stage> = Vec::new();
+    // Keys of stages that have been "completed" (a later FROM has been seen),
+    // available as --from= references. Contains numeric index strings ("0", "1", ...)
+    // and alias strings.
+    let mut completed_keys: Vec<String> = Vec::new();
 
     for (lineno, raw) in content.lines().enumerate() {
         let line = raw.trim();
@@ -56,60 +71,135 @@ fn parse_build_config(path: &Path) -> Result<BuildConfig> {
 
         match directive {
             "FROM" => {
-                if rootfs.is_some() {
-                    bail!(
-                        "{}:{}: duplicate FROM directive",
-                        path.display(),
-                        lineno + 1
-                    );
+                // Finalize the previous stage: add its index and alias to completed_keys
+                // so subsequent stages can reference it via --from=.
+                if let Some(prev) = stages.last() {
+                    let idx = stages.len() - 1;
+                    completed_keys.push(idx.to_string());
+                    if let Some(alias) = &prev.alias {
+                        completed_keys.push(alias.clone());
+                    }
                 }
-                if rest.is_empty() {
-                    bail!(
-                        "{}:{}: FROM requires a rootfs name",
-                        path.display(),
-                        lineno + 1
-                    );
+
+                // Parse "name" or "name AS alias".
+                let tokens: Vec<&str> = rest.split_whitespace().collect();
+                let (from_name, alias) = match tokens.as_slice() {
+                    [] => {
+                        bail!(
+                            "{}:{}: FROM requires a rootfs name",
+                            path.display(),
+                            lineno + 1
+                        );
+                    }
+                    [name] => {
+                        validate_name(name).with_context(|| {
+                            format!(
+                                "{}:{}: invalid FROM rootfs name",
+                                path.display(),
+                                lineno + 1
+                            )
+                        })?;
+                        (name.to_string(), None)
+                    }
+                    [name, kw, alias_str] if kw.eq_ignore_ascii_case("as") => {
+                        validate_name(name).with_context(|| {
+                            format!(
+                                "{}:{}: invalid FROM rootfs name",
+                                path.display(),
+                                lineno + 1
+                            )
+                        })?;
+                        validate_name(alias_str).with_context(|| {
+                            format!(
+                                "{}:{}: invalid stage alias",
+                                path.display(),
+                                lineno + 1
+                            )
+                        })?;
+                        (name.to_string(), Some(alias_str.to_string()))
+                    }
+                    _ => {
+                        bail!(
+                            "{}:{}: invalid FROM syntax; expected 'FROM <rootfs>' or 'FROM <rootfs> AS <alias>'",
+                            path.display(),
+                            lineno + 1
+                        );
+                    }
+                };
+
+                // Reject duplicate aliases.
+                if let Some(ref a) = alias {
+                    if completed_keys.contains(a)
+                        || stages.last().and_then(|s| s.alias.as_deref()) == Some(a.as_str())
+                    {
+                        bail!(
+                            "{}:{}: duplicate stage alias '{a}'",
+                            path.display(),
+                            lineno + 1
+                        );
+                    }
                 }
-                validate_name(rest).with_context(|| {
-                    format!(
-                        "{}:{}: invalid FROM rootfs name",
-                        path.display(),
-                        lineno + 1
-                    )
-                })?;
-                rootfs = Some(rest.to_string());
+
+                stages.push(Stage {
+                    from: from_name,
+                    alias,
+                    ops: Vec::new(),
+                });
             }
             "COPY" => {
-                if rootfs.is_none() {
+                if stages.is_empty() {
                     bail!(
                         "{}:{}: FROM must be the first directive",
                         path.display(),
                         lineno + 1
                     );
                 }
-                let (src, dst) = rest.split_once(char::is_whitespace).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "{}:{}: COPY requires two arguments: COPY <src> <dst>",
-                        path.display(),
-                        lineno + 1
-                    )
-                })?;
-                let dst = dst.trim();
-                if dst.is_empty() {
-                    bail!(
-                        "{}:{}: COPY requires two arguments: COPY <src> <dst>",
-                        path.display(),
-                        lineno + 1
-                    );
-                }
-                ops.push(BuildOp::Copy {
-                    src: PathBuf::from(src),
-                    dst: PathBuf::from(dst),
+
+                let tokens: Vec<&str> = rest.split_whitespace().collect();
+                let (from_stage, src_str, dst_str) =
+                    if tokens.first().map(|t| t.starts_with("--from=")).unwrap_or(false) {
+                        let from_ref = tokens[0]["--from=".len()..].to_string();
+                        if from_ref.is_empty() {
+                            bail!(
+                                "{}:{}: --from= requires a stage alias or index",
+                                path.display(),
+                                lineno + 1
+                            );
+                        }
+                        if !completed_keys.contains(&from_ref) {
+                            bail!(
+                                "{}:{}: --from={from_ref} references unknown or current/forward stage",
+                                path.display(),
+                                lineno + 1
+                            );
+                        }
+                        if tokens.len() != 3 {
+                            bail!(
+                                "{}:{}: COPY --from=<stage> requires exactly two path arguments: src dst",
+                                path.display(),
+                                lineno + 1
+                            );
+                        }
+                        (Some(from_ref), tokens[1], tokens[2])
+                    } else if tokens.len() == 2 {
+                        (None, tokens[0], tokens[1])
+                    } else {
+                        bail!(
+                            "{}:{}: COPY requires two arguments: COPY <src> <dst>",
+                            path.display(),
+                            lineno + 1
+                        );
+                    };
+
+                stages.last_mut().unwrap().ops.push(BuildOp::Copy {
+                    from_stage,
+                    src: PathBuf::from(src_str),
+                    dst: PathBuf::from(dst_str),
                     lineno: lineno + 1,
                 });
             }
             "RUN" => {
-                if rootfs.is_none() {
+                if stages.is_empty() {
                     bail!(
                         "{}:{}: FROM must be the first directive",
                         path.display(),
@@ -119,7 +209,7 @@ fn parse_build_config(path: &Path) -> Result<BuildConfig> {
                 if rest.is_empty() {
                     bail!("{}:{}: RUN requires a command", path.display(), lineno + 1);
                 }
-                ops.push(BuildOp::Run {
+                stages.last_mut().unwrap().ops.push(BuildOp::Run {
                     command: rest.to_string(),
                     lineno: lineno + 1,
                 });
@@ -134,13 +224,13 @@ fn parse_build_config(path: &Path) -> Result<BuildConfig> {
         }
     }
 
-    let rootfs =
-        rootfs.ok_or_else(|| anyhow::anyhow!("{}: missing FROM directive", path.display()))?;
+    if stages.is_empty() {
+        bail!("{}: missing FROM directive", path.display());
+    }
 
     Ok(BuildConfig {
         path: path.to_path_buf(),
-        rootfs,
-        ops,
+        stages,
     })
 }
 
@@ -260,19 +350,84 @@ fn do_copy(
     Ok(())
 }
 
-fn execute_build(
+/// Mount the overlayfs for a stopped container, copy the merged view to `dest`,
+/// then unmount. Used to capture intermediate stage results.
+fn capture_merged_fs(
     datadir: &Path,
     container_name: &str,
-    rootfs: &str,
-    config: &BuildConfig,
+    rootfs_name: &str,
+    dest: &Path,
+    verbose: bool,
+) -> Result<()> {
+    let rootfs_dir = datadir.join("fs").join(rootfs_name);
+    let merged_dir = datadir
+        .join("containers")
+        .join(container_name)
+        .join("merged");
+    let upper_dir = datadir
+        .join("containers")
+        .join(container_name)
+        .join("upper");
+    let work_dir = datadir
+        .join("containers")
+        .join(container_name)
+        .join("work");
+
+    let mount_opts = format!(
+        "lowerdir={},upperdir={},workdir={}",
+        rootfs_dir.display(),
+        upper_dir.display(),
+        work_dir.display()
+    );
+
+    let mount_status = std::process::Command::new("mount")
+        .args(["-t", "overlay", "overlay", "-o", &mount_opts])
+        .arg(&merged_dir)
+        .status()
+        .context("failed to run mount")?;
+
+    if !mount_status.success() {
+        bail!("failed to mount overlayfs for stage capture");
+    }
+
+    let copy_result: Result<()> = (|| {
+        fs::create_dir_all(dest)
+            .with_context(|| format!("failed to create {}", dest.display()))?;
+        copy::copy_metadata(&merged_dir, dest)?;
+        copy::copy_xattrs(&merged_dir, dest)?;
+        if verbose {
+            eprintln!("copying {} -> {}", merged_dir.display(), dest.display());
+        }
+        copy::copy_tree(&merged_dir, dest, verbose)
+    })();
+
+    let _ = std::process::Command::new("umount")
+        .arg(&merged_dir)
+        .status();
+
+    copy_result.context("failed to copy merged filesystem")
+}
+
+/// Execute all build operations for one stage.
+///
+/// `stage_dirs` maps previously-completed stage keys (alias and numeric index
+/// strings) to their captured filesystem directories, used to resolve
+/// `COPY --from=<stage>` sources.
+fn execute_stage(
+    datadir: &Path,
+    container_name: &str,
+    rootfs_name: &str,
+    stage: &Stage,
+    stage_dirs: &HashMap<String, PathBuf>,
     opaque_dirs: &[String],
     boot_timeout: u64,
     verbose: bool,
+    config_path: &Path,
 ) -> Result<()> {
     let mut container_running = false;
     let timeout = std::time::Duration::from_secs(boot_timeout);
 
-    for op in &config.ops {
+    for op in &stage.ops {
         check_interrupted()?;
 
         match op {
@@ -284,9 +439,14 @@ fn execute_build(
                     container_running = true;
                 }
                 run_in_container(container_name, command, verbose)
-                    .with_context(|| format!("{}:{}", config.path.display(), lineno))?;
+                    .with_context(|| format!("{}:{}", config_path.display(), lineno))?;
             }
-            BuildOp::Copy { src, dst, lineno } => {
+            BuildOp::Copy {
+                from_stage,
+                src,
+                dst,
+                lineno,
+            } => {
                 if container_running {
                     eprintln!("stopping build container '{container_name}'");
                     containers::stop(container_name, containers::StopMode::Terminate, verbose)?;
@@ -296,14 +456,38 @@ fn execute_build(
                     .join("containers")
                     .join(container_name)
                     .join("upper");
-                let lower_dir = datadir.join("fs").join(rootfs);
-                do_copy(&upper_dir, &lower_dir, src, dst, opaque_dirs, verbose)
-                    .with_context(|| format!("{}:{}", config.path.display(), lineno))?;
+                let lower_dir = datadir.join("fs").join(rootfs_name);
+
+                let actual_src: PathBuf = if let Some(stage_ref) = from_stage {
+                    let stage_dir = stage_dirs.get(stage_ref).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "{}:{}: stage '{stage_ref}' not found",
+                            config_path.display(),
+                            lineno
+                        )
+                    })?;
+                    // The src is a path within the stage's filesystem; strip the
+                    // leading '/' and reject '..' to prevent traversal.
+                    let rel = sanitize_dest_path(src).with_context(|| {
+                        format!(
+                            "{}:{}: invalid src path in COPY --from=",
+                            config_path.display(),
+                            lineno
+                        )
+                    })?;
+                    stage_dir.join(rel)
+                } else {
+                    src.clone()
+                };
+
+                do_copy(&upper_dir, &lower_dir, &actual_src, dst, opaque_dirs, verbose)
+                    .with_context(|| format!("{}:{}", config_path.display(), lineno))?;
             }
         }
     }
 
-    // Ensure container is stopped; overlayfs must be unmounted for merged layer copy.
+    // Ensure the container is stopped before we return (overlayfs must be
+    // unmounted for the merged-layer copy that follows).
     if container_running {
         eprintln!("stopping build container '{container_name}'");
         containers::stop(container_name, containers::StopMode::Terminate, verbose)?;
@@ -336,109 +520,178 @@ pub fn build(
 
     let config = parse_build_config(config_path)?;
 
-    // Verify the FROM rootfs exists.
-    let rootfs_dir = fs_dir.join(&config.rootfs);
-    if !rootfs_dir.is_dir() {
-        bail!("fs not found: {}", config.rootfs);
-    }
-
-    // Create a staging container.
-    let staging_name = format!("build-{name}");
-    eprintln!("creating build container '{staging_name}'");
-    // Staging container runs as root for package installation and file copying.
-    let create_opts = containers::CreateOptions {
-        name: Some(staging_name.clone()),
-        rootfs: Some(config.rootfs.clone()),
-        ..Default::default()
-    };
-    containers::create(datadir, &create_opts, verbose)?;
-
-    // Execute all build operations; clean up on failure.
-    if let Err(e) = execute_build(
-        datadir,
-        &staging_name,
-        &config.rootfs,
-        &config,
-        &create_opts.opaque_dirs,
-        boot_timeout,
-        verbose,
-    ) {
-        crate::reset_interrupt();
-        eprintln!("build failed, removing '{staging_name}'");
-        let _ = containers::remove(datadir, &staging_name, verbose);
-        return Err(e);
-    }
-
-    // Capture the merged filesystem as the new rootfs.
-    let merged_dir = datadir
-        .join("containers")
-        .join(&staging_name)
-        .join("merged");
-
-    // Mount overlayfs to get the merged view (container is stopped, so we mount manually).
-    let upper_dir = datadir.join("containers").join(&staging_name).join("upper");
-    let work_dir = datadir.join("containers").join(&staging_name).join("work");
-
-    let mount_opts = format!(
-        "lowerdir={},upperdir={},workdir={}",
-        rootfs_dir.display(),
-        upper_dir.display(),
-        work_dir.display()
-    );
-
-    let mount_status = std::process::Command::new("mount")
-        .args(["-t", "overlay", "overlay", "-o", &mount_opts])
-        .arg(&merged_dir)
-        .status()
-        .context("failed to run mount")?;
-
-    if !mount_status.success() {
-        eprintln!("build failed (mount), removing '{staging_name}'");
-        let _ = containers::remove(datadir, &staging_name, verbose);
-        bail!("failed to mount overlayfs for final copy");
-    }
-
-    // Copy merged to staging rootfs, then atomic rename.
-    let staging_rootfs = fs_dir.join(format!(".{name}.importing"));
-    let copy_result = (|| -> Result<()> {
-        fs::create_dir_all(&staging_rootfs)
-            .with_context(|| format!("failed to create {}", staging_rootfs.display()))?;
-        copy::copy_metadata(&merged_dir, &staging_rootfs)?;
-        copy::copy_xattrs(&merged_dir, &staging_rootfs)?;
-        if verbose {
-            eprintln!(
-                "copying {} -> {}",
-                merged_dir.display(),
-                staging_rootfs.display()
-            );
+    // Verify all FROM rootfs names exist before starting any work.
+    for stage in &config.stages {
+        let rootfs_dir = fs_dir.join(&stage.from);
+        if !rootfs_dir.is_dir() {
+            bail!("fs not found: {}", stage.from);
         }
-        copy::copy_tree(&merged_dir, &staging_rootfs, verbose)
-    })();
-
-    // Unmount regardless of copy result.
-    let _ = std::process::Command::new("umount")
-        .arg(&merged_dir)
-        .status();
-
-    if let Err(e) = copy_result {
-        let _ = copy::make_removable(&staging_rootfs);
-        let _ = fs::remove_dir_all(&staging_rootfs);
-        let _ = containers::remove(datadir, &staging_name, verbose);
-        return Err(e).context("failed to copy merged filesystem");
     }
 
-    // Atomic rename to final location.
-    if let Err(e) = fs::rename(&staging_rootfs, &final_dir) {
-        let _ = copy::make_removable(&staging_rootfs);
-        let _ = fs::remove_dir_all(&staging_rootfs);
-        let _ = containers::remove(datadir, &staging_name, verbose);
-        return Err(e).with_context(|| {
+    let n_stages = config.stages.len();
+    // Maps completed-stage keys (numeric index string or alias) to their
+    // captured filesystem directories, for --from= resolution.
+    let mut stage_dirs: HashMap<String, PathBuf> = HashMap::new();
+    // Temp directories for intermediate stage captures; cleaned up at the end.
+    let mut temp_dirs: Vec<PathBuf> = Vec::new();
+    // Staging containers that are still alive (for cleanup on error).
+    let mut staging_containers: Vec<String> = Vec::new();
+
+    let build_result: Result<()> = (|| {
+        for (i, stage) in config.stages.iter().enumerate() {
+            check_interrupted()?;
+
+            let is_last = i == n_stages - 1;
+            // The final stage keeps the canonical name for backwards compat;
+            // intermediate stages get a unique name.
+            let container_name = if !is_last {
+                format!("build-{name}-s{i}")
+            } else {
+                format!("build-{name}")
+            };
+
+            if n_stages > 1 {
+                eprintln!(
+                    "creating build container '{container_name}' (stage {}/{})",
+                    i + 1,
+                    n_stages
+                );
+            } else {
+                eprintln!("creating build container '{container_name}'");
+            }
+
+            let create_opts = containers::CreateOptions {
+                name: Some(container_name.clone()),
+                rootfs: Some(stage.from.clone()),
+                ..Default::default()
+            };
+            containers::create(datadir, &create_opts, verbose)?;
+            staging_containers.push(container_name.clone());
+
+            execute_stage(
+                datadir,
+                &container_name,
+                &stage.from,
+                stage,
+                &stage_dirs,
+                &create_opts.opaque_dirs,
+                boot_timeout,
+                verbose,
+                &config.path,
+            )?;
+
+            if !is_last {
+                // Capture the intermediate stage's merged filesystem to a temp dir.
+                let temp_dir =
+                    std::env::temp_dir().join(format!("sdme-build-{name}-s{i}"));
+                // Remove stale temp dir from a previous failed build, if any.
+                if temp_dir.exists() {
+                    let _ = copy::make_removable(&temp_dir);
+                    let _ = fs::remove_dir_all(&temp_dir);
+                }
+                capture_merged_fs(datadir, &container_name, &stage.from, &temp_dir, verbose)?;
+
+                // Register by numeric index and by alias for --from= resolution.
+                stage_dirs.insert(i.to_string(), temp_dir.clone());
+                if let Some(alias) = &stage.alias {
+                    stage_dirs.insert(alias.clone(), temp_dir.clone());
+                }
+                temp_dirs.push(temp_dir);
+
+                eprintln!("removing build container '{container_name}'");
+                containers::remove(datadir, &container_name, verbose)?;
+                staging_containers.retain(|s| s != &container_name);
+            }
+        }
+
+        // Capture the final stage's merged filesystem as the new rootfs.
+        let final_container = format!("build-{name}");
+        let last_stage = config.stages.last().unwrap();
+        let rootfs_dir = fs_dir.join(&last_stage.from);
+        let merged_dir = datadir
+            .join("containers")
+            .join(&final_container)
+            .join("merged");
+        let upper_dir = datadir
+            .join("containers")
+            .join(&final_container)
+            .join("upper");
+        let work_dir = datadir
+            .join("containers")
+            .join(&final_container)
+            .join("work");
+
+        let mount_opts = format!(
+            "lowerdir={},upperdir={},workdir={}",
+            rootfs_dir.display(),
+            upper_dir.display(),
+            work_dir.display()
+        );
+
+        let mount_status = std::process::Command::new("mount")
+            .args(["-t", "overlay", "overlay", "-o", &mount_opts])
+            .arg(&merged_dir)
+            .status()
+            .context("failed to run mount")?;
+
+        if !mount_status.success() {
+            bail!("failed to mount overlayfs for final copy");
+        }
+
+        // Copy merged to a staging path, then atomic rename to final.
+        let staging_rootfs = fs_dir.join(format!(".{name}.importing"));
+        let copy_result: Result<()> = (|| {
+            fs::create_dir_all(&staging_rootfs)
+                .with_context(|| format!("failed to create {}", staging_rootfs.display()))?;
+            copy::copy_metadata(&merged_dir, &staging_rootfs)?;
+            copy::copy_xattrs(&merged_dir, &staging_rootfs)?;
+            if verbose {
+                eprintln!(
+                    "copying {} -> {}",
+                    merged_dir.display(),
+                    staging_rootfs.display()
+                );
+            }
+            copy::copy_tree(&merged_dir, &staging_rootfs, verbose)
+        })();
+
+        // Unmount regardless of copy result.
+        let _ = std::process::Command::new("umount")
+            .arg(&merged_dir)
+            .status();
+
+        copy_result.context("failed to copy merged filesystem")?;
+
+        // Atomic rename to final location.
+        fs::rename(&staging_rootfs, &final_dir).with_context(|| {
             format!(
                 "failed to rename {} to {}",
                 staging_rootfs.display(),
                 final_dir.display()
             )
-        });
+        })
+    })();
+
+    // Always clean up intermediate stage temp dirs.
+    for dir in &temp_dirs {
+        let _ = copy::make_removable(dir);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    if let Err(e) = build_result {
+        crate::reset_interrupt();
+        // Clean up partially-written staging rootfs.
+        let staging_rootfs = fs_dir.join(format!(".{name}.importing"));
+        if staging_rootfs.exists() {
+            let _ = copy::make_removable(&staging_rootfs);
+            let _ = fs::remove_dir_all(&staging_rootfs);
+        }
+        // Remove any staging containers still alive.
+        for container in &staging_containers {
+            eprintln!("build failed, removing '{container}'");
+            let _ = containers::remove(datadir, container, verbose);
+        }
+        return Err(e);
     }
 
     // Write distro metadata sidecar.
@@ -450,9 +703,10 @@ pub fn build(
         state.write_to(&meta_path)?;
     }
 
-    // Clean up the staging container.
-    eprintln!("removing build container '{staging_name}'");
-    let _ = containers::remove(datadir, &staging_name, verbose);
+    // Clean up the final staging container.
+    let final_container = format!("build-{name}");
+    eprintln!("removing build container '{final_container}'");
+    let _ = containers::remove(datadir, &final_container, verbose);
 
     Ok(())
 }
@@ -503,17 +757,25 @@ mod tests {
             "FROM ubuntu\nRUN apt-get update\nCOPY /etc/hostname /etc/build-host\n",
         );
         let config = parse_build_config(&path).unwrap();
-        assert_eq!(config.rootfs, "ubuntu");
-        assert_eq!(config.ops.len(), 2);
-        match &config.ops[0] {
+        assert_eq!(config.stages.len(), 1);
+        assert_eq!(config.stages[0].from, "ubuntu");
+        assert!(config.stages[0].alias.is_none());
+        assert_eq!(config.stages[0].ops.len(), 2);
+        match &config.stages[0].ops[0] {
             BuildOp::Run { command, lineno } => {
                 assert_eq!(command, "apt-get update");
                 assert_eq!(*lineno, 2);
             }
             _ => panic!("expected Run"),
         }
-        match &config.ops[1] {
-            BuildOp::Copy { src, dst, lineno } => {
+        match &config.stages[0].ops[1] {
+            BuildOp::Copy {
+                from_stage,
+                src,
+                dst,
+                lineno,
+            } => {
+                assert!(from_stage.is_none());
                 assert_eq!(src, Path::new("/etc/hostname"));
                 assert_eq!(dst, Path::new("/etc/build-host"));
                 assert_eq!(*lineno, 3);
@@ -530,8 +792,9 @@ mod tests {
             "# this is a comment\n\nFROM debian\n\n# another comment\nRUN echo hello\n",
         );
         let config = parse_build_config(&path).unwrap();
-        assert_eq!(config.rootfs, "debian");
-        assert_eq!(config.ops.len(), 1);
+        assert_eq!(config.stages.len(), 1);
+        assert_eq!(config.stages[0].from, "debian");
+        assert_eq!(config.stages[0].ops.len(), 1);
     }
 
     #[test]
@@ -546,11 +809,17 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_duplicate_from() {
-        let tmp = TempDir::new("dup-from");
-        let path = write_config(tmp.path(), "FROM ubuntu\nFROM debian\n");
+    fn test_parse_duplicate_alias() {
+        let tmp = TempDir::new("dup-alias");
+        let path = write_config(
+            tmp.path(),
+            "FROM ubuntu AS base\nFROM debian AS base\n",
+        );
         let err = parse_build_config(&path).unwrap_err();
-        assert!(err.to_string().contains("duplicate FROM"), "got: {err}");
+        assert!(
+            err.to_string().contains("duplicate stage alias"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -580,8 +849,9 @@ mod tests {
         let tmp = TempDir::new("empty-ops");
         let path = write_config(tmp.path(), "FROM ubuntu\n");
         let config = parse_build_config(&path).unwrap();
-        assert_eq!(config.rootfs, "ubuntu");
-        assert!(config.ops.is_empty());
+        assert_eq!(config.stages.len(), 1);
+        assert_eq!(config.stages[0].from, "ubuntu");
+        assert!(config.stages[0].ops.is_empty());
     }
 
     #[test]
@@ -636,12 +906,137 @@ mod tests {
             "FROM ubuntu\nRUN echo hello | grep hello && echo done\n",
         );
         let config = parse_build_config(&path).unwrap();
-        match &config.ops[0] {
+        match &config.stages[0].ops[0] {
             BuildOp::Run { command, .. } => {
                 assert_eq!(command, "echo hello | grep hello && echo done");
             }
             _ => panic!("expected Run"),
         }
+    }
+
+    // --- FROM x AS y tests ---
+
+    #[test]
+    fn test_parse_from_with_alias() {
+        let tmp = TempDir::new("from-alias");
+        let path = write_config(tmp.path(), "FROM ubuntu AS builder\n");
+        let config = parse_build_config(&path).unwrap();
+        assert_eq!(config.stages.len(), 1);
+        assert_eq!(config.stages[0].from, "ubuntu");
+        assert_eq!(config.stages[0].alias.as_deref(), Some("builder"));
+    }
+
+    #[test]
+    fn test_parse_multi_stage() {
+        let tmp = TempDir::new("multi-stage");
+        let path = write_config(
+            tmp.path(),
+            "FROM ubuntu AS builder\nRUN make all\nFROM debian\nRUN echo done\n",
+        );
+        let config = parse_build_config(&path).unwrap();
+        assert_eq!(config.stages.len(), 2);
+        assert_eq!(config.stages[0].from, "ubuntu");
+        assert_eq!(config.stages[0].alias.as_deref(), Some("builder"));
+        assert_eq!(config.stages[0].ops.len(), 1);
+        assert_eq!(config.stages[1].from, "debian");
+        assert!(config.stages[1].alias.is_none());
+        assert_eq!(config.stages[1].ops.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_copy_from_stage() {
+        let tmp = TempDir::new("copy-from-stage");
+        let path = write_config(
+            tmp.path(),
+            "FROM ubuntu AS builder\nRUN make\nFROM debian\nCOPY --from=builder /app/bin /usr/bin\n",
+        );
+        let config = parse_build_config(&path).unwrap();
+        assert_eq!(config.stages.len(), 2);
+        match &config.stages[1].ops[0] {
+            BuildOp::Copy {
+                from_stage,
+                src,
+                dst,
+                ..
+            } => {
+                assert_eq!(from_stage.as_deref(), Some("builder"));
+                assert_eq!(src, Path::new("/app/bin"));
+                assert_eq!(dst, Path::new("/usr/bin"));
+            }
+            _ => panic!("expected Copy"),
+        }
+    }
+
+    #[test]
+    fn test_parse_copy_from_by_index() {
+        let tmp = TempDir::new("copy-from-index");
+        let path = write_config(
+            tmp.path(),
+            "FROM ubuntu\nRUN make\nFROM debian\nCOPY --from=0 /out /bin\n",
+        );
+        let config = parse_build_config(&path).unwrap();
+        match &config.stages[1].ops[0] {
+            BuildOp::Copy { from_stage, .. } => {
+                assert_eq!(from_stage.as_deref(), Some("0"));
+            }
+            _ => panic!("expected Copy"),
+        }
+    }
+
+    #[test]
+    fn test_parse_copy_from_forward_ref() {
+        let tmp = TempDir::new("forward-ref");
+        // Stage 1 tries to reference stage 1 (itself / a forward ref).
+        let path = write_config(
+            tmp.path(),
+            "FROM ubuntu AS a\nFROM debian AS b\nCOPY --from=b /src /dst\n",
+        );
+        let err = parse_build_config(&path).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("references unknown or current/forward stage"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_copy_from_unknown_alias() {
+        let tmp = TempDir::new("unknown-alias");
+        let path = write_config(
+            tmp.path(),
+            "FROM ubuntu\nFROM debian\nCOPY --from=nonexistent /src /dst\n",
+        );
+        let err = parse_build_config(&path).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("references unknown or current/forward stage"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_from_invalid_syntax() {
+        let tmp = TempDir::new("from-syntax");
+        let path = write_config(tmp.path(), "FROM ubuntu foo bar\n");
+        let err = parse_build_config(&path).unwrap_err();
+        assert!(
+            err.to_string().contains("invalid FROM syntax"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_copy_from_missing_args() {
+        let tmp = TempDir::new("from-missing-args");
+        let path = write_config(
+            tmp.path(),
+            "FROM ubuntu AS a\nFROM debian\nCOPY --from=a /src\n",
+        );
+        let err = parse_build_config(&path).unwrap_err();
+        assert!(
+            err.to_string().contains("exactly two path arguments"),
+            "got: {err}"
+        );
     }
 
     // --- do_copy tests ---
