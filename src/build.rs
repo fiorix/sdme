@@ -152,11 +152,14 @@ fn run_in_container(name: &str, command: &str, verbose: bool) -> Result<()> {
     }
     let status = std::process::Command::new("systemd-run")
         .args([
-            "--machine", name,
+            "--machine",
+            name,
             "--pipe",
             "--wait",
             "--quiet",
-            "/bin/sh", "-c", command,
+            "/bin/sh",
+            "-c",
+            command,
         ])
         .status()
         .context("failed to run systemd-run")?;
