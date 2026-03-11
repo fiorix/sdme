@@ -273,6 +273,7 @@ phase5_test_oci() {
         record "oci/volume-dir" SKIP "app import failed"
         record "oci/boot" SKIP "app import failed"
         record "oci/service" SKIP "app import failed"
+        record "oci/logs" SKIP "app import failed"
         record "oci/curl-port" SKIP "app import failed"
         record "oci/curl-content" SKIP "app import failed"
         return
@@ -291,6 +292,7 @@ phase5_test_oci() {
         record "oci/volume-dir" SKIP "create failed"
         record "oci/boot" SKIP "create failed"
         record "oci/service" SKIP "create failed"
+        record "oci/logs" SKIP "create failed"
         record "oci/curl-port" SKIP "create failed"
         record "oci/curl-content" SKIP "create failed"
         return
@@ -315,6 +317,7 @@ phase5_test_oci() {
         record "oci/volume-dir" FAIL "$vol_dir does not exist"
         record "oci/boot" SKIP "volume dir missing"
         record "oci/service" SKIP "volume dir missing"
+        record "oci/logs" SKIP "volume dir missing"
         record "oci/curl-port" SKIP "volume dir missing"
         record "oci/curl-content" SKIP "volume dir missing"
         stop_container "$CT_OCI"
@@ -354,6 +357,7 @@ HTMLEOF
     if ! output=$(timeout "$TIMEOUT_BOOT" sdme start "$CT_OCI" -t 120 2>&1); then
         record "oci/boot" FAIL "start failed: $output"
         record "oci/service" SKIP "start failed"
+        record "oci/logs" SKIP "start failed"
         record "oci/curl-port" SKIP "start failed"
         record "oci/curl-content" SKIP "start failed"
         sdme rm -f "$CT_OCI" 2>/dev/null || true
@@ -370,6 +374,13 @@ HTMLEOF
         record "oci/service" PASS
     else
         record "oci/service" FAIL "$output"
+    fi
+
+    # Check OCI app logs via sdme logs --oci
+    if output=$(timeout "$TIMEOUT_TEST" sdme logs --oci "$CT_OCI" --no-pager -n 5 2>&1); then
+        record "oci/logs" PASS
+    else
+        record "oci/logs" FAIL "$output"
     fi
 
     # Curl the port-forwarded nginx via the host-side veth IP.
@@ -452,7 +463,7 @@ generate_report() {
         echo "|------|--------|---------|"
         for key in build import plain/create plain/boot plain/exec \
                    oci/import oci/create oci/state-ports oci/volume-dir \
-                   oci/boot oci/service oci/curl-port oci/curl-content; do
+                   oci/boot oci/service oci/logs oci/curl-port oci/curl-content; do
             if [[ -n "${RESULTS[$key]+x}" ]]; then
                 local st msg
                 st=$(result_status "$key")

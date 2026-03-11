@@ -97,14 +97,14 @@ $SDME start pod-c2 $VFLAG
 # Start a listener in c1 on port 9999 as a transient systemd unit.
 # The pod netns has no internet, so we use Python (available in Ubuntu)
 # instead of nc. We use systemd-run so the listener survives session exit.
-machinectl shell pod-c1 /usr/bin/systemd-run --unit=test-listener \
+$SDME exec pod-c1 /usr/bin/systemd-run --unit=test-listener \
     /usr/bin/python3 -c \
     'import socket; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind(("127.0.0.1",9999)); s.listen(1); c,_=s.accept(); c.sendall(b"HELLO\n"); c.close(); s.close()' \
     >/dev/null 2>&1
 sleep 1
 
 # Connect from c2 to c1 via 127.0.0.1:9999 using Python.
-result=$(machinectl shell pod-c2 /usr/bin/python3 -c \
+result=$($SDME exec pod-c2 /usr/bin/python3 -c \
     'import socket; s=socket.socket(); s.settimeout(2); s.connect(("127.0.0.1",9999)); print(s.recv(1024).decode().strip()); s.close()' \
     2>/dev/null || true)
 if [[ "$result" == *"HELLO"* ]]; then
@@ -149,13 +149,13 @@ else
 fi
 
 # Loopback connectivity.
-machinectl shell pod-pn1 /usr/bin/systemd-run --unit=test-listener \
+$SDME exec pod-pn1 /usr/bin/systemd-run --unit=test-listener \
     /usr/bin/python3 -c \
     'import socket; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind(("127.0.0.1",9997)); s.listen(1); c,_=s.accept(); c.sendall(b"PRIVNET\n"); c.close(); s.close()' \
     >/dev/null 2>&1
 sleep 1
 
-result=$(machinectl shell pod-pn2 /usr/bin/python3 -c \
+result=$($SDME exec pod-pn2 /usr/bin/python3 -c \
     'import socket; s=socket.socket(); s.settimeout(2); s.connect(("127.0.0.1",9997)); print(s.recv(1024).decode().strip()); s.close()' \
     2>/dev/null || true)
 if [[ "$result" == *"PRIVNET"* ]]; then

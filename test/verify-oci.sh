@@ -194,6 +194,7 @@ phase2_test_oci() {
             record "$distro/volume-dir" SKIP "base import failed"
             record "$distro/boot" SKIP "base import failed"
             record "$distro/service" SKIP "base import failed"
+            record "$distro/oci-logs" SKIP "base import failed"
             record "$distro/curl-port" SKIP "base import failed"
             record "$distro/curl-content" SKIP "base import failed"
             continue
@@ -216,6 +217,7 @@ phase2_test_oci() {
             record "$distro/volume-dir" SKIP "app import failed"
             record "$distro/boot" SKIP "app import failed"
             record "$distro/service" SKIP "app import failed"
+            record "$distro/oci-logs" SKIP "app import failed"
             record "$distro/curl-port" SKIP "app import failed"
             record "$distro/curl-content" SKIP "app import failed"
             continue
@@ -237,6 +239,7 @@ phase2_test_oci() {
             record "$distro/volume-dir" SKIP "create failed"
             record "$distro/boot" SKIP "create failed"
             record "$distro/service" SKIP "create failed"
+            record "$distro/oci-logs" SKIP "create failed"
             record "$distro/curl-port" SKIP "create failed"
             record "$distro/curl-content" SKIP "create failed"
             continue
@@ -272,6 +275,7 @@ phase2_test_oci() {
             # Can't serve content without the volume dir
             record "$distro/boot" SKIP "volume dir missing"
             record "$distro/service" SKIP "volume dir missing"
+            record "$distro/oci-logs" SKIP "volume dir missing"
             record "$distro/curl-port" SKIP "volume dir missing"
             record "$distro/curl-content" SKIP "volume dir missing"
             stop_container "$ct_name"
@@ -303,6 +307,7 @@ HTMLEOF
         if ! output=$(timeout "$TIMEOUT_BOOT" sdme start "$ct_name" -t 120 2>&1); then
             record "$distro/boot" FAIL "start failed: $output"
             record "$distro/service" SKIP "start failed"
+            record "$distro/oci-logs" SKIP "start failed"
             record "$distro/curl-port" SKIP "start failed"
             record "$distro/curl-content" SKIP "start failed"
             sdme rm -f "$ct_name" 2>/dev/null || true
@@ -319,6 +324,13 @@ HTMLEOF
             record "$distro/service" PASS
         else
             record "$distro/service" FAIL "$output"
+        fi
+
+        # -- Check OCI app logs via sdme logs --oci --
+        if output=$(timeout "$TIMEOUT_TEST" sdme logs --oci "$ct_name" --no-pager -n 5 2>&1); then
+            record "$distro/oci-logs" PASS
+        else
+            record "$distro/oci-logs" FAIL "$output"
         fi
 
         # -- Curl the port-forwarded nginx --
@@ -416,10 +428,10 @@ generate_report() {
 
         echo "## Results"
         echo ""
-        echo "| Distro | Import Base | Import App | State Ports | State Volumes | Volume Dir | Boot | Service | Curl Port | Curl Content |"
-        echo "|--------|------------|------------|-------------|---------------|------------|------|---------|-----------|--------------|"
+        echo "| Distro | Import Base | Import App | State Ports | State Volumes | Volume Dir | Boot | Service | OCI Logs | Curl Port | Curl Content |"
+        echo "|--------|------------|------------|-------------|---------------|------------|------|---------|----------|-----------|--------------|"
         for distro in "${DISTROS[@]}"; do
-            local ib ia sp sv vd bo se cp cc
+            local ib ia sp sv vd bo se ol cp cc
             ib=$(result_status "$distro/import-base")
             ia=$(result_status "$distro/import-app")
             sp=$(result_status "$distro/state-ports")
@@ -427,9 +439,10 @@ generate_report() {
             vd=$(result_status "$distro/volume-dir")
             bo=$(result_status "$distro/boot")
             se=$(result_status "$distro/service")
+            ol=$(result_status "$distro/oci-logs")
             cp=$(result_status "$distro/curl-port")
             cc=$(result_status "$distro/curl-content")
-            echo "| $distro | $ib | $ia | $sp | $sv | $vd | $bo | $se | $cp | $cc |"
+            echo "| $distro | $ib | $ia | $sp | $sv | $vd | $bo | $se | $ol | $cp | $cc |"
         done
         echo ""
 

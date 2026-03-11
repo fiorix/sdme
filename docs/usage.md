@@ -459,8 +459,8 @@ make                        # same as cargo build --release
 sudo make install           # install to /usr/local (does NOT rebuild)
 ```
 
-See [tests.md](tests.md) for the test suite and [test_results.md](test_results.md)
-for the latest verified results.
+See [test/README.md](../test/README.md) for the test suite and
+[test/results.md](../test/results.md) for the latest verified results.
 
 ## Further reading
 
@@ -475,5 +475,5 @@ for the latest verified results.
 - [OCI-to-nspawn bridging](hacks.md): how sdme handles non-root OCI
   users and /dev/stdout compatibility
 - [macOS](macos.md): running sdme on macOS via lima-vm
-- [Tests](tests.md): test suite, how to run
-- [Test results](test_results.md): latest verified results
+- [Tests](../test/README.md): test suite, how to run
+- [Test results](../test/results.md): latest verified results

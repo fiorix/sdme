@@ -165,5 +165,5 @@ test run will re-import everything from OCI registries.
 
 ## Test results
 
-See [test_results.md](test_results.md) for the latest verified results.
+See [results.md](results.md) for the latest verified results.
 Update that file before each tagged release.

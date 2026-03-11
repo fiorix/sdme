@@ -127,6 +127,6 @@ full story.
 - [docs/hacks.md](docs/hacks.md) -- Wiring OCI apps into
   systemd-nspawn
 - [docs/macos.md](docs/macos.md) -- Running sdme on macOS via lima-vm
-- [docs/tests.md](docs/tests.md) -- Test suite overview
-- [docs/test_results.md](docs/test_results.md) -- Latest test results
+- [test/README.md](test/README.md) -- Test suite overview
+- [test/results.md](test/results.md) -- Latest test results
 - [docs/story.md](docs/story.md) -- The backstory and project stats

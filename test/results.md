@@ -4,7 +4,7 @@ Last verified: 2026-03-11
 
 System: Linux 6.17.0-14-generic, systemd 257 (257.9-0ubuntu2.1), sdme 0.3.0
 
-See [tests.md](tests.md) for how to run the tests.
+See [README.md](README.md) for how to run the tests.
 
 ## Unit tests
 
