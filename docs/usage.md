@@ -182,30 +182,115 @@ To avoid passing `--base-fs` every time, set a default:
 sudo sdme config set default_base_fs ubuntu
 ```
 
-See [oci.md](oci.md) for more examples, including MySQL with runtime
-environment variables, pod networking, and known limitations.
+See the [OCI integration section](architecture.md#8-oci-integration)
+in the architecture doc for internals, including the capsule model,
+privilege dropping, and known limitations.
 
 ## Pods
 
 Pods give multiple containers a shared network namespace so they can
 reach each other on localhost. Same concept as Kubernetes pods: one
-network namespace, multiple containers.
+network namespace, multiple processes.
+
+### Lifecycle
+
+```bash
+sudo sdme pod new my-pod         # create a pod
+sudo sdme pod ls                 # list pods
+sudo sdme pod rm my-pod          # remove (fails if containers reference it)
+sudo sdme pod rm -f my-pod       # force remove
+```
+
+A pod creates a network namespace at `/run/sdme/pods/{name}/netns` with
+loopback only. State is persisted at `{datadir}/pods/{name}/state`.
+
+### Joining a pod
+
+Containers join a pod at creation time via `--pod` or `--oci-pod`.
+
+**`--pod` (whole container):** The entire nspawn container (init,
+services, everything) runs in the pod's network namespace:
 
 ```bash
 sudo sdme pod new my-pod
-sudo sdme new --pod=my-pod -r ubuntu db
-sudo sdme new --pod=my-pod -r ubuntu app
-# db and app can communicate via 127.0.0.1
+sudo sdme create --pod=my-pod -r ubuntu db
+sudo sdme create --pod=my-pod -r ubuntu app
+sudo sdme start db app
+# db and app communicate via 127.0.0.1
 ```
 
-There is also `--oci-pod` for placing only the OCI app process in
-the pod's network namespace while keeping the container's systemd on
-its own network. See [oci.md](oci.md) for details.
+`--pod` is mutually exclusive with `--private-network`. Incompatible
+with `--userns` and `--hardened` because the kernel blocks
+`setns(CLONE_NEWNET)` across user namespace boundaries.
+
+**`--oci-pod` (app process only):** Only the
+`sdme-oci-app.service` process enters the pod's network namespace.
+The container's systemd init and other services remain in their own
+namespace:
 
 ```bash
-sudo sdme pod ls                 # list pods
-sudo sdme pod rm my-pod          # remove a pod
+sudo sdme pod new web-pod
+sudo sdme create --oci-pod=web-pod --hardened -r nginx web
+sudo sdme start web
 ```
+
+Requires `--private-network` (or `--hardened`/`--strict`, which imply
+it). Works with `--hardened` because the netns join happens inside the
+container's own user namespace.
+
+**Combining both flags:** Both `--pod` and `--oci-pod` can be set on
+the same container, pointing to the same or different pods. When set to
+different pods, the container-level networking and the application-level
+networking operate in separate network namespaces.
+
+```bash
+sudo sdme pod new infra-pod
+sudo sdme pod new app-pod
+sudo sdme create --pod=infra-pod --oci-pod=app-pod -r nginx web
+```
+
+### Host access via nsenter
+
+Reach pod services from the host by entering the pod's network
+namespace:
+
+```bash
+sudo nsenter --net=/run/sdme/pods/my-pod/netns curl -s http://localhost
+```
+
+### Multi-service patterns
+
+Multiple containers in a pod communicate over localhost without port
+forwarding or bridges:
+
+```bash
+sudo sdme pod new monitoring
+sudo sdme create --pod=monitoring -r nginx web
+sudo sdme create --pod=monitoring -r redis cache
+sudo sdme create --pod=monitoring -r prometheus monitor
+sudo sdme start web cache monitor
+```
+
+All services are reachable from any container in the pod: nginx on :80,
+redis on :6379, prometheus on :9090.
+
+**OCI app pod groups.** Group OCI app containers into isolated pod
+networks:
+
+```bash
+# Web tier
+sudo sdme pod new web-tier
+sudo sdme create --oci-pod=web-tier --hardened -r nginx frontend
+sudo sdme create --oci-pod=web-tier --hardened -r nginx api-gateway
+
+# Data tier (separate pod, separate network)
+sudo sdme pod new data-tier
+sudo sdme create --oci-pod=data-tier --hardened -r redis cache
+sudo sdme create --oci-pod=data-tier --hardened -r mysql db
+```
+
+Containers in `web-tier` share localhost. Containers in `data-tier`
+share a separate localhost. The two tiers are network-isolated.
 
 ## Security
 
@@ -238,8 +323,9 @@ sudo sdme create mybox -r ubuntu \
   --system-call-filter '~@raw-io'
 ```
 
-See [security.md](security.md) for a full analysis of the isolation
-model and comparisons with Docker and Podman.
+See [architecture.md, Section 14](architecture.md#14-security) for
+implementation details and [security.md](security.md) for comparisons
+with Docker and Podman.
 
 ## Networking
 
@@ -257,6 +343,17 @@ sudo sdme create mybox --private-network --port 8080:80  # port forwarding
 
 `--hardened` and `--strict` both enable `--private-network`
 automatically.
+
+### Network zones
+
+Containers in the same zone can reach each other by name:
+
+```bash
+sudo sdme create -r nginx --private-network --network-zone=myzone -p 8080:80 web
+sudo sdme create -r ubuntu --private-network --network-zone=myzone client
+sudo sdme start web client
+sudo sdme exec client -- curl http://web
+```
 
 ## Resource limits
 
@@ -335,9 +432,12 @@ See [tests.md](tests.md) for the full test matrix and CI details.
 
 - [Architecture and design](architecture.md): internals, overlayfs
   layout, container lifecycle, the build engine
-- [OCI containers](oci.md): OCI app examples, pods, limitations
-- [Security](security.md): isolation model, hardening flags,
-  comparison with Docker and Podman
+- [OCI integration](architecture.md#8-oci-integration): capsule model,
+  privilege dropping, ports, volumes, limitations
+- [Security implementation](architecture.md#14-security): capabilities,
+  seccomp, AppArmor, `--hardened`, `--strict`
+- [Security comparisons](security.md): isolation model vs Docker and
+  Podman
 - [OCI-to-nspawn bridging](hacks.md): how sdme handles non-root OCI
   users and /dev/stdout compatibility
 - [macOS](macos.md): running sdme on macOS via lima-vm

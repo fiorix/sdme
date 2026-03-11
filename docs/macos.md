@@ -1,52 +1,43 @@
-# Using sdme on macOS
+# macOS Support
 
-sdme requires Linux with systemd. On a Mac, you can get a local Linux VM
-using [lima-vm](https://lima-vm.io/).
+sdme requires Linux with systemd. On macOS, use
+[lima-vm](https://lima-vm.io/) to run a Linux VM.
 
-> **Note:** If your Mac has an Apple Silicon chip (M1, M2, etc.), the VM
-> runs Linux on aarch64. Not all binaries and container images will work
-> out of the box. Make sure what you're running supports `arm64`/`aarch64`.
+## Prerequisites
 
-## Set up a Linux VM
+- [Homebrew](https://brew.sh/)
+- lima-vm: `brew install lima`
 
-Install lima:
+## VM setup
 
-```bash
-brew install lima
-```
-
-Create and start a VM:
+Create and start a VM with any systemd-based distro:
 
 ```bash
 limactl create --name=dev template:ubuntu
 limactl start dev
-```
-
-You can pick other distros. Run `limactl create` interactively to see
-available templates.
-
-Shell into the VM:
-
-```bash
 limactl shell dev
 ```
 
-From here on, all commands run inside the VM.
+Other distro templates are available via `limactl create` (interactive).
 
-## Install sdme
+## Installing sdme
+
+Inside the VM:
 
 ```bash
 curl -fsSL https://fiorix.github.io/sdme/install.sh | sudo sh
 ```
 
-## Run your first container
+All sdme commands run inside the VM from this point.
 
-```bash
-sudo sdme new
-```
+## Known limitations
 
-Check that systemd is running inside the container:
-
-```bash
-systemctl status
-```
+- **Apple Silicon (M1/M2/M3/M4):** The VM runs Linux on aarch64.
+  Container images and binaries must support `arm64`/`aarch64`.
+- **File sharing:** Lima mounts macOS directories into the VM by
+  default. Bind mounts (`-b`) pointing to lima-shared paths work, but
+  file operations may be slower than native.
+- **Networking:** Lima forwards ports from the VM to macOS. Services
+  running in host-network containers are accessible on `localhost` from
+  the Mac. Private-network containers require additional port forwarding
+  configuration in the lima VM config.

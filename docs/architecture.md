@@ -427,9 +427,33 @@ destination directory.
 ### Two modes: base OS and application
 
 When importing an OCI image, sdme classifies it as either a **base OS
-image** or an **application image** based on the image config: presence
-of an entrypoint, non-shell default command, or exposed ports indicate
-an application.
+image** or an **application image** based on the image config:
+
+| Classification    | Criteria                                          | Result                                      |
+|-------------------|---------------------------------------------------|---------------------------------------------|
+| Base OS image     | No entrypoint, shell default command, no ports    | Extracted as a first-class sdme rootfs       |
+| Application image | Has entrypoint, non-shell command, or exposed ports | Placed under `/oci/root` inside a base rootfs |
+
+Application images require a base rootfs specified with `--base-fs`:
+
+```bash
+sudo sdme fs import ubuntu docker.io/ubuntu:24.04 -v
+sudo sdme fs import nginx docker.io/nginx --base-fs=ubuntu -v
+```
+
+Set a default to avoid repeating `--base-fs`:
+
+```bash
+sudo sdme config set default_base_fs ubuntu
+```
+
+The `--oci-mode` flag overrides auto-detection:
+
+| Flag              | Behavior                                     |
+|-------------------|----------------------------------------------|
+| `--oci-mode=auto` | Auto-detect from image config (default)       |
+| `--oci-mode=base` | Force base OS mode                            |
+| `--oci-mode=app`  | Force application mode (requires `--base-fs`) |
 
 **Base OS import** (debian, ubuntu, fedora) is straightforward: extract
 the rootfs and install systemd if missing. The result is a first-class
@@ -563,6 +587,27 @@ inside the `RootDirectory=/oci/root` chroot where the OCI application
 runs. OCI-declared volumes and ports are handled correctly because sdme
 maps volumes into the `/oci/root` subtree and ports operate at the
 network namespace level.
+
+### Environment variables
+
+OCI image environment variables are stored in `/oci/env` inside the
+rootfs (loaded via `EnvironmentFile=-/oci/env` in the generated unit).
+Runtime-only variables (e.g. `MYSQL_ROOT_PASSWORD`) must be added
+manually before first boot:
+
+```bash
+echo 'MYSQL_ROOT_PASSWORD=secret' | sudo tee -a /var/lib/sdme/fs/mysql/oci/env
+```
+
+### Limitations
+
+- **One OCI service per container.** Each rootfs generates a single
+  `sdme-oci-app.service`.
+- **Environment variables need manual setup.** Runtime-only variables
+  must be added to `/oci/env` before first boot.
+- **No health checks.** OCI HEALTHCHECK directives are ignored.
+- **No restart policy mapping.** OCI restart policies don't map to
+  systemd; the generated unit uses systemd defaults.
 
 ### Future direction
 
@@ -799,12 +844,250 @@ Config files are written with mode `0600` and directories with mode
 
 ## 14. Security
 
-For a comprehensive analysis of sdme's isolation model, including
-namespace isolation, capability bounding sets, seccomp filtering,
-AppArmor, and comparisons with Docker and Podman, see
+This section documents sdme's security implementation: capabilities,
+seccomp, AppArmor, the `--hardened` and `--strict` flags, and input
+sanitization. For comparisons with Docker and Podman, see
 [docs/security.md](security.md).
 
-This section covers input sanitization for untrusted data.
+### Capability bounding set
+
+systemd-nspawn retains 26 capabilities by default:
+
+```
+CAP_AUDIT_CONTROL       CAP_AUDIT_WRITE         CAP_CHOWN
+CAP_DAC_OVERRIDE        CAP_DAC_READ_SEARCH     CAP_FOWNER
+CAP_FSETID              CAP_IPC_OWNER           CAP_KILL
+CAP_LEASE               CAP_LINUX_IMMUTABLE     CAP_MKNOD
+CAP_NET_BIND_SERVICE    CAP_NET_BROADCAST       CAP_NET_RAW
+CAP_SETFCAP             CAP_SETGID              CAP_SETPCAP
+CAP_SETUID              CAP_SYS_ADMIN           CAP_SYS_BOOT
+CAP_SYS_CHROOT          CAP_SYS_NICE            CAP_SYS_PTRACE
+CAP_SYS_RESOURCE        CAP_SYS_TTY_CONFIG
+```
+
+`CAP_NET_ADMIN` is added only when `--private-network` is active, since
+it is safe to grant when the container has its own network namespace
+(changes only affect the isolated namespace, not the host).
+
+`CAP_SYS_ADMIN` is the most significant capability in this set. It is
+required for systemd to function inside the container: mounting
+filesystems, configuring cgroups, managing namespaces for its own
+services. This cannot be dropped without breaking the
+systemd-inside-nspawn model.
+
+Notable exclusions: `CAP_SYS_MODULE` (no kernel module loading),
+`CAP_SYS_RAWIO` (no raw I/O port access), `CAP_SYS_TIME` (no system
+clock modification), `CAP_BPF` (no BPF program loading),
+`CAP_SYSLOG`, and `CAP_IPC_LOCK`.
+
+sdme provides fine-grained capability management:
+
+- `--drop-capability CAP_X`: drop individual capabilities from nspawn's
+  default set. Accepts names with or without the `CAP_` prefix.
+- `--capability CAP_X`: add capabilities not in the default set (e.g.
+  `CAP_NET_ADMIN` for containers with `--private-network`).
+
+Both flags are repeatable and validated against a known set of Linux
+capabilities. Specifying the same capability in both is rejected as
+contradictory.
+
+### Seccomp filtering
+
+nspawn applies a built-in allowlist-based seccomp filter. Syscalls not
+on the allowlist are blocked with `EPERM` (for known syscalls) or
+`ENOSYS` (for unknown ones).
+
+Allowed by default: `@basic-io`, `@file-system`, `@io-event`, `@ipc`,
+`@mount`, `@network-io`, `@process`, `@resources`, `@setuid`, `@signal`,
+`@sync`, `@timer`, and about 50 individual syscalls.
+
+Blocked unconditionally: `kexec_load`, `kexec_file_load`,
+`perf_event_open`, `fanotify_init`, `open_by_handle_at`, `quotactl`,
+the `@swap` group, and the `@cpu-emulation` group.
+
+Capability-gated: `@clock` requires `CAP_SYS_TIME`, `@module` requires
+`CAP_SYS_MODULE`, `@raw-io` requires `CAP_SYS_RAWIO`. Since none of
+these capabilities are in the default bounding set, these syscall groups
+are effectively blocked.
+
+`--system-call-filter` layers additional seccomp filters on top of
+nspawn's baseline. It uses systemd's group syntax:
+
+- `@group`: allow a syscall group
+- `~@group`: deny a syscall group
+
+```
+sdme create mybox --system-call-filter ~@raw-io
+sdme create mybox --system-call-filter ~@cpu-emulation
+```
+
+The flag is repeatable. Note that `~@mount` breaks systemd inside the
+container, the same reason nspawn allows it in the first place.
+
+### Mandatory access control
+
+sdme ships a default AppArmor profile (`sdme-default`) designed for
+systemd-nspawn system containers. The profile allows the operations
+required for systemd boot (mount, pivot_root, signal, unix sockets)
+while denying dangerous host-level access (raw device I/O, `/proc`
+sysctl writes, kernel module paths). It is applied via
+`AppArmorProfile=` in the systemd service unit drop-in.
+
+The profile is automatically applied by `--strict`. It can also be used
+standalone:
+
+```
+sdme create mybox --apparmor-profile sdme-default
+```
+
+To install the profile:
+
+```
+sdme config apparmor-profile > /etc/apparmor.d/sdme-default
+apparmor_parser -r /etc/apparmor.d/sdme-default
+```
+
+The deb and rpm packages install and load the profile automatically.
+
+**SELinux is not supported.** sdme has no SELinux integration. During
+rootfs import (`sdme fs import`), `security.selinux` extended
+attributes are explicitly skipped because they do not transfer
+meaningfully between filesystems.
+
+### Privilege escalation prevention
+
+**`--no-new-privileges`** passes `--no-new-privileges=yes` to nspawn.
+Off by default because interactive containers typically want `sudo`/`su`
+to work; `no_new_privs` blocks privilege escalation via setuid binaries
+and file capabilities. Enabled by `--hardened` and `--strict`.
+
+**`--read-only`** makes the overlayfs merged view read-only.
+Applications needing writable areas use bind mounts (`-b`).
+
+### The `--hardened` flag
+
+`--hardened` is sdme's one-flag defense-in-depth bundle. It enables
+multiple security layers at once:
+
+- **User namespace isolation** (`--private-users=pick
+  --private-users-ownership=auto`): container root maps to a high
+  unprivileged UID on the host.
+- **Private network namespace** (`--private-network`): the container
+  gets its own network namespace with loopback only.
+- **`--no-new-privileges=yes`**: blocks privilege escalation via setuid
+  binaries and file capabilities.
+- **Drops capabilities**: `CAP_SYS_PTRACE`, `CAP_NET_RAW`,
+  `CAP_SYS_RAWIO`, `CAP_SYS_BOOT`, reducing from 26 to 22 retained
+  capabilities.
+
+```
+sdme create mybox --hardened
+sdme new mybox --hardened
+```
+
+**When cloning the host rootfs** (no `-r` flag), `--hardened` has
+several visible effects because the container inherits the host's
+installed binaries and enabled services:
+
+- **No internet.** `--private-network` gives the container only a
+  loopback interface. Host services that assume network access (sshd,
+  NTP, avahi, etc.) will fail or retry indefinitely.
+- **`sudo`/`su` silently fail.** `--no-new-privileges` prevents setuid
+  escalation. The binaries exist and appear normal, but the kernel
+  blocks the privilege transition.
+- **`ping` and raw-socket tools fail.** `CAP_NET_RAW` is dropped.
+- **`strace`/`gdb` fail.** `CAP_SYS_PTRACE` is dropped.
+
+`sdme new` prints notes about `--private-network` and
+`--no-new-privileges` when cloning the host rootfs. For imported rootfs
+(e.g. `-r ubuntu`), these effects are less surprising because the rootfs
+was built for container use.
+
+For a host-rootfs container where these side effects matter, apply
+individual flags instead:
+
+```
+sdme create mybox --userns --drop-capability CAP_SYS_RAWIO
+```
+
+**Composable with fine-grained flags.** `--hardened` sets a baseline
+that individual flags can override or extend:
+
+```
+sdme create mybox --hardened --capability CAP_NET_RAW       # re-enable a dropped cap
+sdme create mybox --hardened --system-call-filter ~@raw-io  # add seccomp filter
+sdme create mybox --hardened --apparmor-profile myprofile   # add MAC confinement
+sdme create mybox --hardened --read-only                    # read-only rootfs
+```
+
+**Configurable.** The capabilities dropped by `--hardened` are
+controlled by the `hardened_drop_caps` config key:
+
+```
+sdme config set hardened_drop_caps CAP_SYS_PTRACE,CAP_NET_RAW
+```
+
+### The `--strict` flag
+
+`--strict` closes the gaps between `--hardened` and Docker/Podman
+defaults. It implies `--hardened` and adds:
+
+- **Aggressive capability drops**: retains only the ~14 capabilities
+  Docker grants (AUDIT_WRITE, CHOWN, DAC_OVERRIDE, FOWNER, FSETID,
+  KILL, MKNOD, NET_BIND_SERVICE, SETFCAP, SETGID, SETPCAP, SETUID,
+  SYS_CHROOT) plus `CAP_SYS_ADMIN` (required for systemd init). Also
+  drops `CAP_NET_RAW` (carried over from `--hardened`, stricter than
+  Docker). Drops 27 capabilities total.
+- **Seccomp filters**: denies `@cpu-emulation`, `@debug`, `@obsolete`,
+  and `@raw-io` syscall groups on top of nspawn's baseline filter.
+- **AppArmor profile**: applies the `sdme-default` profile, which
+  confines `/proc`/`/sys` writes and raw device access at the MAC level.
+
+```
+sdme create mybox --strict
+sdme new mybox --strict
+```
+
+**When cloning the host rootfs**, `--strict` compounds the effects of
+`--hardened` with additional restrictions:
+
+- **`systemd-networkd` and `NetworkManager` fail.**
+  `CAP_NET_ADMIN` is dropped.
+- **`systemd-timesyncd` cannot set the clock.** `CAP_SYS_TIME` is
+  dropped.
+- **Logging to `/dev/kmsg` is denied.** `CAP_SYSLOG` is dropped.
+- **Nice/priority adjustments fail.** `CAP_SYS_NICE` is dropped.
+- **AppArmor profile must be installed first.** The `sdme-default`
+  profile is checked at `start` time; if it is not loaded, the
+  container fails to start with instructions for installation.
+
+For host-rootfs use, `--hardened` with selective additions is often
+more practical than `--strict`:
+
+```
+sdme create mybox --hardened --system-call-filter ~@raw-io
+```
+
+`--strict` is best suited for imported rootfs images where the service
+set is known and controlled.
+
+**Why `CAP_SYS_ADMIN` is retained.** `CAP_SYS_ADMIN` is required for
+systemd to function inside the container. It needs to mount filesystems,
+configure cgroups, and manage namespaces for its own services. With user
+namespace isolation (enabled by `--strict`), `CAP_SYS_ADMIN` is scoped
+to the user namespace. It does not grant host-level SYS_ADMIN. A process
+that escapes the container lands in an unprivileged context on the host.
+
+**Composable with fine-grained flags.** Like `--hardened`, `--strict`
+sets a baseline that individual flags can override:
+
+```
+sdme create mybox --strict --capability CAP_NET_RAW   # re-enable a dropped cap
+sdme create mybox --strict --read-only                # add read-only rootfs
+sdme create mybox --strict --apparmor-profile custom  # use a custom profile
+```
+
+### Input sanitization
 
 sdme runs as root and handles untrusted input: tarballs from the
 internet, OCI images from public registries, QCOW2 disk images from

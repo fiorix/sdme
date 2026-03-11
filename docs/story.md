@@ -50,7 +50,7 @@ well. But they are also boring for my learning experience. Do what, now?
 Sit and run something inside? Meh.
 
 Actually, half true. Convenience was my initial driver for supporting
-[OCI containers](oci.md). We all know off the top of our head
+[OCI containers](architecture.md#8-oci-integration). We all know off the top of our head
 docker.io/ubuntu but I bet you wouldn't tell me the qcow2 URL for any
 distro outside your own maybe. Using debootstrap is fine but I wanted to
 ensure the systemd container ecosystem can be enriched by ecosystems
