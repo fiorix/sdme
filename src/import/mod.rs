@@ -555,34 +555,86 @@ fn cleanup_staging(staging_dir: &Path, force: bool, verbose: bool) -> Result<()>
 
 // --- Systemd detection and package installation ---
 
-/// Check whether systemd is present inside a rootfs.
-fn has_systemd(rootfs: &Path, family: &DistroFamily) -> bool {
-    let common_paths = [
+/// What systemd components are present in a rootfs.
+struct SystemdPresence {
+    /// systemd binary found.
+    has_systemd: bool,
+    /// dbus daemon found (dbus-daemon or dbus-broker).
+    has_dbus: bool,
+}
+
+impl SystemdPresence {
+    /// Returns true if both systemd and dbus are present.
+    fn is_bootable(&self) -> bool {
+        self.has_systemd && self.has_dbus
+    }
+
+    /// Describes which components are missing, for error messages.
+    fn missing(&self) -> &'static str {
+        match (self.has_systemd, self.has_dbus) {
+            (false, false) => "systemd and dbus",
+            (true, false) => "dbus",
+            (false, true) => "systemd",
+            (true, true) => "nothing",
+        }
+    }
+}
+
+/// Detect systemd and dbus presence inside a rootfs.
+fn detect_systemd_presence(rootfs: &Path) -> SystemdPresence {
+    let has_systemd = [
         "usr/bin/systemd",
         "usr/lib/systemd/systemd",
         "lib/systemd/systemd",
-    ];
-    for p in &common_paths {
-        if rootfs.join(p).exists() {
-            return true;
-        }
-    }
+    ]
+    .iter()
+    .any(|p| rootfs.join(p).exists())
+        || detect_systemd_nixos(rootfs);
 
-    if *family == DistroFamily::NixOS {
-        if rootfs.join("run/current-system/sw/bin/systemd").exists() {
-            return true;
-        }
-        // Scan nix store for systemd binary.
-        let store = rootfs.join("nix/store");
-        if let Ok(entries) = fs::read_dir(&store) {
-            for entry in entries.flatten() {
-                if entry.path().join("bin/systemd").exists() {
-                    return true;
-                }
+    let has_dbus = [
+        "usr/bin/dbus-daemon",
+        "usr/bin/dbus-broker",
+        "usr/lib/dbus-1/dbus-daemon-launch-helper",
+    ]
+    .iter()
+    .any(|p| rootfs.join(p).exists())
+        || detect_dbus_nixos(rootfs);
+
+    SystemdPresence {
+        has_systemd,
+        has_dbus,
+    }
+}
+
+/// Check for systemd in NixOS-specific paths.
+fn detect_systemd_nixos(rootfs: &Path) -> bool {
+    if rootfs.join("run/current-system/sw/bin/systemd").exists() {
+        return true;
+    }
+    scan_nix_store(rootfs, "bin/systemd")
+}
+
+/// Check for dbus in NixOS-specific paths.
+fn detect_dbus_nixos(rootfs: &Path) -> bool {
+    if rootfs
+        .join("run/current-system/sw/bin/dbus-daemon")
+        .exists()
+    {
+        return true;
+    }
+    scan_nix_store(rootfs, "bin/dbus-daemon")
+}
+
+/// Scan the nix store for a binary matching the given suffix.
+fn scan_nix_store(rootfs: &Path, suffix: &str) -> bool {
+    let store = rootfs.join("nix/store");
+    if let Ok(entries) = fs::read_dir(&store) {
+        for entry in entries.flatten() {
+            if entry.path().join(suffix).exists() {
+                return true;
             }
         }
     }
-
     false
 }
 
@@ -911,10 +963,15 @@ fn machinectl_fix_commands(family: &DistroFamily) -> Vec<String> {
 ///
 /// Returns `Ok(true)` if the user accepts, `Ok(false)` if declined,
 /// or `Err` if interrupted by a signal.
-fn prompt_install_systemd(family: &DistroFamily, distro_name: &str) -> Result<bool> {
+fn prompt_install_systemd(
+    presence: &SystemdPresence,
+    family: &DistroFamily,
+    distro_name: &str,
+) -> Result<bool> {
     let commands = install_commands(family);
-    eprintln!("warning: systemd not found in rootfs (detected: {distro_name})");
-    eprintln!("Install systemd packages via chroot? The following commands will run:");
+    let missing = presence.missing();
+    eprintln!("warning: {missing} not found in rootfs (detected: {distro_name})");
+    eprintln!("Install packages via chroot? The following commands will run:");
     for cmd in &commands {
         eprintln!("  {cmd}");
     }
@@ -1536,21 +1593,39 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
         );
     }
 
-    if !skip_systemd_check && !has_systemd(&staging_dir, &family) {
+    let mut presence = detect_systemd_presence(&staging_dir);
+
+    if verbose {
+        eprintln!(
+            "systemd components: systemd={}, dbus={}",
+            if presence.has_systemd {
+                "found"
+            } else {
+                "missing"
+            },
+            if presence.has_dbus {
+                "found"
+            } else {
+                "missing"
+            },
+        );
+    }
+
+    if !skip_systemd_check && !presence.is_bootable() {
+        let missing = presence.missing();
         let install_result = (|| -> Result<()> {
             match install_packages {
                 InstallPackages::Yes => {
                     if family == DistroFamily::Unknown || family == DistroFamily::NixOS {
                         if force {
                             eprintln!(
-                                "warning: cannot install systemd for {:?} distro; \
+                                "warning: {missing} not found in rootfs; \
                                  importing anyway (forced)",
-                                family
                             );
                             return Ok(());
                         }
                         bail!(
-                            "systemd not found and cannot install packages for {:?} distro",
+                            "{missing} not found and cannot install packages for {:?} distro",
                             family
                         );
                     }
@@ -1560,33 +1635,33 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
                     if family == DistroFamily::Unknown || family == DistroFamily::NixOS {
                         if force {
                             eprintln!(
-                                "warning: systemd not found in rootfs; \
+                                "warning: {missing} not found in rootfs; \
                                  importing anyway (forced)"
                             );
                             return Ok(());
                         }
                         bail!(
-                            "systemd not found in rootfs and distro family is {:?}; \
+                            "{missing} not found in rootfs and distro family is {:?}; \
                              cannot install packages automatically\n\
                              re-run with -f to import anyway",
                             family
                         );
                     }
                     if interactive {
-                        if prompt_install_systemd(&family, &distro_name)? {
+                        if prompt_install_systemd(&presence, &family, &distro_name)? {
                             install_systemd_packages(&staging_dir, &family, verbose)?;
                         } else {
-                            bail!("systemd not found in rootfs; import aborted by user");
+                            bail!("{missing} not found in rootfs; import aborted by user");
                         }
                     } else if force {
                         eprintln!(
-                            "warning: systemd not found in rootfs; \
+                            "warning: {missing} not found in rootfs; \
                              importing anyway (forced)"
                         );
                         return Ok(());
                     } else {
                         bail!(
-                            "systemd not found in rootfs and running non-interactively; \
+                            "{missing} not found in rootfs and running non-interactively; \
                              re-run with --install-packages=yes or -f to override"
                         );
                     }
@@ -1594,12 +1669,12 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
                 InstallPackages::No => {
                     if force {
                         eprintln!(
-                            "warning: systemd not found in rootfs; importing anyway (forced)"
+                            "warning: {missing} not found in rootfs; importing anyway (forced)"
                         );
                         return Ok(());
                     }
                     bail!(
-                        "systemd not found in rootfs; \
+                        "{missing} not found in rootfs; \
                          re-run with --install-packages=yes or -f to override"
                     );
                 }
@@ -1613,17 +1688,21 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
             return Err(e);
         }
 
-        // Verify systemd is present after installation.
-        if !has_systemd(&staging_dir, &family) && !force {
+        // Re-scan after installation.
+        presence = detect_systemd_presence(&staging_dir);
+        if !presence.is_bootable() && !force {
             let _ = make_removable(&staging_dir);
             let _ = fs::remove_dir_all(&staging_dir);
-            bail!("systemd still not found after package installation");
+            bail!(
+                "{} still not found after package installation",
+                presence.missing()
+            );
         }
     }
 
     // Patch systemd services for nspawn compatibility (mask resolved,
     // unmask logind, install missing machinectl shell dependencies).
-    if !skip_systemd_check && has_systemd(&staging_dir, &family) {
+    if !skip_systemd_check && presence.has_systemd {
         if let Err(e) = patch_rootfs_services(&staging_dir, &family, verbose) {
             eprintln!("warning: rootfs service patching failed: {e}");
         }
