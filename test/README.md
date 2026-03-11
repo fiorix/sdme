@@ -133,6 +133,21 @@ sudo ./test/scripts/verify-matrix.sh --keep
 sudo ./test/scripts/verify-security.sh
 ```
 
+### verify-usage.sh
+
+Verifies the commands documented in [usage.md](../docs/usage.md). Walks
+through each section of the usage guide and runs the documented commands
+to ensure nothing is stale or broken: host clone lifecycle, distro import,
+OCI apps (nginx, redis, postgresql with `--oci-env`), `exec --oci`,
+`logs --oci`, pods with connectivity, security flags (`--hardened`,
+`--strict`, individual), networking (private, veth, zones), resource
+limits, bind mounts, environment variables, and configuration.
+
+```bash
+sudo ./test/scripts/verify-usage.sh
+sudo ./test/scripts/verify-usage.sh --keep   # keep artifacts
+```
+
 ## Running a full test pass
 
 Before tagging a release, run everything from a clean state:
@@ -146,6 +161,7 @@ sudo ./test/scripts/verify-matrix.sh --keep
 sudo ./test/scripts/verify-pods.sh
 sudo ./test/scripts/verify-oci.sh
 sudo ./test/scripts/verify-security.sh
+sudo ./test/scripts/verify-usage.sh
 ```
 
 Use `--keep` on verify-matrix.sh so that verify-security.sh can reuse
