@@ -51,9 +51,15 @@ struct PodTemplate {
 pub(crate) struct PodSpec {
     pub(crate) containers: Vec<Container>,
     #[serde(default)]
+    pub(crate) init_containers: Vec<Container>,
+    #[serde(default)]
     pub(crate) volumes: Vec<Volume>,
     #[serde(default)]
     pub(crate) restart_policy: Option<String>,
+    #[serde(default)]
+    pub(crate) termination_grace_period_seconds: Option<u32>,
+    #[serde(default)]
+    pub(crate) security_context: Option<PodSecurityContext>,
 }
 
 #[derive(serde::Deserialize, Debug)]
@@ -71,6 +77,58 @@ pub(crate) struct Container {
     pub(crate) ports: Vec<ContainerPort>,
     #[serde(default)]
     pub(crate) volume_mounts: Vec<VolumeMount>,
+    #[serde(default)]
+    pub(crate) working_dir: Option<String>,
+    #[serde(default)]
+    pub(crate) image_pull_policy: Option<String>,
+    #[serde(default)]
+    pub(crate) resources: Option<ResourceRequirements>,
+    #[serde(default)]
+    pub(crate) liveness_probe: Option<Probe>,
+    #[serde(default)]
+    pub(crate) readiness_probe: Option<Probe>,
+}
+
+#[derive(serde::Deserialize, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PodSecurityContext {
+    pub(crate) run_as_user: Option<u32>,
+    pub(crate) run_as_group: Option<u32>,
+    pub(crate) run_as_non_root: Option<bool>,
+}
+
+#[derive(serde::Deserialize, Debug, Default)]
+pub(crate) struct ResourceRequirements {
+    #[serde(default)]
+    pub(crate) limits: Option<ResourceList>,
+    #[serde(default)]
+    pub(crate) requests: Option<ResourceList>,
+}
+
+#[derive(serde::Deserialize, Debug, Default)]
+pub(crate) struct ResourceList {
+    pub(crate) memory: Option<String>,
+    pub(crate) cpu: Option<String>,
+}
+
+#[derive(serde::Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Probe {
+    pub(crate) exec: Option<ExecAction>,
+    #[serde(default)]
+    pub(crate) initial_delay_seconds: Option<u32>,
+    #[serde(default)]
+    pub(crate) period_seconds: Option<u32>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub(crate) timeout_seconds: Option<u32>,
+    #[serde(default)]
+    pub(crate) failure_threshold: Option<u32>,
+}
+
+#[derive(serde::Deserialize, Debug)]
+pub(crate) struct ExecAction {
+    pub(crate) command: Vec<String>,
 }
 
 #[derive(serde::Deserialize, Debug)]
@@ -122,12 +180,16 @@ pub(crate) struct HostPathVolume {
 pub(crate) struct KubePlan {
     pub(crate) pod_name: String,
     pub(crate) containers: Vec<KubeContainer>,
+    pub(crate) init_containers: Vec<KubeContainer>,
     pub(crate) volumes: Vec<KubeVolume>,
     pub(crate) restart_policy: String,
     /// Aggregated ports from all containers.
     pub(crate) ports: Vec<ContainerPort>,
     /// Host-path binds needed at nspawn level.
     pub(crate) host_binds: Vec<(String, String)>,
+    pub(crate) termination_grace_period: Option<u32>,
+    pub(crate) run_as_user: Option<u32>,
+    pub(crate) run_as_group: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -139,6 +201,13 @@ pub(crate) struct KubeContainer {
     pub(crate) args_override: Option<Vec<String>>,
     pub(crate) env: Vec<(String, String)>,
     pub(crate) volume_mounts: Vec<KubeVolumeMount>,
+    pub(crate) working_dir_override: Option<String>,
+    pub(crate) image_pull_policy: String,
+    pub(crate) resource_lines: Vec<String>,
+    pub(crate) readiness_exec: Option<String>,
+    /// Parsed but not yet enforced at runtime (future: watchdog integration).
+    #[allow(dead_code)]
+    pub(crate) liveness_probe: Option<Probe>,
 }
 
 #[derive(Debug)]
@@ -163,6 +232,80 @@ pub(crate) struct KubeVolume {
     pub(crate) kind: KubeVolumeKind,
 }
 
+// --- Known fields for unknown-field warnings ---
+
+const KNOWN_POD_SPEC_FIELDS: &[&str] = &[
+    "containers",
+    "initContainers",
+    "volumes",
+    "restartPolicy",
+    "terminationGracePeriodSeconds",
+    "securityContext",
+];
+
+const KNOWN_CONTAINER_FIELDS: &[&str] = &[
+    "name",
+    "image",
+    "command",
+    "args",
+    "env",
+    "ports",
+    "volumeMounts",
+    "workingDir",
+    "imagePullPolicy",
+    "resources",
+    "livenessProbe",
+    "readinessProbe",
+];
+
+const KNOWN_SECURITY_CONTEXT_FIELDS: &[&str] = &["runAsUser", "runAsGroup", "runAsNonRoot"];
+
+/// Walk raw YAML and warn about unrecognized fields.
+fn warn_unknown_fields(raw: &serde_yml::Value, path: &str, known: &[&str]) {
+    if let serde_yml::Value::Mapping(map) = raw {
+        for (key, _val) in map {
+            if let serde_yml::Value::String(k) = key {
+                if !known.contains(&k.as_str()) {
+                    eprintln!("warning: unknown field '{path}.{k}' will be ignored");
+                }
+            }
+        }
+    }
+}
+
+/// Warn about unknown fields in a pod spec value tree.
+fn warn_pod_spec_unknown_fields(spec_value: &serde_yml::Value) {
+    warn_unknown_fields(spec_value, "spec", KNOWN_POD_SPEC_FIELDS);
+
+    if let serde_yml::Value::Mapping(map) = spec_value {
+        // Check securityContext fields.
+        if let Some(sc) = map.get(serde_yml::Value::String("securityContext".into())) {
+            warn_unknown_fields(sc, "spec.securityContext", KNOWN_SECURITY_CONTEXT_FIELDS);
+        }
+
+        // Check container fields.
+        for list_key in ["containers", "initContainers"] {
+            if let Some(serde_yml::Value::Sequence(containers)) =
+                map.get(serde_yml::Value::String(list_key.into()))
+            {
+                for (i, c) in containers.iter().enumerate() {
+                    let fallback = format!("{i}");
+                    let cname = c
+                        .as_mapping()
+                        .and_then(|m| m.get(serde_yml::Value::String("name".into())))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(&fallback);
+                    warn_unknown_fields(
+                        c,
+                        &format!("spec.{list_key}[{cname}]"),
+                        KNOWN_CONTAINER_FIELDS,
+                    );
+                }
+            }
+        }
+    }
+}
+
 // --- Parsing ---
 
 /// Parse a YAML file into a pod name and PodSpec.
@@ -177,18 +320,28 @@ pub(crate) fn parse_yaml(content: &str) -> Result<(String, PodSpec)> {
                 .as_ref()
                 .and_then(|m| m.name.clone())
                 .unwrap_or_default();
+            let spec_value = manifest.spec.context("Pod manifest missing 'spec' field")?;
+            warn_pod_spec_unknown_fields(&spec_value);
             let spec: PodSpec =
-                serde_yml::from_value(manifest.spec.context("Pod manifest missing 'spec' field")?)
-                    .context("failed to parse Pod spec")?;
+                serde_yml::from_value(spec_value).context("failed to parse Pod spec")?;
             Ok((name, spec))
         }
         "Deployment" => {
-            let deploy_spec: DeploymentSpec = serde_yml::from_value(
-                manifest
-                    .spec
-                    .context("Deployment manifest missing 'spec' field")?,
-            )
-            .context("failed to parse Deployment spec")?;
+            let spec_value = manifest
+                .spec
+                .context("Deployment manifest missing 'spec' field")?;
+            // For deployments, warn on the template spec inside.
+            if let serde_yml::Value::Mapping(ref map) = spec_value {
+                if let Some(template) = map.get(serde_yml::Value::String("template".into())) {
+                    if let serde_yml::Value::Mapping(ref tmap) = template {
+                        if let Some(tspec) = tmap.get(serde_yml::Value::String("spec".into())) {
+                            warn_pod_spec_unknown_fields(tspec);
+                        }
+                    }
+                }
+            }
+            let deploy_spec: DeploymentSpec =
+                serde_yml::from_value(spec_value).context("failed to parse Deployment spec")?;
             let name = deploy_spec
                 .template
                 .metadata
@@ -204,6 +357,185 @@ pub(crate) fn parse_yaml(content: &str) -> Result<(String, PodSpec)> {
 
 // --- Validation ---
 
+/// Parse a K8s memory string (e.g. "128Mi", "1Gi", "1000") to a systemd-compatible string.
+fn parse_k8s_memory(s: &str) -> Result<String> {
+    for (suffix, unit) in [("Ki", "K"), ("Mi", "M"), ("Gi", "G"), ("Ti", "T")] {
+        if let Some(num) = s.strip_suffix(suffix) {
+            if num.is_empty() || !num.chars().all(|c| c.is_ascii_digit()) {
+                bail!("invalid memory value: {s}");
+            }
+            return Ok(format!("{num}{unit}"));
+        }
+    }
+    if !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()) {
+        // Plain bytes.
+        Ok(s.to_string())
+    } else {
+        bail!("unsupported memory format: {s}")
+    }
+}
+
+/// Parse a K8s CPU string (e.g. "500m", "2") to a CPUQuota percentage.
+fn parse_k8s_cpu_quota(s: &str) -> Result<u32> {
+    if s.ends_with('m') {
+        let millis: u32 = s[..s.len() - 1]
+            .parse()
+            .with_context(|| format!("invalid CPU millicore value: {s}"))?;
+        Ok(millis / 10) // 1000m = 100%
+    } else {
+        let cores: f64 = s
+            .parse()
+            .with_context(|| format!("invalid CPU value: {s}"))?;
+        Ok((cores * 100.0) as u32)
+    }
+}
+
+/// Parse a K8s CPU request to a systemd CPUWeight (1-10000).
+fn parse_k8s_cpu_weight(s: &str) -> Result<u32> {
+    let millis = if s.ends_with('m') {
+        s[..s.len() - 1]
+            .parse::<u32>()
+            .with_context(|| format!("invalid CPU millicore value: {s}"))?
+    } else {
+        let cores: f64 = s
+            .parse()
+            .with_context(|| format!("invalid CPU value: {s}"))?;
+        (cores * 1000.0) as u32
+    };
+    // Map millicores to weight: 100m = 100 (default), scale linearly, clamp to 1-10000.
+    Ok(millis.clamp(1, 10000))
+}
+
+/// Build resource directive lines from a container's resources spec.
+fn build_resource_lines(resources: &ResourceRequirements) -> Result<Vec<String>> {
+    let mut lines = Vec::new();
+    if let Some(ref limits) = resources.limits {
+        if let Some(ref mem) = limits.memory {
+            let val = parse_k8s_memory(mem)?;
+            lines.push(format!("MemoryMax={val}"));
+        }
+        if let Some(ref cpu) = limits.cpu {
+            let pct = parse_k8s_cpu_quota(cpu)?;
+            lines.push(format!("CPUQuota={pct}%"));
+        }
+    }
+    if let Some(ref requests) = resources.requests {
+        if let Some(ref mem) = requests.memory {
+            let val = parse_k8s_memory(mem)?;
+            lines.push(format!("MemoryLow={val}"));
+        }
+        if let Some(ref cpu) = requests.cpu {
+            let weight = parse_k8s_cpu_weight(cpu)?;
+            lines.push(format!("CPUWeight={weight}"));
+        }
+    }
+    Ok(lines)
+}
+
+/// Build a readiness check ExecStartPost command from a readiness probe.
+fn build_readiness_exec(probe: &Probe) -> Result<String> {
+    let exec = probe
+        .exec
+        .as_ref()
+        .context("only exec readiness probes are supported")?;
+    if exec.command.is_empty() {
+        bail!("readiness probe exec command is empty");
+    }
+    let initial_delay = probe.initial_delay_seconds.unwrap_or(0);
+    let period = probe.period_seconds.unwrap_or(10);
+    let threshold = probe.failure_threshold.unwrap_or(3);
+    let cmd = shell_join(&exec.command);
+    // The `-` prefix means systemd won't fail the unit if the check fails.
+    Ok(format!(
+        "-/bin/sh -c 'sleep {initial_delay}; for i in $(seq 1 {threshold}); do if {cmd}; then exit 0; fi; sleep {period}; done; exit 1'"
+    ))
+}
+
+/// Validate a container and build a KubeContainer plan entry.
+fn validate_container(c: Container) -> Result<KubeContainer> {
+    let image_ref = ImageReference::parse(&c.image)
+        .with_context(|| format!("invalid image reference: {}", c.image))?;
+    let env: Vec<(String, String)> = c
+        .env
+        .iter()
+        .map(|e| (e.name.clone(), e.value.clone().unwrap_or_default()))
+        .collect();
+    let volume_mounts: Vec<KubeVolumeMount> = c
+        .volume_mounts
+        .iter()
+        .map(|vm| KubeVolumeMount {
+            volume_name: vm.name.clone(),
+            mount_path: vm.mount_path.clone(),
+            read_only: vm.read_only,
+        })
+        .collect();
+
+    // Validate imagePullPolicy.
+    let image_pull_policy = match c.image_pull_policy.as_deref() {
+        None | Some("Always") => "Always".to_string(),
+        Some("IfNotPresent") => "IfNotPresent".to_string(),
+        Some("Never") => "Never".to_string(),
+        Some(other) => bail!(
+            "container '{}': unsupported imagePullPolicy: {other}",
+            c.name
+        ),
+    };
+
+    // Validate workingDir.
+    if let Some(ref wd) = c.working_dir {
+        if !wd.starts_with('/') {
+            bail!("container '{}': workingDir must be absolute: {wd}", c.name);
+        }
+        if wd.contains("..") {
+            bail!(
+                "container '{}': workingDir must not contain '..': {wd}",
+                c.name
+            );
+        }
+    }
+
+    // Build resource lines.
+    let resource_lines = if let Some(ref res) = c.resources {
+        build_resource_lines(res)
+            .with_context(|| format!("container '{}': invalid resources", c.name))?
+    } else {
+        Vec::new()
+    };
+
+    // Validate probes.
+    if let Some(ref probe) = c.liveness_probe {
+        if probe.exec.is_none() {
+            bail!(
+                "container '{}': only exec liveness probes are supported (httpGet/tcpSocket are not implemented)",
+                c.name
+            );
+        }
+    }
+    let readiness_exec = if let Some(ref probe) = c.readiness_probe {
+        Some(
+            build_readiness_exec(probe)
+                .with_context(|| format!("container '{}': invalid readiness probe", c.name))?,
+        )
+    } else {
+        None
+    };
+
+    Ok(KubeContainer {
+        name: c.name,
+        image: c.image,
+        image_ref,
+        command_override: c.command,
+        args_override: c.args,
+        env,
+        volume_mounts,
+        working_dir_override: c.working_dir,
+        image_pull_policy,
+        resource_lines,
+        readiness_exec,
+        liveness_probe: c.liveness_probe,
+    })
+}
+
 /// Validate a PodSpec and produce a KubePlan.
 pub(crate) fn validate_and_plan(pod_name: &str, spec: PodSpec) -> Result<KubePlan> {
     if spec.containers.is_empty() {
@@ -216,9 +548,9 @@ pub(crate) fn validate_and_plan(pod_name: &str, spec: PodSpec) -> Result<KubePla
     }
     validate_name(pod_name).context("invalid pod name")?;
 
-    // Validate container names are unique and valid.
+    // Validate container names are unique and valid (across both init and regular).
     let mut seen_names = HashSet::new();
-    for c in &spec.containers {
+    for c in spec.init_containers.iter().chain(spec.containers.iter()) {
         validate_name(&c.name).with_context(|| format!("invalid container name: {}", c.name))?;
         if !seen_names.insert(&c.name) {
             bail!("duplicate container name: {}", c.name);
@@ -227,6 +559,26 @@ pub(crate) fn validate_and_plan(pod_name: &str, spec: PodSpec) -> Result<KubePla
             bail!("container '{}' has empty image", c.name);
         }
     }
+
+    // Validate terminationGracePeriodSeconds.
+    if let Some(t) = spec.termination_grace_period_seconds {
+        if t == 0 {
+            bail!("terminationGracePeriodSeconds must be > 0");
+        }
+    }
+
+    // Validate securityContext.
+    let (run_as_user, run_as_group) = if let Some(ref sc) = spec.security_context {
+        if sc.run_as_non_root == Some(true) && sc.run_as_user.is_none() {
+            bail!("securityContext.runAsNonRoot is true but runAsUser is not set");
+        }
+        if sc.run_as_non_root == Some(true) && sc.run_as_user == Some(0) {
+            bail!("securityContext.runAsNonRoot is true but runAsUser is 0 (root)");
+        }
+        (sc.run_as_user, sc.run_as_group)
+    } else {
+        (None, None)
+    };
 
     // Validate volume names are unique.
     let mut vol_names = HashSet::new();
@@ -253,8 +605,8 @@ pub(crate) fn validate_and_plan(pod_name: &str, spec: PodSpec) -> Result<KubePla
         }
     }
 
-    // Validate volume mount references.
-    for c in &spec.containers {
+    // Validate volume mount references (across both init and regular containers).
+    for c in spec.init_containers.iter().chain(spec.containers.iter()) {
         for vm in &c.volume_mounts {
             if !vol_names.contains(&vm.name) {
                 bail!(
@@ -334,46 +686,31 @@ pub(crate) fn validate_and_plan(pod_name: &str, spec: PodSpec) -> Result<KubePla
         }
     }
 
+    // Build init container plans.
+    let init_containers: Vec<KubeContainer> = spec
+        .init_containers
+        .into_iter()
+        .map(validate_container)
+        .collect::<Result<Vec<_>>>()?;
+
     // Build container plans.
     let containers: Vec<KubeContainer> = spec
         .containers
         .into_iter()
-        .map(|c| {
-            let image_ref = ImageReference::parse(&c.image)
-                .with_context(|| format!("invalid image reference: {}", c.image))?;
-            let env: Vec<(String, String)> = c
-                .env
-                .iter()
-                .map(|e| (e.name.clone(), e.value.clone().unwrap_or_default()))
-                .collect();
-            let volume_mounts: Vec<KubeVolumeMount> = c
-                .volume_mounts
-                .iter()
-                .map(|vm| KubeVolumeMount {
-                    volume_name: vm.name.clone(),
-                    mount_path: vm.mount_path.clone(),
-                    read_only: vm.read_only,
-                })
-                .collect();
-            Ok(KubeContainer {
-                name: c.name,
-                image: c.image,
-                image_ref,
-                command_override: c.command,
-                args_override: c.args,
-                env,
-                volume_mounts,
-            })
-        })
+        .map(validate_container)
         .collect::<Result<Vec<_>>>()?;
 
     Ok(KubePlan {
         pod_name: pod_name.to_string(),
         containers,
+        init_containers,
         volumes,
         restart_policy,
         ports,
         host_binds,
+        termination_grace_period: spec.termination_grace_period_seconds,
+        run_as_user,
+        run_as_group,
     })
 }
 
@@ -448,7 +785,22 @@ pub fn kube_create(
     fs::create_dir_all(&wants_dir)
         .with_context(|| format!("failed to create {}", wants_dir.display()))?;
 
-    for kc in &plan.containers {
+    // Collect init container names for dependency ordering.
+    let init_container_names: Vec<String> = plan
+        .init_containers
+        .iter()
+        .map(|c| c.name.clone())
+        .collect();
+
+    // Process init containers first, then regular containers.
+    let all_containers: Vec<(&KubeContainer, bool)> = plan
+        .init_containers
+        .iter()
+        .map(|c| (c, true))
+        .chain(plan.containers.iter().map(|c| (c, false)))
+        .collect();
+
+    for (kc, is_init) in &all_containers {
         check_interrupted()?;
 
         let app_dir = apps_dir.join(&kc.name);
@@ -456,15 +808,45 @@ pub fn kube_create(
         fs::create_dir_all(&app_root)
             .with_context(|| format!("failed to create {}", app_root.display()))?;
 
+        // Check imagePullPolicy before pulling.
+        let should_pull = match kc.image_pull_policy.as_str() {
+            "Never" => {
+                eprintln!(
+                    "skipping image pull for '{}' (imagePullPolicy: Never)",
+                    kc.name
+                );
+                false
+            }
+            "IfNotPresent" => {
+                let has_content = app_root
+                    .read_dir()
+                    .map_or(false, |mut d| d.next().is_some());
+                if has_content {
+                    eprintln!(
+                        "skipping image pull for '{}' (imagePullPolicy: IfNotPresent, app root not empty)",
+                        kc.name
+                    );
+                    false
+                } else {
+                    true
+                }
+            }
+            _ => true, // "Always" or default
+        };
+
         // Pull the image.
-        let oci_config = crate::import::registry::import_registry_image(
-            &kc.image_ref,
-            &app_root,
-            &rootfs_dir,
-            docker_credentials,
-            verbose,
-        )
-        .with_context(|| format!("failed to pull image for container '{}'", kc.name))?;
+        let oci_config = if should_pull {
+            crate::import::registry::import_registry_image(
+                &kc.image_ref,
+                &app_root,
+                &rootfs_dir,
+                docker_credentials,
+                verbose,
+            )
+            .with_context(|| format!("failed to pull image for container '{}'", kc.name))?
+        } else {
+            None
+        };
 
         // Set up the app.
         setup_kube_container(
@@ -473,6 +855,10 @@ pub fn kube_create(
             kc,
             oci_config.as_ref(),
             &plan.restart_policy,
+            &plan.volumes,
+            &plan,
+            *is_init,
+            &init_container_names,
             verbose,
         )
         .with_context(|| format!("failed to set up container '{}'", kc.name))?;
@@ -547,7 +933,12 @@ WantedBy=multi-user.target
         format!("{:x}", hasher.finalize())
     };
 
-    let container_names: Vec<&str> = plan.containers.iter().map(|c| c.name.as_str()).collect();
+    let container_names: Vec<&str> = plan
+        .init_containers
+        .iter()
+        .chain(plan.containers.iter())
+        .map(|c| c.name.as_str())
+        .collect();
 
     // Build bind mounts for hostPath volumes only.
     let bind_strings: Vec<String> = plan
@@ -635,6 +1026,10 @@ fn setup_kube_container(
     kc: &KubeContainer,
     oci_config: Option<&OciContainerConfig>,
     restart_policy: &str,
+    _volumes: &[KubeVolume],
+    plan: &KubePlan,
+    is_init: bool,
+    init_container_names: &[String],
     verbose: bool,
 ) -> Result<()> {
     let app_root = app_dir.join("root");
@@ -666,8 +1061,22 @@ fn setup_kube_container(
     }
     let exec_start = shell_join(&exec_args);
 
-    let working_dir = config.working_dir.as_deref().unwrap_or("/");
-    let user = config.user.as_deref().unwrap_or("root");
+    // Use workingDir override from YAML, then OCI config, then "/".
+    let working_dir = kc
+        .working_dir_override
+        .as_deref()
+        .or(config.working_dir.as_deref())
+        .unwrap_or("/");
+
+    // Use pod-level securityContext user override, then OCI config, then "root".
+    let user_override;
+    let user = if let Some(uid) = plan.run_as_user {
+        let gid = plan.run_as_group.unwrap_or(uid);
+        user_override = format!("{uid}:{gid}");
+        &user_override
+    } else {
+        config.user.as_deref().unwrap_or("root")
+    };
 
     // Merge env: OCI image env + K8s env overrides (by key).
     let mut env_lines: Vec<String> = Vec::new();
@@ -704,6 +1113,18 @@ fn setup_kube_container(
         vec!["sdme-kube-volumes.service".to_string()]
     };
 
+    // Build unit ordering dependencies for regular containers:
+    // they depend on all init containers.
+    let (after_units, requires_units) = if !is_init && !init_container_names.is_empty() {
+        let after: Vec<String> = init_container_names
+            .iter()
+            .map(|n| format!("sdme-oci-{n}.service"))
+            .collect();
+        (after.clone(), after)
+    } else {
+        (Vec::new(), Vec::new())
+    };
+
     crate::import::setup_oci_app(&crate::import::OciAppSetup {
         name: &kc.name,
         staging_dir,
@@ -719,6 +1140,13 @@ fn setup_kube_container(
         bind_paths: vec![],
         extra_after,
         verbose,
+        timeout_stop_sec: plan.termination_grace_period,
+        resource_lines: kc.resource_lines.clone(),
+        unit_type: if is_init { Some("oneshot") } else { None },
+        remain_after_exit: is_init,
+        after_units,
+        requires_units,
+        readiness_exec: kc.readiness_exec.clone(),
     })
 }
 
@@ -1099,5 +1527,778 @@ spec:
         let (name, spec) = parse_yaml(yaml).unwrap();
         let plan = validate_and_plan(&name, spec).unwrap();
         assert_eq!(plan.restart_policy, "always");
+    }
+
+    // --- Feature 1: Unknown fields ---
+
+    #[test]
+    fn test_unknown_fields_parse_ok() {
+        // Unknown fields should not cause parse errors.
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: warn-pod
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+    livenessProbe:
+      exec:
+        command: ["true"]
+    securityContext:
+      runAsUser: 1000
+    unknownField: "hello"
+"#;
+        let result = parse_yaml(yaml);
+        assert!(result.is_ok(), "parse should succeed with unknown fields");
+    }
+
+    // --- Feature 2: imagePullPolicy ---
+
+    #[test]
+    fn test_image_pull_policy_parse() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pull-pod
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+    imagePullPolicy: IfNotPresent
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let plan = validate_and_plan(&name, spec).unwrap();
+        assert_eq!(plan.containers[0].image_pull_policy, "IfNotPresent");
+    }
+
+    #[test]
+    fn test_image_pull_policy_default() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pull-pod
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let plan = validate_and_plan(&name, spec).unwrap();
+        assert_eq!(plan.containers[0].image_pull_policy, "Always");
+    }
+
+    #[test]
+    fn test_image_pull_policy_invalid() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pull-pod
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+    imagePullPolicy: Bogus
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let err = validate_and_plan(&name, spec).unwrap_err();
+        assert!(err.to_string().contains("unsupported imagePullPolicy"));
+    }
+
+    // --- Feature 3: terminationGracePeriodSeconds ---
+
+    #[test]
+    fn test_termination_grace_period() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: grace-pod
+spec:
+  terminationGracePeriodSeconds: 45
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let plan = validate_and_plan(&name, spec).unwrap();
+        assert_eq!(plan.termination_grace_period, Some(45));
+    }
+
+    #[test]
+    fn test_termination_grace_period_zero() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: grace-pod
+spec:
+  terminationGracePeriodSeconds: 0
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let err = validate_and_plan(&name, spec).unwrap_err();
+        assert!(err.to_string().contains("must be > 0"));
+    }
+
+    // --- Feature 4: workingDir ---
+
+    #[test]
+    fn test_working_dir() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: wd-pod
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+    workingDir: /app
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let plan = validate_and_plan(&name, spec).unwrap();
+        assert_eq!(
+            plan.containers[0].working_dir_override,
+            Some("/app".to_string())
+        );
+    }
+
+    #[test]
+    fn test_working_dir_relative_rejected() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: wd-pod
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+    workingDir: relative/path
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let err = validate_and_plan(&name, spec).unwrap_err();
+        assert!(err.to_string().contains("workingDir must be absolute"));
+    }
+
+    #[test]
+    fn test_working_dir_dotdot_rejected() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: wd-pod
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+    workingDir: /app/../etc
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let err = validate_and_plan(&name, spec).unwrap_err();
+        assert!(err.to_string().contains("must not contain '..'"));
+    }
+
+    // --- Feature 5: resources ---
+
+    #[test]
+    fn test_resource_limits_memory() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: res-pod
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+    resources:
+      limits:
+        memory: 256Mi
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let plan = validate_and_plan(&name, spec).unwrap();
+        assert!(plan.containers[0]
+            .resource_lines
+            .contains(&"MemoryMax=256M".to_string()));
+    }
+
+    #[test]
+    fn test_resource_limits_cpu() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: res-pod
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+    resources:
+      limits:
+        cpu: "2"
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let plan = validate_and_plan(&name, spec).unwrap();
+        assert!(plan.containers[0]
+            .resource_lines
+            .contains(&"CPUQuota=200%".to_string()));
+    }
+
+    #[test]
+    fn test_resource_limits_cpu_millicore() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: res-pod
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+    resources:
+      limits:
+        cpu: 500m
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let plan = validate_and_plan(&name, spec).unwrap();
+        assert!(plan.containers[0]
+            .resource_lines
+            .contains(&"CPUQuota=50%".to_string()));
+    }
+
+    #[test]
+    fn test_resource_requests() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: res-pod
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+    resources:
+      requests:
+        memory: 128Mi
+        cpu: 250m
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let plan = validate_and_plan(&name, spec).unwrap();
+        assert!(plan.containers[0]
+            .resource_lines
+            .contains(&"MemoryLow=128M".to_string()));
+        assert!(plan.containers[0]
+            .resource_lines
+            .contains(&"CPUWeight=250".to_string()));
+    }
+
+    #[test]
+    fn test_parse_k8s_memory_formats() {
+        assert_eq!(parse_k8s_memory("128Ki").unwrap(), "128K");
+        assert_eq!(parse_k8s_memory("256Mi").unwrap(), "256M");
+        assert_eq!(parse_k8s_memory("1Gi").unwrap(), "1G");
+        assert_eq!(parse_k8s_memory("2Ti").unwrap(), "2T");
+        assert_eq!(parse_k8s_memory("1048576").unwrap(), "1048576");
+        assert!(parse_k8s_memory("10MB").is_err());
+    }
+
+    #[test]
+    fn test_parse_k8s_cpu_quota() {
+        assert_eq!(parse_k8s_cpu_quota("1000m").unwrap(), 100);
+        assert_eq!(parse_k8s_cpu_quota("500m").unwrap(), 50);
+        assert_eq!(parse_k8s_cpu_quota("250m").unwrap(), 25);
+        assert_eq!(parse_k8s_cpu_quota("2").unwrap(), 200);
+        assert_eq!(parse_k8s_cpu_quota("0.5").unwrap(), 50);
+    }
+
+    // --- Feature 6: securityContext ---
+
+    #[test]
+    fn test_security_context_run_as_user() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sec-pod
+spec:
+  securityContext:
+    runAsUser: 1000
+    runAsGroup: 1000
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let plan = validate_and_plan(&name, spec).unwrap();
+        assert_eq!(plan.run_as_user, Some(1000));
+        assert_eq!(plan.run_as_group, Some(1000));
+    }
+
+    #[test]
+    fn test_security_context_run_as_non_root_without_user() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sec-pod
+spec:
+  securityContext:
+    runAsNonRoot: true
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let err = validate_and_plan(&name, spec).unwrap_err();
+        assert!(err.to_string().contains("runAsNonRoot is true"));
+    }
+
+    #[test]
+    fn test_security_context_run_as_non_root_with_root_user() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sec-pod
+spec:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 0
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let err = validate_and_plan(&name, spec).unwrap_err();
+        assert!(err.to_string().contains("runAsUser is 0"));
+    }
+
+    // --- Feature 7: initContainers ---
+
+    #[test]
+    fn test_init_containers() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: init-pod
+spec:
+  initContainers:
+  - name: init-setup
+    image: docker.io/busybox:latest
+    command: ["/bin/sh", "-c"]
+    args: ["echo init"]
+  containers:
+  - name: app
+    image: docker.io/nginx:latest
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        assert_eq!(spec.init_containers.len(), 1);
+        assert_eq!(spec.init_containers[0].name, "init-setup");
+        let plan = validate_and_plan(&name, spec).unwrap();
+        assert_eq!(plan.init_containers.len(), 1);
+        assert_eq!(plan.init_containers[0].name, "init-setup");
+        assert_eq!(plan.containers.len(), 1);
+        assert_eq!(plan.containers[0].name, "app");
+    }
+
+    #[test]
+    fn test_init_container_duplicate_name() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: init-pod
+spec:
+  initContainers:
+  - name: app
+    image: docker.io/busybox:latest
+  containers:
+  - name: app
+    image: docker.io/nginx:latest
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let err = validate_and_plan(&name, spec).unwrap_err();
+        assert!(err.to_string().contains("duplicate container name"));
+    }
+
+    // --- Feature 8: Probes ---
+
+    #[test]
+    fn test_readiness_probe_exec() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: probe-pod
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+    readinessProbe:
+      exec:
+        command: ["/bin/sh", "-c", "test -f /tmp/ready"]
+      initialDelaySeconds: 5
+      periodSeconds: 3
+      failureThreshold: 5
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let plan = validate_and_plan(&name, spec).unwrap();
+        let exec = plan.containers[0].readiness_exec.as_ref().unwrap();
+        assert!(exec.contains("sleep 5"));
+        assert!(exec.contains("seq 1 5"));
+        assert!(exec.contains("sleep 3"));
+        assert!(exec.contains("test -f /tmp/ready"));
+    }
+
+    #[test]
+    fn test_liveness_probe_non_exec_rejected() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: probe-pod
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+    livenessProbe:
+      initialDelaySeconds: 5
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let err = validate_and_plan(&name, spec).unwrap_err();
+        assert!(err.to_string().contains("only exec liveness probes"));
+    }
+
+    #[test]
+    fn test_liveness_probe_exec_ok() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: probe-pod
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+    livenessProbe:
+      exec:
+        command: ["true"]
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let plan = validate_and_plan(&name, spec).unwrap();
+        assert!(plan.containers[0].liveness_probe.is_some());
+    }
+
+    // --- Combined feature test ---
+
+    #[test]
+    fn test_all_features_combined() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: full-pod
+spec:
+  terminationGracePeriodSeconds: 30
+  securityContext:
+    runAsUser: 1000
+    runAsGroup: 1000
+  initContainers:
+  - name: init-setup
+    image: docker.io/busybox:latest
+    command: ["/bin/sh", "-c"]
+    args: ["echo init"]
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+    workingDir: /app
+    imagePullPolicy: IfNotPresent
+    resources:
+      limits:
+        memory: 256Mi
+        cpu: "1"
+      requests:
+        memory: 128Mi
+        cpu: 250m
+    readinessProbe:
+      exec:
+        command: ["/bin/sh", "-c", "test -f /tmp/ready"]
+    volumeMounts:
+    - name: shared
+      mountPath: /data
+  volumes:
+  - name: shared
+    emptyDir: {}
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let plan = validate_and_plan(&name, spec).unwrap();
+
+        assert_eq!(plan.termination_grace_period, Some(30));
+        assert_eq!(plan.run_as_user, Some(1000));
+        assert_eq!(plan.run_as_group, Some(1000));
+        assert_eq!(plan.init_containers.len(), 1);
+        assert_eq!(plan.containers.len(), 1);
+
+        let app = &plan.containers[0];
+        assert_eq!(app.working_dir_override, Some("/app".to_string()));
+        assert_eq!(app.image_pull_policy, "IfNotPresent");
+        assert!(app.resource_lines.contains(&"MemoryMax=256M".to_string()));
+        assert!(app.resource_lines.contains(&"CPUQuota=100%".to_string()));
+        assert!(app.resource_lines.contains(&"MemoryLow=128M".to_string()));
+        assert!(app.resource_lines.contains(&"CPUWeight=250".to_string()));
+        assert!(app.readiness_exec.is_some());
+    }
+
+    // --- Unit file integration tests ---
+    //
+    // These tests call `setup_kube_container()` with a temp directory and
+    // verify the generated systemd unit file contains correct directives.
+
+    use crate::testutil::TempDataDir;
+    use std::sync::Mutex;
+
+    static UNIT_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Helper: set up a temp dir, call `setup_kube_container()`, return the
+    /// generated unit file content.
+    fn setup_test_container(
+        name: &str,
+        kc: &KubeContainer,
+        plan: &KubePlan,
+        is_init: bool,
+        init_container_names: &[String],
+    ) -> String {
+        let tmp = TempDataDir::new("kube-unit");
+        let staging = tmp.path().join("staging");
+        let app_dir = staging.join(format!("oci/apps/{name}"));
+        let app_root = app_dir.join("root");
+        fs::create_dir_all(&app_root).unwrap();
+        fs::create_dir_all(staging.join("etc/systemd/system/multi-user.target.wants")).unwrap();
+
+        setup_kube_container(
+            &staging,
+            &app_dir,
+            kc,
+            None,
+            &plan.restart_policy,
+            &plan.volumes,
+            plan,
+            is_init,
+            init_container_names,
+            false,
+        )
+        .unwrap();
+
+        let unit_path = staging.join(format!("etc/systemd/system/sdme-oci-{name}.service"));
+        fs::read_to_string(&unit_path).unwrap()
+    }
+
+    fn make_test_container(name: &str) -> KubeContainer {
+        KubeContainer {
+            name: name.to_string(),
+            image: "docker.io/busybox:latest".to_string(),
+            image_ref: ImageReference::parse("docker.io/busybox:latest").unwrap(),
+            command_override: Some(vec!["/bin/sh".to_string(), "-c".to_string()]),
+            args_override: Some(vec!["echo hello".to_string()]),
+            env: vec![],
+            volume_mounts: vec![],
+            working_dir_override: None,
+            image_pull_policy: "Always".to_string(),
+            resource_lines: vec![],
+            readiness_exec: None,
+            liveness_probe: None,
+        }
+    }
+
+    fn make_test_plan() -> KubePlan {
+        KubePlan {
+            pod_name: "test-pod".to_string(),
+            containers: vec![],
+            init_containers: vec![],
+            volumes: vec![],
+            restart_policy: "always".to_string(),
+            ports: vec![],
+            host_binds: vec![],
+            termination_grace_period: None,
+            run_as_user: None,
+            run_as_group: None,
+        }
+    }
+
+    #[test]
+    fn test_unit_default_container() {
+        let _lock = UNIT_TEST_LOCK.lock().unwrap();
+        let kc = make_test_container("app");
+        let plan = make_test_plan();
+        let unit = setup_test_container("app", &kc, &plan, false, &[]);
+
+        assert!(unit.contains("Type=exec"), "default type should be exec");
+        assert!(
+            unit.contains("Restart=always"),
+            "should have restart policy"
+        );
+        assert!(
+            !unit.contains("RemainAfterExit"),
+            "should not have RemainAfterExit"
+        );
+        assert!(
+            !unit.contains("TimeoutStopSec"),
+            "should not have TimeoutStopSec"
+        );
+        assert!(
+            unit.contains("After=network.target\n"),
+            "should have After=network.target only"
+        );
+        assert!(
+            !unit.contains("Requires="),
+            "should not have Requires= line"
+        );
+    }
+
+    #[test]
+    fn test_unit_init_container_type() {
+        let _lock = UNIT_TEST_LOCK.lock().unwrap();
+        let kc = make_test_container("init-setup");
+        let plan = make_test_plan();
+        let unit = setup_test_container("init-setup", &kc, &plan, true, &[]);
+
+        assert!(
+            unit.contains("Type=oneshot"),
+            "init container should be oneshot"
+        );
+        assert!(
+            unit.contains("RemainAfterExit=yes"),
+            "init container should have RemainAfterExit"
+        );
+        assert!(
+            !unit.contains("Restart="),
+            "oneshot init container should not have Restart="
+        );
+    }
+
+    #[test]
+    fn test_unit_main_container_deps() {
+        let _lock = UNIT_TEST_LOCK.lock().unwrap();
+        let kc = make_test_container("app");
+        let plan = make_test_plan();
+        let init_names = vec!["init-setup".to_string()];
+        let unit = setup_test_container("app", &kc, &plan, false, &init_names);
+
+        assert!(
+            unit.contains("After=network.target sdme-oci-init-setup.service"),
+            "should depend on init container, got: {unit}"
+        );
+        assert!(
+            unit.contains("Requires=sdme-oci-init-setup.service"),
+            "should require init container"
+        );
+    }
+
+    #[test]
+    fn test_unit_termination_grace_period() {
+        let _lock = UNIT_TEST_LOCK.lock().unwrap();
+        let kc = make_test_container("app");
+        let mut plan = make_test_plan();
+        plan.termination_grace_period = Some(45);
+        let unit = setup_test_container("app", &kc, &plan, false, &[]);
+
+        assert!(
+            unit.contains("TimeoutStopSec=45s"),
+            "should have TimeoutStopSec=45s"
+        );
+    }
+
+    #[test]
+    fn test_unit_working_dir_override() {
+        let _lock = UNIT_TEST_LOCK.lock().unwrap();
+        let mut kc = make_test_container("app");
+        kc.working_dir_override = Some("/app".to_string());
+        let plan = make_test_plan();
+        let unit = setup_test_container("app", &kc, &plan, false, &[]);
+
+        assert!(
+            unit.contains("WorkingDirectory=/app"),
+            "should have WorkingDirectory=/app"
+        );
+    }
+
+    #[test]
+    fn test_unit_resources() {
+        let _lock = UNIT_TEST_LOCK.lock().unwrap();
+        let mut kc = make_test_container("app");
+        kc.resource_lines = vec!["MemoryMax=256M".to_string(), "CPUQuota=100%".to_string()];
+        let plan = make_test_plan();
+        let unit = setup_test_container("app", &kc, &plan, false, &[]);
+
+        assert!(unit.contains("MemoryMax=256M"), "should have MemoryMax");
+        assert!(unit.contains("CPUQuota=100%"), "should have CPUQuota");
+    }
+
+    #[test]
+    fn test_unit_readiness_probe() {
+        let _lock = UNIT_TEST_LOCK.lock().unwrap();
+        let mut kc = make_test_container("app");
+        kc.readiness_exec = Some("/bin/sh -c 'test -f /tmp/ready'".to_string());
+        let plan = make_test_plan();
+        let unit = setup_test_container("app", &kc, &plan, false, &[]);
+
+        assert!(
+            unit.contains("ExecStartPost=/bin/sh -c 'test -f /tmp/ready'"),
+            "should have ExecStartPost for readiness probe"
+        );
+    }
+
+    #[test]
+    fn test_unit_security_context_user() {
+        let _lock = UNIT_TEST_LOCK.lock().unwrap();
+        let kc = make_test_container("app");
+        let mut plan = make_test_plan();
+        plan.run_as_user = Some(1000);
+        plan.run_as_group = Some(1000);
+
+        // setup_kube_container passes "1000:1000" as user, which
+        // resolve_oci_user() resolves as numeric UID:GID, deploying
+        // drop_privs. We need etc/passwd for name lookups but numeric
+        // UIDs work without it.
+        let tmp = TempDataDir::new("kube-unit-sec");
+        let staging = tmp.path().join("staging");
+        let app_dir = staging.join("oci/apps/app");
+        let app_root = app_dir.join("root");
+        fs::create_dir_all(&app_root).unwrap();
+        fs::create_dir_all(staging.join("etc/systemd/system/multi-user.target.wants")).unwrap();
+
+        setup_kube_container(
+            &staging,
+            &app_dir,
+            &kc,
+            None,
+            &plan.restart_policy,
+            &plan.volumes,
+            &plan,
+            false,
+            &[],
+            false,
+        )
+        .unwrap();
+
+        let unit_path = staging.join("etc/systemd/system/sdme-oci-app.service");
+        let unit = fs::read_to_string(&unit_path).unwrap();
+
+        // Non-root user: should use drop_privs with uid/gid.
+        assert!(
+            unit.contains("/.sdme-drop-privs 1000 1000"),
+            "should use drop_privs with uid=1000 gid=1000, got: {unit}"
+        );
+        // drop_privs binary should be deployed.
+        assert!(app_root.join(".sdme-drop-privs").is_file());
     }
 }
