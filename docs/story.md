@@ -97,6 +97,8 @@ building the loop of test, review, fix, and converge.
 
 # Project Stats
 
+These stats are from the project bootstrap.
+
 In ~11 days we built a 19.7k-line Rust systems tool with 140 commits,
 359 tests, support for 6 import source types, 6 distro families, 2
 CPU architectures (with hand-written ELF emitters), 3 security tiers,
