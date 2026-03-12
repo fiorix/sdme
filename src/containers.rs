@@ -752,6 +752,7 @@ pub struct ContainerInfo {
     pub userns: bool,
     pub enabled: bool,
     pub binds: String,
+    pub kube: String,
 }
 
 impl ContainerInfo {
@@ -814,15 +815,23 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
         let state = State::read_from(&state_path);
 
         // Extract all state-dependent fields at once.
-        let (rootfs_name, pod, oci_pod, userns, enabled, binds) = match &state {
-            Ok(s) => (
-                s.rootfs().to_string(),
-                s.get("POD").unwrap_or("").to_string(),
-                s.get("OCI_POD").unwrap_or("").to_string(),
-                s.is_yes("USERNS"),
-                s.is_yes("ENABLED"),
-                s.get("BINDS").unwrap_or("").to_string(),
-            ),
+        let (rootfs_name, pod, oci_pod, userns, enabled, binds, kube) = match &state {
+            Ok(s) => {
+                let kube = if s.is_yes("KUBE") {
+                    format!("kube:{}", s.get("KUBE_CONTAINERS").unwrap_or(""))
+                } else {
+                    String::new()
+                };
+                (
+                    s.rootfs().to_string(),
+                    s.get("POD").unwrap_or("").to_string(),
+                    s.get("OCI_POD").unwrap_or("").to_string(),
+                    s.is_yes("USERNS"),
+                    s.is_yes("ENABLED"),
+                    s.get("BINDS").unwrap_or("").to_string(),
+                    kube,
+                )
+            }
             Err(_) => {
                 problems.push("unreadable state file");
                 (
@@ -831,6 +840,7 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
                     String::new(),
                     false,
                     false,
+                    String::new(),
                     String::new(),
                 )
             }
@@ -873,6 +883,7 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
             userns,
             enabled,
             binds,
+            kube,
         });
     }
     Ok(result)

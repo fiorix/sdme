@@ -5,6 +5,7 @@ pub mod copy;
 pub mod devfd_shim;
 pub mod drop_privs;
 pub mod import;
+pub mod kube;
 pub mod mounts;
 pub mod names;
 pub mod network;

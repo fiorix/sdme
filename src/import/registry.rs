@@ -19,7 +19,7 @@ use super::{build_http_agent, open_decoder, proxy_from_env, sorted_keys_csv, MAX
 
 /// Parsed OCI image reference (e.g. `quay.io/centos/centos:stream10`).
 #[derive(Debug, PartialEq)]
-pub(super) struct ImageReference {
+pub(crate) struct ImageReference {
     /// Registry hostname (e.g. `registry-1.docker.io`, `quay.io`).
     pub(super) registry: String,
     /// Repository path (e.g. `library/nginx`, `centos/centos`).
@@ -334,23 +334,23 @@ fn host_arch() -> &'static str {
 
 /// The `config` object inside an OCI image config blob.
 #[derive(serde::Deserialize, Debug, Default)]
-pub(super) struct OciContainerConfig {
+pub(crate) struct OciContainerConfig {
     #[serde(rename = "Entrypoint")]
-    pub(super) entrypoint: Option<Vec<String>>,
+    pub(crate) entrypoint: Option<Vec<String>>,
     #[serde(rename = "Cmd")]
-    pub(super) cmd: Option<Vec<String>>,
+    pub(crate) cmd: Option<Vec<String>>,
     #[serde(rename = "WorkingDir")]
-    pub(super) working_dir: Option<String>,
+    pub(crate) working_dir: Option<String>,
     #[serde(rename = "Env")]
-    pub(super) env: Option<Vec<String>>,
+    pub(crate) env: Option<Vec<String>>,
     #[serde(rename = "User")]
-    pub(super) user: Option<String>,
+    pub(crate) user: Option<String>,
     #[serde(rename = "ExposedPorts")]
-    pub(super) exposed_ports: Option<HashMap<String, serde_json::Value>>,
+    pub(crate) exposed_ports: Option<HashMap<String, serde_json::Value>>,
     #[serde(rename = "Volumes")]
-    pub(super) volumes: Option<HashMap<String, serde_json::Value>>,
+    pub(crate) volumes: Option<HashMap<String, serde_json::Value>>,
     #[serde(rename = "StopSignal")]
-    pub(super) stop_signal: Option<String>,
+    pub(crate) stop_signal: Option<String>,
 }
 
 impl OciContainerConfig {
@@ -359,7 +359,7 @@ impl OciContainerConfig {
     /// ExposedPorts is the strongest signal: base OS images never expose ports.
     /// After that, base OS images typically have no entrypoint and a single
     /// shell binary as Cmd. Application images have non-shell entrypoint/cmd.
-    pub(super) fn is_base_os_image(&self) -> bool {
+    pub(crate) fn is_base_os_image(&self) -> bool {
         // ExposedPorts is the strongest signal: base OS images never expose ports.
         let has_ports = self.exposed_ports.as_ref().is_some_and(|p| !p.is_empty());
         if has_ports {
@@ -379,8 +379,8 @@ impl OciContainerConfig {
 
 /// Top-level OCI image config blob.
 #[derive(serde::Deserialize, Debug)]
-pub(super) struct OciImageConfig {
-    pub(super) config: Option<OciContainerConfig>,
+pub(crate) struct OciImageConfig {
+    pub(crate) config: Option<OciContainerConfig>,
 }
 
 /// Fetch the config blob from a registry and parse it.
@@ -607,7 +607,7 @@ fn download_blob(
 /// Downloads layers one at a time to temp files, verifies digests,
 /// and extracts each layer using the OCI whiteout-aware extractor.
 /// Also fetches the image config blob and returns the container config.
-pub(super) fn import_registry_image(
+pub(crate) fn import_registry_image(
     image: &ImageReference,
     staging_dir: &Path,
     rootfs_dir: &Path,

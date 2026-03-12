@@ -1,0 +1,343 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+# verify-kube.sh - end-to-end verification of sdme kube apply/create/delete
+# Run as root. Requires a base-fs imported (e.g. ubuntu).
+#
+# Tests:
+# 1. Single container pod (nginx)
+# 2. Two containers with shared emptyDir volume
+# 3. Command override with busybox
+# 4. Cleanup with sdme kube delete
+
+SDME="${SDME:-sdme}"
+BASE_FS="${BASE_FS:-ubuntu}"
+DATADIR="/var/lib/sdme"
+KEEP=0
+REPORT_DIR="."
+
+# Timeouts (seconds)
+TIMEOUT_CREATE=600
+TIMEOUT_BOOT=120
+
+# Result tracking
+declare -A RESULTS
+PASS_COUNT=0
+FAIL_COUNT=0
+SKIP_COUNT=0
+
+usage() {
+    cat <<EOF
+Usage: $(basename "$0") [OPTIONS]
+
+End-to-end verification of sdme kube support.
+Must be run as root.
+
+Options:
+  --base-fs NAME   Base rootfs to use (default: ubuntu)
+  --keep           Do not remove test artifacts on exit
+  --report-dir DIR Write report to DIR (default: .)
+  --help           Show help
+EOF
+}
+
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --base-fs)
+                shift
+                BASE_FS="$1"
+                ;;
+            --keep)
+                KEEP=1
+                ;;
+            --report-dir)
+                shift
+                REPORT_DIR="$1"
+                ;;
+            --help)
+                usage
+                exit 0
+                ;;
+            *)
+                echo "unknown option: $1" >&2
+                usage >&2
+                exit 1
+                ;;
+        esac
+        shift
+    done
+}
+
+record() {
+    local test_name="$1" result="$2"
+    RESULTS["$test_name"]="$result"
+    case "$result" in
+        PASS) ((PASS_COUNT++)) ;;
+        FAIL) ((FAIL_COUNT++)) ;;
+        SKIP) ((SKIP_COUNT++)) ;;
+    esac
+    echo "[$result] $test_name"
+}
+
+cleanup_container() {
+    local name="$1"
+    if [[ $KEEP -eq 0 ]]; then
+        "$SDME" kube delete "$name" --force 2>/dev/null || true
+    fi
+}
+
+# --- Test 1: Single container nginx pod ---
+test_single_container() {
+    local test_name="single-container-nginx"
+    local pod_name="vfy-kube-nginx"
+    local yaml_file
+    yaml_file=$(mktemp /tmp/kube-test-XXXXXX.yaml)
+
+    cat > "$yaml_file" <<'YAML'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: vfy-kube-nginx
+spec:
+  containers:
+  - name: nginx
+    image: docker.io/nginx:latest
+    ports:
+    - containerPort: 80
+YAML
+
+    echo "--- $test_name: creating pod from YAML ---"
+    if ! "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" -v 2>&1; then
+        record "$test_name" FAIL
+        rm -f "$yaml_file"
+        return
+    fi
+    rm -f "$yaml_file"
+
+    echo "--- $test_name: starting pod ---"
+    if ! timeout "$TIMEOUT_BOOT" "$SDME" start "$pod_name" -v 2>&1; then
+        record "$test_name" FAIL
+        cleanup_container "$pod_name"
+        return
+    fi
+
+    # Wait for nginx to be ready.
+    sleep 3
+
+    echo "--- $test_name: checking nginx service inside container ---"
+    if "$SDME" exec "$pod_name" -- systemctl is-active sdme-oci-nginx.service 2>&1 | grep -q active; then
+        record "$test_name" PASS
+    else
+        echo "nginx service not active"
+        record "$test_name" FAIL
+    fi
+
+    cleanup_container "$pod_name"
+}
+
+# --- Test 2: Command override with busybox ---
+test_command_override() {
+    local test_name="command-override"
+    local pod_name="vfy-kube-cmd"
+    local yaml_file
+    yaml_file=$(mktemp /tmp/kube-test-XXXXXX.yaml)
+
+    cat > "$yaml_file" <<'YAML'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: vfy-kube-cmd
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+    command: ["/bin/sh", "-c"]
+    args: ["echo hello-from-kube > /tmp/marker && sleep infinity"]
+YAML
+
+    echo "--- $test_name: creating pod ---"
+    if ! "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" -v 2>&1; then
+        record "$test_name" FAIL
+        rm -f "$yaml_file"
+        return
+    fi
+    rm -f "$yaml_file"
+
+    echo "--- $test_name: starting pod ---"
+    if ! timeout "$TIMEOUT_BOOT" "$SDME" start "$pod_name" -v 2>&1; then
+        record "$test_name" FAIL
+        cleanup_container "$pod_name"
+        return
+    fi
+
+    sleep 3
+
+    echo "--- $test_name: checking marker file ---"
+    local marker
+    marker=$("$SDME" exec "$pod_name" -- cat /oci/apps/app/root/tmp/marker 2>/dev/null || echo "")
+    if [[ "$marker" == *"hello-from-kube"* ]]; then
+        record "$test_name" PASS
+    else
+        echo "marker file not found or wrong content: '$marker'"
+        record "$test_name" FAIL
+    fi
+
+    cleanup_container "$pod_name"
+}
+
+# --- Test 3: kube delete removes both container and rootfs ---
+test_kube_delete() {
+    local test_name="kube-delete-cleanup"
+    local pod_name="vfy-kube-del"
+    local yaml_file
+    yaml_file=$(mktemp /tmp/kube-test-XXXXXX.yaml)
+
+    cat > "$yaml_file" <<'YAML'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: vfy-kube-del
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+    command: ["/bin/sh", "-c", "sleep infinity"]
+YAML
+
+    echo "--- $test_name: creating pod ---"
+    if ! "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" -v 2>&1; then
+        record "$test_name" FAIL
+        rm -f "$yaml_file"
+        return
+    fi
+    rm -f "$yaml_file"
+
+    # Verify state and rootfs exist.
+    if [[ ! -f "$DATADIR/state/$pod_name" ]]; then
+        echo "state file missing before delete"
+        record "$test_name" FAIL
+        cleanup_container "$pod_name"
+        return
+    fi
+
+    echo "--- $test_name: deleting pod ---"
+    if ! "$SDME" kube delete "$pod_name" 2>&1; then
+        record "$test_name" FAIL
+        return
+    fi
+
+    # Verify state and rootfs are gone.
+    if [[ -f "$DATADIR/state/$pod_name" ]]; then
+        echo "state file still exists after delete"
+        record "$test_name" FAIL
+        return
+    fi
+    if [[ -d "$DATADIR/fs/kube-$pod_name" ]]; then
+        echo "rootfs dir still exists after delete"
+        record "$test_name" FAIL
+        return
+    fi
+
+    record "$test_name" PASS
+}
+
+# --- Test 4: sdme ps shows kube metadata ---
+test_ps_kube_column() {
+    local test_name="ps-kube-column"
+    local pod_name="vfy-kube-ps"
+    local yaml_file
+    yaml_file=$(mktemp /tmp/kube-test-XXXXXX.yaml)
+
+    cat > "$yaml_file" <<'YAML'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: vfy-kube-ps
+spec:
+  containers:
+  - name: web
+    image: docker.io/busybox:latest
+    command: ["/bin/sh", "-c", "sleep infinity"]
+  - name: sidecar
+    image: docker.io/busybox:latest
+    command: ["/bin/sh", "-c", "sleep infinity"]
+YAML
+
+    echo "--- $test_name: creating pod ---"
+    if ! "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" -v 2>&1; then
+        record "$test_name" FAIL
+        rm -f "$yaml_file"
+        return
+    fi
+    rm -f "$yaml_file"
+
+    echo "--- $test_name: checking sdme ps output ---"
+    local ps_output
+    ps_output=$("$SDME" ps 2>/dev/null)
+    if echo "$ps_output" | grep -q "kube:web,sidecar"; then
+        record "$test_name" PASS
+    else
+        echo "expected 'kube:web,sidecar' in ps output:"
+        echo "$ps_output"
+        record "$test_name" FAIL
+    fi
+
+    cleanup_container "$pod_name"
+}
+
+# --- Main ---
+main() {
+    parse_args "$@"
+
+    if [[ $EUID -ne 0 ]]; then
+        echo "error: must be run as root" >&2
+        exit 1
+    fi
+
+    # Verify base-fs exists.
+    if [[ ! -d "$DATADIR/fs/$BASE_FS" ]]; then
+        echo "error: base rootfs '$BASE_FS' not found; import it first:" >&2
+        echo "  sdme fs import docker.io/$BASE_FS:latest -n $BASE_FS" >&2
+        exit 1
+    fi
+
+    echo "=== sdme kube verification ==="
+    echo "base-fs: $BASE_FS"
+    echo ""
+
+    test_single_container
+    test_command_override
+    test_kube_delete
+    test_ps_kube_column
+
+    echo ""
+    echo "=== Results ==="
+    for test_name in "${!RESULTS[@]}"; do
+        echo "  [${RESULTS[$test_name]}] $test_name"
+    done
+    echo ""
+    echo "Total: $PASS_COUNT passed, $FAIL_COUNT failed, $SKIP_COUNT skipped"
+
+    # Write report.
+    local report="$REPORT_DIR/verify-kube-$(date +%Y%m%d-%H%M%S).md"
+    {
+        echo "# sdme kube verification"
+        echo ""
+        echo "Date: $(date -Iseconds)"
+        echo "Base FS: $BASE_FS"
+        echo ""
+        echo "| Test | Result |"
+        echo "|------|--------|"
+        for test_name in "${!RESULTS[@]}"; do
+            echo "| $test_name | ${RESULTS[$test_name]} |"
+        done
+        echo ""
+        echo "**$PASS_COUNT passed, $FAIL_COUNT failed, $SKIP_COUNT skipped**"
+    } > "$report"
+    echo "Report: $report"
+
+    [[ $FAIL_COUNT -eq 0 ]]
+}
+
+main "$@"

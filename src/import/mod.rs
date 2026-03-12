@@ -14,7 +14,7 @@
 mod dir;
 mod img;
 mod oci;
-mod registry;
+pub(crate) mod registry;
 mod tar;
 
 use anyhow::{bail, Context, Result};
@@ -50,7 +50,7 @@ pub(super) fn sorted_keys_csv(
 ///
 /// Arguments containing spaces, quotes, or shell metacharacters are
 /// single-quoted. Single quotes within arguments are escaped as `'\''`.
-fn shell_join(args: &[String]) -> String {
+pub(crate) fn shell_join(args: &[String]) -> String {
     args.iter()
         .map(|arg| {
             if arg.is_empty() {
@@ -401,7 +401,7 @@ pub(super) fn proxy_from_env() -> Option<String> {
 /// blocked `read()` syscalls return `EINTR` immediately on Ctrl+C. The download
 /// loops in `download_file()` and `download_blob()` call `check_interrupted()` on
 /// each iteration, which will catch the flag set by the signal handler.
-pub(super) fn build_http_agent(verbose: bool) -> Result<ureq::Agent> {
+pub(crate) fn build_http_agent(verbose: bool) -> Result<ureq::Agent> {
     let mut config = ureq::Agent::config_builder()
         .user_agent("sdme/0.1")
         .redirect_auth_headers(ureq::config::RedirectAuthHeaders::SameHost)
@@ -983,9 +983,9 @@ fn prompt_install_systemd(
 
 /// Resolved numeric identity for an OCI container user.
 #[derive(Debug)]
-struct ResolvedUser {
-    uid: u32,
-    gid: u32,
+pub(crate) struct ResolvedUser {
+    pub(crate) uid: u32,
+    pub(crate) gid: u32,
 }
 
 /// Parse an `/etc/passwd`-format file and look up a user by name or numeric UID.
@@ -1040,7 +1040,7 @@ fn lookup_group(group_path: &Path, group: &str) -> Option<u32> {
 /// - `"name:group"` or `"uid:gid"` → resolve both parts
 ///
 /// Returns `None` for root users (uid=0), since they don't need drop_privs.
-fn resolve_oci_user(oci_root: &Path, user: &str) -> Result<Option<ResolvedUser>> {
+pub(crate) fn resolve_oci_user(oci_root: &Path, user: &str) -> Result<Option<ResolvedUser>> {
     // Empty or literal "root": no drop_privs needed.
     // Note: "root:somegroup" is treated as plain root (group ignored). This
     // differs from "0:somegroup" which goes through full resolution. The

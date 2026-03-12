@@ -1,12 +1,12 @@
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 use sdme::import::{ImportOptions, InstallPackages, OciMode};
 use sdme::{
-    config, confirm, containers, pod, rootfs, security, system_check, systemd, BindConfig,
+    config, confirm, containers, kube, pod, rootfs, security, system_check, systemd, BindConfig,
     EnvConfig, NetworkConfig, ResourceLimits, SecurityConfig,
 };
 
@@ -373,6 +373,10 @@ enum Command {
     /// Manage pod network namespaces
     #[command(name = "pod", subcommand)]
     Pod(PodCommand),
+
+    /// Manage Kubernetes-compatible pods (experimental)
+    #[command(name = "kube", subcommand)]
+    Kube(KubeCommand),
 }
 
 #[derive(Subcommand)]
@@ -543,6 +547,49 @@ enum PodCommand {
         #[arg(required = true)]
         names: Vec<String>,
         /// Force removal even if containers reference the pod
+        #[arg(short, long)]
+        force: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum KubeCommand {
+    /// Create and start a kube pod from a YAML file, then enter the container
+    Apply {
+        /// Path to Kubernetes Pod or Deployment YAML file
+        #[arg(short, long)]
+        file: String,
+
+        /// Base root filesystem for the pod (default: config default_base_fs)
+        #[arg(long)]
+        base_fs: Option<String>,
+
+        /// Boot timeout in seconds (overrides config, default: 60)
+        #[arg(short, long)]
+        timeout: Option<u64>,
+
+        #[command(flatten)]
+        security: SecurityArgs,
+    },
+    /// Create a kube pod from a YAML file (without starting)
+    Create {
+        /// Path to Kubernetes Pod or Deployment YAML file
+        #[arg(short, long)]
+        file: String,
+
+        /// Base root filesystem for the pod (default: config default_base_fs)
+        #[arg(long)]
+        base_fs: Option<String>,
+
+        #[command(flatten)]
+        security: SecurityArgs,
+    },
+    /// Delete a kube pod (stop, remove container and rootfs)
+    Delete {
+        /// Pod name
+        name: String,
+
+        /// Force deletion even if not a kube pod
         #[arg(short, long)]
         force: bool,
     },
@@ -1395,6 +1442,11 @@ fn main() -> Result<()> {
                 } else {
                     None
                 };
+                let kube_w = if entries.iter().any(|e| !e.kube.is_empty()) {
+                    Some(entries.iter().map(|e| e.kube.len()).max().unwrap().max(4))
+                } else {
+                    None
+                };
                 // Header.
                 print!(
                     "{:<name_w$}  {:<status_w$}  {:<health_w$}  {:<os_w$}",
@@ -1414,6 +1466,9 @@ fn main() -> Result<()> {
                 }
                 if let Some(bw) = binds_w {
                     print!("  {:<bw$}", "BINDS");
+                }
+                if let Some(kw) = kube_w {
+                    print!("  {:<kw$}", "KUBE");
                 }
                 println!();
                 // Rows.
@@ -1436,6 +1491,9 @@ fn main() -> Result<()> {
                     }
                     if let Some(bw) = binds_w {
                         print!("  {:<bw$}", binds_display[i]);
+                    }
+                    if let Some(kw) = kube_w {
+                        print!("  {:<kw$}", e.kube);
                     }
                     println!();
                 }
@@ -1541,6 +1599,75 @@ fn main() -> Result<()> {
                 if failed {
                     bail!("some pods could not be removed");
                 }
+            }
+        },
+        Command::Kube(cmd) => match cmd {
+            KubeCommand::Apply {
+                file,
+                base_fs,
+                timeout,
+                security: _,
+            } => {
+                system_check::check_systemd_version(252)?;
+                let yaml_content = std::fs::read_to_string(&file)
+                    .with_context(|| format!("failed to read {file}"))?;
+                let effective_base_fs = base_fs.or_else(|| {
+                    if cfg.default_base_fs.is_empty() {
+                        None
+                    } else {
+                        Some(cfg.default_base_fs.clone())
+                    }
+                });
+                let base_fs = effective_base_fs
+                    .as_deref()
+                    .context("--base-fs is required (or set default with: sdme config set default_base_fs <name>)")?;
+                let name = kube::kube_create(&cfg.datadir, &yaml_content, base_fs, cli.verbose)?;
+                eprintln!("starting '{name}'");
+                let boot_result = (|| -> Result<()> {
+                    systemd::start(&cfg.datadir, &name, cli.verbose)?;
+                    let boot_timeout =
+                        std::time::Duration::from_secs(timeout.unwrap_or(cfg.boot_timeout));
+                    systemd::await_boot(&name, boot_timeout, cli.verbose)?;
+                    Ok(())
+                })();
+                if let Err(e) = boot_result {
+                    sdme::reset_interrupt();
+                    eprintln!("boot failed, removing '{name}'");
+                    let _ = kube::kube_delete(&cfg.datadir, &name, true, cli.verbose);
+                    return Err(e);
+                }
+                eprintln!("joining '{name}'");
+                let status =
+                    containers::join(&cfg.datadir, &name, &[], cfg.join_as_sudo_user, cli.verbose)?;
+                if !status.success() {
+                    let code = status.code().unwrap_or(1);
+                    std::process::exit(code);
+                }
+            }
+            KubeCommand::Create {
+                file,
+                base_fs,
+                security: _,
+            } => {
+                system_check::check_systemd_version(252)?;
+                let yaml_content = std::fs::read_to_string(&file)
+                    .with_context(|| format!("failed to read {file}"))?;
+                let effective_base_fs = base_fs.or_else(|| {
+                    if cfg.default_base_fs.is_empty() {
+                        None
+                    } else {
+                        Some(cfg.default_base_fs.clone())
+                    }
+                });
+                let base_fs = effective_base_fs
+                    .as_deref()
+                    .context("--base-fs is required (or set default with: sdme config set default_base_fs <name>)")?;
+                let name = kube::kube_create(&cfg.datadir, &yaml_content, base_fs, cli.verbose)?;
+                println!("{name}");
+            }
+            KubeCommand::Delete { name, force } => {
+                kube::kube_delete(&cfg.datadir, &name, force, cli.verbose)?;
+                println!("{name}");
             }
         },
         Command::Fs(cmd) => match cmd {
