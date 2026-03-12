@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: vfy-kube-redis
+spec:
+  containers:
+  - name: redis
+    image: docker.io/redis:latest
+  - name: client
+    image: docker.io/busybox:latest
+    command: ["/bin/sh", "-c", "sleep infinity"]

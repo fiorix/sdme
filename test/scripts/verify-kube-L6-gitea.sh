@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-# verify-gitea-pod.sh - end-to-end verification of Gitea + MySQL + Nginx
+# verify-kube-L6-gitea.sh - end-to-end verification of Gitea + MySQL + Nginx
 # Run as root. Requires a base-fs imported (e.g. ubuntu).
 #
 # Deploys a Gitea + MySQL + Nginx stack as a single kube pod and verifies:

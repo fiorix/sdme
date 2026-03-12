@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: vfy-kube-net
+spec:
+  containers:
+  - name: nginx-unprivileged
+    image: quay.io/nginx/nginx-unprivileged
+  - name: client
+    image: docker.io/busybox:latest
+    command: ["/bin/sh", "-c", "sleep infinity"]

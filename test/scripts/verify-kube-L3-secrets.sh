@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-# verify-kube-secrets.sh - end-to-end verification of kube secret volumes
+# verify-kube-L3-secrets.sh - end-to-end verification of kube secret volumes
 # Run as root. Requires a base-fs imported (e.g. ubuntu).
 #
 # Uses examples from the Kubernetes documentation:

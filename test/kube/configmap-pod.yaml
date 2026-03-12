@@ -1,0 +1,50 @@
+# Pod with configMap volumes and env valueFrom (secretKeyRef, configMapKeyRef).
+#
+# Requires resources created before applying:
+#   sdme kube configmap create app-config --from-literal database-url=postgres://localhost/db --from-literal log-level=info
+#   sdme kube secret create env-secret --from-literal api-key=secret-api-key-123
+#
+# Tests:
+#   - configMap volume mount (all keys)
+#   - configMap volume mount (projected items with defaultMode 0400)
+#   - env valueFrom secretKeyRef
+#   - env valueFrom configMapKeyRef
+apiVersion: v1
+kind: Pod
+metadata:
+  name: configmap-test-pod
+spec:
+  containers:
+    - name: test-container
+      image: docker.io/nginx:latest
+      env:
+        - name: LITERAL_VAR
+          value: hello-world
+        - name: SECRET_VAR
+          valueFrom:
+            secretKeyRef:
+              name: env-secret
+              key: api-key
+        - name: CONFIG_VAR
+          valueFrom:
+            configMapKeyRef:
+              name: app-config
+              key: log-level
+      volumeMounts:
+        - name: config-volume
+          mountPath: /etc/config
+          readOnly: true
+        - name: config-projected
+          mountPath: /etc/config-projected
+          readOnly: true
+  volumes:
+    - name: config-volume
+      configMap:
+        name: app-config
+    - name: config-projected
+      configMap:
+        name: app-config
+        defaultMode: 0400
+        items:
+        - key: database-url
+          path: db/connection-string

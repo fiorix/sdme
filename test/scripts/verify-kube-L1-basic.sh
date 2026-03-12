@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-# verify-kube.sh - end-to-end verification of sdme kube apply/create/delete
+# verify-kube-L1-basic.sh - end-to-end verification of sdme kube apply/create/delete
 # Run as root. Requires a base-fs imported (e.g. ubuntu).
 #
 # Tests:
@@ -84,6 +84,60 @@ cleanup_container() {
     local name="$1"
     if [[ $KEEP -eq 0 ]]; then
         "$SDME" kube delete "$name" --force 2>/dev/null || true
+    fi
+}
+
+# --- Test 0: Validate YAML files with kubeconform ---
+test_validate_yaml() {
+    local kubeconform=""
+
+    # Check PATH first.
+    if command -v kubeconform &>/dev/null; then
+        kubeconform="kubeconform"
+    else
+        # Download to /tmp if not available.
+        local kc_bin="/tmp/kubeconform"
+        if [[ -x "$kc_bin" ]]; then
+            kubeconform="$kc_bin"
+        else
+            echo "--- validate/yaml: downloading kubeconform ---"
+            local arch
+            arch=$(uname -m)
+            case "$arch" in
+                x86_64)  arch="amd64" ;;
+                aarch64) arch="arm64" ;;
+            esac
+            local url="https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-${arch}.tar.gz"
+            if curl -fsSL "$url" | tar xz -C /tmp kubeconform 2>/dev/null; then
+                chmod +x "$kc_bin"
+                kubeconform="$kc_bin"
+            fi
+        fi
+    fi
+
+    if [[ -z "$kubeconform" ]]; then
+        record "validate/yaml" SKIP "kubeconform not available"
+        return
+    fi
+
+    local script_dir
+    script_dir=$(dirname "$0")
+    local yaml_dir="$script_dir/../kube"
+    local fail=0
+
+    for yaml_file in "$yaml_dir"/*.yaml; do
+        local basename
+        basename=$(basename "$yaml_file")
+        if "$kubeconform" -strict "$yaml_file" 2>&1; then
+            record "validate/yaml-$basename" PASS
+        else
+            record "validate/yaml-$basename" FAIL
+            fail=1
+        fi
+    done
+
+    if [[ $fail -eq 0 ]]; then
+        echo "  all YAML files validated"
     fi
 }
 
@@ -381,6 +435,7 @@ main() {
     echo "base-fs: $BASE_FS"
     echo ""
 
+    test_validate_yaml
     test_single_container
     test_command_override
     test_kube_delete

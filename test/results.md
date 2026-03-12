@@ -218,6 +218,19 @@ nginx-unprivileged declares exposed ports but no volumes. This
 exercises the full pipeline: read volumes file, create host dirs,
 add bind mounts, serve content.
 
+## Kube Tests
+
+Run in order with `--base-fs ubuntu`. Results pending.
+
+| Script | Level | Tests | Result |
+|--------|-------|-------|--------|
+| verify-kube-L1-basic.sh | L1 Basic lifecycle | ~5 | - |
+| verify-kube-L2-spec.sh | L2 Pod spec features | ~12 | - |
+| verify-kube-L3-volumes.sh | L3 Volumes (secrets, configmaps, PVCs) | ~28 | - |
+| verify-kube-L4-networking.sh | L4 Localhost networking | ~6 | - |
+| verify-kube-L5-redis.sh | L5 Redis round-trip | ~6 | - |
+| verify-kube-L6-gitea.sh | L6 Gitea stack | ~15 | - |
+
 ## Usage Guide Verification
 
 44 passed, 0 failed, 0 skipped.

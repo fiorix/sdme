@@ -148,6 +148,29 @@ sudo ./test/scripts/verify-usage.sh
 sudo ./test/scripts/verify-usage.sh --keep   # keep artifacts
 ```
 
+### Kube Tests
+
+Six-level progression from basic lifecycle to a full multi-service stack.
+All require a base-fs imported (e.g. `ubuntu`). Run in order:
+
+| Script | Level | Tests | What it covers |
+|--------|-------|-------|----------------|
+| `verify-kube-L1-basic.sh` | L1 | ~5 | YAML validation, single-container pod, command override, kube delete, shared emptyDir, ps metadata |
+| `verify-kube-L2-spec.sh` | L2 | ~12 | Pod spec features: terminationGracePeriodSeconds, securityContext, initContainers, workingDir, resources, readinessProbe |
+| `verify-kube-L3-volumes.sh` | L3 | ~28 | Volumes: secret + configMap create/ls/rm, all-keys mount, projected items, defaultMode, env valueFrom, PVC persistence |
+| `verify-kube-L4-networking.sh` | L4 | ~6 | Inter-container localhost networking: nginx + busybox, HTTP fetch across containers |
+| `verify-kube-L5-redis.sh` | L5 | ~6 | Real service data round-trip: redis PING/PONG, SET/GET via raw protocol |
+| `verify-kube-L6-gitea.sh` | L6 | ~15 | Full 3-container app stack: Gitea + MySQL + Nginx with API validation |
+
+```bash
+sudo ./test/scripts/verify-kube-L1-basic.sh --base-fs ubuntu
+sudo ./test/scripts/verify-kube-L2-spec.sh --base-fs ubuntu
+sudo ./test/scripts/verify-kube-L3-volumes.sh --base-fs ubuntu
+sudo ./test/scripts/verify-kube-L4-networking.sh --base-fs ubuntu
+sudo ./test/scripts/verify-kube-L5-redis.sh --base-fs ubuntu
+sudo ./test/scripts/verify-kube-L6-gitea.sh --base-fs ubuntu
+```
+
 ## Running a full test pass
 
 Before tagging a release, run everything from a clean state:
@@ -162,6 +185,14 @@ sudo ./test/scripts/verify-pods.sh
 sudo ./test/scripts/verify-oci.sh
 sudo ./test/scripts/verify-security.sh
 sudo ./test/scripts/verify-usage.sh
+
+# 3. Kube tests (requires ubuntu base-fs from step 2)
+sudo ./test/scripts/verify-kube-L1-basic.sh --base-fs ubuntu
+sudo ./test/scripts/verify-kube-L2-spec.sh --base-fs ubuntu
+sudo ./test/scripts/verify-kube-L3-volumes.sh --base-fs ubuntu
+sudo ./test/scripts/verify-kube-L4-networking.sh --base-fs ubuntu
+sudo ./test/scripts/verify-kube-L5-redis.sh --base-fs ubuntu
+sudo ./test/scripts/verify-kube-L6-gitea.sh --base-fs ubuntu
 ```
 
 Use `--keep` on verify-matrix.sh so that verify-security.sh can reuse

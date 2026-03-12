@@ -6,7 +6,8 @@ use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 use sdme::import::{ImportOptions, InstallPackages, OciMode};
 use sdme::{
-    config, confirm, containers, kube, kube_secret, pod, rootfs, security, system_check, systemd,
+    config, confirm, containers, kube, kube_configmap, kube_secret, pod, rootfs, security,
+    system_check, systemd,
     BindConfig, EnvConfig, NetworkConfig, ResourceLimits, SecurityConfig,
 };
 
@@ -602,6 +603,9 @@ enum KubeCommand {
     /// Manage secrets for kube pods
     #[command(subcommand)]
     Secret(KubeSecretCommand),
+    /// Manage configmaps for kube pods
+    #[command(subcommand)]
+    Configmap(KubeConfigmapCommand),
 }
 
 #[derive(Subcommand)]
@@ -624,6 +628,31 @@ enum KubeSecretCommand {
     /// Remove one or more secrets
     Rm {
         /// Secret names
+        #[arg(required = true)]
+        names: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum KubeConfigmapCommand {
+    /// Create a configmap from literal values or files
+    Create {
+        /// ConfigMap name
+        name: String,
+
+        /// Set a literal key=value pair (repeatable)
+        #[arg(long = "from-literal", value_name = "KEY=VALUE")]
+        from_literal: Vec<String>,
+
+        /// Set a key from a file key=path (repeatable)
+        #[arg(long = "from-file", value_name = "KEY=PATH")]
+        from_file: Vec<String>,
+    },
+    /// List configmaps
+    Ls,
+    /// Remove one or more configmaps
+    Rm {
+        /// ConfigMap names
         #[arg(required = true)]
         names: Vec<String>,
     },
@@ -1907,6 +1936,59 @@ fn main() -> Result<()> {
                 }
                 KubeSecretCommand::Rm { names } => {
                     kube_secret::remove(&cfg.datadir, &names)?;
+                    for name in &names {
+                        println!("{name}");
+                    }
+                }
+            },
+            KubeCommand::Configmap(cmd) => match cmd {
+                KubeConfigmapCommand::Create {
+                    name,
+                    from_literal,
+                    from_file,
+                } => {
+                    let literals: Vec<(String, String)> = from_literal
+                        .iter()
+                        .map(|s| {
+                            s.split_once('=')
+                                .map(|(k, v)| (k.to_string(), v.to_string()))
+                                .context(format!(
+                                    "invalid --from-literal format: {s} (expected KEY=VALUE)"
+                                ))
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    let files: Vec<(String, String)> = from_file
+                        .iter()
+                        .map(|s| {
+                            s.split_once('=')
+                                .map(|(k, v)| (k.to_string(), v.to_string()))
+                                .context(format!(
+                                    "invalid --from-file format: {s} (expected KEY=PATH)"
+                                ))
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    kube_configmap::create(&cfg.datadir, &name, &literals, &files)?;
+                    println!("{name}");
+                }
+                KubeConfigmapCommand::Ls => {
+                    let configmaps = kube_configmap::list(&cfg.datadir)?;
+                    if configmaps.is_empty() {
+                        eprintln!("no configmaps");
+                        return Ok(());
+                    }
+                    let name_w = configmaps
+                        .iter()
+                        .map(|s| s.name.len())
+                        .max()
+                        .unwrap()
+                        .max(4);
+                    println!("{:<name_w$}  {:>5}  {}", "NAME", "KEYS", "CREATED");
+                    for s in &configmaps {
+                        println!("{:<name_w$}  {:>5}  {}", s.name, s.keys, s.created);
+                    }
+                }
+                KubeConfigmapCommand::Rm { names } => {
+                    kube_configmap::remove(&cfg.datadir, &names)?;
                     for name in &names {
                         println!("{name}");
                     }

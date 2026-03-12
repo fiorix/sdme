@@ -132,9 +132,25 @@ pub(crate) struct ExecAction {
 }
 
 #[derive(serde::Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct EnvVar {
     pub(crate) name: String,
     pub(crate) value: Option<String>,
+    #[serde(default)]
+    pub(crate) value_from: Option<EnvVarSource>,
+}
+
+#[derive(serde::Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EnvVarSource {
+    pub(crate) secret_key_ref: Option<KeySelector>,
+    pub(crate) config_map_key_ref: Option<KeySelector>,
+}
+
+#[derive(serde::Deserialize, Debug)]
+pub(crate) struct KeySelector {
+    pub(crate) name: String,
+    pub(crate) key: String,
 }
 
 #[derive(serde::Deserialize, Debug, Clone)]
@@ -168,6 +184,10 @@ pub(crate) struct Volume {
     pub(crate) host_path: Option<HostPathVolume>,
     #[serde(default)]
     pub(crate) secret: Option<SecretVolume>,
+    #[serde(default)]
+    pub(crate) config_map: Option<ConfigMapVolume>,
+    #[serde(default)]
+    pub(crate) persistent_volume_claim: Option<PVCVolume>,
 }
 
 #[derive(serde::Deserialize, Debug)]
@@ -245,6 +265,35 @@ pub(crate) struct SecretKeyToPath {
     pub(crate) path: String,
 }
 
+#[derive(serde::Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ConfigMapVolume {
+    pub(crate) name: String,
+    #[serde(default)]
+    pub(crate) items: Vec<ConfigMapKeyToPath>,
+    #[serde(
+        default = "default_configmap_mode",
+        deserialize_with = "deserialize_file_mode"
+    )]
+    pub(crate) default_mode: u32,
+}
+
+fn default_configmap_mode() -> u32 {
+    0o644
+}
+
+#[derive(serde::Deserialize, Debug)]
+pub(crate) struct ConfigMapKeyToPath {
+    pub(crate) key: String,
+    pub(crate) path: String,
+}
+
+#[derive(serde::Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PVCVolume {
+    pub(crate) claim_name: String,
+}
+
 // --- Parsed / validated plan ---
 
 /// A validated plan for creating a kube pod container.
@@ -271,7 +320,7 @@ pub(crate) struct KubeContainer {
     pub(crate) image_ref: ImageReference,
     pub(crate) command_override: Option<Vec<String>>,
     pub(crate) args_override: Option<Vec<String>>,
-    pub(crate) env: Vec<(String, String)>,
+    pub(crate) env: Vec<(String, KubeEnvValue)>,
     pub(crate) volume_mounts: Vec<KubeVolumeMount>,
     pub(crate) working_dir_override: Option<String>,
     pub(crate) image_pull_policy: String,
@@ -292,6 +341,14 @@ pub(crate) struct KubeVolumeMount {
     pub(crate) read_only: bool,
 }
 
+/// Resolved env var value (literal or deferred reference).
+#[derive(Debug)]
+pub(crate) enum KubeEnvValue {
+    Literal(String),
+    SecretKeyRef { name: String, key: String },
+    ConfigMapKeyRef { name: String, key: String },
+}
+
 #[derive(Debug)]
 pub(crate) enum KubeVolumeKind {
     EmptyDir,
@@ -301,6 +358,12 @@ pub(crate) enum KubeVolumeKind {
         items: Vec<(String, String)>,
         default_mode: u32,
     },
+    ConfigMap {
+        configmap_name: String,
+        items: Vec<(String, String)>,
+        default_mode: u32,
+    },
+    PVC(String),
 }
 
 #[derive(Debug)]
@@ -532,11 +595,45 @@ fn build_readiness_exec(probe: &Probe) -> Result<String> {
 fn validate_container(c: Container) -> Result<KubeContainer> {
     let image_ref = ImageReference::parse(&c.image)
         .with_context(|| format!("invalid image reference: {}", c.image))?;
-    let env: Vec<(String, String)> = c
+    let env: Vec<(String, KubeEnvValue)> = c
         .env
         .iter()
-        .map(|e| (e.name.clone(), e.value.clone().unwrap_or_default()))
-        .collect();
+        .map(|e| {
+            if let Some(ref vf) = e.value_from {
+                if let Some(ref skr) = vf.secret_key_ref {
+                    validate_name(&skr.name)
+                        .with_context(|| format!("env '{}': invalid secret name", e.name))?;
+                    Ok((
+                        e.name.clone(),
+                        KubeEnvValue::SecretKeyRef {
+                            name: skr.name.clone(),
+                            key: skr.key.clone(),
+                        },
+                    ))
+                } else if let Some(ref cmkr) = vf.config_map_key_ref {
+                    validate_name(&cmkr.name)
+                        .with_context(|| format!("env '{}': invalid configmap name", e.name))?;
+                    Ok((
+                        e.name.clone(),
+                        KubeEnvValue::ConfigMapKeyRef {
+                            name: cmkr.name.clone(),
+                            key: cmkr.key.clone(),
+                        },
+                    ))
+                } else {
+                    bail!(
+                        "env '{}': valueFrom must specify secretKeyRef or configMapKeyRef",
+                        e.name
+                    )
+                }
+            } else {
+                Ok((
+                    e.name.clone(),
+                    KubeEnvValue::Literal(e.value.clone().unwrap_or_default()),
+                ))
+            }
+        })
+        .collect::<Result<Vec<_>>>()?;
     let volume_mounts: Vec<KubeVolumeMount> = c
         .volume_mounts
         .iter()
@@ -753,6 +850,39 @@ pub(crate) fn validate_and_plan(pod_name: &str, spec: PodSpec) -> Result<KubePla
                     items,
                     default_mode: sec.default_mode,
                 }
+            } else if let Some(ref cm) = v.config_map {
+                validate_name(&cm.name)
+                    .with_context(|| format!("volume '{}': invalid configmap name", v.name))?;
+                let items: Vec<(String, String)> = cm
+                    .items
+                    .iter()
+                    .map(|item| {
+                        if item.path.contains("..") {
+                            bail!(
+                                "volume '{}': configmap item path must not contain '..': {}",
+                                v.name,
+                                item.path
+                            );
+                        }
+                        if item.path.starts_with('/') {
+                            bail!(
+                                "volume '{}': configmap item path must not start with '/': {}",
+                                v.name,
+                                item.path
+                            );
+                        }
+                        Ok((item.key.clone(), item.path.clone()))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                KubeVolumeKind::ConfigMap {
+                    configmap_name: cm.name.clone(),
+                    items,
+                    default_mode: cm.default_mode,
+                }
+            } else if let Some(ref pvc) = v.persistent_volume_claim {
+                validate_name(&pvc.claim_name)
+                    .with_context(|| format!("volume '{}': invalid PVC claim name", v.name))?;
+                KubeVolumeKind::PVC(pvc.claim_name.clone())
             } else {
                 KubeVolumeKind::EmptyDir
             };
@@ -766,13 +896,18 @@ pub(crate) fn validate_and_plan(pod_name: &str, spec: PodSpec) -> Result<KubePla
     // Collect nspawn --bind= arguments for hostPath volumes only.
     // emptyDir volumes live inside the rootfs at /oci/volumes/{name} and are
     // bind-mounted to each app's root via sdme-kube-volumes.service.
+    // ConfigMap and Secret volumes are populated into the rootfs.
+    // PVC volumes get host_binds added in kube_create after datadir is known.
     let host_binds: Vec<(String, String)> = volumes
         .iter()
         .filter_map(|v| match &v.kind {
             KubeVolumeKind::HostPath(path) => {
                 Some((path.clone(), format!("/oci/volumes/{}", v.name)))
             }
-            KubeVolumeKind::EmptyDir | KubeVolumeKind::Secret { .. } => None,
+            KubeVolumeKind::EmptyDir
+            | KubeVolumeKind::Secret { .. }
+            | KubeVolumeKind::ConfigMap { .. }
+            | KubeVolumeKind::PVC(_) => None,
         })
         .collect();
 
@@ -839,7 +974,7 @@ pub fn kube_create(
     }
 
     let (pod_name, spec) = parse_yaml(yaml_content)?;
-    let plan = validate_and_plan(&pod_name, spec)?;
+    let mut plan = validate_and_plan(&pod_name, spec)?;
 
     let rootfs_name = format!("kube-{}", plan.pod_name);
     let rootfs_dir = datadir.join("fs");
@@ -937,6 +1072,77 @@ pub fn kube_create(
         }
     }
 
+    // Populate configMap volumes.
+    for vol in &plan.volumes {
+        if let KubeVolumeKind::ConfigMap {
+            ref configmap_name,
+            ref items,
+            default_mode,
+        } = vol.kind
+        {
+            let vol_path = volumes_dir.join(&vol.name);
+            fs::create_dir_all(&vol_path)
+                .with_context(|| format!("failed to create volume dir {}", vol_path.display()))?;
+
+            let configmap_data =
+                crate::kube_configmap::read_configmap_data(datadir, configmap_name)
+                    .with_context(|| {
+                        format!(
+                            "volume '{}': failed to read configmap '{configmap_name}'",
+                            vol.name
+                        )
+                    })?;
+
+            if items.is_empty() {
+                // Copy all keys.
+                for (key, contents) in &configmap_data {
+                    let file_path = vol_path.join(key);
+                    fs::write(&file_path, contents)
+                        .with_context(|| format!("failed to write {}", file_path.display()))?;
+                    set_file_mode(&file_path, default_mode)?;
+                }
+            } else {
+                // Copy only projected keys.
+                let data_map: HashMap<&str, &[u8]> = configmap_data
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), v.as_slice()))
+                    .collect();
+                for (key, path) in items {
+                    let contents = data_map.get(key.as_str()).with_context(|| {
+                        format!(
+                            "volume '{}': configmap '{configmap_name}' has no key '{key}'",
+                            vol.name
+                        )
+                    })?;
+                    let file_path = vol_path.join(path);
+                    if let Some(parent) = file_path.parent() {
+                        fs::create_dir_all(parent)
+                            .with_context(|| format!("failed to create {}", parent.display()))?;
+                    }
+                    fs::write(&file_path, contents)
+                        .with_context(|| format!("failed to write {}", file_path.display()))?;
+                    set_file_mode(&file_path, default_mode)?;
+                }
+            }
+        }
+    }
+
+    // Handle PVC volumes: create host-side directories and add bind mounts.
+    for vol in &plan.volumes {
+        if let KubeVolumeKind::PVC(ref claim_name) = vol.kind {
+            let host_dir = datadir.join("volumes").join(claim_name);
+            fs::create_dir_all(&host_dir)
+                .with_context(|| format!("failed to create {}", host_dir.display()))?;
+            let vol_path = volumes_dir.join(&vol.name);
+            fs::create_dir_all(&vol_path)
+                .with_context(|| format!("failed to create volume dir {}", vol_path.display()))?;
+            plan.host_binds.push((
+                host_dir.to_string_lossy().to_string(),
+                format!("/oci/volumes/{}", vol.name),
+            ));
+        }
+    }
+
     // 3. Pull each container image and set up its app directory.
     let unit_dir = staging_dir.join("etc/systemd/system");
     fs::create_dir_all(&unit_dir)
@@ -1010,6 +1216,7 @@ pub fn kube_create(
 
         // Set up the app.
         setup_kube_container(
+            datadir,
             &staging_dir,
             &app_dir,
             kc,
@@ -1181,6 +1388,7 @@ pub fn kube_delete(datadir: &Path, name: &str, force: bool, verbose: bool) -> Re
 /// Builds the K8s command/args overrides, merges env vars, constructs volume
 /// bind paths, then delegates to `setup_oci_app()` for the common logic.
 fn setup_kube_container(
+    datadir: &Path,
     staging_dir: &Path,
     app_dir: &Path,
     kc: &KubeContainer,
@@ -1249,7 +1457,38 @@ fn setup_kube_container(
             seen_keys.insert(key.to_string(), i);
         }
     }
-    for (key, value) in &kc.env {
+    for (key, env_val) in &kc.env {
+        let value = match env_val {
+            KubeEnvValue::Literal(v) => v.clone(),
+            KubeEnvValue::SecretKeyRef { name, key: k } => {
+                let data = crate::kube_secret::read_secret_data(datadir, name)
+                    .with_context(|| format!("env '{key}': failed to read secret '{name}'"))?;
+                let (_, contents) = data
+                    .iter()
+                    .find(|(dk, _)| dk == k)
+                    .with_context(|| {
+                        format!("env '{key}': secret '{name}' has no key '{k}'")
+                    })?;
+                String::from_utf8(contents.clone()).with_context(|| {
+                    format!("env '{key}': secret '{name}' key '{k}' is not valid UTF-8")
+                })?
+            }
+            KubeEnvValue::ConfigMapKeyRef { name, key: k } => {
+                let data = crate::kube_configmap::read_configmap_data(datadir, name)
+                    .with_context(|| {
+                        format!("env '{key}': failed to read configmap '{name}'")
+                    })?;
+                let (_, contents) = data
+                    .iter()
+                    .find(|(dk, _)| dk == k)
+                    .with_context(|| {
+                        format!("env '{key}': configmap '{name}' has no key '{k}'")
+                    })?;
+                String::from_utf8(contents.clone()).with_context(|| {
+                    format!("env '{key}': configmap '{name}' key '{k}' is not valid UTF-8")
+                })?
+            }
+        };
         let line = format!("{key}={value}");
         if let Some(&idx) = seen_keys.get(key) {
             env_lines[idx] = line;
@@ -2252,6 +2491,7 @@ spec:
         fs::create_dir_all(staging.join("etc/systemd/system/multi-user.target.wants")).unwrap();
 
         setup_kube_container(
+            tmp.path(),
             &staging,
             &app_dir,
             kc,
@@ -2444,6 +2684,7 @@ spec:
         fs::create_dir_all(staging.join("etc/systemd/system/multi-user.target.wants")).unwrap();
 
         setup_kube_container(
+            tmp.path(),
             &staging,
             &app_dir,
             &kc,
@@ -2649,5 +2890,252 @@ spec:
         let (_name, spec) = parse_yaml(yaml).unwrap();
         let secret = spec.volumes[0].secret.as_ref().unwrap();
         assert_eq!(secret.default_mode, 0o400); // 256 decimal
+    }
+
+    // --- ConfigMap volumes ---
+
+    #[test]
+    fn test_parse_configmap_volume() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cm-pod
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+    volumeMounts:
+    - name: my-config
+      mountPath: /etc/config
+  volumes:
+  - name: my-config
+    configMap:
+      name: app-config
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        assert!(spec.volumes[0].config_map.is_some());
+        let cm = spec.volumes[0].config_map.as_ref().unwrap();
+        assert_eq!(cm.name, "app-config");
+        assert!(cm.items.is_empty());
+        assert_eq!(cm.default_mode, 0o644);
+
+        let plan = validate_and_plan(&name, spec).unwrap();
+        assert!(matches!(
+            plan.volumes[0].kind,
+            KubeVolumeKind::ConfigMap { .. }
+        ));
+        // ConfigMap volumes should not generate host binds.
+        assert!(plan.host_binds.is_empty());
+    }
+
+    #[test]
+    fn test_parse_configmap_volume_with_items() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cm-pod
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+    volumeMounts:
+    - name: my-config
+      mountPath: /etc/config
+  volumes:
+  - name: my-config
+    configMap:
+      name: app-config
+      items:
+      - key: config-key
+        path: app.conf
+      - key: log-key
+        path: log.conf
+      defaultMode: 256
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let plan = validate_and_plan(&name, spec).unwrap();
+        if let KubeVolumeKind::ConfigMap {
+            ref items,
+            default_mode,
+            ..
+        } = plan.volumes[0].kind
+        {
+            assert_eq!(items.len(), 2);
+            assert_eq!(items[0], ("config-key".to_string(), "app.conf".to_string()));
+            assert_eq!(items[1], ("log-key".to_string(), "log.conf".to_string()));
+            assert_eq!(default_mode, 256); // 0o400
+        } else {
+            panic!("expected ConfigMap volume kind");
+        }
+    }
+
+    #[test]
+    fn test_configmap_volume_invalid_name() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cm-pod
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+  volumes:
+  - name: my-config
+    configMap:
+      name: INVALID
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let err = validate_and_plan(&name, spec).unwrap_err();
+        assert!(
+            err.to_string().contains("invalid configmap name")
+                || err.to_string().contains("lowercase"),
+            "unexpected error: {err}"
+        );
+    }
+
+    // --- PVC volumes ---
+
+    #[test]
+    fn test_parse_pvc_volume() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pvc-pod
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+    volumeMounts:
+    - name: data-volume
+      mountPath: /data
+  volumes:
+  - name: data-volume
+    persistentVolumeClaim:
+      claimName: test-data
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        assert!(spec.volumes[0].persistent_volume_claim.is_some());
+        let pvc = spec.volumes[0].persistent_volume_claim.as_ref().unwrap();
+        assert_eq!(pvc.claim_name, "test-data");
+
+        let plan = validate_and_plan(&name, spec).unwrap();
+        assert!(matches!(plan.volumes[0].kind, KubeVolumeKind::PVC(_)));
+        // PVC volumes don't generate host binds at plan time (added in kube_create).
+        assert!(plan.host_binds.is_empty());
+    }
+
+    #[test]
+    fn test_pvc_volume_invalid_name() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pvc-pod
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+  volumes:
+  - name: data-volume
+    persistentVolumeClaim:
+      claimName: INVALID
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let err = validate_and_plan(&name, spec).unwrap_err();
+        assert!(
+            err.to_string().contains("invalid PVC claim name")
+                || err.to_string().contains("lowercase"),
+            "unexpected error: {err}"
+        );
+    }
+
+    // --- env valueFrom ---
+
+    #[test]
+    fn test_parse_env_value_from_secret() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: env-pod
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+    env:
+    - name: DB_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: db-creds
+          key: password
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let plan = validate_and_plan(&name, spec).unwrap();
+        assert!(matches!(
+            plan.containers[0].env[0].1,
+            KubeEnvValue::SecretKeyRef { .. }
+        ));
+        if let KubeEnvValue::SecretKeyRef { ref name, ref key } = plan.containers[0].env[0].1 {
+            assert_eq!(name, "db-creds");
+            assert_eq!(key, "password");
+        }
+    }
+
+    #[test]
+    fn test_parse_env_value_from_configmap() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: env-pod
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+    env:
+    - name: LOG_LEVEL
+      valueFrom:
+        configMapKeyRef:
+          name: app-config
+          key: log-level
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let plan = validate_and_plan(&name, spec).unwrap();
+        assert!(matches!(
+            plan.containers[0].env[0].1,
+            KubeEnvValue::ConfigMapKeyRef { .. }
+        ));
+        if let KubeEnvValue::ConfigMapKeyRef { ref name, ref key } = plan.containers[0].env[0].1 {
+            assert_eq!(name, "app-config");
+            assert_eq!(key, "log-level");
+        }
+    }
+
+    #[test]
+    fn test_parse_env_value_from_invalid() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: env-pod
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+    env:
+    - name: BAD_VAR
+      valueFrom: {}
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let err = validate_and_plan(&name, spec).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("valueFrom must specify secretKeyRef or configMapKeyRef"),
+            "unexpected error: {err}"
+        );
     }
 }

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-# verify-kube-features.sh - end-to-end verification of kube pod spec features
+# verify-kube-L2-spec.sh - end-to-end verification of kube pod spec features
 # Run as root. Requires a base-fs imported (e.g. ubuntu).
 #
 # Deploys a single pod that exercises all kube features at once to minimize
@@ -14,6 +14,42 @@ set -uo pipefail
 #   - readinessProbe (exec)
 #
 # Verifies both the generated unit files (static) and runtime behavior.
+#
+# --- K8s Pod Spec Gap Analysis ---
+# Source of truth: src/kube.rs
+#
+# SUPPORTED:
+#   Pod-level:
+#     metadata.name, spec.containers, spec.initContainers, spec.volumes,
+#     spec.restartPolicy, spec.terminationGracePeriodSeconds,
+#     spec.securityContext (runAsUser, runAsGroup, runAsNonRoot)
+#   Container-level:
+#     name, image, command, args, env (name/value), ports (containerPort,
+#     protocol, hostPort), volumeMounts (name, mountPath, readOnly),
+#     workingDir, imagePullPolicy, resources (limits/requests for memory
+#     and cpu), readinessProbe (exec only), livenessProbe (exec only),
+#     securityContext (runAsUser, runAsGroup, runAsNonRoot)
+#   Volume types:
+#     emptyDir, hostPath (path, type), secret (secretName, items with
+#     key/path, defaultMode), configMap (name, items with key/path,
+#     defaultMode), persistentVolumeClaim (claimName)
+#   env:
+#     name/value, valueFrom (secretKeyRef, configMapKeyRef)
+#   Top-level kinds:
+#     v1 Pod, apps/v1 Deployment (extracts pod template)
+#
+# NOT SUPPORTED (notable):
+#   env: envFrom (configMapRef, secretRef)
+#   Probes: httpGet, tcpSocket, grpc; startupProbe; lifecycle hooks
+#   Volumes: projected, downwardAPI, subPath, subPathExpr
+#   Networking: hostNetwork, dnsPolicy, dnsConfig, hostAliases
+#   Security: per-container securityContext (capabilities, seLinux,
+#             seccompProfile, allowPrivilegeEscalation, readOnlyRootFilesystem)
+#   Images: imagePullSecrets
+#   Scheduling: nodeSelector, tolerations, affinity, nodeName,
+#               topologySpreadConstraints (not applicable to single-node)
+#   Other kinds: StatefulSet, DaemonSet, Job, CronJob
+# --- End Gap Analysis ---
 
 SDME="${SDME:-sdme}"
 BASE_FS="${BASE_FS:-ubuntu}"

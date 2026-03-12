@@ -6,6 +6,7 @@ pub mod devfd_shim;
 pub mod drop_privs;
 pub mod import;
 pub mod kube;
+pub mod kube_configmap;
 pub mod kube_secret;
 pub mod mounts;
 pub mod names;

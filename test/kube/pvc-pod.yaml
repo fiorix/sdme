@@ -1,0 +1,19 @@
+# Pod with a PVC volume mounted at /data.
+#
+# The PVC claim name maps to a host directory at {datadir}/volumes/{claimName}.
+# Data persists across container restarts.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pvc-test-pod
+spec:
+  containers:
+    - name: test-container
+      image: docker.io/nginx:latest
+      volumeMounts:
+        - name: data-volume
+          mountPath: /data
+  volumes:
+    - name: data-volume
+      persistentVolumeClaim:
+        claimName: test-data
