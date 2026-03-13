@@ -201,6 +201,14 @@ enum Command {
         #[arg(short, long)]
         timeout: Option<u64>,
 
+        /// Enter the OCI app's PID/IPC/mount namespaces (default shell: /bin/sh)
+        #[arg(long)]
+        oci: bool,
+
+        /// Target a specific OCI app by name (implies --oci)
+        #[arg(long)]
+        oci_app: Option<String>,
+
         /// Command to run inside the container (default: login shell)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
@@ -1468,6 +1476,8 @@ fn main() -> Result<()> {
             name,
             start,
             timeout,
+            oci,
+            oci_app,
             command,
         } => {
             let name = containers::resolve_name(&cfg.datadir, &name)?;
@@ -1492,6 +1502,19 @@ fn main() -> Result<()> {
                 let boot_timeout =
                     std::time::Duration::from_secs(timeout.unwrap_or(cfg.boot_timeout));
                 start_and_await_boot(&cfg.datadir, &name, boot_timeout, cli.verbose)?;
+            }
+
+            if oci || oci_app.is_some() {
+                let app_name = resolve_oci_app_name(&cfg.datadir, &name, oci_app.as_deref())?;
+                let command = if command.is_empty() {
+                    vec!["/bin/sh".to_string()]
+                } else {
+                    command
+                };
+                eprintln!("joining '{name}' (oci app '{app_name}')");
+                let status =
+                    containers::exec_oci(&cfg.datadir, &name, &app_name, &command, cli.verbose)?;
+                std::process::exit(status.code().unwrap_or(1));
             }
 
             eprintln!("joining '{name}'");

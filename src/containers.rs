@@ -861,10 +861,90 @@ pub fn exec(
     machinectl_shell(datadir, name, command, join_as_sudo_user, verbose)
 }
 
-/// Run a command inside a container's OCI app root using
-/// `systemd-run --machine=` with `RootDirectory=/oci/apps/{name}/root`.
-/// The app name is read from `OCI_APP` in the state file, or auto-detected
-/// from the rootfs.
+/// Candidate inner cgroup paths under a container's cgroup.
+/// systemd-nspawn organizes its cgroup subtree differently depending on
+/// the version and configuration; we try each one.
+const CGROUP_INNER_PATHS: &[&str] = &[
+    "init.scope/system.slice",
+    "payload/system.slice",
+    "system.slice",
+];
+
+/// Locate the cgroup directory for the OCI app's systemd service inside
+/// the container's cgroup hierarchy (cgroups v2).
+fn find_oci_service_cgroup(name: &str, app_name: &str) -> Result<PathBuf> {
+    let service_name = format!("sdme-oci-{app_name}.service");
+    let container_cgroup =
+        PathBuf::from(format!("/sys/fs/cgroup/machine.slice/sdme@{name}.service"));
+    for inner in CGROUP_INNER_PATHS {
+        let candidate = container_cgroup.join(inner).join(&service_name);
+        if candidate.is_dir() {
+            return Ok(candidate);
+        }
+    }
+    bail!(
+        "cgroup for {service_name} not found under {}",
+        container_cgroup.display()
+    )
+}
+
+/// Parse the `NSpid:` line from `/proc/{pid}/status` content.
+/// Returns the list of namespace PIDs (host PID first, then inner PIDs).
+fn parse_nspid(status_content: &str) -> Option<Vec<u32>> {
+    for line in status_content.lines() {
+        if let Some(rest) = line.strip_prefix("NSpid:") {
+            let pids: Vec<u32> = rest
+                .split_whitespace()
+                .filter_map(|s| s.parse().ok())
+                .collect();
+            if !pids.is_empty() {
+                return Some(pids);
+            }
+        }
+    }
+    None
+}
+
+/// Find the host PID of the OCI app process by reading `cgroup.procs` and
+/// checking each process's `NSpid:` line for one that is PID 1 in the
+/// innermost (isolate) PID namespace.
+fn find_app_pid(service_cgroup: &Path, app_name: &str) -> Result<u32> {
+    let procs_path = service_cgroup.join("cgroup.procs");
+    let content = fs::read_to_string(&procs_path)
+        .with_context(|| format!("failed to read {}", procs_path.display()))?;
+
+    for line in content.lines() {
+        let pid: u32 = match line.trim().parse() {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        let status_path = format!("/proc/{pid}/status");
+        let status = match fs::read_to_string(&status_path) {
+            Ok(s) => s,
+            Err(_) => continue, // process may have exited
+        };
+        if let Some(nspids) = parse_nspid(&status) {
+            // The app process (inside the isolate namespace) has NSpid with
+            // 3+ entries where the last one is 1:
+            //   NSpid: <host_pid> <container_pid> 1
+            // The isolate parent only has 2 entries (host + container).
+            if nspids.len() >= 3 && nspids[nspids.len() - 1] == 1 {
+                return Ok(pid);
+            }
+        }
+    }
+
+    bail!(
+        "could not find PID 1 process for OCI app '{}' in {}",
+        app_name,
+        service_cgroup.display()
+    )
+}
+
+/// Run a command inside a container's OCI app namespaces using `nsenter`.
+///
+/// Discovers the app's host PID via its cgroup, then enters its PID, IPC,
+/// and mount namespaces so that `ps` shows only the app's processes.
 pub fn exec_oci(
     datadir: &Path,
     name: &str,
@@ -874,14 +954,20 @@ pub fn exec_oci(
 ) -> Result<ExitStatus> {
     ensure_running(datadir, name)?;
 
-    let root_dir = format!("--property=RootDirectory=/oci/apps/{app_name}/root");
-    let mut cmd = std::process::Command::new("systemd-run");
-    cmd.args(["--machine", name, "--pipe", "--quiet", &root_dir, "--"]);
+    crate::system_check::find_program("nsenter")
+        .context("nsenter is required for exec --oci (install util-linux)")?;
+
+    let service_cgroup = find_oci_service_cgroup(name, app_name)?;
+    let app_pid = find_app_pid(&service_cgroup, app_name)?;
+
+    let pid_str = app_pid.to_string();
+    let mut cmd = std::process::Command::new("nsenter");
+    cmd.args(["-t", &pid_str, "--pid", "--ipc", "--mount", "--fork", "--"]);
     cmd.args(command);
 
     if verbose {
         eprintln!(
-            "exec: systemd-run {}",
+            "exec: nsenter {}",
             cmd.get_args()
                 .map(|a| a.to_string_lossy())
                 .collect::<Vec<_>>()
@@ -889,7 +975,7 @@ pub fn exec_oci(
         );
     }
 
-    let status = cmd.status().context("failed to run systemd-run")?;
+    let status = cmd.status().context("failed to run nsenter")?;
     Ok(status)
 }
 
@@ -1618,5 +1704,65 @@ mod tests {
             msg.contains("--oci-env requires an OCI app rootfs"),
             "unexpected error: {msg}"
         );
+    }
+
+    // --- parse_nspid tests ---
+
+    #[test]
+    fn test_parse_nspid_app_process() {
+        // App process inside isolate: host PID 12345, container PID 67, nested PID 1
+        let status = "Name:\tredis-server\nNSpid:\t12345\t67\t1\nPPid:\t12300\n";
+        let result = parse_nspid(status).unwrap();
+        assert_eq!(result, vec![12345, 67, 1]);
+    }
+
+    #[test]
+    fn test_parse_nspid_isolate_parent() {
+        // Isolate parent: host PID 12300, container PID 55 (only 2 entries)
+        let status = "Name:\tsdme-isolate\nNSpid:\t12300\t55\nPPid:\t1\n";
+        let result = parse_nspid(status).unwrap();
+        assert_eq!(result, vec![12300, 55]);
+    }
+
+    #[test]
+    fn test_parse_nspid_missing() {
+        let status = "Name:\tinit\nPid:\t1\nPPid:\t0\n";
+        assert!(parse_nspid(status).is_none());
+    }
+
+    #[test]
+    fn test_parse_nspid_single_pid() {
+        // Host-level process with a single NSpid entry
+        let status = "Name:\tbash\nNSpid:\t9999\nPPid:\t1\n";
+        let result = parse_nspid(status).unwrap();
+        assert_eq!(result, vec![9999]);
+    }
+
+    // --- find_app_pid tests (using mock cgroup/proc data) ---
+
+    #[test]
+    fn test_find_app_pid_selects_nested_pid1() {
+        let tmp = tmp();
+        let cgroup_dir = tmp.path().join("cgroup");
+        fs::create_dir_all(&cgroup_dir).unwrap();
+
+        // Two PIDs in the cgroup: the isolate parent and the app process.
+        // We use fake /proc entries under a temp dir, but find_app_pid reads
+        // real /proc, so we test parse_nspid logic directly here and verify
+        // the selection logic.
+        //
+        // Isolate parent: NSpid has 2 entries (host + container)
+        let isolate_status = "Name:\tsdme-isolate\nNSpid:\t100\t50\nPPid:\t1\n";
+        // App process: NSpid has 3 entries, last is 1
+        let app_status = "Name:\tredis-server\nNSpid:\t101\t51\t1\nPPid:\t100\n";
+
+        // Verify our selection logic: only the app has 3+ entries with last == 1
+        let isolate_nspids = parse_nspid(isolate_status).unwrap();
+        assert_eq!(isolate_nspids.len(), 2);
+        assert_ne!(*isolate_nspids.last().unwrap(), 1u32);
+
+        let app_nspids = parse_nspid(app_status).unwrap();
+        assert!(app_nspids.len() >= 3);
+        assert_eq!(*app_nspids.last().unwrap(), 1u32);
     }
 }

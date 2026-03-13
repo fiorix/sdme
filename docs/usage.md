@@ -381,12 +381,15 @@ From outside, you can view its logs and run commands in the app's root:
 ```bash
 sudo sdme logs --oci mycontainer
 sudo sdme logs --oci mycontainer -f     # follow mode
+sudo sdme join --oci mycontainer        # shell inside the app's namespaces
 sudo sdme exec --oci mycontainer -- redis-cli ping
 ```
 
 The `--oci` flag on `logs` shows the OCI app service journal instead of
-the container's main journal. On `exec`, it runs the command inside the
-app's rootfs (`/oci/apps/{name}/root`) rather than the container root.
+the container's main journal. On `join` and `exec`, it enters the app's
+PID, IPC, and mount namespaces via `nsenter`, so commands like `ps` show
+only the app's processes, not the entire container init tree. `join --oci`
+defaults to `/bin/sh` when no command is given.
 
 ### 5.3 The convenience of this model
 

@@ -245,7 +245,7 @@ below for details on each flag.
 .PP
 If the container is running, a note is printed advising a restart for the
 changes to take effect.
-.SS sdme join \fIname\fR [\-\-start] [\-t \fIseconds\fR] [\-\-] [\fIcommand\fR...]
+.SS sdme join [\-\-oci] [\-\-oci\-app \fIname\fR] [\-\-start] [\-t \fIseconds\fR] \fIname\fR [\-\-] [\fIcommand\fR...]
 Enter a running container using
 .BR machinectl (1)
 shell.
@@ -258,6 +258,23 @@ Use
 .B \-t
 to override the boot timeout when combined with
 .BR \-\-start .
+.PP
+Use
+.B \-\-oci
+to enter the OCI app's PID, IPC, and mount namespaces via
+.BR nsenter (1).
+The default shell is
+.BR /bin/sh .
+Inside the app namespaces, commands like
+.BR ps (1)
+show only the app's processes, not the container's init tree.
+.PP
+Use
+.B \-\-oci\-app
+to target a specific app by name (implies
+.BR \-\-oci ).
+Required for multi\-container kube pods; single\-container pods auto\-select
+the only app.
 .SS sdme exec [\-\-oci] [\-\-oci\-app \fIname\fR] \fIname\fR \fIcommand\fR [\fIargs\fR...]
 Run a one\-off command in a running container using
 .BR machinectl (1)
@@ -265,14 +282,15 @@ shell.
 .PP
 Use
 .B \-\-oci
-to run the command inside the OCI app root
-.RI ( /oci/apps/{name}/root )
-via
-.BR systemd\-run (1)
-with
-.BR RootDirectory=/oci/apps/{name}/root .
-This is useful for running app\-specific tools (e.g.\& redis\-cli, pg_isready)
-without needing chroot installed in the container.
+to enter the OCI app's PID, IPC, and mount namespaces via
+.BR nsenter (1).
+The app's host PID is discovered from its cgroup, and
+.B nsenter \-t \fIpid\fR \-\-pid \-\-ipc \-\-mount \-\-fork
+is used to enter them.
+Commands like
+.BR ps (1)
+show only the app's processes, not the container's init tree.
+This is useful for running app\-specific tools (e.g.\& redis\-cli, pg_isready).
 .PP
 Use
 .B \-\-oci\-app
@@ -405,9 +423,9 @@ is generated to run the application's entrypoint via
 .BR RootDirectory=/oci/apps/{name}/root .
 OCI metadata (environment, ports, volumes) is saved under
 .IR /oci/ .
-See
-.I docs/oci.md
-for a full walkthrough.
+See Section 6 (OCI Integration) in
+.I docs/architecture.md
+for details.
 .PP
 The source type is auto\-detected:
 .RS
@@ -1738,6 +1756,7 @@ State files are created atomically with
 .SH SEE ALSO
 .BR systemd\-nspawn (1),
 .BR machinectl (1),
+.BR nsenter (1),
 .BR journalctl (1),
 .BR qemu\-nbd (8),
 .BR overlayfs (5),

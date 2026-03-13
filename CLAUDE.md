@@ -48,8 +48,8 @@ The project is a single Rust binary (`src/main.rs`) backed by a shared library (
 | `sdme new` | Create, start, and enter a new container (accepts same flags as `create`) |
 | `sdme create` | Create a new container (overlayfs dirs + state file). Security flags: `--strict`, `--hardened`, `--drop-capability`, `--capability`, `--no-new-privileges`, `--read-only`, `--system-call-filter`, `--apparmor-profile`. OCI flags: `--no-oci-ports`, `--no-oci-volumes`, `--oci-env KEY=VALUE` (sets env vars for the OCI app service via the `/oci/apps/{name}/env` file, separate from `-e` which sets nspawn env vars) |
 | `sdme start` | Start one or more containers (installs/updates template unit, starts via D-Bus). Supports `--all` to start all stopped containers |
-| `sdme join` | Enter a running container (`machinectl shell`). `--start` starts the container first if stopped |
-| `sdme exec` | Run a one-off command in a running container (`machinectl shell`). `--oci` runs the command inside `/oci/apps/{name}/root` via `systemd-run --property=RootDirectory=/oci/apps/{name}/root`. `--oci-app NAME` targets a specific app by name (implies `--oci`; required for multi-container kube pods) |
+| `sdme join` | Enter a running container (`machinectl shell`). `--start` starts the container first if stopped. `--oci` enters the OCI app's PID/IPC/mount namespaces via `nsenter` (default shell: `/bin/sh`). `--oci-app NAME` targets a specific app by name (implies `--oci`) |
+| `sdme exec` | Run a one-off command in a running container (`machinectl shell`). `--oci` enters the OCI app's PID, IPC, and mount namespaces via `nsenter` (discovers the app's host PID from its cgroup, then runs `nsenter -t <pid> --pid --ipc --mount --fork`). `--oci-app NAME` targets a specific app by name (implies `--oci`; required for multi-container kube pods) |
 | `sdme stop` | Graceful shutdown via `SIGRTMIN+4` (default), `--term` for terminate, `--kill` for force-kill |
 | `sdme rm` | Remove containers (stops if running, deletes state + files) |
 | `sdme ps` | List containers with status, health, OS, pod/OCI-pod/kube/userns/binds (if any) |
@@ -134,6 +134,7 @@ The project is a single Rust binary (`src/main.rs`) backed by a shared library (
 | `machinectl` | `systemd-container` | `sdme join`, `sdme exec`, `sdme new` |
 | `busctl` | `systemd` | Boot-wait D-Bus probe for `--userns` containers |
 | `journalctl` | `systemd` | `sdme logs` |
+| `nsenter` | `util-linux` | `sdme exec --oci` (namespace entry) |
 | `qemu-nbd` | `qemu-utils` | `sdme fs import` (QCOW2 images only) |
 
 Dependencies are checked at runtime before use via `system_check::check_dependencies()`, which resolves each binary in PATH and prints the resolved path with `-v`.
