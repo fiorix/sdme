@@ -8,7 +8,7 @@ See [README.md](README.md) for how to run the tests.
 
 ## Unit tests
 
-360 passed, 0 failed, 3 ignored.
+452 passed, 0 failed, 3 ignored.
 
 ## Base OS Import and Boot
 
@@ -220,16 +220,17 @@ add bind mounts, serve content.
 
 ## Kube Tests
 
-Run in order with `--base-fs ubuntu`. Results pending.
+Run in order with `--base-fs ubuntu`.
 
-| Script | Level | Tests | Result |
-|--------|-------|-------|--------|
-| verify-kube-L1-basic.sh | L1 Basic lifecycle | ~5 | - |
-| verify-kube-L2-spec.sh | L2 Pod spec features | ~12 | - |
-| verify-kube-L3-volumes.sh | L3 Volumes (secrets, configmaps, PVCs) | ~28 | - |
-| verify-kube-L4-networking.sh | L4 Localhost networking | ~6 | - |
-| verify-kube-L5-redis.sh | L5 Redis round-trip | ~6 | - |
-| verify-kube-L6-gitea.sh | L6 Gitea stack | ~15 | - |
+| Script | Level | Tests | Pass | Fail | Skip | Result |
+|--------|-------|-------|------|------|------|--------|
+| verify-kube-L1-basic.sh | L1 Basic lifecycle | 11 | 11 | 0 | 0 | PASS |
+| verify-kube-L2-spec.sh | L2 Pod spec features | 12 | 12 | 0 | 0 | PASS |
+| verify-kube-L3-volumes.sh | L3 Volumes (secrets, configmaps, PVCs) | 31 | 31 | 0 | 0 | PASS |
+| verify-kube-L4-networking.sh | L4 Localhost networking | 6 | 6 | 0 | 0 | PASS |
+| verify-kube-L5-redis.sh | L5 Redis round-trip | 6 | 6 | 0 | 0 | PASS |
+| verify-kube-L6-gitea.sh | L6 Gitea stack | 15 | 15 | 0 | 0 | PASS |
+
 
 ## Usage Guide Verification
 
