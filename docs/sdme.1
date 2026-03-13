@@ -266,11 +266,11 @@ shell.
 Use
 .B \-\-oci
 to run the command inside the OCI app root
-.RI ( /oci/root )
+.RI ( /oci/apps/{name}/root )
 via
 .BR systemd\-run (1)
 with
-.BR RootDirectory=/oci/root .
+.BR RootDirectory=/oci/apps/{name}/root .
 This is useful for running app\-specific tools (e.g.\& redis\-cli, pg_isready)
 without needing chroot installed in the container.
 .SS sdme stop [\-a] [\-\-term] [\-\-kill] \fIname\fR...
@@ -383,11 +383,11 @@ The
 flag specifies a previously imported rootfs (with systemd) to use as the base
 layer for OCI application images.
 The application rootfs is placed under
-.I /oci/root
+.I /oci/apps/{name}/root
 inside a copy of the base, and a systemd service unit
-.RI ( sdme\-oci\-app.service )
+.RI ( sdme\-oci\-{name}.service )
 is generated to run the application's entrypoint via
-.BR RootDirectory=/oci/root .
+.BR RootDirectory=/oci/apps/{name}/root .
 OCI metadata (environment, ports, volumes) is saved under
 .IR /oci/ .
 See
@@ -521,7 +521,7 @@ or
 keys) unless
 .B \-f
 is given.
-.SS sdme kube apply \-f \fIfile\fR [\-\-base\-fs \fIname\fR] [\-t \fIseconds\fR] [\-\-] [\fIcommand\fR...]
+.SS sdme kube apply \-f \fIfile\fR [\-\-base\-fs \fIname\fR] [\-\-pod \fIpod\fR] [\-\-oci\-pod \fIpod\fR] [\-t \fIseconds\fR] [\-\-] [\fIcommand\fR...]
 Create, start, and enter a container from a Kubernetes Pod YAML file.
 Equivalent to
 .B kube create
@@ -545,7 +545,7 @@ An optional command overrides the default login shell.
 .PP
 If boot fails or is interrupted (Ctrl+C), the just\-created container is
 automatically removed.
-.SS sdme kube create \-f \fIfile\fR [\-\-base\-fs \fIname\fR]
+.SS sdme kube create \-f \fIfile\fR [\-\-base\-fs \fIname\fR] [\-\-pod \fIpod\fR] [\-\-oci\-pod \fIpod\fR]
 Create a container from a Kubernetes Pod YAML file without starting it.
 .PP
 Parses the YAML, pulls each container's OCI image from the registry, builds
@@ -627,9 +627,10 @@ for deferred resolution from secrets and configmaps at create time.
 Pod\-level
 .B securityContext
 supports
-.B runAsUser
+.BR runAsUser ,
+.BR runAsGroup ,
 and
-.BR runAsGroup .
+.BR runAsNonRoot .
 .PP
 Ports declared across all containers are aggregated; if any ports are
 declared,
@@ -1384,7 +1385,7 @@ For each declared volume path (e.g.\&
 a host directory is created at
 .IR /var/lib/sdme/volumes/ name / vol\-name
 and bind\-mounted to
-.IR /oci/root /var/lib/mysql
+.IR /oci/apps/{name}/root /var/lib/mysql
 inside the container.
 Volume data persists across container removal; when
 .B sdme rm

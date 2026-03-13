@@ -103,7 +103,7 @@ sudo sdme new -r redis
 Inside the container, the OCI app runs as a managed systemd service:
 
 ```bash
-systemctl status sdme-oci-app.service
+systemctl status sdme-oci-redis.service
 ```
 
 This gives you the OCI packaging model (pull from any registry) with

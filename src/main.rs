@@ -177,7 +177,7 @@ enum Command {
     Exec {
         /// Container name
         name: String,
-        /// Run command inside the OCI app root (/oci/root)
+        /// Run command inside the OCI app root (/oci/apps/{name}/root)
         #[arg(long)]
         oci: bool,
         /// Target a specific OCI app by name (implies --oci)
@@ -405,7 +405,7 @@ OCI REGISTRY IMAGES:
 
       app             Force application mode. Requires --base-fs to
                       specify a systemd-capable rootfs as the base layer.
-                      The OCI rootfs is placed under /oci/root and a systemd
+                      The OCI rootfs is placed under /oci/apps/{name}/root and a systemd
                       unit is generated to run the application.
 
     Examples:
@@ -426,7 +426,7 @@ OCI REGISTRY IMAGES:
         /// OCI image classification: auto-detect, force base OS, or force application
         #[arg(long, value_enum, default_value_t = OciMode::Auto)]
         oci_mode: OciMode,
-        /// Base rootfs for OCI application images (must have systemd; OCI rootfs goes under /oci/root)
+        /// Base rootfs for OCI application images (must have systemd; OCI rootfs goes under /oci/apps/{name}/root)
         #[arg(long)]
         base_fs: Option<String>,
     },
@@ -1087,7 +1087,7 @@ fn validate_pod_args(
 ///
 /// Checks that:
 /// - The pod exists in the catalogue
-/// - The rootfs is an OCI app rootfs (contains `sdme-oci-app.service`)
+/// - The rootfs is an OCI app rootfs (contains an `sdme-oci-*.service` unit)
 /// - Private network is enabled (required for `NetworkNamespacePath=` inside
 ///   the container; nspawn strips `CAP_NET_ADMIN` on host-network containers,
 ///   which prevents systemd from calling `setns(CLONE_NEWNET)`)

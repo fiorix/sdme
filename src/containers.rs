@@ -291,11 +291,11 @@ fn do_create(
     if !opts.oci_volumes.is_empty() {
         let oci_app = detect_oci_app_name(rootfs);
         let vol_base = volumes_dir(datadir, name);
+        let oci_app = oci_app.as_deref().with_context(|| {
+            "OCI volumes require an OCI app rootfs (no /oci/apps/ directory found)"
+        })?;
         for vol_path in &opts.oci_volumes {
-            let container_path = match oci_app {
-                Some(ref app_name) => format!("/oci/apps/{app_name}/root{vol_path}"),
-                None => format!("/oci/root{vol_path}"),
-            };
+            let container_path = format!("/oci/apps/{oci_app}/root{vol_path}");
             // Skip if user already binds to this container path.
             // Bind format is "host:container:mode".
             let already_bound = binds
@@ -368,16 +368,11 @@ fn do_create(
     // vars, so each container gets its own env file independent of the
     // shared rootfs.
     if !opts.oci_envs.is_empty() {
-        let oci_app_for_env = detect_oci_app_name(rootfs);
-        let lower_env = match oci_app_for_env {
-            Some(ref app_name) => rootfs.join(format!("oci/apps/{app_name}/env")),
-            None => rootfs.join("oci/env"),
-        };
+        let oci_app_for_env = detect_oci_app_name(rootfs)
+            .with_context(|| "--oci-env requires an OCI app rootfs (no /oci/apps/ directory found)")?;
+        let lower_env = rootfs.join(format!("oci/apps/{oci_app_for_env}/env"));
         if lower_env.exists() {
-            let upper_oci = match oci_app_for_env {
-                Some(ref app_name) => container_dir.join(format!("upper/oci/apps/{app_name}")),
-                None => container_dir.join("upper/oci"),
-            };
+            let upper_oci = container_dir.join(format!("upper/oci/apps/{oci_app_for_env}"));
             fs::create_dir_all(&upper_oci)
                 .with_context(|| format!("failed to create {}", upper_oci.display()))?;
             let upper_env = upper_oci.join("env");

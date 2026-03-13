@@ -76,7 +76,7 @@ sudo ./test/scripts/verify-matrix.sh --keep                        # keep artifa
 ```
 
 Each cell verifies: app import with `--base-fs`, container boot,
-`sdme-oci-app.service` active, journal and status accessible, and
+`sdme-oci-{name}.service` active, journal and status accessible, and
 app-specific health check (HTTP 200 for nginx-unprivileged, redis-cli
 ping, pg_isready).
 
@@ -110,7 +110,7 @@ sudo ./test/scripts/verify-oci.sh --keep           # keep artifacts
 
 Each distro cell verifies: base import, app import, PORTS and
 OCI_VOLUMES in the state file, host volume directory creation, container
-boot, `sdme-oci-app.service` active, HTTP 200 on the forwarded port,
+boot, `sdme-oci-{name}.service` active, HTTP 200 on the forwarded port,
 and response body containing the test HTML content.
 
 ### verify-security.sh

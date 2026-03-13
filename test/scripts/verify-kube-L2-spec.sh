@@ -177,7 +177,7 @@ spec:
     image: docker.io/alpine:latest
     command: ["/bin/sh", "-c", "echo init-done"]
   containers:
-  - name: app
+  - name: testapp
     image: docker.io/alpine:latest
     command: ["/bin/sh", "-c", "touch /tmp/healthy && sleep infinity"]
     workingDir: /tmp
@@ -418,14 +418,14 @@ test_runtime_app_service() {
 
     local output
     output=$("$SDME" exec "$POD_NAME" -- \
-        /usr/bin/systemctl is-active sdme-oci-app.service 2>/dev/null || echo "")
+        /usr/bin/systemctl is-active sdme-oci-testapp.service 2>/dev/null || echo "")
     if echo "$output" | grep -qw '^active'; then
         record "$test_name" PASS
     else
         local status
         status=$(echo "$output" | grep -v 'Connected to\|Press \^]\|Connection to\|^$' | tail -1)
         record "$test_name" FAIL "app service: $status"
-        "$SDME" exec "$POD_NAME" -- /usr/bin/systemctl status sdme-oci-app.service 2>&1 || true
+        "$SDME" exec "$POD_NAME" -- /usr/bin/systemctl status sdme-oci-testapp.service 2>&1 || true
     fi
 }
 
@@ -439,7 +439,7 @@ test_runtime_memory_limit() {
     # Check cgroup memory limit applied to the service.
     local output
     output=$("$SDME" exec "$POD_NAME" -- \
-        /usr/bin/systemctl show sdme-oci-app.service -p MemoryMax --value 2>/dev/null || echo "")
+        /usr/bin/systemctl show sdme-oci-testapp.service -p MemoryMax --value 2>/dev/null || echo "")
     # 256Mi = 268435456 bytes; grep for the number in the output.
     if echo "$output" | grep -q '268435456'; then
         record "$test_name" PASS "MemoryMax=268435456"

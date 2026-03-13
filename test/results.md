@@ -37,7 +37,7 @@ publishes `linux/amd64` manifests.
 | postgresql         | docker.io/postgres                 | PASS | PASS | PASS | PASS | PASS | PASS | PASS |
 
 Each cell verifies: app import with `--base-fs`, container boot,
-`sdme-oci-app.service` active, journal and status accessible, and
+`sdme-oci-{name}.service` active, journal and status accessible, and
 app-specific health check (marker file served by nginx-unprivileged,
 redis-cli ping, pg_isready).
 
@@ -135,7 +135,7 @@ redis-cli ping, pg_isready).
   `verify-matrix.sh --keep`; suse userns has a systemd UID/GID shift
   incompatibility).
 - **--userns OCI app**: nginx imported as OCI app on ubuntu base, container
-  created with `--userns`, `sdme-oci-app.service` is active.
+  created with `--userns`, `sdme-oci-{name}.service` is active.
 
 ## Hardened Boot Matrix
 
@@ -181,7 +181,7 @@ private network, no-new-privileges, and drops
 | postgresql         | archlinux | PASS | PASS    |
 
 Each cell verifies: container created with `--hardened`, boots
-successfully, and `sdme-oci-app.service` is active. App-specific
+successfully, and `sdme-oci-{name}.service` is active. App-specific
 health checks (HTTP, CLI) are skipped because `--hardened` enables
 private network, blocking host-side connectivity.
 
@@ -208,7 +208,7 @@ Each column covers multiple checks per distro (18 total):
 - **State**: `PORTS` contains `tcp:8080:8080`, `OCI_VOLUMES` is set
 - **Volume**: host-side directory at
   `volumes/{name}/usr-share-nginx-html/` exists after create
-- **Boot**: container starts, `sdme-oci-app.service` is active
+- **Boot**: container starts, `sdme-oci-{name}.service` is active
 - **Curl**: HTTP 200 on the forwarded port via host-side veth IP,
   response body contains the test HTML marker
 

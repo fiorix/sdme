@@ -758,7 +758,7 @@ pub fn wait_for_dbus(name: &str, timeout: std::time::Duration, verbose: bool) ->
 ///
 /// Combines `wait_for_boot` and `wait_for_dbus` with shared timeout tracking.
 ///
-/// TODO: for OCI app containers, optionally wait for `sdme-oci-app.service`
+/// TODO: for OCI app containers, optionally wait for `sdme-oci-{name}.service`
 /// to reach active state. Currently we only wait for the container's systemd
 /// to boot, so a failing OCI app service (e.g. port conflict) goes unnoticed
 /// until the user checks manually.
@@ -985,7 +985,7 @@ pub fn write_nspawn_dropin(datadir: &Path, name: &str, verbose: bool) -> Result<
     nspawn_args.extend(envs.to_nspawn_args());
 
     // OCI pod: bind-mount the pod's netns into the container so the
-    // sdme-oci-app.service can use NetworkNamespacePath= to enter it.
+    // sdme-oci-{name}.service can use NetworkNamespacePath= to enter it.
     let oci_pod = state
         .get("OCI_POD")
         .filter(|s| !s.is_empty())

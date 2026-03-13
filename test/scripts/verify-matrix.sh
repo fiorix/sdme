@@ -388,7 +388,7 @@ phase3_apps() {
             # start so the marker is present when nginx boots. This avoids
             # depending on the default welcome page which varies by distro.
             if [[ "$app" == "nginx-unprivileged" ]]; then
-                local html_dir="$DATADIR/containers/$ct_name/upper/oci/root/usr/share/nginx/html"
+                local html_dir="$DATADIR/containers/$ct_name/upper/oci/apps/$app/root/usr/share/nginx/html"
                 mkdir -p "$html_dir"
                 echo "$NGINX_MARKER" > "$html_dir/sdme-test.txt"
             fi
