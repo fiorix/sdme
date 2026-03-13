@@ -408,6 +408,26 @@ pub(crate) fn build_http_agent(verbose: bool) -> Result<ureq::Agent> {
     Ok(config.build().into())
 }
 
+/// Build a ureq agent that does not convert non-2xx status codes to errors.
+///
+/// Same proxy/timeout configuration as [`build_http_agent`], but with
+/// `http_status_as_error(false)` so callers can inspect non-2xx responses.
+pub(crate) fn build_http_agent_no_error() -> Result<ureq::Agent> {
+    let mut config = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .user_agent("sdme/0.1")
+        .timeout_connect(Some(Duration::from_secs(30)))
+        .timeout_resolve(Some(Duration::from_secs(30)))
+        .timeout_recv_response(Some(Duration::from_secs(60)))
+        .timeout_recv_body(Some(Duration::from_secs(300)));
+    if let Some(proxy_uri) = proxy_from_env() {
+        let proxy = ureq::Proxy::new(&proxy_uri)
+            .with_context(|| format!("invalid proxy URI: {proxy_uri}"))?;
+        config = config.proxy(Some(proxy));
+    }
+    Ok(config.build().into())
+}
+
 /// Maximum download size (50 GiB) to prevent disk exhaustion from malicious servers.
 pub(crate) const MAX_DOWNLOAD_SIZE: u64 = 50 * 1024 * 1024 * 1024;
 

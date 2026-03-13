@@ -83,7 +83,7 @@ pub(super) fn create(
     let mut state = State::new();
     let created = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .expect("system clock before unix epoch")
+        .map_err(|_| anyhow::anyhow!("system clock is before UNIX epoch"))?
         .as_secs();
     state.set("CREATED", created.to_string());
     state.write_to(&entry_dir.join("state"))?;

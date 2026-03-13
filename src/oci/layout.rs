@@ -1,4 +1,4 @@
-//! OCI container image import.
+//! OCI layout parsing: tarball detection, manifest resolution, layer unpacking with whiteout handling.
 
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;

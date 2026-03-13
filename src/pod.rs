@@ -240,7 +240,9 @@ fn create_netns(name: &str, verbose: bool) -> Result<()> {
     let ret = unsafe { libc::setns(saved_fd, libc::CLONE_NEWNET) };
     unsafe { libc::close(saved_fd) };
     if ret != 0 {
-        // This is critical; we can't leave the process in the wrong netns.
+        // Unrecoverable: the process is now in the wrong network namespace.
+        // Returning an error would let the caller continue operating on
+        // the wrong netns, which is worse than crashing. exit(1) is correct.
         let err = std::io::Error::last_os_error();
         eprintln!("FATAL: failed to restore network namespace: {err}");
         std::process::exit(1);

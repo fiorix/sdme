@@ -68,7 +68,7 @@ with its own writable layer so changes stay isolated.
   +------------------------------------------------------+
 
   Note: /etc/systemd/system and /var/log are opaque
-  by default -- the container sees empty directories
+  by default: the container sees empty directories
   there, not the host's units and logs.
 ```
 
@@ -282,18 +282,18 @@ Containers reference them by name.
 
 `sdme fs import` auto-detects the source type by probing in order:
 
-- **URL** -- `http://` or `https://` prefix. Downloads the file, then
+- **URL**: `http://` or `https://` prefix. Downloads the file, then
   extracts as a tarball.
-- **OCI registry** -- looks like a domain with a path
+- **OCI registry**: looks like a domain with a path
   (e.g. `docker.io/ubuntu:24.04`, `quay.io/fedora/fedora`). Pulled via
   the OCI Distribution Spec.
-- **Directory** -- path is a directory. Copied with `copy_tree()`
+- **Directory**: path is a directory. Copied with `copy_tree()`
   preserving ownership, permissions, xattrs, and special files.
-- **QCOW2 image** -- magic bytes `QFI\xfb` at the start of the file.
+- **QCOW2 image**: magic bytes `QFI\xfb` at the start of the file.
   Mounted read-only via `qemu-nbd`, then copied with `copy_tree()`.
-- **Raw disk image** -- MBR/GPT signature or `.raw`/`.img` extension.
+- **Raw disk image**: MBR/GPT signature or `.raw`/`.img` extension.
   Same `qemu-nbd` path as QCOW2.
-- **Tarball** -- default fallback for any other file. Extracted with
+- **Tarball**: default fallback for any other file. Extracted with
   native Rust crates; compression is detected from magic bytes, not the
   file name.
 
@@ -489,9 +489,9 @@ container state file at create time.
   |      |  |  +-----------------------------+  |  |     |
   |      |  +-----------------------------------+  |     |
   |      |                                         |     |
-  |      |  /oci/apps/{name}/env     -- env vars    |     |
-  |      |  /oci/apps/{name}/ports   -- ports      |     |
-  |      |  /oci/apps/{name}/volumes -- volumes    |     |
+  |      |  /oci/apps/{name}/env     (env vars)    |     |
+  |      |  /oci/apps/{name}/ports   (ports)      |     |
+  |      |  /oci/apps/{name}/volumes (volumes)    |     |
   |      +-----------------------------------------+     |
   +------------------------------------------------------+
 ```
@@ -524,7 +524,7 @@ This is a known upstream limitation (see
 sdme solves this with a generated static ELF binary (`isolate`,
 under 2 KiB) that creates PID/IPC namespaces, remounts /proc, drops
 `CAP_SYS_ADMIN`, optionally drops privileges (`setgroups`/`setgid`/
-`setuid`), changes the working directory, and exec's the target -- all
+`setuid`), changes the working directory, and exec's the target, all
 via raw syscalls with no libc or NSS dependency. The binary is written
 to `/.sdme-isolate` inside the OCI root at import time (mode `0o111`,
 owned by root). The generated unit becomes:
@@ -565,7 +565,7 @@ the OCI rootfs, not on the host. This is a known upstream limitation:
 
 sdme generates a static ELF binary (`isolate`) that creates PID/IPC
 namespaces, remounts /proc, drops `CAP_SYS_ADMIN`, optionally drops
-privileges, and execs the target -- all via raw syscalls with no libc
+privileges, and execs the target, all via raw syscalls with no libc
 dependency and no NSS. The binary is invoked as:
 
 ```

@@ -386,7 +386,7 @@ pub(crate) fn setup_oci_app(opts: &OciAppSetup) -> Result<()> {
     // 3. Resolve user, deploy .sdme-isolate binary.
     // Always use isolate for all OCI apps (root and non-root). The isolate
     // binary creates PID/IPC namespaces, remounts /proc, drops CAP_SYS_ADMIN,
-    // and optionally drops privileges — strictly more correct and secure than
+    // and optionally drops privileges; strictly more correct and secure than
     // running without namespace isolation.
     let resolved_user = resolve_oci_user(opts.app_root, opts.user)?;
     let elf_bytes = crate::isolate::generate(arch);
@@ -820,7 +820,10 @@ mod tests {
     #[test]
     fn test_build_hardening_block_default() {
         let block = build_hardening_block(None);
-        assert!(block.contains("CAP_SYS_ADMIN"), "must include CAP_SYS_ADMIN");
+        assert!(
+            block.contains("CAP_SYS_ADMIN"),
+            "must include CAP_SYS_ADMIN"
+        );
         assert!(block.contains("CAP_NET_RAW"), "must include CAP_NET_RAW");
         assert!(
             block.contains("NoNewPrivileges=yes"),
@@ -830,8 +833,14 @@ mod tests {
             block.contains("ProtectKernelModules=yes"),
             "should have fixed directives"
         );
-        assert!(!block.contains("ReadOnlyPaths"), "should not be read-only by default");
-        assert!(!block.contains("SystemCallFilter"), "no syscall filters by default");
+        assert!(
+            !block.contains("ReadOnlyPaths"),
+            "should not be read-only by default"
+        );
+        assert!(
+            !block.contains("SystemCallFilter"),
+            "no syscall filters by default"
+        );
         assert!(!block.contains("AppArmorProfile"), "no apparmor by default");
     }
 
@@ -861,7 +870,10 @@ mod tests {
             apparmor_profile: None,
         };
         let block = build_hardening_block(Some(&sec));
-        assert!(!block.contains("CAP_NET_RAW"), "CAP_NET_RAW should be dropped");
+        assert!(
+            !block.contains("CAP_NET_RAW"),
+            "CAP_NET_RAW should be dropped"
+        );
         assert!(block.contains("CAP_SYS_ADMIN"), "must keep CAP_SYS_ADMIN");
     }
 
@@ -877,10 +889,19 @@ mod tests {
         };
         let block = build_hardening_block(Some(&sec));
         // Only CAP_SYS_ADMIN (always) and CAP_CHOWN (explicitly added) should remain.
-        assert!(block.contains("CAP_SYS_ADMIN"), "must preserve CAP_SYS_ADMIN");
+        assert!(
+            block.contains("CAP_SYS_ADMIN"),
+            "must preserve CAP_SYS_ADMIN"
+        );
         assert!(block.contains("CAP_CHOWN"), "should include added cap");
-        assert!(!block.contains("CAP_NET_RAW"), "should not include defaults after ALL drop");
-        assert!(!block.contains("CAP_SETUID"), "should not include defaults after ALL drop");
+        assert!(
+            !block.contains("CAP_NET_RAW"),
+            "should not include defaults after ALL drop"
+        );
+        assert!(
+            !block.contains("CAP_SETUID"),
+            "should not include defaults after ALL drop"
+        );
     }
 
     #[test]
@@ -929,7 +950,10 @@ mod tests {
             apparmor_profile: None,
         };
         let block = build_hardening_block(Some(&sec));
-        assert!(block.contains("ReadOnlyPaths=/"), "should add ReadOnlyPaths");
+        assert!(
+            block.contains("ReadOnlyPaths=/"),
+            "should add ReadOnlyPaths"
+        );
     }
 
     #[test]

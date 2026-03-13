@@ -1,4 +1,4 @@
-//! OCI rootfs detection: app name scanning, port and volume reading.
+//! OCI rootfs helpers: app name detection, port/volume reading from OCI metadata files.
 
 use std::fs;
 use std::path::{Component, Path};

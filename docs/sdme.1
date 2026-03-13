@@ -1,4 +1,4 @@
-.TH SDME 1 "2026-03-03" "sdme" "User Commands"
+.TH SDME 1 "2026-03-13" "sdme" "User Commands"
 .SH NAME
 sdme \- lightweight systemd\-nspawn containers with overlayfs
 .SH SYNOPSIS
@@ -96,7 +96,7 @@ below.
 Use
 .B \-\-oci\-env
 to set environment variables for the OCI app service (written to
-.IR /oci/env
+.IR /oci/apps/{name}/env
 in the overlayfs upper layer); see
 .B OCI ENVIRONMENT
 below.
@@ -258,7 +258,7 @@ Use
 .B \-t
 to override the boot timeout when combined with
 .BR \-\-start .
-.SS sdme exec [\-\-oci] \fIname\fR \fIcommand\fR [\fIargs\fR...]
+.SS sdme exec [\-\-oci] [\-\-oci\-app \fIname\fR] \fIname\fR \fIcommand\fR [\fIargs\fR...]
 Run a one\-off command in a running container using
 .BR machinectl (1)
 shell.
@@ -273,6 +273,13 @@ with
 .BR RootDirectory=/oci/apps/{name}/root .
 This is useful for running app\-specific tools (e.g.\& redis\-cli, pg_isready)
 without needing chroot installed in the container.
+.PP
+Use
+.B \-\-oci\-app
+to target a specific app by name (implies
+.BR \-\-oci ).
+Required for multi\-container kube pods; single\-container pods auto\-select
+the only app.
 .SS sdme stop [\-a] [\-\-term] [\-\-kill] \fIname\fR...
 Stop one or more running containers.
 The default mode sends SIGRTMIN+4 to the container leader for a clean
@@ -305,6 +312,7 @@ to skip confirmation prompts (useful for scripting).
 List all containers with their status, health, and detected OS.
 A POD column is shown when any container uses \fB\-\-pod\fR.
 An OCI\-POD column is shown when any container uses \fB\-\-oci\-pod\fR.
+A KUBE column is shown when any container is a kube pod (listing container names).
 A USERNS column is shown when any container uses \fB\-\-userns\fR.
 A BINDS column is shown when any container has bind mounts configured.
 An ENABLED column is shown when any container has auto\-start enabled.
@@ -320,7 +328,7 @@ Disable auto\-start for one or more containers.
 Removes the systemd
 .B wants
 symlink.
-.SS sdme logs [\-\-oci] \fIname\fR [\fIargs\fR...]
+.SS sdme logs [\-\-oci] [\-\-oci\-app \fIname\fR] \fIname\fR [\fIargs\fR...]
 View container logs by executing
 .BR journalctl (1)
 for the container's service unit.
@@ -332,10 +340,17 @@ Extra arguments are passed through to journalctl
 Use
 .B \-\-oci
 to show logs for the OCI app service
-.RI ( sdme\-oci\-app.service )
+.RI ( sdme\-oci\-{name}.service )
 instead of the container unit.
 This runs journalctl inside the container via
 .BR machinectl (1).
+.PP
+Use
+.B \-\-oci\-app
+to target a specific app by name (implies
+.BR \-\-oci ).
+Required for multi\-container kube pods; single\-container pods auto\-select
+the only app.
 .SS sdme fs import \fIname\fR \fIsource\fR [\-f] [\-\-install\-packages \fImode\fR] [\-\-oci\-mode \fImode\fR] [\-\-base\-fs \fIrootfs\fR]
 Import a root filesystem.
 After import, systemd is detected in the rootfs; if missing, distro\-specific
@@ -500,6 +515,16 @@ Use a different path (e.g.\&
 Lines starting with
 .B #
 and blank lines are ignored.
+.SS sdme fs cache info
+Show the OCI blob cache location, total size, and blob count.
+.SS sdme fs cache ls
+List all cached OCI blobs with their digest and size.
+.SS sdme fs cache clean [\-\-all]
+Clean up the OCI blob cache.
+By default, removes only expired blobs (based on LRU eviction policy).
+Use
+.B \-\-all
+to remove all cached blobs.
 .SS sdme pod new \fIname\fR
 Create a new pod network namespace.
 Allocates a network namespace with loopback up, bind\-mounts it to
@@ -521,7 +546,7 @@ or
 keys) unless
 .B \-f
 is given.
-.SS sdme kube apply \-f \fIfile\fR [\-\-base\-fs \fIname\fR] [\-\-pod \fIpod\fR] [\-\-oci\-pod \fIpod\fR] [\-t \fIseconds\fR] [\-\-] [\fIcommand\fR...]
+.SS sdme kube apply \-f \fIfile\fR [\-\-base\-fs \fIname\fR] [\-\-pod \fIpod\fR] [\-\-oci\-pod \fIpod\fR] [\-t \fIseconds\fR] [\fIsecurity\fR]
 Create, start, and enter a container from a Kubernetes Pod YAML file.
 Equivalent to
 .B kube create
@@ -541,11 +566,24 @@ config value.
 Use
 .B \-t
 to override the boot timeout.
-An optional command overrides the default login shell.
+.PP
+Security hardening options can be set with
+.BR \-\-strict ,
+.BR \-\-hardened ,
+.BR \-\-drop\-capability ,
+.BR \-\-capability ,
+.BR \-\-no\-new\-privileges ,
+.BR \-\-read\-only ,
+.BR \-\-system\-call\-filter ,
+and
+.BR \-\-apparmor\-profile ;
+see
+.B SECURITY HARDENING
+below.
 .PP
 If boot fails or is interrupted (Ctrl+C), the just\-created container is
 automatically removed.
-.SS sdme kube create \-f \fIfile\fR [\-\-base\-fs \fIname\fR] [\-\-pod \fIpod\fR] [\-\-oci\-pod \fIpod\fR]
+.SS sdme kube create \-f \fIfile\fR [\-\-base\-fs \fIname\fR] [\-\-pod \fIpod\fR] [\-\-oci\-pod \fIpod\fR] [\fIsecurity\fR]
 Create a container from a Kubernetes Pod YAML file without starting it.
 .PP
 Parses the YAML, pulls each container's OCI image from the registry, builds
@@ -556,6 +594,20 @@ Each pod container becomes a separate systemd service
 .RI ( sdme\-oci\-{name}.service )
 chrooted into its own rootfs under
 .IR /oci/apps/{name}/root .
+.PP
+Security hardening options can be set with
+.BR \-\-strict ,
+.BR \-\-hardened ,
+.BR \-\-drop\-capability ,
+.BR \-\-capability ,
+.BR \-\-no\-new\-privileges ,
+.BR \-\-read\-only ,
+.BR \-\-system\-call\-filter ,
+and
+.BR \-\-apparmor\-profile ;
+see
+.B SECURITY HARDENING
+below.
 .PP
 Supported volume types:
 .RS
@@ -759,6 +811,17 @@ is used.
 Set to an empty string to disable all hardened capability drops.
 Default:
 .BR CAP_SYS_PTRACE,CAP_NET_RAW,CAP_SYS_RAWIO,CAP_SYS_BOOT .
+.TP
+.B default_base_fs
+Name of the default base rootfs for OCI app imports and kube pods.
+When set, the
+.B \-\-base\-fs
+flag can be omitted from
+.BR "sdme fs import" ,
+.BR "sdme kube apply" ,
+and
+.BR "sdme kube create" .
+Default: empty (not set).
 .RE
 .SH CONFIGURATION
 The configuration file is in TOML format, located at
@@ -834,6 +897,19 @@ Capabilities are validated against the known set.
 Set to an empty string to disable all hardened capability drops.
 Default:
 .BR CAP_SYS_PTRACE,CAP_NET_RAW,CAP_SYS_RAWIO,CAP_SYS_BOOT .
+.TP
+.B default_base_fs
+String.
+Name of a previously imported rootfs (with systemd) to use as the default
+base layer for OCI app imports and kube pods.
+When set, the
+.B \-\-base\-fs
+flag can be omitted from
+.BR "sdme fs import" ,
+.BR "sdme kube apply" ,
+and
+.BR "sdme kube create" .
+Default: empty (not set).
 .SH FILES
 .TP
 .I /var/lib/sdme/
@@ -1173,7 +1249,7 @@ Relative CPU scheduling weight.
 Maps to the systemd
 .B CPUWeight=
 directive.
-Range: 1\(en10000 (default kernel weight is 100).
+Range: 1\-10000 (default kernel weight is 100).
 Lower values get proportionally less CPU time under contention.
 .SH NETWORKING
 By default, containers share the host's network namespace and have full network
@@ -1301,10 +1377,10 @@ and applied at start time via the systemd nspawn drop\-in configuration.
 Set an environment variable for the OCI app service.
 Can be specified multiple times.
 The value is written to
-.I /oci/env
+.I /oci/apps/{name}/env
 in the container's overlayfs upper layer.
 The
-.B sdme\-oci\-app.service
+.B sdme\-oci\-{name}.service
 unit reads this file via
 .BR EnvironmentFile= .
 .PP
@@ -1321,7 +1397,7 @@ for variables the OCI application needs (e.g.\&
 .BR REDIS_ARGS ).
 .PP
 Requires an OCI app rootfs (the rootfs must contain
-.IR /oci/env ).
+.IR /oci/apps/{name}/env ).
 Example:
 .PP
 .RS
@@ -1434,12 +1510,13 @@ Pod membership is stored in the container's state file as
 Join the named pod's network namespace for the OCI app process only.
 The pod's netns is bind\-mounted into the container, and an inner systemd
 drop\-in makes only the
-.B sdme\-oci\-app.service
+.B sdme\-oci\-{name}.service
 process enter the pod's netns via
 .BR NetworkNamespacePath= .
 The container's init and other services remain in their own network namespace.
-Requires an OCI app rootfs (the rootfs must contain
-.IR sdme\-oci\-app.service )
+Requires an OCI app rootfs (the rootfs must contain an
+.IR sdme\-oci\-{name}.service
+unit)
 and
 .BR \-\-private\-network
 (or

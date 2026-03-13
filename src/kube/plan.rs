@@ -291,7 +291,11 @@ fn parse_k8s_cpu_quota(s: &str) -> Result<u32> {
         let cores: f64 = s
             .parse()
             .with_context(|| format!("invalid CPU value: {s}"))?;
-        Ok((cores * 100.0) as u32)
+        let percent = (cores * 100.0).round();
+        if percent < 0.0 || percent > u32::MAX as f64 {
+            bail!("CPU value out of range: {s}");
+        }
+        Ok(percent as u32)
     }
 }
 
@@ -305,7 +309,11 @@ fn parse_k8s_cpu_weight(s: &str) -> Result<u32> {
         let cores: f64 = s
             .parse()
             .with_context(|| format!("invalid CPU value: {s}"))?;
-        (cores * 1000.0) as u32
+        let millis = (cores * 1000.0).round();
+        if millis < 0.0 || millis > u32::MAX as f64 {
+            bail!("CPU value out of range: {s}");
+        }
+        millis as u32
     };
     // Map millicores to weight: 100m = 100 (default), scale linearly, clamp to 1-10000.
     Ok(millis.clamp(1, 10000))
@@ -368,9 +376,7 @@ fn validate_seccomp_profile(sp: &SeccompProfile, container_name: &str) -> Result
             "container '{container_name}': seccompProfile type 'Localhost' is not supported \
              (systemd SystemCallFilter cannot load custom seccomp BPF profiles)"
         ),
-        other => bail!(
-            "container '{container_name}': unknown seccompProfile type: {other}"
-        ),
+        other => bail!("container '{container_name}': unknown seccompProfile type: {other}"),
     }
 }
 
@@ -392,9 +398,7 @@ fn validate_apparmor_k8s(ap: &AppArmorProfile, container_name: &str) -> Result<S
             Ok(name.to_string())
         }
         "Unconfined" => Ok(String::new()),
-        other => bail!(
-            "container '{container_name}': unknown appArmorProfile type: {other}"
-        ),
+        other => bail!("container '{container_name}': unknown appArmorProfile type: {other}"),
     }
 }
 
@@ -532,19 +536,17 @@ fn validate_container(c: Container) -> Result<KubeContainer> {
         if let Some(ref caps) = sc.capabilities {
             for cap in &caps.add {
                 let normalized = security::normalize_cap(cap);
-                security::validate_capability(&normalized).with_context(|| {
-                    format!("container '{}': capabilities.add", c.name)
-                })?;
+                security::validate_capability(&normalized)
+                    .with_context(|| format!("container '{}': capabilities.add", c.name))?;
                 add.push(normalized);
             }
             for cap in &caps.drop {
-                if cap.to_ascii_uppercase() == "ALL" {
+                if cap.eq_ignore_ascii_case("ALL") {
                     drop.push("ALL".to_string());
                 } else {
                     let normalized = security::normalize_cap(cap);
-                    security::validate_capability(&normalized).with_context(|| {
-                        format!("container '{}': capabilities.drop", c.name)
-                    })?;
+                    security::validate_capability(&normalized)
+                        .with_context(|| format!("container '{}': capabilities.drop", c.name))?;
                     drop.push(normalized);
                 }
             }
@@ -642,19 +644,23 @@ pub(crate) fn validate_and_plan(pod_name: &str, spec: PodSpec) -> Result<KubePla
             if sc.run_as_non_root == Some(true) && sc.run_as_user == Some(0) {
                 bail!("securityContext.runAsNonRoot is true but runAsUser is 0 (root)");
             }
-            let seccomp_type = sc.seccomp_profile.as_ref().map(|sp| {
-                match sp.profile_type.as_str() {
+            let seccomp_type = sc
+                .seccomp_profile
+                .as_ref()
+                .map(|sp| match sp.profile_type.as_str() {
                     "RuntimeDefault" | "Unconfined" => Ok(sp.profile_type.clone()),
                     "Localhost" => bail!(
                         "pod securityContext: seccompProfile type 'Localhost' is not supported \
                          (systemd SystemCallFilter cannot load custom seccomp BPF profiles)"
                     ),
                     other => bail!("pod securityContext: unknown seccompProfile type: {other}"),
-                }
-            }).transpose()?;
-            let apparmor = sc.apparmor_profile.as_ref().map(|ap| {
-                validate_apparmor_k8s(ap, "<pod>")
-            }).transpose()?;
+                })
+                .transpose()?;
+            let apparmor = sc
+                .apparmor_profile
+                .as_ref()
+                .map(|ap| validate_apparmor_k8s(ap, "<pod>"))
+                .transpose()?;
             (sc.run_as_user, sc.run_as_group, seccomp_type, apparmor)
         } else {
             (None, None, None, None)
@@ -2573,7 +2579,10 @@ spec:
         let (name, spec) = parse_yaml(yaml).unwrap();
         let plan = validate_and_plan(&name, spec).unwrap();
         let c = &plan.containers[0];
-        assert!(c.syscall_filters.is_empty(), "Unconfined should have no filters");
+        assert!(
+            c.syscall_filters.is_empty(),
+            "Unconfined should have no filters"
+        );
     }
 
     #[test]
@@ -2834,7 +2843,10 @@ spec:
         kc.drop_caps = vec!["CAP_NET_RAW".to_string()];
         let plan = make_test_plan();
         let unit = setup_test_container("app", &kc, &plan, false, &[]);
-        assert!(!unit.contains("CAP_NET_RAW"), "CAP_NET_RAW should be dropped");
+        assert!(
+            !unit.contains("CAP_NET_RAW"),
+            "CAP_NET_RAW should be dropped"
+        );
         assert!(unit.contains("CAP_SYS_ADMIN"), "must keep CAP_SYS_ADMIN");
     }
 
@@ -2858,7 +2870,10 @@ spec:
         kc.read_only_root_filesystem = true;
         let plan = make_test_plan();
         let unit = setup_test_container("app", &kc, &plan, false, &[]);
-        assert!(unit.contains("ReadOnlyPaths=/"), "should have ReadOnlyPaths");
+        assert!(
+            unit.contains("ReadOnlyPaths=/"),
+            "should have ReadOnlyPaths"
+        );
     }
 
     #[test]
@@ -2911,6 +2926,9 @@ spec:
         plan.run_as_group = Some(1000);
         let unit = setup_test_container("app", &kc, &plan, false, &[]);
         // Container-level 2000 should override pod-level 1000.
-        assert!(unit.contains("2000 2000"), "container user should override pod user: {unit}");
+        assert!(
+            unit.contains("2000 2000"),
+            "container user should override pod user: {unit}"
+        );
     }
 }

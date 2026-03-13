@@ -12,7 +12,6 @@ use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::Path;
-use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
@@ -21,7 +20,7 @@ use crate::check_interrupted;
 
 use super::layout::unpack_oci_layer;
 use super::sorted_keys_csv;
-use crate::import::{build_http_agent, open_decoder, proxy_from_env, MAX_DOWNLOAD_SIZE};
+use crate::import::{build_http_agent, build_http_agent_no_error, open_decoder, MAX_DOWNLOAD_SIZE};
 
 /// Parsed OCI image reference (e.g. `quay.io/centos/centos:stream10`).
 #[derive(Debug, PartialEq)]
@@ -157,31 +156,12 @@ fn split_auth_params(s: &str) -> Vec<&str> {
     parts
 }
 
-/// Build a ureq agent that does not convert non-2xx status codes to errors.
-///
-/// Used for the `/v2/` auth probe where we need to inspect the 401 response headers.
-fn build_noerror_agent() -> Result<ureq::Agent> {
-    let mut config = ureq::Agent::config_builder()
-        .http_status_as_error(false)
-        .user_agent("sdme/0.1")
-        .timeout_connect(Some(Duration::from_secs(30)))
-        .timeout_resolve(Some(Duration::from_secs(30)))
-        .timeout_recv_response(Some(Duration::from_secs(60)))
-        .timeout_recv_body(Some(Duration::from_secs(300)));
-    if let Some(proxy_uri) = proxy_from_env() {
-        let proxy = ureq::Proxy::new(&proxy_uri)
-            .with_context(|| format!("invalid proxy URI: {proxy_uri}"))?;
-        config = config.proxy(Some(proxy));
-    }
-    Ok(config.build().into())
-}
-
 /// Docker Hub registry hostnames that credentials apply to.
 const DOCKER_HUB_REGISTRIES: &[&str] = &["registry-1.docker.io", "docker.io", "index.docker.io"];
 
 /// Check if a registry hostname is Docker Hub.
 fn is_docker_hub(registry: &str) -> bool {
-    DOCKER_HUB_REGISTRIES.iter().any(|&r| r == registry)
+    DOCKER_HUB_REGISTRIES.contains(&registry)
 }
 
 /// Obtain a bearer token for pulling from a registry.
@@ -213,7 +193,7 @@ fn obtain_token(
     }
 
     // Use an agent that doesn't error on non-2xx so we can read 401 headers.
-    let probe_agent = build_noerror_agent()?;
+    let probe_agent = build_http_agent_no_error()?;
     let response = probe_agent
         .get(&v2_url)
         .call()
@@ -296,11 +276,14 @@ fn obtain_token(
 }
 
 /// Base64-encode a string (standard alphabet, with padding).
+///
+/// Hand-rolled instead of pulling in a crate: single call site, 30 lines,
+/// well-tested. Not worth a dependency.
 fn base64_encode(input: &str) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
     let bytes = input.as_bytes();
-    let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
 
     for chunk in bytes.chunks(3) {
         let b0 = chunk[0] as u32;
@@ -613,6 +596,7 @@ fn resolve_manifest(
 
 /// Download a blob to a file while verifying its SHA-256 digest.
 /// If a cache is provided and the blob is already cached, copies from cache instead.
+#[allow(clippy::too_many_arguments)]
 fn download_blob(
     agent: &ureq::Agent,
     registry: &str,

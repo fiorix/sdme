@@ -1,3 +1,5 @@
+//! Container name generation from a Tupi-Guarani wordlist with collision avoidance.
+
 use std::fs;
 use std::io::Read;
 use std::path::Path;

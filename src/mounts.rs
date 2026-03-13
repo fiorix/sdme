@@ -54,7 +54,9 @@ impl BindConfig {
         let mut args = Vec::new();
 
         for bind in &self.binds {
-            // Parse "host:container:mode"
+            // Parse "host:container:mode".
+            // Colon-delimited format matches systemd-nspawn's --bind= syntax;
+            // paths containing colons are not supported (same limitation as nspawn).
             let parts: Vec<&str> = bind.split(':').collect();
             if parts.len() < 3 {
                 continue; // Invalid format, skip

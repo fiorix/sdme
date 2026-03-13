@@ -15,6 +15,7 @@ use crate::{check_interrupted, validate_name, State};
 /// Create a kube pod: parse YAML, pull images, build combined rootfs, create container.
 ///
 /// Returns the container name on success.
+#[allow(clippy::too_many_arguments)]
 pub fn kube_create(
     datadir: &Path,
     yaml_content: &str,
@@ -84,49 +85,21 @@ pub fn kube_create(
             default_mode,
         } = vol.kind
         {
-            let vol_path = volumes_dir.join(&vol.name);
-            fs::create_dir_all(&vol_path)
-                .with_context(|| format!("failed to create volume dir {}", vol_path.display()))?;
-
-            let secret_data =
-                super::secret::read_data(datadir, secret_name).with_context(|| {
-                    format!(
-                        "volume '{}': failed to read secret '{secret_name}'",
-                        vol.name
-                    )
-                })?;
-
-            if items.is_empty() {
-                // Copy all keys.
-                for (key, contents) in &secret_data {
-                    let file_path = vol_path.join(key);
-                    fs::write(&file_path, contents)
-                        .with_context(|| format!("failed to write {}", file_path.display()))?;
-                    set_file_mode(&file_path, default_mode)?;
-                }
-            } else {
-                // Copy only projected keys.
-                let data_map: HashMap<&str, &[u8]> = secret_data
-                    .iter()
-                    .map(|(k, v)| (k.as_str(), v.as_slice()))
-                    .collect();
-                for (key, path) in items {
-                    let contents = data_map.get(key.as_str()).with_context(|| {
-                        format!(
-                            "volume '{}': secret '{secret_name}' has no key '{key}'",
-                            vol.name
-                        )
-                    })?;
-                    let file_path = vol_path.join(path);
-                    if let Some(parent) = file_path.parent() {
-                        fs::create_dir_all(parent)
-                            .with_context(|| format!("failed to create {}", parent.display()))?;
-                    }
-                    fs::write(&file_path, contents)
-                        .with_context(|| format!("failed to write {}", file_path.display()))?;
-                    set_file_mode(&file_path, default_mode)?;
-                }
-            }
+            let data = super::secret::read_data(datadir, secret_name).with_context(|| {
+                format!(
+                    "volume '{}': failed to read secret '{secret_name}'",
+                    vol.name
+                )
+            })?;
+            populate_volume_data(
+                &volumes_dir,
+                &vol.name,
+                "secret",
+                secret_name,
+                items,
+                default_mode,
+                data,
+            )?;
         }
     }
 
@@ -138,49 +111,21 @@ pub fn kube_create(
             default_mode,
         } = vol.kind
         {
-            let vol_path = volumes_dir.join(&vol.name);
-            fs::create_dir_all(&vol_path)
-                .with_context(|| format!("failed to create volume dir {}", vol_path.display()))?;
-
-            let configmap_data = super::configmap::read_data(datadir, configmap_name)
-                .with_context(|| {
-                    format!(
-                        "volume '{}': failed to read configmap '{configmap_name}'",
-                        vol.name
-                    )
-                })?;
-
-            if items.is_empty() {
-                // Copy all keys.
-                for (key, contents) in &configmap_data {
-                    let file_path = vol_path.join(key);
-                    fs::write(&file_path, contents)
-                        .with_context(|| format!("failed to write {}", file_path.display()))?;
-                    set_file_mode(&file_path, default_mode)?;
-                }
-            } else {
-                // Copy only projected keys.
-                let data_map: HashMap<&str, &[u8]> = configmap_data
-                    .iter()
-                    .map(|(k, v)| (k.as_str(), v.as_slice()))
-                    .collect();
-                for (key, path) in items {
-                    let contents = data_map.get(key.as_str()).with_context(|| {
-                        format!(
-                            "volume '{}': configmap '{configmap_name}' has no key '{key}'",
-                            vol.name
-                        )
-                    })?;
-                    let file_path = vol_path.join(path);
-                    if let Some(parent) = file_path.parent() {
-                        fs::create_dir_all(parent)
-                            .with_context(|| format!("failed to create {}", parent.display()))?;
-                    }
-                    fs::write(&file_path, contents)
-                        .with_context(|| format!("failed to write {}", file_path.display()))?;
-                    set_file_mode(&file_path, default_mode)?;
-                }
-            }
+            let data = super::configmap::read_data(datadir, configmap_name).with_context(|| {
+                format!(
+                    "volume '{}': failed to read configmap '{configmap_name}'",
+                    vol.name
+                )
+            })?;
+            populate_volume_data(
+                &volumes_dir,
+                &vol.name,
+                "configmap",
+                configmap_name,
+                items,
+                default_mode,
+                data,
+            )?;
         }
     }
 
@@ -652,6 +597,52 @@ pub(crate) fn setup_kube_container(
         readiness_exec: kc.readiness_exec.clone(),
         security,
     })
+}
+
+/// Write key-value data into a volume directory, applying file permissions.
+///
+/// Used by both secret and configMap volume population. When `items` is empty,
+/// all keys are written; otherwise only the projected key→path pairs.
+fn populate_volume_data(
+    volumes_dir: &Path,
+    vol_name: &str,
+    source_noun: &str,
+    source_name: &str,
+    items: &[(String, String)],
+    default_mode: u32,
+    data: Vec<(String, Vec<u8>)>,
+) -> Result<()> {
+    let vol_path = volumes_dir.join(vol_name);
+    fs::create_dir_all(&vol_path)
+        .with_context(|| format!("failed to create volume dir {}", vol_path.display()))?;
+
+    if items.is_empty() {
+        for (key, contents) in &data {
+            let file_path = vol_path.join(key);
+            fs::write(&file_path, contents)
+                .with_context(|| format!("failed to write {}", file_path.display()))?;
+            set_file_mode(&file_path, default_mode)?;
+        }
+    } else {
+        let data_map: HashMap<&str, &[u8]> = data
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_slice()))
+            .collect();
+        for (key, path) in items {
+            let contents = data_map.get(key.as_str()).with_context(|| {
+                format!("volume '{vol_name}': {source_noun} '{source_name}' has no key '{key}'")
+            })?;
+            let file_path = vol_path.join(path);
+            if let Some(parent) = file_path.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("failed to create {}", parent.display()))?;
+            }
+            fs::write(&file_path, contents)
+                .with_context(|| format!("failed to write {}", file_path.display()))?;
+            set_file_mode(&file_path, default_mode)?;
+        }
+    }
+    Ok(())
 }
 
 /// Set file permissions to the given mode.

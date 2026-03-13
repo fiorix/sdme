@@ -2009,7 +2009,7 @@ fn main() -> Result<()> {
                         return Ok(());
                     }
                     let name_w = secrets.iter().map(|s| s.name.len()).max().unwrap().max(4);
-                    println!("{:<name_w$}  {:>5}  {}", "NAME", "KEYS", "CREATED");
+                    println!("{:<name_w$}  {:>5}  CREATED", "NAME", "KEYS");
                     for s in &secrets {
                         println!("{:<name_w$}  {:>5}  {}", s.name, s.keys, s.created);
                     }
@@ -2062,7 +2062,7 @@ fn main() -> Result<()> {
                         .max()
                         .unwrap()
                         .max(4);
-                    println!("{:<name_w$}  {:>5}  {}", "NAME", "KEYS", "CREATED");
+                    println!("{:<name_w$}  {:>5}  CREATED", "NAME", "KEYS");
                     for s in &configmaps {
                         println!("{:<name_w$}  {:>5}  {}", s.name, s.keys, s.created);
                     }
@@ -2218,7 +2218,7 @@ fn main() -> Result<()> {
                         eprintln!("no cached blobs");
                     } else {
                         let digest_w = 19; // "sha256:" + 12 hex chars
-                        println!("{:<digest_w$}  {:>10}  {}", "DIGEST", "SIZE", "LAST ACCESS");
+                        println!("{:<digest_w$}  {:>10}  LAST ACCESS", "DIGEST", "SIZE");
                         for entry in &entries {
                             let short = if entry.digest.len() > 19 {
                                 &entry.digest[..19]

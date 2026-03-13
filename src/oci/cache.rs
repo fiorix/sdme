@@ -110,7 +110,7 @@ impl BlobCache {
                 let _ = self.save_index(&index);
             }
             None => {
-                // File exists but not in index — stale file.
+                // File exists but not in index; stale file.
                 if verbose {
                     eprintln!("cache miss: {digest} (not in index)");
                 }
@@ -516,7 +516,7 @@ mod tests {
     fn test_cache_lru_eviction() {
         let tmp = TempDataDir::new("cache-eviction");
         let cache_dir = tmp.path().join("cache");
-        // 30 bytes max — will trigger eviction after two 20-byte blobs.
+        // 30 bytes max: will trigger eviction after two 20-byte blobs.
         let cfg = test_config(&cache_dir, "30");
         let cache = BlobCache::from_config(&cfg).unwrap();
 
