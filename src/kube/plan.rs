@@ -78,12 +78,24 @@ pub(crate) struct KubeVolumeMount {
 #[derive(Debug)]
 pub(crate) enum KubeEnvValue {
     Literal(String),
-    SecretKeyRef { name: String, key: String },
-    ConfigMapKeyRef { name: String, key: String },
+    SecretKeyRef {
+        name: String,
+        key: String,
+    },
+    ConfigMapKeyRef {
+        name: String,
+        key: String,
+    },
     /// Import all keys from a secret as env vars (from `envFrom`).
-    SecretRef { name: String, prefix: String },
+    SecretRef {
+        name: String,
+        prefix: String,
+    },
     /// Import all keys from a configMap as env vars (from `envFrom`).
-    ConfigMapRef { name: String, prefix: String },
+    ConfigMapRef {
+        name: String,
+        prefix: String,
+    },
 }
 
 #[derive(Debug)]
@@ -3104,7 +3116,11 @@ spec:
             plan.containers[0].env[0].1,
             KubeEnvValue::ConfigMapRef { .. }
         ));
-        if let KubeEnvValue::ConfigMapRef { ref name, ref prefix } = plan.containers[0].env[0].1 {
+        if let KubeEnvValue::ConfigMapRef {
+            ref name,
+            ref prefix,
+        } = plan.containers[0].env[0].1
+        {
             assert_eq!(name, "my-config");
             assert_eq!(prefix, "");
         }
@@ -3131,7 +3147,11 @@ spec:
             plan.containers[0].env[0].1,
             KubeEnvValue::SecretRef { .. }
         ));
-        if let KubeEnvValue::SecretRef { ref name, ref prefix } = plan.containers[0].env[0].1 {
+        if let KubeEnvValue::SecretRef {
+            ref name,
+            ref prefix,
+        } = plan.containers[0].env[0].1
+        {
             assert_eq!(name, "my-secret");
             assert_eq!(prefix, "");
         }
