@@ -67,18 +67,21 @@ detailed output on any script.
 ### verify-matrix.sh
 
 Full distro x OCI app verification matrix. Imports distro rootfs from
-OCI registries, then tests OCI applications on each distro.
+OCI registries, then tests OCI applications on each distro. Also tests
+hardened boot across all distros and hardened OCI app combinations.
 
 ```bash
 sudo ./test/scripts/verify-matrix.sh
 sudo ./test/scripts/verify-matrix.sh --distro ubuntu --app redis   # single cell
 sudo ./test/scripts/verify-matrix.sh --keep                        # keep artifacts
+sudo ./test/scripts/verify-matrix.sh --report-dir ./test/reports   # custom report dir
 ```
 
 Each cell verifies: app import with `--base-fs`, container boot,
 `sdme-oci-{name}.service` active, journal and status accessible, and
 app-specific health check (HTTP 200 for nginx-unprivileged, redis-cli
-ping, pg_isready).
+ping, pg_isready). Additional phases test hardened boot (all distros)
+and hardened OCI app combinations.
 
 See `./test/scripts/verify-matrix.sh --help` for all options.
 
@@ -148,16 +151,33 @@ sudo ./test/scripts/verify-usage.sh
 sudo ./test/scripts/verify-usage.sh --keep   # keep artifacts
 ```
 
+### verify-nixos.sh
+
+NixOS end-to-end verification. Builds a NixOS rootfs via `nix-build`,
+imports it into sdme, boots a plain NixOS container, then tests an OCI
+nginx-unprivileged app on the NixOS base. Requires `nix` with the
+daemon running.
+
+```bash
+sudo ./test/scripts/verify-nixos.sh
+sudo ./test/scripts/verify-nixos.sh --keep   # keep artifacts
+```
+
+The `test/scripts/nix/build-rootfs.sh` helper builds the NixOS rootfs
+from `test/scripts/nix/container.nix`.
+
 ### Kube Tests
 
-Six-level progression from basic lifecycle to a full multi-service stack.
+Eight-level progression from basic lifecycle to a full multi-service stack.
 All require a base-fs imported (e.g. `ubuntu`). Run in order:
 
 | Script | Level | Tests | What it covers |
 |--------|-------|-------|----------------|
-| `verify-kube-L1-basic.sh` | L1 | ~5 | YAML validation, single-container pod, command override, kube delete, shared emptyDir, ps metadata |
+| `verify-kube-L1-basic.sh` | L1 | ~6 | YAML validation, single-container pod, command override, kube delete, shared emptyDir, ps metadata |
 | `verify-kube-L2-spec.sh` | L2 | ~12 | Pod spec features: terminationGracePeriodSeconds, securityContext, initContainers, workingDir, resources, readinessProbe |
-| `verify-kube-L3-volumes.sh` | L3 | ~28 | Volumes: secret + configMap create/ls/rm, all-keys mount, projected items, defaultMode, env valueFrom, PVC persistence |
+| `verify-kube-L2-security.sh` | L2 | ~17 | Container securityContext: capabilities add/drop (including ALL), allowPrivilegeEscalation, readOnlyRootFilesystem, seccompProfile, appArmorProfile, per-container runAsUser/runAsGroup |
+| `verify-kube-L3-volumes.sh` | L3 | ~39 | Volumes: secret + configMap create/ls/rm, all-keys mount, projected items, defaultMode, env valueFrom, envFrom (configMapRef, secretRef with prefix), read-only mounts, missing-resource errors, PVC persistence |
+| `verify-kube-L3-secrets.sh` | L3 | ~16 | Secret volumes: create/ls/rm lifecycle, all-keys mount, projected items, defaultMode permissions, runtime access, missing-secret errors |
 | `verify-kube-L4-networking.sh` | L4 | ~6 | Inter-container localhost networking: nginx + busybox, HTTP fetch across containers |
 | `verify-kube-L5-redis.sh` | L5 | ~6 | Real service data round-trip: redis PING/PONG, SET/GET via raw protocol |
 | `verify-kube-L6-gitea.sh` | L6 | ~15 | Full 3-container app stack: Gitea + MySQL + Nginx with API validation |
@@ -165,7 +185,9 @@ All require a base-fs imported (e.g. `ubuntu`). Run in order:
 ```bash
 sudo ./test/scripts/verify-kube-L1-basic.sh --base-fs ubuntu
 sudo ./test/scripts/verify-kube-L2-spec.sh --base-fs ubuntu
+sudo ./test/scripts/verify-kube-L2-security.sh --base-fs ubuntu
 sudo ./test/scripts/verify-kube-L3-volumes.sh --base-fs ubuntu
+sudo ./test/scripts/verify-kube-L3-secrets.sh --base-fs ubuntu
 sudo ./test/scripts/verify-kube-L4-networking.sh --base-fs ubuntu
 sudo ./test/scripts/verify-kube-L5-redis.sh --base-fs ubuntu
 sudo ./test/scripts/verify-kube-L6-gitea.sh --base-fs ubuntu
@@ -185,11 +207,14 @@ sudo ./test/scripts/verify-pods.sh
 sudo ./test/scripts/verify-oci.sh
 sudo ./test/scripts/verify-security.sh
 sudo ./test/scripts/verify-usage.sh
+sudo ./test/scripts/verify-nixos.sh   # requires nix
 
 # 3. Kube tests (requires ubuntu base-fs from step 2)
 sudo ./test/scripts/verify-kube-L1-basic.sh --base-fs ubuntu
 sudo ./test/scripts/verify-kube-L2-spec.sh --base-fs ubuntu
+sudo ./test/scripts/verify-kube-L2-security.sh --base-fs ubuntu
 sudo ./test/scripts/verify-kube-L3-volumes.sh --base-fs ubuntu
+sudo ./test/scripts/verify-kube-L3-secrets.sh --base-fs ubuntu
 sudo ./test/scripts/verify-kube-L4-networking.sh --base-fs ubuntu
 sudo ./test/scripts/verify-kube-L5-redis.sh --base-fs ubuntu
 sudo ./test/scripts/verify-kube-L6-gitea.sh --base-fs ubuntu
