@@ -245,7 +245,7 @@ below for details on each flag.
 .PP
 If the container is running, a note is printed advising a restart for the
 changes to take effect.
-.SS sdme join [\-\-oci] [\-\-oci\-app \fIname\fR] [\-\-start] [\-t \fIseconds\fR] \fIname\fR [\-\-] [\fIcommand\fR...]
+.SS sdme join [\-\-oci [\fIapp\fR]] [\-\-start] [\-t \fIseconds\fR] \fIname\fR [\-\-] [\fIcommand\fR...]
 Enter a running container using
 .BR machinectl (1)
 shell.
@@ -268,14 +268,10 @@ The default shell is
 Inside the app namespaces, commands like
 .BR ps (1)
 show only the app's processes, not the container's init tree.
-.PP
-Use
-.B \-\-oci\-app
-to target a specific app by name (implies
-.BR \-\-oci ).
-Required for multi\-container kube pods; single\-container pods auto\-select
-the only app.
-.SS sdme exec [\-\-oci] [\-\-oci\-app \fIname\fR] \fIname\fR \fIcommand\fR [\fIargs\fR...]
+For multi\-container kube pods, pass the app name:
+.BR "\-\-oci redis" .
+Single\-container pods auto\-select the only app.
+.SS sdme exec [\-\-oci [\fIapp\fR]] \fIname\fR \fIcommand\fR [\fIargs\fR...]
 Run a one\-off command in a running container using
 .BR machinectl (1)
 shell.
@@ -291,13 +287,9 @@ Commands like
 .BR ps (1)
 show only the app's processes, not the container's init tree.
 This is useful for running app\-specific tools (e.g.\& redis\-cli, pg_isready).
-.PP
-Use
-.B \-\-oci\-app
-to target a specific app by name (implies
-.BR \-\-oci ).
-Required for multi\-container kube pods; single\-container pods auto\-select
-the only app.
+For multi\-container kube pods, pass the app name:
+.BR "\-\-oci redis" .
+Single\-container pods auto\-select the only app.
 .SS sdme stop [\-a] [\-\-term] [\-\-kill] \fIname\fR...
 Stop one or more running containers.
 The default mode sends SIGRTMIN+4 to the container leader for a clean
@@ -346,7 +338,7 @@ Disable auto\-start for one or more containers.
 Removes the systemd
 .B wants
 symlink.
-.SS sdme logs [\-\-oci] [\-\-oci\-app \fIname\fR] \fIname\fR [\fIargs\fR...]
+.SS sdme logs [\-\-oci [\fIapp\fR]] \fIname\fR [\fIargs\fR...]
 View container logs by executing
 .BR journalctl (1)
 for the container's service unit.
@@ -362,13 +354,9 @@ to show logs for the OCI app service
 instead of the container unit.
 This runs journalctl inside the container via
 .BR machinectl (1).
-.PP
-Use
-.B \-\-oci\-app
-to target a specific app by name (implies
-.BR \-\-oci ).
-Required for multi\-container kube pods; single\-container pods auto\-select
-the only app.
+For multi\-container kube pods, pass the app name:
+.BR "\-\-oci redis" .
+Single\-container pods auto\-select the only app.
 .SS sdme fs import \fIname\fR \fIsource\fR [\-f] [\-\-install\-packages \fImode\fR] [\-\-oci\-mode \fImode\fR] [\-\-base\-fs \fIrootfs\fR]
 Import a root filesystem.
 After import, systemd is detected in the rootfs; if missing, distro\-specific

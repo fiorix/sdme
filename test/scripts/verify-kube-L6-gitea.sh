@@ -431,7 +431,7 @@ test_setup_admin_user() {
     local output rc
 
     while [[ $SECONDS -lt $deadline ]]; do
-        output=$("$SDME" exec "$POD_NAME" --oci-app gitea -- \
+        output=$("$SDME" exec "$POD_NAME" --oci gitea -- \
             /bin/su -s /bin/bash -c \
             "/usr/local/bin/gitea admin user create --admin --username admin --password 'adminpass123!' --email admin@test.local" \
             git 2>&1)

@@ -698,15 +698,17 @@ Secrets and configmaps can be mounted as volumes or referenced via
 creation time; changes to secrets or configmaps after creation do not
 affect running containers.
 
-**Multi-container pods.** For pods with more than one container, use
-`--oci-app` to target a specific service with `exec` and `logs`:
+**Multi-container pods.** For pods with more than one container, pass
+the app name to `--oci` to target a specific service:
 
 ```bash
-sudo sdme exec --oci-app nginx mycontainer -- nginx -t
-sudo sdme logs --oci-app redis mycontainer -f
+sudo sdme exec --oci nginx mycontainer -- nginx -t
+sudo sdme join --oci redis mycontainer
+sudo sdme logs --oci redis mycontainer -f
 ```
 
-Single-container pods auto-select the only app, so `--oci` is sufficient.
+Single-container pods auto-select the only app, so `--oci` without a
+value is sufficient.
 
 **What's tested.** The kube test suite runs eight progressive levels:
 L1 (basic lifecycle), L2-spec (pod spec features: command/args, env,

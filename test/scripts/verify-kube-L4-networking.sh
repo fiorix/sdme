@@ -242,7 +242,7 @@ test_localhost_http() {
 
     echo "--- $test_name: busybox client fetching from nginx via localhost ---"
     local output
-    output=$("$SDME" exec "$POD_NAME" --oci-app client -- \
+    output=$("$SDME" exec "$POD_NAME" --oci client -- \
         /bin/wget -qO- http://127.0.0.1:8888 2>&1 || echo "")
 
     if echo "$output" | grep -q 'kube-net-ok'; then

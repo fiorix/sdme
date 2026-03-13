@@ -177,12 +177,9 @@ enum Command {
     Exec {
         /// Container name
         name: String,
-        /// Run command inside the OCI app root (/oci/apps/{name}/root)
-        #[arg(long)]
-        oci: bool,
-        /// Target a specific OCI app by name (implies --oci)
-        #[arg(long)]
-        oci_app: Option<String>,
+        /// Enter the OCI app's namespaces (optional app name for multi-container kube pods)
+        #[arg(long, num_args = 0..=1, default_missing_value = "", value_name = "APP")]
+        oci: Option<String>,
         /// Command to run inside the container
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
         command: Vec<String>,
@@ -201,13 +198,9 @@ enum Command {
         #[arg(short, long)]
         timeout: Option<u64>,
 
-        /// Enter the OCI app's PID/IPC/mount namespaces (default shell: /bin/sh)
-        #[arg(long)]
-        oci: bool,
-
-        /// Target a specific OCI app by name (implies --oci)
-        #[arg(long)]
-        oci_app: Option<String>,
+        /// Enter the OCI app's namespaces (optional app name for multi-container kube pods; default shell: /bin/sh)
+        #[arg(long, num_args = 0..=1, default_missing_value = "", value_name = "APP")]
+        oci: Option<String>,
 
         /// Command to run inside the container (default: login shell)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -218,12 +211,9 @@ enum Command {
     Logs {
         /// Container name
         name: String,
-        /// Show logs for the OCI app service instead of the container unit
-        #[arg(long)]
-        oci: bool,
-        /// Target a specific OCI app by name (implies --oci)
-        #[arg(long)]
-        oci_app: Option<String>,
+        /// Show OCI app service logs (optional app name for multi-container kube pods)
+        #[arg(long, num_args = 0..=1, default_missing_value = "", value_name = "APP")]
+        oci: Option<String>,
         /// Extra arguments passed to journalctl (e.g. -f, -n 100)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -1047,7 +1037,7 @@ fn resolve_oci_app_name(
                 return Ok(app.to_string());
             }
         }
-        // For kube containers, require --oci-app when multiple containers exist.
+        // For kube containers, require --oci NAME when multiple containers exist.
         if let Some(kube_containers) = state.get("KUBE_CONTAINERS") {
             let names: Vec<&str> = kube_containers
                 .split(',')
@@ -1057,7 +1047,7 @@ fn resolve_oci_app_name(
                 return Ok(names[0].to_string());
             }
             bail!(
-                "kube pod '{name}' has multiple containers: {}; use --oci-app to select one",
+                "kube pod '{name}' has multiple containers: {}; use --oci NAME to select one",
                 kube_containers
             );
         }
@@ -1398,15 +1388,15 @@ fn main() -> Result<()> {
             }
             println!("{name}");
         }
-        Command::Exec {
-            name,
-            oci,
-            oci_app,
-            command,
-        } => {
+        Command::Exec { name, oci, command } => {
             let name = containers::resolve_name(&cfg.datadir, &name)?;
-            let status = if oci || oci_app.is_some() {
-                let app_name = resolve_oci_app_name(&cfg.datadir, &name, oci_app.as_deref())?;
+            let status = if let Some(ref oci_app) = oci {
+                let explicit = if oci_app.is_empty() {
+                    None
+                } else {
+                    Some(oci_app.as_str())
+                };
+                let app_name = resolve_oci_app_name(&cfg.datadir, &name, explicit)?;
                 containers::exec_oci(&cfg.datadir, &name, &app_name, &command, cli.verbose)?
             } else {
                 containers::exec(
@@ -1477,7 +1467,6 @@ fn main() -> Result<()> {
             start,
             timeout,
             oci,
-            oci_app,
             command,
         } => {
             let name = containers::resolve_name(&cfg.datadir, &name)?;
@@ -1504,8 +1493,13 @@ fn main() -> Result<()> {
                 start_and_await_boot(&cfg.datadir, &name, boot_timeout, cli.verbose)?;
             }
 
-            if oci || oci_app.is_some() {
-                let app_name = resolve_oci_app_name(&cfg.datadir, &name, oci_app.as_deref())?;
+            if let Some(ref oci_app) = oci {
+                let explicit = if oci_app.is_empty() {
+                    None
+                } else {
+                    Some(oci_app.as_str())
+                };
+                let app_name = resolve_oci_app_name(&cfg.datadir, &name, explicit)?;
                 let command = if command.is_empty() {
                     vec!["/bin/sh".to_string()]
                 } else {
@@ -1527,15 +1521,15 @@ fn main() -> Result<()> {
             )?;
             std::process::exit(status.code().unwrap_or(1));
         }
-        Command::Logs {
-            name,
-            oci,
-            oci_app,
-            args,
-        } => {
+        Command::Logs { name, oci, args } => {
             let name = containers::resolve_name(&cfg.datadir, &name)?;
-            if oci || oci_app.is_some() {
-                let app_name = resolve_oci_app_name(&cfg.datadir, &name, oci_app.as_deref())?;
+            if let Some(ref oci_app) = oci {
+                let explicit = if oci_app.is_empty() {
+                    None
+                } else {
+                    Some(oci_app.as_str())
+                };
+                let app_name = resolve_oci_app_name(&cfg.datadir, &name, explicit)?;
                 let mut command = vec![
                     "/usr/bin/journalctl".to_string(),
                     "-u".to_string(),
