@@ -90,20 +90,33 @@ spec:
 | `containers[].command` | Override ENTRYPOINT |
 | `containers[].args` | Override CMD |
 | `containers[].env` | Per-container environment variables |
+| `containers[].env[].valueFrom` | Resolve from secretKeyRef or configMapKeyRef |
 | `containers[].ports` | Aggregated port forwarding (on private network) |
 | `containers[].volumeMounts` | Bind volumes into the container's rootfs |
+| `containers[].workingDir` | Override working directory |
+| `containers[].imagePullPolicy` | Always, IfNotPresent, or Never |
+| `containers[].resources` | MemoryMax, MemoryLow, CPUQuota, CPUWeight |
+| `containers[].readinessProbe` | Exec-based readiness check (ExecStartPre) |
+| `containers[].livenessProbe` | Exec-based (parsed; not yet enforced at runtime) |
+| `initContainers[]` | Run-to-completion containers before app containers |
 | `volumes` (emptyDir) | Shared directory between containers |
 | `volumes` (hostPath) | Mount host directory into the pod |
+| `volumes` (secret) | Populate from sdme kube secret (supports items, defaultMode) |
+| `volumes` (configMap) | Populate from sdme kube configmap (supports items, defaultMode) |
+| `volumes` (persistentVolumeClaim) | Host dir at {datadir}/volumes/{claimName} |
 | `restartPolicy` | Maps to systemd Restart= (Always/OnFailure/Never) |
+| `terminationGracePeriodSeconds` | Shutdown timeout for the container |
+| `securityContext.runAsUser` | Pod-level UID for all containers |
+| `securityContext.runAsGroup` | Pod-level GID for all containers |
 
 ## How It Works
 
-1. **Parse & Validate** — reads the YAML, validates container names, volume references, etc.
-2. **Pull Images** — downloads each container's OCI image from the registry
-3. **Build Combined Rootfs** — copies the base rootfs, then places each container's OCI rootfs under `/oci/apps/{name}/root` with a generated systemd service unit
-4. **Generate Volume Mounts** — if the pod has volume mounts, generates a `sdme-kube-volumes.service` oneshot unit that bind-mounts `/oci/volumes/{name}` into each app's root directory; app services depend on this unit via `After=`/`Requires=`
-5. **Create Container** — creates an sdme container using the combined rootfs (hostPath volumes become nspawn `--bind=` mounts; emptyDir volumes live inside the rootfs)
-6. **Start & Boot** — boots the container; the volume mount service runs first, then all app services start
+1. **Parse & Validate**: reads the YAML, validates container names, volume references, etc.
+2. **Pull Images**: downloads each container's OCI image from the registry.
+3. **Build Combined Rootfs**: copies the base rootfs, then places each container's OCI rootfs under `/oci/apps/{name}/root` with a generated systemd service unit.
+4. **Generate Volume Mounts**: if the pod has volume mounts, generates a `sdme-kube-volumes.service` oneshot unit that bind-mounts `/oci/volumes/{name}` into each app's root directory; app services depend on this unit via `After=`/`Requires=`.
+5. **Create Container**: creates an sdme container using the combined rootfs (hostPath volumes become nspawn `--bind=` mounts; emptyDir volumes live inside the rootfs).
+6. **Start & Boot**: boots the container; the volume mount service runs first, then all app services start.
 
 ### Filesystem Layout
 
@@ -190,13 +203,32 @@ Read-only mounts get an additional `remount,ro,bind` line.
 sdme kube apply -f <file> [--base-fs NAME] [--timeout N]
 sdme kube create -f <file> [--base-fs NAME]
 sdme kube delete <name> [--force]
+
+sdme kube secret create <name> --from-literal KEY=VALUE [--from-file KEY=PATH]
+sdme kube secret ls
+sdme kube secret rm <name>...
+
+sdme kube configmap create <name> --from-literal KEY=VALUE [--from-file KEY=PATH]
+sdme kube configmap ls
+sdme kube configmap rm <name>...
 ```
 
-- `apply` — create + start + enter (like `sdme new`)
-- `create` — create the container without starting
-- `delete` — stop + remove container + remove rootfs
+- `apply` -- create + start + enter (like `sdme new`)
+- `create` -- create the container without starting
+- `delete` -- stop + remove container + remove rootfs
+- `secret create` -- create a secret from literal values or files
+- `secret ls` -- list secrets (name, key count, creation time)
+- `secret rm` -- remove one or more secrets
+- `configmap create` -- create a configmap from literal values or files
+- `configmap ls` -- list configmaps (name, key count, creation time)
+- `configmap rm` -- remove one or more configmaps
 
 The `--base-fs` flag defaults to the `default_base_fs` config value.
+
+Secrets are stored at `{datadir}/secrets/{name}/data/{key}` with restricted
+permissions (0700 dirs, 0600 files). Configmaps use standard permissions
+(0755 dirs, 0644 files). Both can be referenced from pod YAML via secret
+volumes, configMap volumes, or env `valueFrom` references.
 
 ## Viewing Logs
 
@@ -212,18 +244,15 @@ sudo sdme exec my-pod -- journalctl -u sdme-oci-nginx.service -f
 
 Kube pods are tracked with additional state fields:
 
-- `KUBE=yes` — marks this as a kube pod
-- `KUBE_CONTAINERS=nginx,redis,...` — list of container names
-- `KUBE_YAML_HASH={sha256}` — hash of the source YAML (for future update detection)
+- `KUBE=yes`: marks this as a kube pod
+- `KUBE_CONTAINERS=nginx,redis,...`: list of container names
+- `KUBE_YAML_HASH={sha256}`: hash of the source YAML (for future update detection)
 
 `sdme ps` shows kube pods with a KUBE column, e.g.: `kube:nginx,redis`
 
 ## Limitations
 
-- No `initContainers` support yet
-- No per-container resource limits (MemoryMax, CPUQuota)
-- No per-container securityContext
-- No configMap/secret volumes
-- No probes (liveness, readiness, startup)
-- No `sdme kube apply` update/re-apply (must delete and recreate)
-- Only `emptyDir` and `hostPath` volume types are supported
+- No idempotent re-apply: `kube apply` on an existing pod fails; delete first, then re-apply
+- No per-container securityContext (only pod-level `runAsUser`/`runAsGroup`)
+- Liveness probes are parsed but not enforced at runtime
+- No startup probes

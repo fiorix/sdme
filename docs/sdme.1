@@ -557,7 +557,7 @@ Each pod container becomes a separate systemd service
 chrooted into its own rootfs under
 .IR /oci/apps/{name}/root .
 .PP
-Volumes are supported in two forms:
+Supported volume types:
 .RS
 .TP
 .B emptyDir
@@ -573,7 +573,63 @@ Read\-only volume mounts are remounted read\-only after the initial bind.
 .B hostPath
 Bind\-mounted into the container at the nspawn level via
 .BR \-\-bind= .
+.TP
+.B secret
+Populated from an sdme kube secret (see
+.BR "sdme kube secret create" ).
+Supports
+.B items
+for projected key paths and
+.B defaultMode
+for file permissions.
+.TP
+.B configMap
+Populated from an sdme kube configmap (see
+.BR "sdme kube configmap create" ).
+Supports
+.B items
+and
+.BR defaultMode .
+.TP
+.B persistentVolumeClaim
+Host directory at
+.IR {datadir}/volumes/{claimName}
+bind\-mounted into the container via
+.BR \-\-bind= .
 .RE
+.PP
+Init containers
+.RB ( initContainers )
+run to completion (as oneshot services) before app containers start.
+.PP
+Per\-container resource limits
+.RB ( resources )
+map to systemd properties:
+.BR MemoryMax ,
+.BR MemoryLow ,
+.BR CPUQuota ,
+and
+.BR CPUWeight .
+.PP
+Readiness probes (exec only) are translated to
+.B ExecStartPre
+commands in the generated service unit.
+Liveness probes are parsed but not yet enforced at runtime.
+.PP
+Environment variables support
+.B valueFrom
+with
+.B secretKeyRef
+and
+.B configMapKeyRef
+for deferred resolution from secrets and configmaps at create time.
+.PP
+Pod\-level
+.B securityContext
+supports
+.B runAsUser
+and
+.BR runAsGroup .
 .PP
 Ports declared across all containers are aggregated; if any ports are
 declared,
@@ -588,6 +644,36 @@ Stop and remove a kube pod container, then remove its rootfs.
 Refuses to delete non\-kube containers unless
 .B \-\-force
 is given.
+.SS sdme kube secret create \fIname\fR \-\-from\-literal \fIKEY=VALUE\fR [\-\-from\-file \fIKEY=PATH\fR]
+Create a secret from literal key=value pairs or file contents.
+At least one
+.B \-\-from\-literal
+or
+.B \-\-from\-file
+is required.
+Both flags are repeatable.
+Secrets are stored at
+.IR {datadir}/secrets/{name}/data/{key}
+with restricted permissions (0700 directories, 0600 files).
+.SS sdme kube secret ls
+List all secrets with name, key count, and creation time.
+.SS sdme kube secret rm \fIname\fR...
+Remove one or more secrets.
+.SS sdme kube configmap create \fIname\fR \-\-from\-literal \fIKEY=VALUE\fR [\-\-from\-file \fIKEY=PATH\fR]
+Create a configmap from literal key=value pairs or file contents.
+At least one
+.B \-\-from\-literal
+or
+.B \-\-from\-file
+is required.
+Both flags are repeatable.
+Configmaps are stored at
+.IR {datadir}/configmaps/{name}/data/{key}
+with standard permissions (0755 directories, 0644 files).
+.SS sdme kube configmap ls
+List all configmaps with name, key count, and creation time.
+.SS sdme kube configmap rm \fIname\fR...
+Remove one or more configmaps.
 .SS sdme config get
 Show current configuration values.
 .SS sdme config apparmor\-profile
@@ -793,6 +879,12 @@ Per\-container overlayfs work directory.
 .TP
 .I /var/lib/sdme/containers/\fIname\fR/merged/
 Per\-container overlayfs merged mount point.
+.TP
+.I /var/lib/sdme/secrets/\fIname\fR/data/\fIkey\fR
+Kube secret data files (permissions 0600).
+.TP
+.I /var/lib/sdme/configmaps/\fIname\fR/data/\fIkey\fR
+Kube configmap data files (permissions 0644).
 .TP
 .I /var/lib/sdme/pods/\fIname\fR/state
 Pod persistent state file (KEY=VALUE format).

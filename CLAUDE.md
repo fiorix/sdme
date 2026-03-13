@@ -96,8 +96,7 @@ The project is a single Rust binary (`src/main.rs`) backed by a shared library (
 | `src/mounts.rs` | Bind mount (`BindConfig`) and environment variable (`EnvConfig`) configuration |
 | `src/network.rs` | Network configuration validation and state serialization |
 | `src/security.rs` | Security hardening: `SecurityConfig` (capabilities, seccomp, no-new-privileges, read-only, AppArmor), state file roundtrip, nspawn arg generation, validation |
-| `src/kube.rs` | Kubernetes Pod YAML parsing (v1 Pod, apps/v1 Deployment), multi-container orchestration, service unit generation, kube delete |
-| `src/kube_configmap.rs` | ConfigMap store: create/list/remove/read configmaps at `{datadir}/configmaps/{name}/data/{key}` (perms `0o755`/`0o644`) |
+| `src/kube/` | Kubernetes Pod YAML support: types, plan validation, container creation, kube delete, shared store abstraction for secrets and configmaps |
 | `src/pod.rs` | Pod (shared network namespace) lifecycle: create, list, remove, runtime netns management |
 | `src/drop_privs/` | Privilege dropping via minimal static ELF binaries (x86_64 and aarch64 machine code emitters, ELF header construction) |
 
