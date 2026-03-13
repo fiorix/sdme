@@ -335,20 +335,27 @@ fn do_create(
         // OCI app service runs in the pod's network namespace.
         // At start time, the pod's netns is bind-mounted into the container
         // at /run/sdme/oci-pod-netns via --bind-ro=.
-        let oci_app_name = detect_oci_app_name(rootfs).unwrap_or_else(|| "app".to_string());
-        let dropin_dir = container_dir.join(format!(
-            "upper/etc/systemd/system/sdme-oci-{oci_app_name}.service.d"
-        ));
-        fs::create_dir_all(&dropin_dir)
-            .with_context(|| format!("failed to create {}", dropin_dir.display()))?;
-        let dropin_path = dropin_dir.join("oci-pod-netns.conf");
-        fs::write(
-            &dropin_path,
-            "[Service]\nNetworkNamespacePath=/run/sdme/oci-pod-netns\n",
-        )
-        .with_context(|| format!("failed to write {}", dropin_path.display()))?;
-        if verbose {
-            eprintln!("wrote oci-pod netns drop-in: {}", dropin_path.display());
+        let app_names = detect_all_oci_app_names(rootfs);
+        let app_names = if app_names.is_empty() {
+            vec!["app".to_string()]
+        } else {
+            app_names
+        };
+        for oci_app_name in &app_names {
+            let dropin_dir = container_dir.join(format!(
+                "upper/etc/systemd/system/sdme-oci-{oci_app_name}.service.d"
+            ));
+            fs::create_dir_all(&dropin_dir)
+                .with_context(|| format!("failed to create {}", dropin_dir.display()))?;
+            let dropin_path = dropin_dir.join("oci-pod-netns.conf");
+            fs::write(
+                &dropin_path,
+                "[Service]\nNetworkNamespacePath=/run/sdme/oci-pod-netns\n",
+            )
+            .with_context(|| format!("failed to write {}", dropin_path.display()))?;
+            if verbose {
+                eprintln!("wrote oci-pod netns drop-in: {}", dropin_path.display());
+            }
         }
     }
     opts.security.write_to_state(&mut state);
@@ -504,6 +511,19 @@ pub fn detect_oci_app_name(rootfs: &Path) -> Option<String> {
         }
     }
     None
+}
+
+/// Detect all OCI app names from a rootfs by listing `/oci/apps/` subdirectories.
+pub fn detect_all_oci_app_names(rootfs: &Path) -> Vec<String> {
+    let apps_dir = rootfs.join("oci/apps");
+    let Ok(entries) = fs::read_dir(&apps_dir) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().ok().is_some_and(|ft| ft.is_dir()))
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect()
 }
 
 /// Read OCI ports from a rootfs and return port forwarding rules.

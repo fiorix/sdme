@@ -20,6 +20,8 @@ pub fn kube_create(
     yaml_content: &str,
     base_fs: &str,
     docker_credentials: Option<(&str, &str)>,
+    pod: Option<&str>,
+    oci_pod: Option<&str>,
     verbose: bool,
 ) -> Result<String> {
     validate_name(base_fs)?;
@@ -382,11 +384,18 @@ WantedBy=multi-user.target
         }
     }
 
+    // --oci-pod requires private network for CAP_NET_ADMIN.
+    if oci_pod.is_some() {
+        network.private_network = true;
+    }
+
     let opts = crate::containers::CreateOptions {
         name: Some(plan.pod_name.clone()),
         rootfs: Some(rootfs_name.clone()),
         network,
         binds,
+        pod: pod.map(String::from),
+        oci_pod: oci_pod.map(String::from),
         ..Default::default()
     };
     let name = crate::containers::create(datadir, &opts, verbose)?;

@@ -574,6 +574,14 @@ enum KubeCommand {
         #[arg(short, long)]
         timeout: Option<u64>,
 
+        /// Join a pod network namespace (entire container runs in the pod's netns)
+        #[arg(long)]
+        pod: Option<String>,
+
+        /// Join a pod network namespace for all OCI app processes (requires private network)
+        #[arg(long)]
+        oci_pod: Option<String>,
+
         #[command(flatten)]
         security: SecurityArgs,
     },
@@ -586,6 +594,14 @@ enum KubeCommand {
         /// Base root filesystem for the pod (default: config default_base_fs)
         #[arg(long)]
         base_fs: Option<String>,
+
+        /// Join a pod network namespace (entire container runs in the pod's netns)
+        #[arg(long)]
+        pod: Option<String>,
+
+        /// Join a pod network namespace for all OCI app processes (requires private network)
+        #[arg(long)]
+        oci_pod: Option<String>,
 
         #[command(flatten)]
         security: SecurityArgs,
@@ -1122,6 +1138,27 @@ fn validate_oci_pod_args(
             "--oci-pod requires an OCI app rootfs; \
              '{rootfs_name}' does not contain an sdme-oci-*.service unit"
         );
+    }
+
+    Ok(())
+}
+
+/// Validate `--oci-pod` constraints for kube commands.
+///
+/// Simplified version of `validate_oci_pod_args` for kube: skips the rootfs
+/// OCI service check since kube always creates OCI services during build.
+/// Only checks that the pod exists.
+fn validate_kube_oci_pod_args(
+    datadir: &std::path::Path,
+    oci_pod: Option<&str>,
+) -> Result<()> {
+    let pod_name = match oci_pod {
+        Some(n) => n,
+        None => return Ok(()),
+    };
+
+    if !pod::exists(datadir, pod_name) {
+        bail!("pod not found: {pod_name}");
     }
 
     Ok(())
@@ -1805,6 +1842,8 @@ fn main() -> Result<()> {
                 file,
                 base_fs,
                 timeout,
+                pod,
+                oci_pod,
                 // TODO: wire security flags into kube_create():
                 // - call parse_security(security, &cfg) to get (sec, hardened)
                 // - if hardened, force private_network = true
@@ -1812,6 +1851,8 @@ fn main() -> Result<()> {
                 security: _,
             } => {
                 system_check::check_systemd_version(252)?;
+                validate_pod_args(&cfg.datadir, pod.as_deref(), false)?;
+                validate_kube_oci_pod_args(&cfg.datadir, oci_pod.as_deref())?;
                 let yaml_content = std::fs::read_to_string(&file)
                     .with_context(|| format!("failed to read {file}"))?;
                 let effective_base_fs = base_fs.or_else(|| {
@@ -1831,6 +1872,8 @@ fn main() -> Result<()> {
                     &yaml_content,
                     base_fs,
                     docker_creds_ref,
+                    pod.as_deref(),
+                    oci_pod.as_deref(),
                     cli.verbose,
                 )?;
                 eprintln!("starting '{name}'");
@@ -1858,6 +1901,8 @@ fn main() -> Result<()> {
             KubeCommand::Create {
                 file,
                 base_fs,
+                pod,
+                oci_pod,
                 // TODO: wire security flags into kube_create():
                 // - call parse_security(security, &cfg) to get (sec, hardened)
                 // - if hardened, force private_network = true
@@ -1865,6 +1910,8 @@ fn main() -> Result<()> {
                 security: _,
             } => {
                 system_check::check_systemd_version(252)?;
+                validate_pod_args(&cfg.datadir, pod.as_deref(), false)?;
+                validate_kube_oci_pod_args(&cfg.datadir, oci_pod.as_deref())?;
                 let yaml_content = std::fs::read_to_string(&file)
                     .with_context(|| format!("failed to read {file}"))?;
                 let effective_base_fs = base_fs.or_else(|| {
@@ -1884,6 +1931,8 @@ fn main() -> Result<()> {
                     &yaml_content,
                     base_fs,
                     docker_creds_ref,
+                    pod.as_deref(),
+                    oci_pod.as_deref(),
                     cli.verbose,
                 )?;
                 println!("{name}");
