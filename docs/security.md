@@ -2,10 +2,16 @@
 
 **Alexandre Fiori, March 2026**
 
-This document compares sdme's isolation model with Docker and Podman.
+This document covers sdme's security model across three layers:
+nspawn container isolation (Part 1), OCI workload isolation inside
+containers (Part 2), and Kubernetes compatibility security (Part 3).
 For sdme's security implementation details (capabilities, seccomp,
 AppArmor, `--hardened`, `--strict`), see
 [architecture.md, Section 14](architecture.md#14-security).
+
+---
+
+# Part 1: nspawn Container Security
 
 ## 1. Security Philosophy: Full Init as a Benefit
 
@@ -26,7 +32,8 @@ proprietary health check mechanism.
 Even OCI applications imported with `sdme fs import` run on the rootfs of
 your choice. You pick your Debian, your CentOS, your Fedora. The OCI app
 is confined inside that environment as a systemd service
-(`sdme-oci-app.service`), not as a standalone process.
+(`sdme-oci-{name}.service`), not as a standalone process. See Part 2 for
+details on how OCI workloads are isolated within the container.
 
 ### Extensible containers
 
@@ -96,17 +103,15 @@ Every container runtime uses Linux namespaces for isolation. The table below
 compares which namespaces each runtime enables and how.
 
 ```
-+-----------------------+----------------------------+----------------------------+----------------------------+
-| Namespace             | sdme (nspawn)              | Docker (runc, rootful)     | Podman (crun, rootless)    |
-+-----------------------+----------------------------+----------------------------+----------------------------+
-| PID                   | Always                     | Always                     | Always                     |
-| IPC                   | Always                     | Always                     | Always                     |
-| UTS                   | Always                     | Always                     | Always                     |
-| Mount                 | Always                     | Always                     | Always                     |
-| Network               | Optional (host default)    | Yes (bridge default)       | Yes (slirp4netns/pasta)    |
-| User                  | Optional                   | Optional                   | Yes (default)              |
-| Cgroup                | Partial (Delegate=yes)     | Yes                        | Yes                        |
-+-----------------------+----------------------------+----------------------------+----------------------------+
+Namespace  sdme (nspawn)            Docker (rootful)     Podman (rootless)
+---------  -----------------------  -------------------  --------------------
+PID        Always                   Always               Always
+IPC        Always                   Always               Always
+UTS        Always                   Always               Always
+Mount      Always                   Always               Always
+Network    Optional (host default)  Yes (bridge)         Yes (slirp4/pasta)
+User       Optional                 Optional             Yes (default)
+Cgroup     Partial (Delegate=yes)   Yes                  Yes
 ```
 
 ### Always-on namespaces
@@ -364,7 +369,7 @@ sdme has no persistent daemon. There is no equivalent of Docker's
 with systemd over the system D-Bus, which is already present and secured
 by its own policy.
 
-## 10. Hardening Tiers: Comparison with Docker/Podman
+## 10. Hardening Tiers
 
 sdme provides two convenience flags (`--hardened` and `--strict`) that
 bundle multiple security layers. See
@@ -372,18 +377,34 @@ bundle multiple security layers. See
 details on what each flag enables and its effects on host-rootfs
 containers.
 
+### sdme hardening tiers
+
+```
+Mechanism            Default   --hardened   --strict
+-------------------  --------  -----------  ----------
+User namespace       No        Yes          Yes
+Private network      No        Yes          Yes
+no_new_privs         No        Yes          Yes
+Caps retained        26        23           14
+Seccomp (extra)      None      None         4 deny groups
+AppArmor             None      None         sdme-default
+Read-only rootfs     No        No           No
+```
+
 ### How `--hardened` compares to Docker/Podman defaults
 
 `--hardened` covers user namespace isolation, network isolation,
-`no_new_privs`, and capability reduction. The remaining gaps versus
-Docker/Podman defaults are:
+`no_new_privs`, and capability reduction. It drops 4 capabilities
+(3 from the active set; `CAP_SYS_RAWIO` is preventive since nspawn
+does not grant it by default), leaving 23 retained. The remaining
+gaps versus Docker/Podman defaults are:
 
 - **No default MAC confinement.** Docker ships a default AppArmor profile.
   sdme supports `--apparmor-profile` but `--hardened` does not set one.
 - **Less restrictive seccomp baseline.** nspawn's allowlist permits
   `@mount` and more syscall groups than Docker's OCI default profile.
 - **More capabilities retained.** Even after `--hardened` drops 4
-  capabilities, 22 remain (including `CAP_SYS_ADMIN`), compared to
+  capabilities, 23 remain (including `CAP_SYS_ADMIN`), compared to
   Docker's ~14.
 
 These gaps are inherent to running a full init system inside the container.
@@ -392,18 +413,17 @@ For maximum restriction, use `--strict`.
 ### `--strict` vs Docker defaults
 
 ```
-+-----------------------------+---------------------------+---------------------------+
-| Mechanism                   | sdme --strict             | Docker default            |
-+-----------------------------+---------------------------+---------------------------+
-| User namespace              | Yes                       | Optional                  |
-| Network namespace           | Yes (loopback only)       | Yes (bridge)              |
-| no_new_privs                | Yes                       | Yes                       |
-| Retained caps               | ~14 (Docker - NET_RAW)    | ~14                       |
-| Seccomp                     | nspawn baseline + 4 deny  | OCI default (~44 blocked) |
-| AppArmor                    | sdme-default              | docker-default            |
-| CAP_SYS_ADMIN               | Yes (for systemd)         | No                        |
-| Init in container           | Full systemd              | Single process            |
-+-----------------------------+---------------------------+---------------------------+
+Mechanism              sdme --strict             Docker default
+---------------------  ------------------------  ----------------------
+User namespace         Yes                       Optional
+Network namespace      Yes (loopback only)       Yes (bridge)
+no_new_privs           Yes                       Yes
+Retained caps          14 (Docker's set, minus   ~14
+                       NET_RAW, plus SYS_ADMIN)
+Seccomp                nspawn baseline + 4 deny  OCI default (~44 deny)
+AppArmor               sdme-default              docker-default
+CAP_SYS_ADMIN          Yes (for systemd)         No
+Init in container      Full systemd              Single process
 ```
 
 The one remaining difference is `CAP_SYS_ADMIN` and the `@mount` syscall
@@ -411,37 +431,36 @@ group, both required for the full init model. sdme's security philosophy
 is that this is an acceptable trade-off for the operational benefits it
 provides (see Section 1).
 
-## 11. Isolation Summary Table
+## 11. Isolation Summary
 
 ```
-+-----------------------+----------------------------+----------------------------+----------------------------+
-| Mechanism             | sdme (nspawn)              | Docker (runc, rootful)     | Podman (crun, rootless)    |
-+-----------------------+----------------------------+----------------------------+----------------------------+
-| PID namespace         | Yes                        | Yes                        | Yes                        |
-| IPC namespace         | Yes                        | Yes                        | Yes                        |
-| UTS namespace         | Yes                        | Yes                        | Yes                        |
-| Mount namespace       | Yes                        | Yes                        | Yes                        |
-| Network namespace     | Optional (host default)    | Yes (bridge default)       | Yes (slirp4netns/pasta)    |
-| User namespace        | Optional (--strict: yes)   | Optional                   | Yes (default)              |
-| Cgroup namespace      | Partial (Delegate=yes)     | Yes                        | Yes                        |
-| Capabilities          | ~26 (--strict: ~15)        | ~14, no SYS_ADMIN          | Same as Docker             |
-| Seccomp               | nspawn + optional filters  | OCI default (~44 blocked)  | Same as Docker             |
-| AppArmor              | sdme-default (--strict)    | Default profile            | Where available            |
-| SELinux               | None                       | svirt labels               | Strong integration         |
-| no_new_privs          | Optional (--strict: yes)   | Yes (default)              | Yes (default)              |
-| Read-only rootfs      | Optional                   | Optional                   | Optional                   |
-| Rootless              | No (root-only)             | Optional                   | Default                    |
-| Daemon                | None                       | containerd socket          | None                       |
-| Init in container     | Full systemd (always)      | Optional (--init)          | Optional (--init)          |
-+-----------------------+----------------------------+----------------------------+----------------------------+
+Mechanism          sdme             Docker           Podman
+-----------------  ---------------  ---------------  ---------------
+PID namespace      Yes              Yes              Yes
+IPC namespace      Yes              Yes              Yes
+UTS namespace      Yes              Yes              Yes
+Mount namespace    Yes              Yes              Yes
+Network ns         Optional         Yes (bridge)     Yes (slirp4pasta)
+User ns            Optional         Optional         Yes (default)
+Cgroup ns          Partial          Yes              Yes
+Capabilities       26 default       ~14              ~14
+Seccomp            nspawn baseline  OCI default      OCI default
+AppArmor           Optional         Default profile  Where available
+SELinux            None             svirt labels     Strong
+no_new_privs       Optional         Yes (default)    Yes (default)
+Read-only rootfs   Optional         Optional         Optional
+Rootless           No (root-only)   Optional         Default
+Daemon             None             containerd       None
+Init in container  Full systemd     Optional --init  Optional --init
 ```
 
-Each "Optional" cell means the feature is available but not on by default.
-For sdme, `--strict` enables all security layers simultaneously. Individual
-flags: `--private-network` or `--hardened` for network namespace, `--userns`
-or `--hardened` for user namespace, `--no-new-privileges` or `--hardened`
-for no_new_privs, `--read-only` for read-only rootfs, `--apparmor-profile`
-for AppArmor, and `--system-call-filter` for additional seccomp rules.
+Each "Optional" cell means the feature is available but not on by
+default. For sdme, `--strict` enables all security layers
+simultaneously. Individual flags: `--private-network` or `--hardened`
+for network namespace, `--userns` or `--hardened` for user namespace,
+`--no-new-privileges` or `--hardened` for no_new_privs, `--read-only`
+for read-only rootfs, `--apparmor-profile` for AppArmor, and
+`--system-call-filter` for additional seccomp rules.
 
 ## 12. When to Use What
 
@@ -469,3 +488,225 @@ for AppArmor, and `--system-call-filter` for additional seccomp rules.
 - SELinux integration is needed.
 - You want a daemonless runtime with Docker-compatible CLI.
 - You need Kubernetes-style pod semantics with full external connectivity.
+
+---
+
+# Part 2: OCI Workload Security
+
+## 13. OCI App Isolation Architecture
+
+OCI applications run inside nspawn containers as systemd services
+(`sdme-oci-{name}.service`) with `RootDirectory=/oci/apps/{name}/root`.
+The isolation is layered:
+
+```
+nspawn container
+  systemd, D-Bus, journald
+  sdme-oci-{name}.service
+    RootDirectory chroot (/oci/apps/{name}/root)
+      isolate binary
+        PID namespace (unshare CLONE_NEWPID)
+        IPC namespace (unshare CLONE_NEWIPC)
+        /proc remount (MS_NOSUID|MS_NODEV|MS_NOEXEC)
+        drop CAP_SYS_ADMIN from bounding set
+        drop privileges (setgroups/setgid/setuid for non-root)
+          application process
+```
+
+The `isolate` binary is a static ELF (under 2 KiB, no libc, raw
+syscalls) written to `/.sdme-isolate` inside the OCI root at import
+time. It is used for ALL OCI apps, both root and non-root:
+
+- **All apps**: PID namespace, IPC namespace, /proc remount,
+  `CAP_SYS_ADMIN` drop
+- **Non-root apps**: additionally drops privileges via
+  `setgroups`/`setgid`/`setuid`
+
+See [architecture.md, Section 8](architecture.md#8-oci-integration)
+and [hacks.md](hacks.md) for full details on the isolate binary.
+
+## 14. Systemd Hardening Directives
+
+The following directives are always applied to OCI app service units.
+These are not optional and do not depend on `--hardened` or `--strict`.
+
+```
+Directive                  Effect
+-------------------------  ----------------------------------
+CapabilityBoundingSet      15 caps (see below)
+NoNewPrivileges=yes        Block setuid/file-cap escalation
+ProtectKernelModules=yes   Deny /usr/lib/modules access
+ProtectKernelLogs=yes      Deny /dev/kmsg and /proc/kmsg
+ProtectControlGroups=yes   Read-only /sys/fs/cgroup
+ProtectClock=yes           Block clock_settime, adjtimex
+RestrictSUIDSGID=yes       Block setuid/setgid bit creation
+LockPersonality=yes        Lock execution domain
+ProtectProc=invisible      Hide other users' processes
+ProcSubset=pid             Expose only /proc/pid/ entries
+```
+
+The 15 capabilities in the bounding set are Docker's 14 plus
+`CAP_SYS_ADMIN`:
+
+```
+CAP_AUDIT_WRITE      CAP_CHOWN            CAP_DAC_OVERRIDE
+CAP_FOWNER           CAP_FSETID           CAP_KILL
+CAP_MKNOD            CAP_NET_BIND_SERVICE CAP_NET_RAW
+CAP_SETFCAP          CAP_SETGID           CAP_SETPCAP
+CAP_SETUID           CAP_SYS_ADMIN        CAP_SYS_CHROOT
+```
+
+`CAP_SYS_ADMIN` is kept in the bounding set because `isolate` needs it
+for `unshare()` and `mount()`. The `isolate` binary drops it via
+`prctl(PR_CAPBSET_DROP)` before exec'ing the workload. The application
+effectively runs with Docker's 14 caps (or zero effective caps for
+non-root users).
+
+Source: `src/import/mod.rs:1383-1397`
+
+## 15. Effective Workload Isolation
+
+After all layers (nspawn + RootDirectory + isolate + systemd directives),
+the application process sees:
+
+- **Own PID namespace**: PID 1 is isolate's child; cannot see sibling
+  services or the container's systemd
+- **Own IPC namespace**: cannot access the container's IPC objects
+  (shared memory, semaphores, message queues)
+- **Shared network namespace**: shares the nspawn container's network
+  (or a pod's netns if `--pod`/`--oci-pod` is configured)
+- **Shared user namespace**: shares the nspawn container's user
+  namespace (remapped if `--userns` is active)
+- **Chrooted filesystem**: confined to `/oci/apps/{name}/root`; cannot
+  see the container's filesystem or other OCI apps
+- **CAP_SYS_ADMIN dropped**: cannot mount, unshare, or manipulate
+  namespaces
+- **NoNewPrivileges active**: cannot escalate via setuid binaries or
+  file capabilities
+- **/proc filtered**: sees only its own PID subtree
+  (`ProtectProc=invisible`, `ProcSubset=pid`)
+
+## 16. OCI Workload Comparison with Docker/Podman
+
+```
+Mechanism              sdme OCI app       Docker         Podman
+---------------------  -----------------  -------------  -------------
+PID namespace          Yes (isolate)      Yes            Yes
+IPC namespace          Yes (isolate)      Yes            Yes
+Network namespace      Shared w/nspawn    Yes            Yes
+User namespace         Shared w/nspawn    Optional       Yes (default)
+Filesystem isolation   RootDirectory      pivot_root     pivot_root
+Capabilities           14 effective       ~14            ~14
+CAP_SYS_ADMIN          Dropped by isolate No             No
+no_new_privs           Yes                Yes            Yes
+Seccomp                nspawn baseline    OCI default    OCI default
+/proc visibility       PID subset only    Default        Default
+Kernel protection      Multiple dirs      Default        Default
+```
+
+### Key differences
+
+- sdme OCI apps get comparable workload isolation to Docker; the
+  capability set is effectively the same after `isolate` drops
+  `CAP_SYS_ADMIN`.
+- The seccomp baseline is still nspawn's (less restrictive than
+  Docker's OCI default), but the application cannot leverage most
+  allowed syscalls due to capability restrictions.
+- PID/IPC isolation comes from `isolate` (not from the container
+  runtime), which creates namespaces via `unshare()` before exec.
+- Network isolation depends on the nspawn container's configuration
+  (host, private, or pod).
+- `/proc` visibility is more restricted in sdme: `ProtectProc=invisible`
+  and `ProcSubset=pid` hide other processes and non-PID /proc entries,
+  while Docker exposes the full /proc by default.
+
+---
+
+# Part 3: Kube Security
+
+## 17. Kube Security Model Overview
+
+Kube pods are a single nspawn container with multiple OCI app services.
+All apps get the same hardening from Part 2 (isolate binary, systemd
+directives). All apps share the nspawn container's network namespace
+and can communicate via localhost. Each app gets its own PID/IPC
+namespace and `RootDirectory` chroot via `isolate`.
+
+The security model is additive: nspawn container isolation (Part 1)
+plus OCI workload isolation (Part 2) plus kube-specific features
+(this section).
+
+## 18. Pod-Level Security Context
+
+Kubernetes `securityContext` fields supported at the pod level:
+
+```
+Field           Supported  Enforcement
+--------------  ---------  --------------------------------
+runAsUser       Yes        Passed to isolate as uid argument
+runAsGroup      Yes        Passed to isolate as gid argument
+runAsNonRoot    Yes        Validated at create time (fails
+                           if runAsUser is 0 or unset)
+```
+
+Per-container `securityContext` is not supported; only pod-level.
+The `runAsUser`/`runAsGroup` values are passed to the `isolate` binary,
+which performs the privilege drop via raw syscalls (`setgroups`,
+`setgid`, `setuid`) before exec'ing the workload.
+
+## 19. Secrets and ConfigMaps
+
+Security properties of the kube secret and configmap stores:
+
+**Secrets:**
+- Stored at `{datadir}/secrets/{name}/data/` on the host
+- Directory permissions: 0700 (root-only access)
+- File permissions: 0600 (root-only read/write)
+- Not encrypted at rest
+
+**ConfigMaps:**
+- Stored at `{datadir}/configmaps/{name}/data/` on the host
+- Directory permissions: 0755
+- File permissions: 0644
+
+**Key validation** (both secrets and configmaps):
+- No empty keys
+- No `/` or `..` in key names
+- No keys starting with `.`
+
+**Environment variable resolution:**
+- `valueFrom` with `secretKeyRef` and `configMapKeyRef` are resolved
+  at container creation time
+- Values are baked into the environment file, not injected at runtime
+- Changing a secret or configmap after creation does not affect running
+  containers
+
+Source: `src/kube/store.rs` (shared CRUD), `src/kube/secret.rs`
+(0700/0600 permissions), `src/kube/configmap.rs` (0755/0644
+permissions)
+
+## 20. Kube vs OCI Differences
+
+```
+Feature               sdme OCI         sdme kube
+--------------------  ---------------  -----------------
+Apps per container    1                1 or more
+Init containers      No               Yes
+Volume sharing        No               Yes (emptyDir)
+Security context      OCI User field   runAsUser/Group
+Secrets/ConfigMaps    No               Yes
+Resource limits       Via sdme set     Via K8s spec
+Restart policy        systemd default  K8s mapping
+Pod networking        Per-container    --pod / --oci-pod
+```
+
+## 21. Kube Limitations
+
+- No per-container `securityContext`
+- No seccomp profiles from K8s spec
+- No AppArmor profiles from K8s spec
+- No network policies
+- No service accounts or RBAC
+- Liveness probes parsed but not enforced at runtime
+- No startup probes
+- Secrets not encrypted at rest

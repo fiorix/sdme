@@ -108,6 +108,7 @@ spec:
 | `terminationGracePeriodSeconds` | Shutdown timeout for the container |
 | `securityContext.runAsUser` | Pod-level UID for all containers |
 | `securityContext.runAsGroup` | Pod-level GID for all containers |
+| `securityContext.runAsNonRoot` | Validates runAsUser is set and non-zero |
 
 ## How It Works
 
@@ -200,8 +201,8 @@ Read-only mounts get an additional `remount,ro,bind` line.
 ## CLI Reference
 
 ```
-sdme kube apply -f <file> [--base-fs NAME] [--timeout N]
-sdme kube create -f <file> [--base-fs NAME]
+sdme kube apply -f <file> [--base-fs NAME] [--timeout N] [--pod NAME] [--oci-pod NAME]
+sdme kube create -f <file> [--base-fs NAME] [--pod NAME] [--oci-pod NAME]
 sdme kube delete <name> [--force]
 
 sdme kube secret create <name> --from-literal KEY=VALUE [--from-file KEY=PATH]

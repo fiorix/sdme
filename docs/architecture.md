@@ -984,8 +984,9 @@ multiple security layers at once:
 - **`--no-new-privileges=yes`**: blocks privilege escalation via setuid
   binaries and file capabilities.
 - **Drops capabilities**: `CAP_SYS_PTRACE`, `CAP_NET_RAW`,
-  `CAP_SYS_RAWIO`, `CAP_SYS_BOOT`, reducing from 26 to 22 retained
-  capabilities.
+  `CAP_SYS_RAWIO`, `CAP_SYS_BOOT`, dropping 4 capabilities (3 from
+  the active set; `CAP_SYS_RAWIO` is preventive since nspawn does not
+  grant it by default), leaving 23 retained capabilities.
 
 ```
 sdme create mybox --hardened
