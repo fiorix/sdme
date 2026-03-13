@@ -71,9 +71,6 @@ pub(crate) struct KubeContainer {
 pub(crate) struct KubeVolumeMount {
     pub(crate) volume_name: String,
     pub(crate) mount_path: String,
-    // TODO: enforce read-only volume mounts (symlinks can't be read-only;
-    // may need BindReadOnlyPaths or mount options in the future).
-    #[allow(dead_code)]
     pub(crate) read_only: bool,
 }
 
@@ -83,6 +80,10 @@ pub(crate) enum KubeEnvValue {
     Literal(String),
     SecretKeyRef { name: String, key: String },
     ConfigMapKeyRef { name: String, key: String },
+    /// Import all keys from a secret as env vars (from `envFrom`).
+    SecretRef { name: String, prefix: String },
+    /// Import all keys from a configMap as env vars (from `envFrom`).
+    ConfigMapRef { name: String, prefix: String },
 }
 
 #[derive(Debug)]
@@ -125,6 +126,7 @@ const KNOWN_CONTAINER_FIELDS: &[&str] = &[
     "command",
     "args",
     "env",
+    "envFrom",
     "ports",
     "volumeMounts",
     "workingDir",
@@ -406,45 +408,71 @@ fn validate_apparmor_k8s(ap: &AppArmorProfile, container_name: &str) -> Result<S
 fn validate_container(c: Container) -> Result<KubeContainer> {
     let image_ref = ImageReference::parse(&c.image)
         .with_context(|| format!("invalid image reference: {}", c.image))?;
-    let env: Vec<(String, KubeEnvValue)> = c
-        .env
-        .iter()
-        .map(|e| {
-            if let Some(ref vf) = e.value_from {
-                if let Some(ref skr) = vf.secret_key_ref {
-                    validate_name(&skr.name)
-                        .with_context(|| format!("env '{}': invalid secret name", e.name))?;
-                    Ok((
-                        e.name.clone(),
-                        KubeEnvValue::SecretKeyRef {
-                            name: skr.name.clone(),
-                            key: skr.key.clone(),
-                        },
-                    ))
-                } else if let Some(ref cmkr) = vf.config_map_key_ref {
-                    validate_name(&cmkr.name)
-                        .with_context(|| format!("env '{}': invalid configmap name", e.name))?;
-                    Ok((
-                        e.name.clone(),
-                        KubeEnvValue::ConfigMapKeyRef {
-                            name: cmkr.name.clone(),
-                            key: cmkr.key.clone(),
-                        },
-                    ))
-                } else {
-                    bail!(
-                        "env '{}': valueFrom must specify secretKeyRef or configMapKeyRef",
-                        e.name
-                    )
-                }
-            } else {
-                Ok((
+    // Process envFrom first so explicit env entries can override them.
+    let mut env: Vec<(String, KubeEnvValue)> = Vec::new();
+    for ef in &c.env_from {
+        let prefix = ef.prefix.as_deref().unwrap_or("");
+        if let Some(ref sr) = ef.secret_ref {
+            validate_name(&sr.name)
+                .with_context(|| format!("envFrom: invalid secret name '{}'", sr.name))?;
+            env.push((
+                String::new(), // placeholder key; resolved at create time
+                KubeEnvValue::SecretRef {
+                    name: sr.name.clone(),
+                    prefix: prefix.to_string(),
+                },
+            ));
+        } else if let Some(ref cmr) = ef.config_map_ref {
+            validate_name(&cmr.name)
+                .with_context(|| format!("envFrom: invalid configmap name '{}'", cmr.name))?;
+            env.push((
+                String::new(),
+                KubeEnvValue::ConfigMapRef {
+                    name: cmr.name.clone(),
+                    prefix: prefix.to_string(),
+                },
+            ));
+        } else {
+            bail!("envFrom entry must specify configMapRef or secretRef");
+        }
+    }
+
+    // Then process explicit env entries (these take priority via the dedup in create.rs).
+    for e in &c.env {
+        if let Some(ref vf) = e.value_from {
+            if let Some(ref skr) = vf.secret_key_ref {
+                validate_name(&skr.name)
+                    .with_context(|| format!("env '{}': invalid secret name", e.name))?;
+                env.push((
                     e.name.clone(),
-                    KubeEnvValue::Literal(e.value.clone().unwrap_or_default()),
-                ))
+                    KubeEnvValue::SecretKeyRef {
+                        name: skr.name.clone(),
+                        key: skr.key.clone(),
+                    },
+                ));
+            } else if let Some(ref cmkr) = vf.config_map_key_ref {
+                validate_name(&cmkr.name)
+                    .with_context(|| format!("env '{}': invalid configmap name", e.name))?;
+                env.push((
+                    e.name.clone(),
+                    KubeEnvValue::ConfigMapKeyRef {
+                        name: cmkr.name.clone(),
+                        key: cmkr.key.clone(),
+                    },
+                ));
+            } else {
+                bail!(
+                    "env '{}': valueFrom must specify secretKeyRef or configMapKeyRef",
+                    e.name
+                )
             }
-        })
-        .collect::<Result<Vec<_>>>()?;
+        } else {
+            env.push((
+                e.name.clone(),
+                KubeEnvValue::Literal(e.value.clone().unwrap_or_default()),
+            ));
+        }
+    }
     let volume_mounts: Vec<KubeVolumeMount> = c
         .volume_mounts
         .iter()
@@ -2929,6 +2957,425 @@ spec:
         assert!(
             unit.contains("2000 2000"),
             "container user should override pod user: {unit}"
+        );
+    }
+
+    // --- Read-only volume mounts ---
+
+    #[test]
+    fn test_parse_read_only_volume_mount() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ro-pod
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+    volumeMounts:
+    - name: config
+      mountPath: /etc/config
+      readOnly: true
+  volumes:
+  - name: config
+    emptyDir: {}
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let plan = validate_and_plan(&name, spec).unwrap();
+        assert!(plan.containers[0].volume_mounts[0].read_only);
+    }
+
+    #[test]
+    fn test_unit_read_only_volume_mount() {
+        // Verify the generated sdme-kube-volumes.service contains remount,ro,bind
+        // for a read-only volume mount.
+        let _lock = UNIT_TEST_LOCK.lock().unwrap();
+        let tmp = TempDataDir::new("kube-rovm");
+        let staging = tmp.path().join("staging");
+        let apps_dir = staging.join("oci/apps");
+        let volumes_dir = staging.join("oci/volumes/shared");
+        let unit_dir = staging.join("etc/systemd/system");
+        let wants_dir = unit_dir.join("multi-user.target.wants");
+        fs::create_dir_all(&apps_dir).unwrap();
+        fs::create_dir_all(&volumes_dir).unwrap();
+        fs::create_dir_all(&wants_dir).unwrap();
+
+        let plan = KubePlan {
+            pod_name: "ro-pod".to_string(),
+            containers: vec![KubeContainer {
+                name: "app".to_string(),
+                volume_mounts: vec![KubeVolumeMount {
+                    volume_name: "shared".to_string(),
+                    mount_path: "/data".to_string(),
+                    read_only: true,
+                }],
+                ..make_test_container("app")
+            }],
+            init_containers: vec![],
+            volumes: vec![KubeVolume {
+                name: "shared".to_string(),
+                kind: KubeVolumeKind::EmptyDir,
+            }],
+            ..make_test_plan()
+        };
+
+        // Generate the volume mount unit.
+        let has_volume_mounts = plan
+            .init_containers
+            .iter()
+            .chain(plan.containers.iter())
+            .any(|kc| !kc.volume_mounts.is_empty());
+        assert!(has_volume_mounts);
+
+        let mut exec_lines = Vec::new();
+        for kc in plan.init_containers.iter().chain(plan.containers.iter()) {
+            for vm in &kc.volume_mounts {
+                let src = format!("/oci/volumes/{}", vm.volume_name);
+                let dst = format!("/oci/apps/{}/root{}", kc.name, vm.mount_path);
+                exec_lines.push(format!("ExecStart=/bin/mount --bind {src} {dst}"));
+                if vm.read_only {
+                    exec_lines.push(format!("ExecStart=/bin/mount -o remount,ro,bind {dst}"));
+                }
+            }
+        }
+
+        assert!(
+            exec_lines
+                .iter()
+                .any(|l| l.contains("remount,ro,bind") && l.contains("/oci/apps/app/root/data")),
+            "should contain remount,ro,bind for read-only mount: {exec_lines:?}"
+        );
+    }
+
+    #[test]
+    fn test_init_container_volume_mounts_in_service() {
+        // Verify init container volume mounts are included in has_volume_mounts check.
+        let plan = KubePlan {
+            pod_name: "init-vm-pod".to_string(),
+            containers: vec![make_test_container("app")],
+            init_containers: vec![KubeContainer {
+                name: "init".to_string(),
+                volume_mounts: vec![KubeVolumeMount {
+                    volume_name: "shared".to_string(),
+                    mount_path: "/data".to_string(),
+                    read_only: false,
+                }],
+                ..make_test_container("init")
+            }],
+            volumes: vec![KubeVolume {
+                name: "shared".to_string(),
+                kind: KubeVolumeKind::EmptyDir,
+            }],
+            ..make_test_plan()
+        };
+
+        let has_volume_mounts = plan
+            .init_containers
+            .iter()
+            .chain(plan.containers.iter())
+            .any(|kc| !kc.volume_mounts.is_empty());
+        assert!(
+            has_volume_mounts,
+            "init container volume mounts should be detected"
+        );
+    }
+
+    // --- envFrom ---
+
+    #[test]
+    fn test_parse_env_from_configmap() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ef-pod
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+    envFrom:
+    - configMapRef:
+        name: my-config
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let plan = validate_and_plan(&name, spec).unwrap();
+        assert!(matches!(
+            plan.containers[0].env[0].1,
+            KubeEnvValue::ConfigMapRef { .. }
+        ));
+        if let KubeEnvValue::ConfigMapRef { ref name, ref prefix } = plan.containers[0].env[0].1 {
+            assert_eq!(name, "my-config");
+            assert_eq!(prefix, "");
+        }
+    }
+
+    #[test]
+    fn test_parse_env_from_secret() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ef-pod
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+    envFrom:
+    - secretRef:
+        name: my-secret
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let plan = validate_and_plan(&name, spec).unwrap();
+        assert!(matches!(
+            plan.containers[0].env[0].1,
+            KubeEnvValue::SecretRef { .. }
+        ));
+        if let KubeEnvValue::SecretRef { ref name, ref prefix } = plan.containers[0].env[0].1 {
+            assert_eq!(name, "my-secret");
+            assert_eq!(prefix, "");
+        }
+    }
+
+    #[test]
+    fn test_parse_env_from_with_prefix() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ef-pod
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+    envFrom:
+    - configMapRef:
+        name: my-config
+      prefix: APP_
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let plan = validate_and_plan(&name, spec).unwrap();
+        if let KubeEnvValue::ConfigMapRef { ref prefix, .. } = plan.containers[0].env[0].1 {
+            assert_eq!(prefix, "APP_");
+        } else {
+            panic!("expected ConfigMapRef");
+        }
+    }
+
+    #[test]
+    fn test_parse_env_from_invalid_no_ref() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ef-pod
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+    envFrom:
+    - prefix: FOO_
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let err = validate_and_plan(&name, spec).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("envFrom entry must specify configMapRef or secretRef"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_env_from_invalid_name() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ef-pod
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+    envFrom:
+    - secretRef:
+        name: INVALID
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let err = validate_and_plan(&name, spec).unwrap_err();
+        assert!(
+            err.to_string().contains("invalid secret name")
+                || err.to_string().contains("lowercase"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_env_from_ordering_explicit_env_wins() {
+        // envFrom entries come before explicit env in the plan, so explicit env
+        // overrides envFrom when create.rs deduplicates by key.
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ef-pod
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+    envFrom:
+    - configMapRef:
+        name: my-config
+    env:
+    - name: OVERRIDE_KEY
+      value: explicit-value
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let plan = validate_and_plan(&name, spec).unwrap();
+        // envFrom should be first, explicit env should be last.
+        assert!(matches!(
+            plan.containers[0].env[0].1,
+            KubeEnvValue::ConfigMapRef { .. }
+        ));
+        assert!(matches!(
+            plan.containers[0].env[1].1,
+            KubeEnvValue::Literal(_)
+        ));
+        assert_eq!(plan.containers[0].env[1].0, "OVERRIDE_KEY");
+    }
+
+    #[test]
+    fn test_env_from_resolve_configmap() {
+        // Integration test: verify envFrom configMapRef resolution from store data.
+        let _lock = UNIT_TEST_LOCK.lock().unwrap();
+        let tmp = TempDataDir::new("kube-envfrom-cm");
+
+        // Create a configmap with test data.
+        super::super::configmap::create(
+            tmp.path(),
+            "my-config",
+            &[
+                ("HOST".into(), "localhost".into()),
+                ("PORT".into(), "8080".into()),
+            ],
+            &[],
+        )
+        .unwrap();
+
+        let mut kc = make_test_container("app");
+        kc.env = vec![
+            (
+                String::new(),
+                KubeEnvValue::ConfigMapRef {
+                    name: "my-config".to_string(),
+                    prefix: "APP_".to_string(),
+                },
+            ),
+            // Explicit env should override envFrom key.
+            (
+                "APP_PORT".to_string(),
+                KubeEnvValue::Literal("9090".to_string()),
+            ),
+        ];
+
+        let staging = tmp.path().join("staging");
+        let app_dir = staging.join("oci/apps/app");
+        let app_root = app_dir.join("root");
+        fs::create_dir_all(&app_root).unwrap();
+        fs::create_dir_all(staging.join("etc/systemd/system/multi-user.target.wants")).unwrap();
+
+        let plan = make_test_plan();
+        super::super::create::setup_kube_container(
+            tmp.path(),
+            &staging,
+            &app_dir,
+            &kc,
+            None,
+            &plan.restart_policy,
+            &plan.volumes,
+            &plan,
+            false,
+            &[],
+            false,
+        )
+        .unwrap();
+
+        // Read the generated env file.
+        let env_path = app_dir.join("env");
+        let env_content = fs::read_to_string(&env_path).unwrap();
+        // envFrom should have produced APP_HOST=localhost.
+        assert!(
+            env_content.contains("APP_HOST=localhost"),
+            "envFrom should produce APP_HOST=localhost, got: {env_content}"
+        );
+        // Explicit env APP_PORT=9090 should override envFrom APP_PORT=8080.
+        assert!(
+            env_content.contains("APP_PORT=9090"),
+            "explicit env should override envFrom, got: {env_content}"
+        );
+        assert!(
+            !env_content.contains("APP_PORT=8080"),
+            "envFrom value should be overridden, got: {env_content}"
+        );
+    }
+
+    #[test]
+    fn test_env_from_resolve_secret() {
+        // Integration test: verify envFrom secretRef resolution from store data.
+        let _lock = UNIT_TEST_LOCK.lock().unwrap();
+        let tmp = TempDataDir::new("kube-envfrom-sec");
+
+        // Create a secret with test data.
+        super::super::secret::create(
+            tmp.path(),
+            "my-secret",
+            &[
+                ("USER".into(), "admin".into()),
+                ("PASS".into(), "s3cret".into()),
+            ],
+            &[],
+        )
+        .unwrap();
+
+        let mut kc = make_test_container("app");
+        kc.env = vec![(
+            String::new(),
+            KubeEnvValue::SecretRef {
+                name: "my-secret".to_string(),
+                prefix: "DB_".to_string(),
+            },
+        )];
+
+        let staging = tmp.path().join("staging");
+        let app_dir = staging.join("oci/apps/app");
+        let app_root = app_dir.join("root");
+        fs::create_dir_all(&app_root).unwrap();
+        fs::create_dir_all(staging.join("etc/systemd/system/multi-user.target.wants")).unwrap();
+
+        let plan = make_test_plan();
+        super::super::create::setup_kube_container(
+            tmp.path(),
+            &staging,
+            &app_dir,
+            &kc,
+            None,
+            &plan.restart_policy,
+            &plan.volumes,
+            &plan,
+            false,
+            &[],
+            false,
+        )
+        .unwrap();
+
+        let env_path = app_dir.join("env");
+        let env_content = fs::read_to_string(&env_path).unwrap();
+        assert!(
+            env_content.contains("DB_PASS=s3cret"),
+            "envFrom should produce DB_PASS=s3cret, got: {env_content}"
+        );
+        assert!(
+            env_content.contains("DB_USER=admin"),
+            "envFrom should produce DB_USER=admin, got: {env_content}"
         );
     }
 }

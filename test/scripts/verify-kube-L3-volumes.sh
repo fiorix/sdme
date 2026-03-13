@@ -10,6 +10,8 @@ set -uo pipefail
 #   - ConfigMap volume mounting (all keys, projected items, defaultMode)
 #   - Secret volume mounting (all keys, projected items, defaultMode)
 #   - env valueFrom (secretKeyRef, configMapKeyRef)
+#   - envFrom (configMapRef, secretRef with prefix, explicit env override)
+#   - Read-only volume mounts (remount,ro,bind verification)
 #   - PVC volume mounting and persistence
 #   - Missing resource error handling
 
@@ -23,10 +25,14 @@ REPORT_DIR="."
 SECRET_POD="secret-test-pod"
 CONFIGMAP_POD="configmap-test-pod"
 PVC_POD="pvc-test-pod"
+ENVFROM_POD="envfrom-test-pod"
+RONLY_POD="readonly-vol-pod"
 SECRET_ALL="test-secret"
 SECRET_PROJ="mysecret"
 SECRET_ENV="env-secret"
+SECRET_ENVFROM="envfrom-secret"
 CONFIGMAP_NAME="app-config"
+CONFIGMAP_ENVFROM="envfrom-config"
 
 # Timeouts (seconds)
 TIMEOUT_CREATE=600
@@ -47,6 +53,9 @@ CONFIGMAP_POD_CREATED=0
 CONFIGMAP_POD_RUNNING=0
 PVC_POD_CREATED=0
 PVC_POD_RUNNING=0
+ENVFROM_POD_CREATED=0
+RONLY_POD_CREATED=0
+RONLY_POD_RUNNING=0
 
 usage() {
     cat <<EOF
@@ -122,10 +131,14 @@ cleanup() {
     "$SDME" kube delete "$SECRET_POD" --force 2>/dev/null || true
     "$SDME" kube delete "$CONFIGMAP_POD" --force 2>/dev/null || true
     "$SDME" kube delete "$PVC_POD" --force 2>/dev/null || true
+    "$SDME" kube delete "$ENVFROM_POD" --force 2>/dev/null || true
+    "$SDME" kube delete "$RONLY_POD" --force 2>/dev/null || true
     "$SDME" kube secret rm "$SECRET_ALL" 2>/dev/null || true
     "$SDME" kube secret rm "$SECRET_PROJ" 2>/dev/null || true
     "$SDME" kube secret rm "$SECRET_ENV" 2>/dev/null || true
+    "$SDME" kube secret rm "$SECRET_ENVFROM" 2>/dev/null || true
     "$SDME" kube configmap rm "$CONFIGMAP_NAME" 2>/dev/null || true
+    "$SDME" kube configmap rm "$CONFIGMAP_ENVFROM" 2>/dev/null || true
 }
 
 trap cleanup EXIT INT TERM
@@ -781,6 +794,304 @@ test_pvc_start_runtime() {
     fi
 }
 
+# --- envFrom tests ------------------------------------------------------------
+
+test_envfrom_create_resources() {
+    local test_name="envfrom-create-resources"
+
+    echo "--- $test_name ---"
+    local output
+
+    # Create a configmap for envFrom.
+    if output=$("$SDME" kube configmap create "$CONFIGMAP_ENVFROM" \
+        --from-literal 'HOST=db.example.com' \
+        --from-literal 'PORT=5432' 2>&1); then
+        true
+    else
+        record "$test_name" FAIL "configmap: $output"
+        return
+    fi
+
+    # Create a secret for envFrom.
+    if output=$("$SDME" kube secret create "$SECRET_ENVFROM" \
+        --from-literal 'USER=admin' \
+        --from-literal 'PASS=s3cret' 2>&1); then
+        record "$test_name" PASS
+    else
+        record "$test_name" FAIL "secret: $output"
+    fi
+}
+
+test_envfrom_create_pod() {
+    local test_name="envfrom-create-pod"
+    if [[ "$(result_status envfrom-create-resources 2>/dev/null)" != "PASS" ]]; then
+        record "$test_name" SKIP "envfrom resources not created"
+        return
+    fi
+
+    local yaml_file
+    yaml_file=$(mktemp /tmp/kube-envfrom-XXXXXX.yaml)
+
+    cat > "$yaml_file" <<YAML
+apiVersion: v1
+kind: Pod
+metadata:
+  name: $ENVFROM_POD
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+    command: ["/bin/sh", "-c", "sleep infinity"]
+    envFrom:
+    - configMapRef:
+        name: $CONFIGMAP_ENVFROM
+      prefix: CFG_
+    - secretRef:
+        name: $SECRET_ENVFROM
+      prefix: SEC_
+    env:
+    - name: CFG_PORT
+      value: "9999"
+YAML
+
+    echo "--- $test_name: creating pod ---"
+    local output
+    if output=$(timeout "$TIMEOUT_CREATE" "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" -v 2>&1); then
+        record "$test_name" PASS
+        ENVFROM_POD_CREATED=1
+    else
+        record "$test_name" FAIL "$output"
+    fi
+    rm -f "$yaml_file"
+}
+
+test_static_envfrom_configmap_keys() {
+    local test_name="static-envfrom-configmap-keys"
+    if [[ $ENVFROM_POD_CREATED -eq 0 ]]; then
+        record "$test_name" SKIP "envfrom pod not created"
+        return
+    fi
+
+    local env_file="$DATADIR/fs/kube-$ENVFROM_POD/oci/apps/app/env"
+    if [[ ! -f "$env_file" ]]; then
+        record "$test_name" FAIL "env file not found: $env_file"
+        return
+    fi
+
+    local content
+    content=$(cat "$env_file")
+    local fail=0
+
+    # envFrom with prefix CFG_ should produce CFG_HOST=db.example.com.
+    if ! echo "$content" | grep -q 'CFG_HOST=db.example.com'; then
+        echo "    missing: CFG_HOST=db.example.com"
+        fail=1
+    fi
+
+    if [[ $fail -eq 0 ]]; then
+        record "$test_name" PASS
+    else
+        record "$test_name" FAIL "envFrom configmap keys missing"
+        echo "    env file content:"
+        echo "$content"
+    fi
+}
+
+test_static_envfrom_secret_keys() {
+    local test_name="static-envfrom-secret-keys"
+    if [[ $ENVFROM_POD_CREATED -eq 0 ]]; then
+        record "$test_name" SKIP "envfrom pod not created"
+        return
+    fi
+
+    local env_file="$DATADIR/fs/kube-$ENVFROM_POD/oci/apps/app/env"
+    local content
+    content=$(cat "$env_file")
+    local fail=0
+
+    # envFrom with prefix SEC_ should produce SEC_USER=admin and SEC_PASS=s3cret.
+    if ! echo "$content" | grep -q 'SEC_USER=admin'; then
+        echo "    missing: SEC_USER=admin"
+        fail=1
+    fi
+    if ! echo "$content" | grep -q 'SEC_PASS=s3cret'; then
+        echo "    missing: SEC_PASS=s3cret"
+        fail=1
+    fi
+
+    if [[ $fail -eq 0 ]]; then
+        record "$test_name" PASS
+    else
+        record "$test_name" FAIL "envFrom secret keys missing"
+        echo "    env file content:"
+        echo "$content"
+    fi
+}
+
+test_static_envfrom_explicit_override() {
+    local test_name="static-envfrom-explicit-override"
+    if [[ $ENVFROM_POD_CREATED -eq 0 ]]; then
+        record "$test_name" SKIP "envfrom pod not created"
+        return
+    fi
+
+    local env_file="$DATADIR/fs/kube-$ENVFROM_POD/oci/apps/app/env"
+    local content
+    content=$(cat "$env_file")
+
+    # Explicit env CFG_PORT=9999 should override envFrom CFG_PORT=5432.
+    if echo "$content" | grep -q 'CFG_PORT=9999'; then
+        if echo "$content" | grep -q 'CFG_PORT=5432'; then
+            record "$test_name" FAIL "envFrom value CFG_PORT=5432 still present"
+            echo "    env file content:"
+            echo "$content"
+        else
+            record "$test_name" PASS
+        fi
+    else
+        record "$test_name" FAIL "expected CFG_PORT=9999 (explicit override)"
+        echo "    env file content:"
+        echo "$content"
+    fi
+}
+
+# --- Read-only volume mount tests --------------------------------------------
+
+test_ronly_create_pod() {
+    local test_name="ronly-create-pod"
+
+    local yaml_file
+    yaml_file=$(mktemp /tmp/kube-ronly-XXXXXX.yaml)
+
+    cat > "$yaml_file" <<YAML
+apiVersion: v1
+kind: Pod
+metadata:
+  name: $RONLY_POD
+spec:
+  containers:
+  - name: writer
+    image: docker.io/busybox:latest
+    command: ["/bin/sh", "-c", "echo hello > /rw-data/marker && sleep infinity"]
+    volumeMounts:
+    - name: shared
+      mountPath: /rw-data
+    - name: shared
+      mountPath: /ro-data
+      readOnly: true
+  volumes:
+  - name: shared
+    emptyDir: {}
+YAML
+
+    echo "--- $test_name: creating pod ---"
+    local output
+    if output=$(timeout "$TIMEOUT_CREATE" "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" -v 2>&1); then
+        record "$test_name" PASS
+        RONLY_POD_CREATED=1
+    else
+        record "$test_name" FAIL "$output"
+    fi
+    rm -f "$yaml_file"
+}
+
+test_static_ronly_volume_service() {
+    local test_name="static-ronly-volume-service"
+    if [[ $RONLY_POD_CREATED -eq 0 ]]; then
+        record "$test_name" SKIP "readonly pod not created"
+        return
+    fi
+
+    local unit_path="$DATADIR/fs/kube-$RONLY_POD/etc/systemd/system/sdme-kube-volumes.service"
+    if [[ ! -f "$unit_path" ]]; then
+        record "$test_name" FAIL "sdme-kube-volumes.service not found"
+        return
+    fi
+
+    local unit
+    unit=$(cat "$unit_path")
+    local fail=0
+
+    # Should have a regular bind mount for /rw-data.
+    if ! echo "$unit" | grep -q 'mount --bind.*/oci/apps/writer/root/rw-data'; then
+        echo "    missing: bind mount for /rw-data"
+        fail=1
+    fi
+
+    # Should have a bind mount for /ro-data.
+    if ! echo "$unit" | grep -q 'mount --bind.*/oci/apps/writer/root/ro-data'; then
+        echo "    missing: bind mount for /ro-data"
+        fail=1
+    fi
+
+    # Should have a remount,ro,bind for /ro-data but NOT for /rw-data.
+    if ! echo "$unit" | grep -q 'remount,ro,bind.*/oci/apps/writer/root/ro-data'; then
+        echo "    missing: remount,ro,bind for /ro-data"
+        fail=1
+    fi
+    if echo "$unit" | grep -q 'remount,ro,bind.*/oci/apps/writer/root/rw-data'; then
+        echo "    unexpected: remount,ro,bind for /rw-data (should be rw)"
+        fail=1
+    fi
+
+    if [[ $fail -eq 0 ]]; then
+        record "$test_name" PASS
+    else
+        record "$test_name" FAIL "volume service read-only config wrong"
+        echo "    unit content:"
+        echo "$unit"
+    fi
+}
+
+test_ronly_start_runtime() {
+    local test_name="ronly-start-runtime"
+    if [[ $RONLY_POD_CREATED -eq 0 ]]; then
+        record "$test_name" SKIP "readonly pod not created"
+        return
+    fi
+
+    echo "--- $test_name: starting pod ---"
+    local output
+    if output=$(timeout "$TIMEOUT_BOOT" "$SDME" start "$RONLY_POD" -v 2>&1); then
+        RONLY_POD_RUNNING=1
+    else
+        record "$test_name" FAIL "failed to start: $output"
+        return
+    fi
+
+    # Wait for the OCI app service to become active and the marker file to appear.
+    local ok=0
+    for i in $(seq 1 10); do
+        sleep 3
+        output=$("$SDME" exec "$RONLY_POD" --oci -- \
+            /bin/cat /rw-data/marker 2>/dev/null || echo "")
+        if echo "$output" | grep -q 'hello'; then
+            ok=1
+            break
+        fi
+    done
+    if [[ $ok -eq 0 ]]; then
+        record "$test_name" FAIL "rw mount: expected 'hello' in /rw-data/marker after retries, got: $output"
+        return
+    fi
+
+    # Verify the ro mount is read-only: try to write and expect failure.
+    output=$("$SDME" exec "$RONLY_POD" --oci -- \
+        /bin/sh -c 'echo test > /ro-data/write-test 2>&1' 2>&1 || true)
+    if echo "$output" | grep -qi 'read-only\|Read-only'; then
+        record "$test_name" PASS
+    else
+        # Also check if the file was NOT created (some shells don't print the error).
+        output=$("$SDME" exec "$RONLY_POD" --oci -- \
+            /bin/cat /ro-data/write-test 2>&1 || echo "NOT_FOUND")
+        if echo "$output" | grep -q 'NOT_FOUND\|No such file'; then
+            record "$test_name" PASS
+        else
+            record "$test_name" FAIL "ro mount is writable: /ro-data/write-test has content: $output"
+        fi
+    fi
+}
+
 # --- Resource rm tests --------------------------------------------------------
 
 test_secret_rm() {
@@ -978,6 +1289,10 @@ generate_report() {
             static-env-from-secret static-env-from-configmap \
             start-secret-pod runtime-read-all-keys runtime-read-projected \
             pvc-create-pod static-pvc-host-dir static-pvc-volume-dir pvc-start-runtime \
+            envfrom-create-resources envfrom-create-pod \
+            static-envfrom-configmap-keys static-envfrom-secret-keys \
+            static-envfrom-explicit-override \
+            ronly-create-pod static-ronly-volume-service ronly-start-runtime \
             secret-rm secret-rm-not-found configmap-rm configmap-rm-not-found \
             missing-secret-error missing-configmap-error; do
             if [[ -n "${RESULTS[$test_name]+x}" ]]; then
@@ -1089,7 +1404,23 @@ main() {
     test_static_pvc_volume_dir
     test_pvc_start_runtime
 
-    # Phase 7: Resource rm and error handling.
+    # Phase 7: envFrom tests.
+    echo ""
+    echo "--- envFrom tests ---"
+    test_envfrom_create_resources
+    test_envfrom_create_pod
+    test_static_envfrom_configmap_keys
+    test_static_envfrom_secret_keys
+    test_static_envfrom_explicit_override
+
+    # Phase 8: Read-only volume mount tests.
+    echo ""
+    echo "--- read-only volume mount tests ---"
+    test_ronly_create_pod
+    test_static_ronly_volume_service
+    test_ronly_start_runtime
+
+    # Phase 9: Resource rm and error handling.
     echo ""
     echo "--- cleanup and error handling ---"
     test_secret_rm

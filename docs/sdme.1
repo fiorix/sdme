@@ -675,6 +675,16 @@ with
 and
 .B configMapKeyRef
 for deferred resolution from secrets and configmaps at create time.
+.B envFrom
+bulk\-imports all keys from a configMap or secret as environment variables,
+with an optional
+.B prefix
+prepended to each key.
+Explicit
+.B env[]
+entries take priority over
+.B envFrom
+for the same key.
 .PP
 Pod\-level
 .B securityContext

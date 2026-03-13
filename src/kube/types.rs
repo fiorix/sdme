@@ -57,6 +57,8 @@ pub(crate) struct Container {
     #[serde(default)]
     pub(crate) env: Vec<EnvVar>,
     #[serde(default)]
+    pub(crate) env_from: Vec<EnvFromSource>,
+    #[serde(default)]
     pub(crate) ports: Vec<ContainerPort>,
     #[serde(default)]
     pub(crate) volume_mounts: Vec<VolumeMount>,
@@ -178,6 +180,22 @@ pub(crate) struct EnvVarSource {
 pub(crate) struct KeySelector {
     pub(crate) name: String,
     pub(crate) key: String,
+}
+
+#[derive(serde::Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EnvFromSource {
+    #[serde(default)]
+    pub(crate) prefix: Option<String>,
+    #[serde(default)]
+    pub(crate) config_map_ref: Option<EnvFromRef>,
+    #[serde(default)]
+    pub(crate) secret_ref: Option<EnvFromRef>,
+}
+
+#[derive(serde::Deserialize, Debug)]
+pub(crate) struct EnvFromRef {
+    pub(crate) name: String,
 }
 
 #[derive(serde::Deserialize, Debug, Clone)]

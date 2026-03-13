@@ -236,12 +236,13 @@ pub fn kube_create(
     // This oneshot service runs `mount --bind` in the container's PID 1 mount
     // namespace so all OCI app services see the same shared directories.
     let has_volume_mounts = plan
-        .containers
+        .init_containers
         .iter()
+        .chain(plan.containers.iter())
         .any(|kc| !kc.volume_mounts.is_empty());
     if has_volume_mounts {
         let mut exec_lines = Vec::new();
-        for kc in &plan.containers {
+        for kc in plan.init_containers.iter().chain(plan.containers.iter()) {
             for vm in &kc.volume_mounts {
                 let src = format!("/oci/volumes/{}", vm.volume_name);
                 let dst = format!("/oci/apps/{}/root{}", kc.name, vm.mount_path);
@@ -466,8 +467,9 @@ pub(crate) fn setup_kube_container(
         }
     }
     for (key, env_val) in &kc.env {
-        let value = match env_val {
-            KubeEnvValue::Literal(v) => v.clone(),
+        // envFrom variants expand into multiple key-value pairs.
+        let pairs: Vec<(String, String)> = match env_val {
+            KubeEnvValue::Literal(v) => vec![(key.clone(), v.clone())],
             KubeEnvValue::SecretKeyRef { name, key: k } => {
                 let data = super::secret::read_data(datadir, name)
                     .with_context(|| format!("env '{key}': failed to read secret '{name}'"))?;
@@ -475,9 +477,10 @@ pub(crate) fn setup_kube_container(
                     .iter()
                     .find(|(dk, _)| dk == k)
                     .with_context(|| format!("env '{key}': secret '{name}' has no key '{k}'"))?;
-                String::from_utf8(contents.clone()).with_context(|| {
+                let value = String::from_utf8(contents.clone()).with_context(|| {
                     format!("env '{key}': secret '{name}' key '{k}' is not valid UTF-8")
-                })?
+                })?;
+                vec![(key.clone(), value)]
             }
             KubeEnvValue::ConfigMapKeyRef { name, key: k } => {
                 let data = super::configmap::read_data(datadir, name)
@@ -486,16 +489,44 @@ pub(crate) fn setup_kube_container(
                     .iter()
                     .find(|(dk, _)| dk == k)
                     .with_context(|| format!("env '{key}': configmap '{name}' has no key '{k}'"))?;
-                String::from_utf8(contents.clone()).with_context(|| {
+                let value = String::from_utf8(contents.clone()).with_context(|| {
                     format!("env '{key}': configmap '{name}' key '{k}' is not valid UTF-8")
-                })?
+                })?;
+                vec![(key.clone(), value)]
+            }
+            KubeEnvValue::SecretRef { name, prefix } => {
+                let data = super::secret::read_data(datadir, name)
+                    .with_context(|| format!("envFrom: failed to read secret '{name}'"))?;
+                data.into_iter()
+                    .map(|(k, v)| {
+                        let value = String::from_utf8(v).with_context(|| {
+                            format!("envFrom: secret '{name}' key '{k}' is not valid UTF-8")
+                        })?;
+                        Ok((format!("{prefix}{k}"), value))
+                    })
+                    .collect::<Result<Vec<_>>>()?
+            }
+            KubeEnvValue::ConfigMapRef { name, prefix } => {
+                let data = super::configmap::read_data(datadir, name)
+                    .with_context(|| format!("envFrom: failed to read configmap '{name}'"))?;
+                data.into_iter()
+                    .map(|(k, v)| {
+                        let value = String::from_utf8(v).with_context(|| {
+                            format!("envFrom: configmap '{name}' key '{k}' is not valid UTF-8")
+                        })?;
+                        Ok((format!("{prefix}{k}"), value))
+                    })
+                    .collect::<Result<Vec<_>>>()?
             }
         };
-        let line = format!("{key}={value}");
-        if let Some(&idx) = seen_keys.get(key) {
-            env_lines[idx] = line;
-        } else {
-            env_lines.push(line);
+        for (k, v) in pairs {
+            let line = format!("{k}={v}");
+            if let Some(&idx) = seen_keys.get(&k) {
+                env_lines[idx] = line;
+            } else {
+                seen_keys.insert(k, env_lines.len());
+                env_lines.push(line);
+            }
         }
     }
 

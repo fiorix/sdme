@@ -36,12 +36,12 @@ set -uo pipefail
 #     key/path, defaultMode), configMap (name, items with key/path,
 #     defaultMode), persistentVolumeClaim (claimName)
 #   env:
-#     name/value, valueFrom (secretKeyRef, configMapKeyRef)
+#     name/value, valueFrom (secretKeyRef, configMapKeyRef),
+#     envFrom (configMapRef, secretRef with optional prefix)
 #   Top-level kinds:
 #     v1 Pod, apps/v1 Deployment (extracts pod template)
 #
 # NOT SUPPORTED (notable):
-#   env: envFrom (configMapRef, secretRef)
 #   Probes: httpGet, tcpSocket, grpc; startupProbe; lifecycle hooks
 #   Volumes: projected, downwardAPI, subPath, subPathExpr
 #   Networking: hostNetwork, dnsPolicy, dnsConfig, hostAliases
