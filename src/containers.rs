@@ -1006,7 +1006,7 @@ pub fn exec_oci(
 
     let pid_str = app_pid.to_string();
     let mut cmd = std::process::Command::new("nsenter");
-    cmd.args(["-t", &pid_str, "--pid", "--ipc", "--mount", "--fork", "--"]);
+    cmd.args(["-t", &pid_str, "--pid", "--ipc", "--mount", "--"]);
     cmd.args(command);
 
     if verbose {
