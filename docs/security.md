@@ -703,9 +703,8 @@ Pod networking        Per-container    --pod / --oci-pod
 
 ## 21. Kube Limitations
 
-- No per-container `securityContext`
-- No seccomp profiles from K8s spec
-- No AppArmor profiles from K8s spec
+- No `securityContext.privileged` support
+- Seccomp `Localhost` profile type not supported (custom BPF profiles cannot be loaded via systemd's `SystemCallFilter`)
 - No network policies
 - No service accounts or RBAC
 - Liveness probes parsed but not enforced at runtime
