@@ -406,7 +406,7 @@ container is cleaned up regardless of success or failure.
 
 `sdme fs export` is the inverse of import: it takes an imported rootfs
 (or a container's merged overlayfs view) and writes it to a directory,
-tarball, or raw ext4 disk image. The implementation lives in
+tarball, or raw disk image (ext4 or btrfs). The implementation lives in
 `src/export.rs`.
 
 ### Format detection
@@ -422,7 +422,7 @@ instead of magic bytes (since we are creating, not reading):
 | `.tar.bz2`, `.tbz2`       | bzip2 tar           |
 | `.tar.xz`, `.txz`         | xz tar              |
 | `.tar.zst`, `.tzst`       | zstandard tar       |
-| `.img`, `.raw`            | bare ext4 raw image |
+| `.img`, `.raw`            | bare ext4 raw image (default; `--filesystem btrfs` for btrfs) |
 | anything else              | directory copy      |
 
 The `-f` flag overrides detection. Format names match the extension
@@ -446,14 +446,16 @@ entries.
 
 ### Raw disk image export
 
-Creates a sparse file, formats it with `mkfs.ext4`, loop-mounts it,
-copies the tree, and unmounts. The mount point is a temporary directory
-under `/tmp`. If the copy fails, the image file is cleaned up.
+Creates a sparse file, formats it with `mkfs.ext4` (default) or
+`mkfs.btrfs` (`--filesystem btrfs`), loop-mounts it, copies the tree,
+and unmounts. The mount point is a temporary directory under `/tmp`. If
+the copy fails, the image file is cleaned up. For ext4, the `lost+found`
+directory created by mkfs is removed before copying; btrfs does not
+create one.
 
 Size auto-calculation: `max(256 MiB, content_size * 1.5)`. The 1.5x
-multiplier accounts for ext4 metadata overhead (journal, inode tables,
-superblock, block groups). The `--size` flag overrides this with a
-human-readable value (e.g. `2G`, `500M`).
+multiplier accounts for filesystem metadata overhead. The `--size` flag
+overrides this with a human-readable value (e.g. `2G`, `500M`).
 
 ### Container export
 

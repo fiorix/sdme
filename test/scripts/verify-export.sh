@@ -11,9 +11,10 @@ set -euo pipefail
 # Tests:
 #   1. Directory export
 #   2. Tarball export (uncompressed, gzip, bzip2, xz, zstd)
-#   3. Raw disk image export (auto-size, explicit --size)
-#   4. Format override (-f)
-#   5. Nonexistent rootfs (error case)
+#   3. Raw disk image export (ext4 auto-size, explicit --size)
+#   4. Btrfs raw disk image export (auto-size, explicit --size)
+#   5. Format override (-f)
+#   6. Nonexistent rootfs (error case)
 
 SDME="${SDME:-sdme}"
 VERBOSE="${VERBOSE:-}"
@@ -85,8 +86,14 @@ fi
 
 HAS_MKFS_EXT4=true
 if ! command -v mkfs.ext4 &>/dev/null; then
-    echo "note: mkfs.ext4 not found; raw image tests will be skipped"
+    echo "note: mkfs.ext4 not found; ext4 raw image tests will be skipped"
     HAS_MKFS_EXT4=false
+fi
+
+HAS_MKFS_BTRFS=true
+if ! command -v mkfs.btrfs &>/dev/null; then
+    echo "note: mkfs.btrfs not found; btrfs raw image tests will be skipped"
+    HAS_MKFS_BTRFS=false
 fi
 
 # ---------------------------------------------------------------------------
@@ -280,6 +287,65 @@ if $SDME fs export nonexistent "$TMPDIR/nope" 2>/dev/null; then
     fail "nonexistent rootfs should error"
 else
     ok "nonexistent rootfs rejected"
+fi
+
+# ---------------------------------------------------------------------------
+# Test 11: Btrfs raw disk image export (auto-size)
+# ---------------------------------------------------------------------------
+echo "=== Test 11: btrfs raw export ==="
+
+if [[ "$HAS_MKFS_BTRFS" == "true" ]]; then
+    rawbtrfs="$TMPDIR/out-btrfs.raw"
+    if $SDME fs export ubuntu "$rawbtrfs" --filesystem btrfs $VFLAG; then
+        if [[ -f "$rawbtrfs" ]]; then
+            mntpoint="$TMPDIR/btrfsmnt"
+            mkdir -p "$mntpoint"
+            if mount -o loop,ro "$rawbtrfs" "$mntpoint"; then
+                if [[ -f "$mntpoint/etc/os-release" ]]; then
+                    ok "btrfs raw export"
+                else
+                    fail "btrfs raw export: missing etc/os-release in image"
+                fi
+                umount "$mntpoint"
+            else
+                fail "btrfs raw export: failed to mount image"
+            fi
+        else
+            fail "btrfs raw export: output file not created"
+        fi
+    else
+        fail "btrfs raw export: command failed"
+    fi
+    rm -f "$rawbtrfs"
+else
+    echo "  SKIP: btrfs raw export (mkfs.btrfs not available)"
+fi
+
+# ---------------------------------------------------------------------------
+# Test 12: Btrfs raw disk image export with --size
+# ---------------------------------------------------------------------------
+echo "=== Test 12: btrfs raw export --size ==="
+
+if [[ "$HAS_MKFS_BTRFS" == "true" ]]; then
+    rawbtrfs2="$TMPDIR/out-btrfs2.raw"
+    if $SDME fs export ubuntu "$rawbtrfs2" --filesystem btrfs --size 2G $VFLAG; then
+        if [[ -f "$rawbtrfs2" ]]; then
+            actual_size=$(stat -c%s "$rawbtrfs2")
+            expected_size=2147483648
+            if [[ "$actual_size" -eq "$expected_size" ]]; then
+                ok "btrfs raw export --size 2G"
+            else
+                fail "btrfs raw export --size 2G: expected $expected_size bytes, got $actual_size"
+            fi
+        else
+            fail "btrfs raw export --size: output file not created"
+        fi
+    else
+        fail "btrfs raw export --size: command failed"
+    fi
+    rm -f "$rawbtrfs2"
+else
+    echo "  SKIP: btrfs raw export --size (mkfs.btrfs not available)"
 fi
 
 # ---------------------------------------------------------------------------

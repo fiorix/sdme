@@ -259,6 +259,8 @@ code bug. PVC, configMap, envFrom, and read-only mount tests all pass.
 | tar.zst export          | PASS   |
 | raw export (auto-size)  | PASS   |
 | raw export --size 2G    | PASS   |
+| btrfs raw export        | PASS   |
+| btrfs raw export --size | PASS   |
 | format override (-f)    | PASS   |
 | nonexistent rootfs      | PASS   |
 
@@ -270,6 +272,10 @@ code bug. PVC, configMap, envFrom, and read-only mount tests all pass.
   it, verifies `etc/os-release` exists.
 - **raw export --size 2G**: creates a 2 GiB raw image, verifies file size
   matches exactly.
+- **btrfs raw export**: creates a bare btrfs disk image (auto-sized),
+  loop-mounts it, verifies `etc/os-release` exists. Requires `mkfs.btrfs`.
+- **btrfs raw export --size**: creates a 2 GiB btrfs raw image, verifies
+  file size matches exactly.
 - **format override**: exports with `-f tar.gz` to a file without extension,
   verifies the output is a valid gzip tarball.
 - **nonexistent rootfs**: `sdme fs export nonexistent` correctly exits

@@ -539,7 +539,7 @@ xz\-compressed tar archive
 zstandard\-compressed tar archive
 .TP
 .BR .img ", " .raw
-bare ext4 filesystem in a raw disk image (no partition table)
+bare ext4 or btrfs filesystem in a raw disk image (no partition table)
 .TP
 anything else
 directory copy
@@ -563,7 +563,16 @@ to override the disk image size for raw format (e.g.\&
 .IR 2G ", " 500M ).
 If omitted, the size is auto\-calculated as
 .RI max(256M, " content \(mu 1.5" )
-to accommodate ext4 metadata overhead.
+to accommodate filesystem metadata overhead.
+.PP
+Use
+.B \-\-filesystem
+to select the filesystem type for raw disk images
+.RI ( ext4
+or
+.IR btrfs ;
+default:
+.BR ext4 ).
 .SS sdme fs cache info
 Show the OCI blob cache location, total size, and blob count.
 .SS sdme fs cache ls

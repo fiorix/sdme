@@ -1,7 +1,7 @@
 //! Rootfs export: directory copy, tarball creation, raw disk image.
 //!
 //! Exports an imported rootfs or a container's merged overlayfs view
-//! to a directory, compressed tarball, or bare ext4 raw disk image.
+//! to a directory, compressed tarball, or bare ext4/btrfs raw disk image.
 
 use std::fs::{self, File};
 use std::path::Path;
@@ -9,6 +9,23 @@ use std::path::Path;
 use anyhow::{bail, Context, Result};
 
 use crate::{check_interrupted, containers, copy, system_check, systemd, validate_name, State};
+
+/// Filesystem type for raw disk image export.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum RawFs {
+    #[default]
+    Ext4,
+    Btrfs,
+}
+
+impl std::fmt::Display for RawFs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RawFs::Ext4 => write!(f, "ext4"),
+            RawFs::Btrfs => write!(f, "btrfs"),
+        }
+    }
+}
 
 /// Output format for rootfs export.
 #[derive(Debug, Clone, PartialEq)]
@@ -25,8 +42,8 @@ pub enum ExportFormat {
     TarXz,
     /// Zstandard-compressed tar archive.
     TarZst,
-    /// Bare ext4 filesystem in a raw disk image (no partition table).
-    Raw,
+    /// Bare filesystem in a raw disk image (no partition table).
+    Raw(RawFs),
 }
 
 /// Detect the export format from the output path extension, with an
@@ -40,7 +57,7 @@ pub fn detect_format(output: &str, format_override: Option<&str>) -> Result<Expo
             "tar.bz2" => Ok(ExportFormat::TarBz2),
             "tar.xz" => Ok(ExportFormat::TarXz),
             "tar.zst" => Ok(ExportFormat::TarZst),
-            "raw" => Ok(ExportFormat::Raw),
+            "raw" => Ok(ExportFormat::Raw(RawFs::Ext4)),
             _ => bail!("unknown format '{fmt}': expected dir, tar, tar.gz, tar.bz2, tar.xz, tar.zst, or raw"),
         };
     }
@@ -57,7 +74,7 @@ pub fn detect_format(output: &str, format_override: Option<&str>) -> Result<Expo
     } else if lower.ends_with(".tar") {
         Ok(ExportFormat::Tar)
     } else if lower.ends_with(".img") || lower.ends_with(".raw") {
-        Ok(ExportFormat::Raw)
+        Ok(ExportFormat::Raw(RawFs::Ext4))
     } else {
         Ok(ExportFormat::Dir)
     }
@@ -143,7 +160,7 @@ fn export_from_dir(
         | ExportFormat::TarBz2
         | ExportFormat::TarXz
         | ExportFormat::TarZst => export_to_tar(src, output, format, verbose),
-        ExportFormat::Raw => export_to_raw(src, output, size, verbose),
+        ExportFormat::Raw(fs_type) => export_to_raw(src, output, *fs_type, size, verbose),
     }
 }
 
@@ -289,21 +306,31 @@ fn meta_gid(meta: &fs::Metadata) -> u64 {
     meta.gid() as u64
 }
 
-/// Export by creating a bare ext4 raw disk image.
-fn export_to_raw(src: &Path, output: &Path, size: Option<&str>, verbose: bool) -> Result<()> {
+/// Export by creating a raw disk image with the specified filesystem.
+fn export_to_raw(
+    src: &Path,
+    output: &Path,
+    fs_type: RawFs,
+    size: Option<&str>,
+    verbose: bool,
+) -> Result<()> {
     if output.exists() {
         bail!("destination already exists: {}", output.display());
     }
 
-    system_check::check_dependencies(&[("mkfs.ext4", "e2fsprogs")], verbose)?;
+    let (mkfs_bin, mkfs_pkg) = match fs_type {
+        RawFs::Ext4 => ("mkfs.ext4", "e2fsprogs"),
+        RawFs::Btrfs => ("mkfs.btrfs", "btrfs-progs"),
+    };
+    system_check::check_dependencies(&[(mkfs_bin, mkfs_pkg)], verbose)?;
 
     // Calculate or parse image size.
     let image_size = match size {
         Some(s) => crate::parse_size(s)?,
         None => {
             let total = dir_size(src)?;
-            // At least 256 MiB, otherwise 150% of content for ext4 overhead
-            // (journal, inode tables, superblock, etc.).
+            // At least 256 MiB, otherwise 150% of content for filesystem
+            // metadata overhead.
             let min_size = 256 * 1024 * 1024;
             let padded = (total as f64 * 1.5) as u64;
             std::cmp::max(min_size, padded)
@@ -312,7 +339,7 @@ fn export_to_raw(src: &Path, output: &Path, size: Option<&str>, verbose: bool) -
 
     if verbose {
         eprintln!(
-            "creating raw image: {} ({} bytes)",
+            "creating {fs_type} raw image: {} ({} bytes)",
             output.display(),
             image_size
         );
@@ -325,15 +352,19 @@ fn export_to_raw(src: &Path, output: &Path, size: Option<&str>, verbose: bool) -
         .with_context(|| format!("failed to set file size for {}", output.display()))?;
     drop(file);
 
-    // Format as ext4.
-    let status = std::process::Command::new("mkfs.ext4")
-        .args(["-q", "-F"])
+    // Format the image.
+    let (mkfs_args, mkfs_err): (&[&str], &str) = match fs_type {
+        RawFs::Ext4 => (&["-q", "-F"], "mkfs.ext4 failed"),
+        RawFs::Btrfs => (&["-q", "-f"], "mkfs.btrfs failed"),
+    };
+    let status = std::process::Command::new(mkfs_bin)
+        .args(mkfs_args)
         .arg(output)
         .status()
-        .context("failed to run mkfs.ext4")?;
+        .with_context(|| format!("failed to run {mkfs_bin}"))?;
     if !status.success() {
         let _ = fs::remove_file(output);
-        bail!("mkfs.ext4 failed");
+        bail!("{mkfs_err}");
     }
 
     // Mount, copy, unmount.
@@ -354,10 +385,12 @@ fn export_to_raw(src: &Path, output: &Path, size: Option<&str>, verbose: bool) -
         bail!("failed to mount raw image");
     }
 
-    // Remove lost+found created by mkfs.ext4.
-    let lost_found = mount_dir.join("lost+found");
-    if lost_found.exists() {
-        let _ = fs::remove_dir(&lost_found);
+    // Remove lost+found created by mkfs.ext4 (btrfs doesn't create one).
+    if fs_type == RawFs::Ext4 {
+        let lost_found = mount_dir.join("lost+found");
+        if lost_found.exists() {
+            let _ = fs::remove_dir(&lost_found);
+        }
     }
 
     let copy_result = (|| -> Result<()> {
@@ -477,8 +510,14 @@ mod tests {
             detect_format("foo.tzst", None).unwrap(),
             ExportFormat::TarZst
         );
-        assert_eq!(detect_format("foo.img", None).unwrap(), ExportFormat::Raw);
-        assert_eq!(detect_format("foo.raw", None).unwrap(), ExportFormat::Raw);
+        assert_eq!(
+            detect_format("foo.img", None).unwrap(),
+            ExportFormat::Raw(RawFs::Ext4)
+        );
+        assert_eq!(
+            detect_format("foo.raw", None).unwrap(),
+            ExportFormat::Raw(RawFs::Ext4)
+        );
         assert_eq!(detect_format("foo", None).unwrap(), ExportFormat::Dir);
         assert_eq!(
             detect_format("/tmp/mydir", None).unwrap(),
@@ -498,7 +537,7 @@ mod tests {
         );
         assert_eq!(
             detect_format("foo", Some("raw")).unwrap(),
-            ExportFormat::Raw
+            ExportFormat::Raw(RawFs::Ext4)
         );
     }
 
@@ -513,7 +552,10 @@ mod tests {
             detect_format("FOO.TAR.GZ", None).unwrap(),
             ExportFormat::TarGz
         );
-        assert_eq!(detect_format("FOO.IMG", None).unwrap(), ExportFormat::Raw);
+        assert_eq!(
+            detect_format("FOO.IMG", None).unwrap(),
+            ExportFormat::Raw(RawFs::Ext4)
+        );
     }
 
     // --- dir_size tests ---

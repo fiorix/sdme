@@ -512,6 +512,9 @@ EXAMPLE:
         /// Override disk image size for raw format (auto-calculated if omitted; e.g. "2G")
         #[arg(short, long)]
         size: Option<String>,
+        /// Filesystem type for raw disk images (ext4 or btrfs; default: ext4)
+        #[arg(long, default_value = "ext4")]
+        filesystem: String,
     },
     /// Manage the OCI blob cache
     #[command(subcommand)]
@@ -2237,8 +2240,25 @@ fn main() -> Result<()> {
                 container,
                 format,
                 size,
+                filesystem,
             } => {
                 let fmt = export::detect_format(&output, format.as_deref())?;
+                let fmt = match fmt {
+                    export::ExportFormat::Raw(_) => {
+                        let fs_type = match filesystem.as_str() {
+                            "ext4" => export::RawFs::Ext4,
+                            "btrfs" => export::RawFs::Btrfs,
+                            other => bail!("unknown filesystem '{other}': expected ext4 or btrfs"),
+                        };
+                        export::ExportFormat::Raw(fs_type)
+                    }
+                    _ => {
+                        if filesystem != "ext4" {
+                            bail!("--filesystem only applies to raw disk image format");
+                        }
+                        fmt
+                    }
+                };
                 let output_path = std::path::PathBuf::from(&output);
                 if container {
                     export::export_container(
