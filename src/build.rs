@@ -317,6 +317,7 @@ fn execute_build(
 
 // --- Main entry point ---
 
+/// Build a root filesystem from a Dockerfile-like configuration file.
 pub fn build(
     datadir: &Path,
     name: &str,

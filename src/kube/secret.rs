@@ -18,8 +18,10 @@ const CONFIG: StoreConfig = StoreConfig {
     file_mode: 0o600,
 };
 
+/// Summary of a stored secret (name, key count, creation time).
 pub type SecretInfo = StoreInfo;
 
+/// Create a new secret from literal key-value pairs and/or files.
 pub fn create(
     datadir: &Path,
     name: &str,
@@ -29,14 +31,17 @@ pub fn create(
     store::create(&CONFIG, datadir, name, literals, files)
 }
 
+/// List all stored secrets.
 pub fn list(datadir: &Path) -> Result<Vec<SecretInfo>> {
     store::list(&CONFIG, datadir)
 }
 
+/// Remove secrets by name.
 pub fn remove(datadir: &Path, names: &[String]) -> Result<()> {
     store::remove(&CONFIG, datadir, names)
 }
 
+/// Read all key-value data from a stored secret.
 pub fn read_data(datadir: &Path, name: &str) -> Result<Vec<(String, Vec<u8>)>> {
     store::read_data(&CONFIG, datadir, name)
 }

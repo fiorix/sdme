@@ -18,8 +18,10 @@ const CONFIG: StoreConfig = StoreConfig {
     file_mode: 0o644,
 };
 
+/// Summary of a stored configmap (name, key count, creation time).
 pub type ConfigMapInfo = StoreInfo;
 
+/// Create a new configmap from literal key-value pairs and/or files.
 pub fn create(
     datadir: &Path,
     name: &str,
@@ -29,14 +31,17 @@ pub fn create(
     store::create(&CONFIG, datadir, name, literals, files)
 }
 
+/// List all stored configmaps.
 pub fn list(datadir: &Path) -> Result<Vec<ConfigMapInfo>> {
     store::list(&CONFIG, datadir)
 }
 
+/// Remove configmaps by name.
 pub fn remove(datadir: &Path, names: &[String]) -> Result<()> {
     store::remove(&CONFIG, datadir, names)
 }
 
+/// Read all key-value data from a stored configmap.
 pub fn read_data(datadir: &Path, name: &str) -> Result<Vec<(String, Vec<u8>)>> {
     store::read_data(&CONFIG, datadir, name)
 }

@@ -1,5 +1,4 @@
 /target
-/dist/*
-!/dist/sdme.1
-!/dist/deb/
+/dist/completions/
+/dist/apparmor/
 /test/reports/

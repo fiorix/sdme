@@ -816,9 +816,7 @@ sudo sdme set mybox --memory 4G --cpus 2
 produce custom rootfs images. See
 [architecture.md, Section 7](architecture.md#7-fs-build-building-root-filesystems).
 
-**Configuration.** Settings are stored in `~/.config/sdme/sdmerc` (TOML).
-Since sdme runs as root via sudo, it uses `$SUDO_USER` to find the right
-config file.
+**Configuration.** Settings are stored in `/etc/sdme.conf` (TOML).
 
 ```bash
 sudo sdme config get                    # show all settings

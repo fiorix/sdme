@@ -1,9 +1,32 @@
+//! Lightweight systemd-nspawn container manager with overlayfs.
+//!
+//! sdme manages containers backed by explicit root filesystems, keeping
+//! the base rootfs untouched via overlayfs copy-on-write. Each container
+//! gets `upper/work/merged` directories under the data directory and a
+//! KEY=VALUE state file that tracks its metadata.
+//!
+//! Requires Linux with systemd (>= 252) and root privileges.
+//!
+//! # Modules
+//!
+//! | Module | Purpose |
+//! |--------|---------|
+//! | [`containers`] | Create, remove, join, exec, stop, list |
+//! | [`systemd`] | D-Bus helpers and template unit management |
+//! | [`import`] | Rootfs import (dir, tar, URL, OCI, QCOW2) |
+//! | [`oci`] | OCI registry, layout, app setup, blob cache |
+//! | [`kube`] | Kubernetes Pod YAML support |
+//! | [`export`] | Rootfs export (dir, tarball, raw image) |
+//! | [`security`] | Capability, seccomp, AppArmor config |
+//! | [`pod`] | Shared network namespace management |
+
 pub mod build;
 pub mod config;
 pub mod containers;
 pub mod copy;
 pub mod devfd_shim;
 pub mod elf;
+pub mod export;
 pub mod import;
 pub mod isolate;
 pub mod kube;
@@ -30,6 +53,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{bail, Context, Result};
 
+/// Global flag set by the SIGINT handler; checked by [`check_interrupted`].
 pub static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
 /// Read a line from stdin, returning `ErrorKind::Interrupted` if a signal
@@ -61,6 +85,7 @@ pub fn read_line_interruptible(buf: &mut String) -> std::io::Result<usize> {
     Ok(len)
 }
 
+/// Return `Err` if the global SIGINT flag is set.
 pub fn check_interrupted() -> Result<()> {
     if INTERRUPTED.load(Ordering::Relaxed) {
         bail!("interrupted");
@@ -83,6 +108,7 @@ pub fn reset_interrupt() {
     install_interrupt_handler();
 }
 
+/// Install the SIGINT handler that sets the global [`INTERRUPTED`] flag.
 pub fn install_interrupt_handler() {
     unsafe {
         let mut sa: libc::sigaction = std::mem::zeroed();
@@ -143,6 +169,7 @@ pub fn confirm_default_yes(msg: &str) -> Result<bool> {
     Ok(!trimmed.eq_ignore_ascii_case("n") && !trimmed.eq_ignore_ascii_case("no"))
 }
 
+/// Information about the real user behind `sudo`.
 pub struct SudoUser {
     pub name: String,
     pub uid: u32,
@@ -175,20 +202,26 @@ pub fn sudo_user() -> Option<SudoUser> {
     })
 }
 
+/// Container metadata stored as KEY=VALUE pairs in a state file.
+///
+/// Backed by a [`BTreeMap`] for stable, sorted ordering of keys.
 #[derive(Default)]
 pub struct State {
     entries: BTreeMap<String, String>,
 }
 
 impl State {
+    /// Create an empty state.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Insert or update a key-value pair.
     pub fn set(&mut self, key: impl Into<String>, value: impl Into<String>) {
         self.entries.insert(key.into(), value.into());
     }
 
+    /// Look up a value by key.
     pub fn get(&self, key: &str) -> Option<&str> {
         self.entries.get(key).map(|s| s.as_str())
     }
@@ -203,10 +236,12 @@ impl State {
         self.get(key) == Some("yes")
     }
 
+    /// Remove a key from the state.
     pub fn remove(&mut self, key: &str) {
         self.entries.remove(key);
     }
 
+    /// Parse KEY=VALUE lines into a new state.
     pub fn parse(content: &str) -> Result<Self> {
         let mut entries = BTreeMap::new();
         for line in content.lines() {
@@ -222,6 +257,7 @@ impl State {
         Ok(Self { entries })
     }
 
+    /// Serialize all entries to KEY=VALUE text.
     pub fn serialize(&self) -> String {
         let mut out = String::new();
         for (key, value) in &self.entries {
@@ -233,12 +269,14 @@ impl State {
         out
     }
 
+    /// Write the state to a file atomically.
     pub fn write_to(&self, path: &Path) -> Result<()> {
         let content = self.serialize();
         atomic_write(path, content.as_bytes())
             .with_context(|| format!("failed to write {}", path.display()))
     }
 
+    /// Read and parse a state file from disk.
     pub fn read_from(path: &Path) -> Result<Self> {
         let content = fs::read_to_string(path)
             .with_context(|| format!("failed to read {}", path.display()))?;
@@ -456,6 +494,10 @@ pub fn parse_size(s: &str) -> Result<u64> {
         .with_context(|| format!("size value overflows: {s}"))
 }
 
+/// Validate a container name.
+///
+/// Names must start with a lowercase letter, contain only lowercase
+/// letters, digits, and hyphens, and be at most 64 characters.
 pub fn validate_name(name: &str) -> Result<()> {
     if name.is_empty() {
         bail!("container name cannot be empty");

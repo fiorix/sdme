@@ -1,3 +1,9 @@
+//! Runtime dependency and version checks.
+//!
+//! Verifies that the host has a compatible systemd version and that
+//! required external programs (systemd-nspawn, machinectl, etc.) are
+//! available in PATH.
+
 use std::path::PathBuf;
 
 use anyhow::{bail, Result};

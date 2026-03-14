@@ -106,7 +106,7 @@ The `dist/` directory contains both checked-in packaging files and generated bui
 | `src/oci/registry.rs` | OCI registry pulling via Distribution Spec (docker.io, quay.io, etc.) |
 | `src/oci/rootfs.rs` | OCI rootfs helpers: app name detection, port/volume reading from OCI metadata files |
 | `src/names.rs` | Container name generation from a Tupi-Guarani wordlist with collision avoidance |
-| `src/config.rs` | Config file loading/saving (`~/.config/sdme/sdmerc`) |
+| `src/config.rs` | Config file loading/saving (`/etc/sdme.conf`) |
 | `src/build.rs` | Build config parsing and rootfs build execution |
 | `src/copy.rs` | Filesystem tree copying with xattr and special file support, path sanitization |
 | `src/mounts.rs` | Bind mount (`BindConfig`) and environment variable (`EnvConfig`) configuration |
@@ -179,4 +179,4 @@ Dependencies are checked at runtime before use via `system_check::check_dependen
   - Rootfs names (`-r`): validated with `validate_name()` to prevent path traversal (`resolve_rootfs()` in `containers.rs`).
   - Opaque dir paths: must be absolute, no `..`, no duplicates; normalized before storage.
   - URL downloads: capped at 50 GiB (`MAX_DOWNLOAD_SIZE` in `import/mod.rs`).
-  - Config files: written with explicit permissions (`0o600` files, `0o700` dirs).
+  - Config files: written with explicit permissions (`0o600`).

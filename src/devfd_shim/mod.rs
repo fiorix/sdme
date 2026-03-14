@@ -1,17 +1,17 @@
-// devfd_shim: generates a tiny LD_PRELOAD shared library (.so) for OCI containers.
-//
-// Intercepts open()/openat()/open64()/openat64() to handle /dev/stdin,
-// /dev/stdout, /dev/stderr, /dev/fd/{0,1,2}, and /proc/self/fd/{0,1,2}.
-// When a path matches, dup(N) is returned instead of calling the real open.
-// This works around ENXIO errors when FDs 0/1/2 are journal sockets (not
-// pipes), which happens under systemd's service management.
-//
-// If the real openat returns ENXIO, the shim resolves one level of symlink
-// via readlinkat and retries the path matching. This handles cases like
-// nginx opening /var/log/nginx/error.log -> /dev/stderr.
-//
-// On error, errno is set properly via __errno_location() (imported through
-// the GOT) and -1 is returned per C convention.
+//! Generates a tiny LD_PRELOAD shared library (.so) for OCI containers.
+//!
+//! Intercepts open()/openat()/open64()/openat64() to handle /dev/stdin,
+//! /dev/stdout, /dev/stderr, /dev/fd/{0,1,2}, and /proc/self/fd/{0,1,2}.
+//! When a path matches, dup(N) is returned instead of calling the real open.
+//! This works around ENXIO errors when FDs 0/1/2 are journal sockets (not
+//! pipes), which happens under systemd's service management.
+//!
+//! If the real openat returns ENXIO, the shim resolves one level of symlink
+//! via readlinkat and retries the path matching. This handles cases like
+//! nginx opening /var/log/nginx/error.log -> /dev/stderr.
+//!
+//! On error, errno is set properly via __errno_location() (imported through
+//! the GOT) and -1 is returned per C convention.
 
 mod aarch64;
 mod elf;

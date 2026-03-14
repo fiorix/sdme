@@ -280,6 +280,7 @@ fn mutate_vowels(word: &str) -> Result<String> {
     Ok(String::from_utf8(result).expect("vowel mutation produced invalid utf-8"))
 }
 
+/// Generate a unique container name from the wordlist, with collision avoidance.
 pub fn generate_name(datadir: &Path) -> Result<String> {
     let mut words: Vec<&str> = WORDLIST.to_vec();
     shuffle(&mut words)?;

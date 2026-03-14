@@ -11,6 +11,7 @@ pub(super) struct KubeManifest {
     pub spec: Option<serde_yml::Value>,
 }
 
+/// Kubernetes object metadata (name, labels, etc.).
 #[derive(serde::Deserialize, Debug)]
 pub(super) struct Metadata {
     pub name: Option<String>,
@@ -22,6 +23,7 @@ pub(super) struct DeploymentSpec {
     pub template: PodTemplate,
 }
 
+/// Pod template within a Deployment spec.
 #[derive(serde::Deserialize, Debug)]
 pub(super) struct PodTemplate {
     pub metadata: Option<Metadata>,
@@ -304,6 +306,7 @@ where
     deserializer.deserialize_any(FileModeVisitor)
 }
 
+/// Maps a secret key to a file path within a volume.
 #[derive(serde::Deserialize, Debug)]
 pub(crate) struct SecretKeyToPath {
     pub(crate) key: String,

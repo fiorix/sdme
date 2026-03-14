@@ -1,10 +1,10 @@
 //! Internal API for managing sdme configuration.
 //!
 //! Handles loading, saving, and resolving the configuration file
-//! (default: `~/.config/sdme/sdmerc`, TOML format). Provides the
+//! (default: `/etc/sdme.conf`, TOML format). Provides the
 //! [`Config`] struct and functions for reading/writing it to disk.
 
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -12,18 +12,23 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
+    /// Prompt for confirmation on destructive operations.
     #[serde(default = "default_interactive")]
     pub interactive: bool,
 
+    /// Root data directory for all container state and filesystems.
     #[serde(default = "default_datadir")]
     pub datadir: PathBuf,
 
+    /// Seconds to wait for a container to boot before giving up.
     #[serde(default = "default_boot_timeout")]
     pub boot_timeout: u64,
 
+    /// Drop to the sudo-invoking user when joining a container.
     #[serde(default = "default_join_as_sudo_user")]
     pub join_as_sudo_user: bool,
 
+    /// Comma-separated overlayfs opaque dirs for host-rootfs containers.
     #[serde(default = "default_host_rootfs_opaque_dirs")]
     pub host_rootfs_opaque_dirs: String,
 
@@ -99,6 +104,7 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Print all configuration values to stdout.
     pub fn display(&self) {
         let interactive = if self.interactive { "yes" } else { "no" };
         let join_as_sudo_user = if self.join_as_sudo_user { "yes" } else { "no" };
@@ -130,36 +136,22 @@ impl Config {
     }
 }
 
-fn sudo_user_config_path() -> Option<PathBuf> {
-    let su = crate::sudo_user()?;
-    Some(su.home.join(".config").join("sdme").join("sdmerc"))
+/// Return the path to the configuration file.
+pub fn config_path() -> PathBuf {
+    PathBuf::from("/etc/sdme.conf")
 }
 
-pub fn config_path() -> Result<PathBuf> {
-    // When running under sudo, prefer the invoking user's config if it exists.
-    if let Some(path) = sudo_user_config_path() {
-        if path.exists() {
-            return Ok(path);
-        }
-    }
-    let base = if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        PathBuf::from(xdg)
-    } else {
-        let home = std::env::var("HOME").context("HOME not set")?;
-        PathBuf::from(home).join(".config")
-    };
-    Ok(base.join("sdme").join("sdmerc"))
-}
-
-pub fn resolve_path(path: Option<&Path>) -> Result<PathBuf> {
+/// Return the given path, or the default config path if `None`.
+pub fn resolve_path(path: Option<&Path>) -> PathBuf {
     match path {
-        Some(p) => Ok(p.to_path_buf()),
+        Some(p) => p.to_path_buf(),
         None => config_path(),
     }
 }
 
+/// Load the configuration from disk, falling back to defaults if missing.
 pub fn load(path: Option<&Path>) -> Result<Config> {
-    let path = resolve_path(path)?;
+    let path = resolve_path(path);
     if !path.exists() {
         return Ok(Config::default());
     }
@@ -170,15 +162,9 @@ pub fn load(path: Option<&Path>) -> Result<Config> {
     Ok(config)
 }
 
+/// Save the configuration to disk with restrictive permissions.
 pub fn save(config: &Config, path: Option<&Path>) -> Result<()> {
-    let path = resolve_path(path)?;
-    if let Some(parent) = path.parent() {
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
+    let path = resolve_path(path);
     let contents = toml::to_string(config).context("failed to serialize config")?;
     crate::atomic_write(&path, contents.as_bytes())
         .with_context(|| format!("failed to write config {}", path.display()))?;
@@ -193,36 +179,12 @@ mod tests {
     use super::*;
     use std::fs;
 
-    use std::sync::Mutex;
-
-    // Tests must run serially because they modify XDG_CONFIG_HOME.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    struct TempConfig {
-        dir: PathBuf,
-        _guard: std::sync::MutexGuard<'static, ()>,
-    }
-
-    impl TempConfig {
-        fn new() -> Self {
-            let guard = ENV_LOCK.lock().unwrap();
-            let dir = std::env::temp_dir().join(format!(
-                "sdme-test-{}-{:?}",
-                std::process::id(),
-                std::thread::current().id()
-            ));
-            let _ = fs::remove_dir_all(&dir);
-            fs::create_dir_all(&dir).unwrap();
-            std::env::set_var("XDG_CONFIG_HOME", &dir);
-            Self { dir, _guard: guard }
-        }
-    }
-
-    impl Drop for TempConfig {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.dir);
-            std::env::remove_var("XDG_CONFIG_HOME");
-        }
+    fn temp_config_path() -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "sdme-test-config-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ))
     }
 
     #[test]
@@ -233,33 +195,39 @@ mod tests {
     }
 
     #[test]
+    fn test_config_path() {
+        assert_eq!(config_path(), PathBuf::from("/etc/sdme.conf"));
+    }
+
+    #[test]
     fn test_load_missing_file() {
-        let _tmp = TempConfig::new();
-        let config = load(None).unwrap();
+        let path = temp_config_path();
+        let _ = fs::remove_file(&path);
+        let config = load(Some(&path)).unwrap();
         assert!(config.interactive);
     }
 
     #[test]
     fn test_save_and_load() {
-        let _tmp = TempConfig::new();
+        let path = temp_config_path();
         let config = Config {
             interactive: false,
             ..Config::default()
         };
-        save(&config, None).unwrap();
-        let loaded = load(None).unwrap();
+        save(&config, Some(&path)).unwrap();
+        let loaded = load(Some(&path)).unwrap();
         assert!(!loaded.interactive);
+        let _ = fs::remove_file(&path);
     }
 
     #[test]
     fn test_load_partial_config() {
-        let _tmp = TempConfig::new();
-        let path = config_path().unwrap();
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let path = temp_config_path();
         // Write an empty TOML file; missing keys should get defaults.
         fs::write(&path, "").unwrap();
-        let config = load(None).unwrap();
+        let config = load(Some(&path)).unwrap();
         assert!(config.interactive);
+        let _ = fs::remove_file(&path);
     }
 
     #[test]
@@ -267,7 +235,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("sdme-test-explicit-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("custom-sdmerc");
+        let path = dir.join("custom-config");
 
         // Load from non-existent explicit path returns default.
         let config = load(Some(&path)).unwrap();
@@ -287,29 +255,16 @@ mod tests {
 
     #[test]
     fn test_save_and_load_custom_datadir() {
-        let _tmp = TempConfig::new();
+        let path = temp_config_path();
         let config = Config {
             interactive: true,
             datadir: PathBuf::from("/tmp/custom-data"),
             ..Config::default()
         };
-        save(&config, None).unwrap();
-        let loaded = load(None).unwrap();
+        save(&config, Some(&path)).unwrap();
+        let loaded = load(Some(&path)).unwrap();
         assert_eq!(loaded.datadir, PathBuf::from("/tmp/custom-data"));
-    }
-
-    #[test]
-    fn test_config_path_xdg() {
-        let _tmp = TempConfig::new();
-        let path = config_path().unwrap();
-        assert!(path.ends_with("sdme/sdmerc"));
-    }
-
-    #[test]
-    fn test_sudo_user_config_path_unset() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        std::env::remove_var("SUDO_USER");
-        assert!(sudo_user_config_path().is_none());
+        let _ = fs::remove_file(&path);
     }
 
     #[test]
@@ -323,26 +278,28 @@ mod tests {
 
     #[test]
     fn test_save_and_load_host_rootfs_opaque_dirs() {
-        let _tmp = TempConfig::new();
+        let path = temp_config_path();
         let config = Config {
             host_rootfs_opaque_dirs: "/var/log".to_string(),
             ..Config::default()
         };
-        save(&config, None).unwrap();
-        let loaded = load(None).unwrap();
+        save(&config, Some(&path)).unwrap();
+        let loaded = load(Some(&path)).unwrap();
         assert_eq!(loaded.host_rootfs_opaque_dirs, "/var/log");
+        let _ = fs::remove_file(&path);
     }
 
     #[test]
     fn test_save_and_load_host_rootfs_opaque_dirs_empty() {
-        let _tmp = TempConfig::new();
+        let path = temp_config_path();
         let config = Config {
             host_rootfs_opaque_dirs: String::new(),
             ..Config::default()
         };
-        save(&config, None).unwrap();
-        let loaded = load(None).unwrap();
+        save(&config, Some(&path)).unwrap();
+        let loaded = load(Some(&path)).unwrap();
         assert_eq!(loaded.host_rootfs_opaque_dirs, "");
+        let _ = fs::remove_file(&path);
     }
 
     #[test]
@@ -353,24 +310,14 @@ mod tests {
 
     #[test]
     fn test_save_and_load_default_base_fs() {
-        let _tmp = TempConfig::new();
+        let path = temp_config_path();
         let config = Config {
             default_base_fs: "ubuntu".to_string(),
             ..Config::default()
         };
-        save(&config, None).unwrap();
-        let loaded = load(None).unwrap();
+        save(&config, Some(&path)).unwrap();
+        let loaded = load(Some(&path)).unwrap();
         assert_eq!(loaded.default_base_fs, "ubuntu");
-    }
-
-    #[test]
-    fn test_sudo_user_config_path_valid() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let user = std::env::var("USER").unwrap();
-        std::env::set_var("SUDO_USER", &user);
-        let path = sudo_user_config_path();
-        std::env::remove_var("SUDO_USER");
-        let path = path.expect("should resolve for current user");
-        assert!(path.ends_with(".config/sdme/sdmerc"));
+        let _ = fs::remove_file(&path);
     }
 }

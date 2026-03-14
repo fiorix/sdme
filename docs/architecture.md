@@ -1322,7 +1322,7 @@ pipe-separated) and reconstituted into nspawn arguments on every start.
 
 ## 14. Configuration
 
-sdme stores its settings in a TOML file at `~/.config/sdme/sdmerc`:
+sdme stores its settings in a TOML file at `/etc/sdme.conf`:
 
 | Setting                   | Default                          |
 |---------------------------|----------------------------------|
@@ -1355,15 +1355,7 @@ sdme stores its settings in a TOML file at `~/.config/sdme/sdmerc`:
 Settings are read with `sdme config get` and written with
 `sdme config set <key> <value>`.
 
-**Sudo interplay.** Since sdme runs as root via `sudo`, the config file
-lookup checks whether `$SUDO_USER` is set to a non-root user. If so,
-and if that user's `~/.config/sdme/sdmerc` exists, it is used instead
-of root's config. This means the invoking user's preferences are
-respected without requiring the config to live under `/root`. An
-explicit `-c`/`--config` flag overrides all resolution logic.
-
-Config files are written with mode `0600` and directories with mode
-`0700`.
+Config files are written with mode `0600`.
 
 ## 15. Security
 

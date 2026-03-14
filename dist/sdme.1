@@ -3,7 +3,7 @@
 sdme \- lightweight systemd\-nspawn containers with overlayfs
 .SH SYNOPSIS
 .B sdme
-[\fB\-v\fR] [\fB\-c\fR \fIpath\fR]
+[\fB\-v\fR] [\fB\-\-config\fR \fIpath\fR]
 .I command
 [\fIargs\fR...]
 .SH DESCRIPTION
@@ -29,19 +29,16 @@ Interactive access uses
 .PP
 .B sdme
 requires root privileges.
-When invoked via
-.BR sudo (8),
-the invoking user's configuration file is preferred.
 .SH OPTIONS
 .TP
 .BR \-v ", " \-\-verbose
 Enable verbose output.
 Implies non\-interactive mode at runtime.
 .TP
-.BR \-c ", " \-\-config " " \fIpath\fR
+.B \-\-config " " \fIpath\fR
 Path to config file.
 Default:
-.IR ~/.config/sdme/sdmerc .
+.IR /etc/sdme.conf .
 .SH COMMANDS
 .SS sdme new [\fIname\fR] [\-r \fIfs\fR] [\-t \fIseconds\fR] [\-u] [\fIlimits\fR] [\fInetwork\fR] [\fIsecurity\fR] [\-o \fIdir\fR]... [\-\-pod \fIpod\fR] [\-\-oci\-pod \fIpod\fR] [\-b \fIbind\fR]... [\-e \fIenv\fR]... [\-\-oci\-env \fIKEY=VALUE\fR]... [\-\-enable] [\-\-no\-oci\-ports] [\-\-no\-oci\-volumes] [\-\-] [\fIcommand\fR...]
 Create, start, and enter a new container.
@@ -887,15 +884,10 @@ Default: empty (not set).
 .RE
 .SH CONFIGURATION
 The configuration file is in TOML format, located at
-.IR ~/.config/sdme/sdmerc .
-When running under
-.BR sudo (8),
-the invoking user's config is preferred if it exists.
-The path can also be set via the
-.B \-c
-option or the
-.B XDG_CONFIG_HOME
-environment variable.
+.IR /etc/sdme.conf .
+The path can be overridden with the
+.B \-\-config
+option.
 .PP
 Available keys:
 .TP
@@ -1045,23 +1037,13 @@ Exit code 133 is treated as a successful clean shutdown.
 Per\-container resource limits drop\-in (created when limits are set,
 removed when limits are cleared or the container is deleted).
 .TP
-.I ~/.config/sdme/sdmerc
-User configuration file (TOML format).
+.I /etc/sdme.conf
+Configuration file (TOML format).
 .SH ENVIRONMENT
 .TP
 .B SUDO_USER
-When set, sdme reads the invoking user's configuration file and resolves
-their home directory for config file lookup.
-.TP
-.B XDG_CONFIG_HOME
-Overrides the base directory for the configuration file.
-Default:
-.IR ~/.config .
-.TP
-.B HOME
-Used to locate the configuration file when
-.B XDG_CONFIG_HOME
-is not set.
+When set and join_as_sudo_user is enabled, sdme join and sdme exec
+pass \-\-uid to machinectl so the session runs as the invoking user.
 .TP
 .BR https_proxy ", " HTTPS_PROXY ", " http_proxy ", " HTTP_PROXY ", " all_proxy ", " ALL_PROXY
 Proxy URI for HTTP/HTTPS downloads during

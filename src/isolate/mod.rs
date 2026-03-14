@@ -1,12 +1,12 @@
-// isolate: generates tiny static ELF64 binaries for PID/IPC namespace isolation.
-//
-// These binaries have no libc dependency; they talk directly to the kernel
-// via syscalls. They wrap a workload with its own PID namespace and IPC
-// namespace, remount /proc, optionally drop privileges, and exec the
-// target command.
-//
-// Same architecture as the ELF builder in crate::elf: raw machine code
-// emitted at build time, wrapped in a minimal ELF64 header.
+//! Generates tiny static ELF64 binaries for PID/IPC namespace isolation.
+//!
+//! These binaries have no libc dependency; they talk directly to the kernel
+//! via syscalls. They wrap a workload with its own PID namespace and IPC
+//! namespace, remount /proc, optionally drop privileges, and exec the
+//! target command.
+//!
+//! Same architecture as the ELF builder in crate::elf: raw machine code
+//! emitted at build time, wrapped in a minimal ELF64 header.
 
 mod aarch64;
 mod x86_64;

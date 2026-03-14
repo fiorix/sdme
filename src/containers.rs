@@ -21,19 +21,32 @@ use crate::{
     SecurityConfig, State,
 };
 
+/// Options for creating a new container.
 #[derive(Default)]
 pub struct CreateOptions {
+    /// Container name; auto-generated if `None`.
     pub name: Option<String>,
+    /// Imported rootfs name; `None` means host rootfs.
     pub rootfs: Option<String>,
+    /// Resource limits (memory, CPU).
     pub limits: ResourceLimits,
+    /// Network configuration (private network, ports).
     pub network: NetworkConfig,
+    /// Directories to mark as overlayfs opaque.
     pub opaque_dirs: Vec<String>,
+    /// Pod to join (shared network namespace via nspawn flag).
     pub pod: Option<String>,
+    /// Pod to join (OCI app service only, via inner netns).
     pub oci_pod: Option<String>,
+    /// Bind mount configuration.
     pub binds: BindConfig,
+    /// Environment variable configuration.
     pub envs: EnvConfig,
+    /// Security hardening configuration.
     pub security: SecurityConfig,
+    /// OCI volume mount paths from the image.
     pub oci_volumes: Vec<String>,
+    /// OCI environment variables from the image.
     pub oci_envs: Vec<String>,
 }
 
@@ -45,6 +58,7 @@ fn get_umask() -> u32 {
     old as u32
 }
 
+/// Create a new container with the given options, returning its name.
 pub fn create(datadir: &Path, opts: &CreateOptions, verbose: bool) -> Result<String> {
     let umask = get_umask();
     if umask & 0o005 != 0 {
@@ -477,6 +491,7 @@ fn check_conflicts(datadir: &Path, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Resolve a rootfs name to its on-disk path; `None` means host rootfs.
 // NOTE: "rootfs" is the internal name; the CLI command is "fs" and the
 // on-disk path is {datadir}/fs/.
 pub fn resolve_rootfs(datadir: &Path, rootfs: Option<&str>) -> Result<PathBuf> {
@@ -542,6 +557,7 @@ pub fn resolve_name(datadir: &Path, input: &str) -> Result<String> {
     }
 }
 
+/// Verify that a container's state file and directory exist.
 pub fn ensure_exists(datadir: &Path, name: &str) -> Result<()> {
     let state_file = datadir.join("state").join(name);
     if !state_file.exists() {
@@ -621,6 +637,7 @@ fn mask_host_mount_units(upper_systemd_dir: &Path, verbose: bool) -> Result<()> 
     Ok(())
 }
 
+/// Stop a container if running, then delete its state file and overlayfs directories.
 pub fn remove(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
     ensure_exists(datadir, name)?;
 
@@ -683,16 +700,27 @@ pub fn remove(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
     Ok(())
 }
 
+/// Status information for a single container, as shown by `sdme ps`.
 pub struct ContainerInfo {
+    /// Container name.
     pub name: String,
+    /// Systemd unit status (e.g. "running", "stopped").
     pub status: String,
+    /// Health status (e.g. "ok", "broken").
     pub health: String,
+    /// OS name from os-release, if detected.
     pub os: String,
+    /// Pod name (nspawn-level), if any.
     pub pod: String,
+    /// Pod name (OCI app-level), if any.
     pub oci_pod: String,
+    /// Whether user namespace isolation is enabled.
     pub userns: bool,
+    /// Whether auto-start on boot is enabled.
     pub enabled: bool,
+    /// Raw bind mount specs from the state file.
     pub binds: String,
+    /// Kube container names, if this is a kube container.
     pub kube: String,
 }
 
@@ -725,6 +753,7 @@ impl ContainerInfo {
     }
 }
 
+/// List all containers with their status, health, OS, and metadata.
 pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
     let state_dir = datadir.join("state");
     if !state_dir.is_dir() {
@@ -839,6 +868,7 @@ fn ensure_running(datadir: &Path, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Enter a running container via `machinectl shell`.
 pub fn join(
     datadir: &Path,
     name: &str,
@@ -850,6 +880,7 @@ pub fn join(
     machinectl_shell(datadir, name, command, join_as_sudo_user, verbose)
 }
 
+/// Run a one-off command in a running container via `machinectl shell`.
 pub fn exec(
     datadir: &Path,
     name: &str,
@@ -1071,6 +1102,7 @@ pub enum StopMode {
     Kill,
 }
 
+/// Stop a container using the specified mode (graceful, terminate, or kill).
 pub fn stop(name: &str, mode: StopMode, verbose: bool) -> Result<()> {
     match mode {
         StopMode::Graceful => {

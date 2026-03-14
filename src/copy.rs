@@ -14,6 +14,7 @@ use anyhow::{bail, Context, Result};
 
 use crate::check_interrupted;
 
+/// Recursively copy all entries from `src_dir` to `dst_dir`.
 pub(crate) fn copy_tree(src_dir: &Path, dst_dir: &Path, verbose: bool) -> Result<()> {
     let entries = fs::read_dir(src_dir)
         .with_context(|| format!("failed to read directory {}", src_dir.display()))?;
@@ -33,6 +34,7 @@ pub(crate) fn copy_tree(src_dir: &Path, dst_dir: &Path, verbose: bool) -> Result
     Ok(())
 }
 
+/// Copy a single filesystem entry (file, dir, symlink, device, fifo, socket).
 pub(crate) fn copy_entry(src: &Path, dst: &Path, verbose: bool) -> Result<()> {
     let stat = lstat_entry(src)?;
     let mode = stat.st_mode & libc::S_IFMT;
@@ -130,6 +132,7 @@ pub(crate) fn copy_entry(src: &Path, dst: &Path, verbose: bool) -> Result<()> {
     Ok(())
 }
 
+/// Apply ownership, permissions, and timestamps from a stat result to `dst`.
 pub(crate) fn copy_metadata_from_stat(dst: &Path, stat: &libc::stat) -> Result<()> {
     let c_path = path_to_cstring(dst)?;
 
@@ -179,11 +182,13 @@ pub(crate) fn copy_metadata_from_stat(dst: &Path, stat: &libc::stat) -> Result<(
     Ok(())
 }
 
+/// Copy ownership, permissions, and timestamps from `src` to `dst`.
 pub(crate) fn copy_metadata(src: &Path, dst: &Path) -> Result<()> {
     let stat = lstat_entry(src)?;
     copy_metadata_from_stat(dst, &stat)
 }
 
+/// Copy extended attributes from `src` to `dst`, skipping security.selinux.
 pub(crate) fn copy_xattrs(src: &Path, dst: &Path) -> Result<()> {
     let c_src = path_to_cstring(src)?;
     let c_dst = path_to_cstring(dst)?;
@@ -310,6 +315,7 @@ pub(crate) fn make_removable(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Call lstat on a path and return the raw stat result.
 pub(crate) fn lstat_entry(path: &Path) -> Result<libc::stat> {
     let c_path = path_to_cstring(path)?;
     let mut stat: libc::stat = unsafe { std::mem::zeroed() };
@@ -345,11 +351,13 @@ pub(crate) fn sanitize_dest_path(path: &Path) -> Result<PathBuf> {
     Ok(clean)
 }
 
+/// Convert a path to a CString for use with libc functions.
 pub(crate) fn path_to_cstring(path: &Path) -> Result<CString> {
     CString::new(path.as_os_str().as_bytes())
         .with_context(|| format!("path contains null byte: {}", path.display()))
 }
 
+/// Change ownership of a path without following symlinks.
 pub(crate) fn lchown(path: &Path, uid: u32, gid: u32) -> Result<()> {
     let c_path = path_to_cstring(path)?;
     let ret = unsafe { libc::lchown(c_path.as_ptr(), uid, gid) };

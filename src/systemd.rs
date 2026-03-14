@@ -692,10 +692,12 @@ mod dbus {
     }
 }
 
+/// Return the systemd version string from D-Bus.
 pub fn systemd_version() -> Result<String> {
     dbus::get_systemd_version()
 }
 
+/// Check whether a container's systemd unit is currently active.
 pub fn is_active(name: &str) -> Result<bool> {
     match dbus::is_unit_active(&service_name(name)) {
         Ok(active) => Ok(active),
@@ -710,6 +712,7 @@ pub fn is_active(name: &str) -> Result<bool> {
     }
 }
 
+/// Enable a container to auto-start on boot.
 pub fn enable(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
     ensure_template_unit(verbose)?;
     let unit = service_name(name);
@@ -724,6 +727,7 @@ pub fn enable(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
     Ok(())
 }
 
+/// Disable a container's auto-start on boot.
 pub fn disable(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
     let unit = service_name(name);
     if verbose {
@@ -746,10 +750,12 @@ pub fn disable_unit_only(name: &str) -> Result<()> {
     dbus::disable_unit(&service_name(name))
 }
 
+/// Wait for a container's systemd to report boot completion.
 pub fn wait_for_boot(name: &str, timeout: std::time::Duration, verbose: bool) -> Result<()> {
     dbus::wait_for_boot(name, timeout, verbose)
 }
 
+/// Wait for D-Bus to become available inside the container.
 pub fn wait_for_dbus(name: &str, timeout: std::time::Duration, verbose: bool) -> Result<()> {
     dbus::wait_for_dbus(name, timeout, verbose)
 }
@@ -770,32 +776,42 @@ pub fn await_boot(name: &str, timeout: std::time::Duration, verbose: bool) -> Re
     Ok(())
 }
 
+/// Terminate a container via the machined D-Bus API.
 pub fn terminate_machine(name: &str) -> Result<()> {
     dbus::terminate_machine(name)
 }
 
+/// Send a signal to a container via the machined D-Bus API.
 pub fn kill_machine(name: &str, who: &str, signal: i32) -> Result<()> {
     dbus::kill_machine(name, who, signal)
 }
 
+/// Wait for a container's systemd unit to become inactive.
 pub fn wait_for_shutdown(name: &str, timeout: std::time::Duration, verbose: bool) -> Result<()> {
     dbus::wait_for_shutdown(name, timeout, verbose)
 }
 
+/// Return the names of all registered machines from machined.
 pub fn list_machines() -> Vec<String> {
     dbus::list_machines()
 }
 
+/// Return the systemd service unit name for a container.
 pub fn service_name(name: &str) -> String {
     format!("sdme@{name}.service")
 }
 
+/// Resolved paths to external programs needed for the template unit.
 pub struct UnitPaths {
+    /// Path to `systemd-nspawn`.
     pub nspawn: PathBuf,
+    /// Path to `mount`.
     pub mount: PathBuf,
+    /// Path to `umount`.
     pub umount: PathBuf,
 }
 
+/// Resolve the external program paths needed for the template unit.
 pub fn resolve_paths() -> Result<UnitPaths> {
     use crate::system_check::find_program;
     let nspawn = find_program("systemd-nspawn")
@@ -1101,6 +1117,7 @@ pub fn remove_limits_dropin(name: &str, verbose: bool) -> Result<()> {
     Ok(())
 }
 
+/// Install the template unit, write the drop-in, and start a container via D-Bus.
 pub fn start(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
     ensure_template_unit(verbose)?;
 

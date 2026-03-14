@@ -19,11 +19,11 @@ pub struct NetworkConfig {
     pub private_network: bool,
     /// Create virtual ethernet link (--network-veth)
     pub network_veth: bool,
-    /// Connect to host bridge (--network-bridge=<name>)
+    /// Connect to host bridge (`--network-bridge=NAME`)
     pub network_bridge: Option<String>,
-    /// Join named network zone (--network-zone=<name>)
+    /// Join named network zone (`--network-zone=NAME`)
     pub network_zone: Option<String>,
-    /// Port forwarding rules (--port=[proto:]host[:container])
+    /// Port forwarding rules (`--port=\[proto:\]host\[:container\]`)
     pub ports: Vec<String>,
 }
 

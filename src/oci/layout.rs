@@ -11,17 +11,20 @@ use crate::copy::{make_removable, sanitize_dest_path};
 
 use crate::import::open_decoder;
 
+/// Deserialized `oci-layout` file.
 #[derive(Deserialize)]
 pub(crate) struct OciLayout {
     #[serde(rename = "imageLayoutVersion")]
     pub(crate) image_layout_version: String,
 }
 
+/// Deserialized `index.json` manifest list.
 #[derive(Deserialize)]
 pub(crate) struct OciIndex {
     pub(crate) manifests: Vec<OciDescriptor>,
 }
 
+/// A single entry in an OCI manifest list or layer list.
 #[derive(Deserialize)]
 pub(crate) struct OciDescriptor {
     pub(crate) digest: String,
@@ -30,6 +33,7 @@ pub(crate) struct OciDescriptor {
     pub(crate) media_type: Option<String>,
 }
 
+/// Deserialized OCI image manifest with layer references.
 #[derive(Deserialize)]
 pub(crate) struct OciManifest {
     pub(crate) layers: Vec<OciDescriptor>,

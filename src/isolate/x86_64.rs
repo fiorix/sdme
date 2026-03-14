@@ -1,31 +1,31 @@
-// x86_64.rs: Machine code emitter for the isolate binary (x86_64)
-//
-// Emits raw x86_64 machine code that performs:
-//   Parent process:
-//     1. Parse argc/argv from the Linux process stack
-//     2. atoi(argv[1]) -> uid, atoi(argv[2]) -> gid
-//     3. unshare(CLONE_NEWPID | CLONE_NEWIPC)
-//     4. fork()
-//     5. Parent: ignore signals (SIGTERM, SIGINT, SIGHUP, SIGQUIT),
-//        wait4(child), exit with child's status
-//     6. Child: mount("proc", "/proc", "proc", MS_NOSUID|MS_NODEV|MS_NOEXEC, NULL)
-//     7. Child: prctl(PR_CAPBSET_DROP, CAP_SYS_ADMIN)
-//     8. Child: if uid > 0: setgroups(0, NULL) -> setgid(gid) -> setuid(uid)
-//     9. Child: chdir(argv[3])
-//    10. Child: execve(argv[4], &argv[4..], envp)
-//
-// Linux x86_64 syscall ABI:
-//   rax = syscall number
-//   rdi, rsi, rdx, r10, r8, r9 = arguments
-//   syscall instruction; return in rax (negative = -errno)
-//
-// Linux process startup ABI (no libc, _start):
-//   [rsp+0]  = argc
-//   [rsp+8]  = argv[0]
-//   [rsp+16] = argv[1]
-//   ...
-//   NULL
-//   envp[0], envp[1], ..., NULL
+//! Machine code emitter for the isolate binary (x86_64)
+//!
+//! Emits raw x86_64 machine code that performs:
+//!   Parent process:
+//!     1. Parse argc/argv from the Linux process stack
+//!     2. atoi(argv[1]) -> uid, atoi(argv[2]) -> gid
+//!     3. unshare(CLONE_NEWPID | CLONE_NEWIPC)
+//!     4. fork()
+//!     5. Parent: ignore signals (SIGTERM, SIGINT, SIGHUP, SIGQUIT),
+//!        wait4(child), exit with child's status
+//!     6. Child: mount("proc", "/proc", "proc", MS_NOSUID|MS_NODEV|MS_NOEXEC, NULL)
+//!     7. Child: prctl(PR_CAPBSET_DROP, CAP_SYS_ADMIN)
+//!     8. Child: if uid > 0: setgroups(0, NULL) -> setgid(gid) -> setuid(uid)
+//!     9. Child: chdir(argv[3])
+//!    10. Child: execve(argv[4], &argv[4..], envp)
+//!
+//! Linux x86_64 syscall ABI:
+//!   rax = syscall number
+//!   rdi, rsi, rdx, r10, r8, r9 = arguments
+//!   syscall instruction; return in rax (negative = -errno)
+//!
+//! Linux process startup ABI (no libc, _start):
+//!   [rsp+0]  = argc
+//!   [rsp+8]  = argv[0]
+//!   [rsp+16] = argv[1]
+//!   ...
+//!   NULL
+//!   envp[0], envp[1], ..., NULL
 
 // Syscall numbers
 const SYS_WRITE: u8 = 1;
@@ -269,7 +269,7 @@ const fn rex(w: bool, r: bool, x: bool, b: bool) -> u8 {
 /// SIB byte for [rsp+disp] addressing (index=none, base=rsp)
 const SIB_RSP: u8 = 0x24;
 
-/// Generate the complete x86_64 machine code for isolate.
+/// Generate the complete x86_64 machine code for the isolate binary.
 pub fn generate() -> Vec<u8> {
     let mut a = Asm::new();
 

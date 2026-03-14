@@ -26,8 +26,8 @@ struct Cli {
     #[arg(short, long, global = true)]
     verbose: bool,
 
-    /// Path to config file (default: ~/.config/sdme/sdmerc)
-    #[arg(short, long, global = true)]
+    /// Path to config file (default: /etc/sdme.conf)
+    #[arg(long, global = true)]
     config: Option<PathBuf>,
 
     #[command(subcommand)]
@@ -1221,7 +1221,7 @@ fn main() -> Result<()> {
     let config_path = cli.config.as_deref();
 
     if cli.verbose {
-        let resolved = config::resolve_path(config_path)?;
+        let resolved = config::resolve_path(config_path);
         eprintln!("config: {}", resolved.display());
     }
 
