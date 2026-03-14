@@ -101,6 +101,24 @@ sudo sdme kube apply -f pod.yaml --base-fs ubuntu
 See [Kubernetes pod support](docs/architecture.md#11-kubernetes-pod-support)
 for the full spec.
 
+### 5. Export rootfs and containers for sharing or VM boot
+
+Export any imported rootfs or container filesystem as a directory, tarball, or
+raw disk image. Copy containers to other machines, share rootfs templates, or
+produce bootable VM images for hypervisors like Cloud Hypervisor and QEMU.
+
+```bash
+# Export a rootfs as a tarball
+sudo sdme fs export ubuntu ubuntu.tar.zst
+
+# Export a container's filesystem (stop it first for consistency)
+sudo sdme fs export --container <name> container.tar.gz
+
+# Export as a raw disk image for VM boot
+sudo sdme fs export ubuntu ubuntu.raw --format raw
+sudo sdme fs export --container <name> vm.raw --format raw
+```
+
 ## Further reading
 
 - [docs/usage.md](docs/usage.md): install, lifecycle, rootfs management,
