@@ -25,8 +25,8 @@ PKGNAME="sdme"
 # Locate pre-built artifacts
 BINARY="$PROJECT_DIR/target/$TARGET/release/sdme"
 MANPAGE="$PROJECT_DIR/dist/sdme.1"
-COMPLETIONS_DIR="$PROJECT_DIR/dist/completions"
-APPARMOR_DIR="$PROJECT_DIR/dist/apparmor"
+COMPLETIONS_DIR="$PROJECT_DIR/dist/out/completions"
+APPARMOR_DIR="$PROJECT_DIR/dist/out/apparmor"
 INSTALL_FILE="$PROJECT_DIR/dist/arch/sdme.install"
 
 for f in "$BINARY" "$MANPAGE" "$COMPLETIONS_DIR/sdme.bash" "$COMPLETIONS_DIR/_sdme" \

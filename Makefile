@@ -14,11 +14,11 @@ install-man:
 
 install-completions:
 	install -dm755 $(DESTDIR)/share/bash-completion/completions
-	target/release/sdme completions bash > $(DESTDIR)/share/bash-completion/completions/sdme
+	target/release/sdme config completions bash > $(DESTDIR)/share/bash-completion/completions/sdme
 	install -dm755 $(DESTDIR)/share/zsh/site-functions
-	target/release/sdme completions zsh > $(DESTDIR)/share/zsh/site-functions/_sdme
+	target/release/sdme config completions zsh > $(DESTDIR)/share/zsh/site-functions/_sdme
 	install -dm755 $(DESTDIR)/share/fish/vendor_completions.d
-	target/release/sdme completions fish > $(DESTDIR)/share/fish/vendor_completions.d/sdme.fish
+	target/release/sdme config completions fish > $(DESTDIR)/share/fish/vendor_completions.d/sdme.fish
 
 uninstall: uninstall-man uninstall-completions
 	rm -f $(DESTDIR)/bin/sdme
@@ -31,23 +31,23 @@ uninstall-completions:
 	rm -f $(DESTDIR)/share/zsh/site-functions/_sdme
 	rm -f $(DESTDIR)/share/fish/vendor_completions.d/sdme.fish
 
-dist/completions: all
-	mkdir -p dist/completions
-	target/release/sdme completions bash > dist/completions/sdme.bash
-	target/release/sdme completions zsh > dist/completions/_sdme
-	target/release/sdme completions fish > dist/completions/sdme.fish
+dist/out/completions: all
+	mkdir -p dist/out/completions
+	target/release/sdme config completions bash > dist/out/completions/sdme.bash
+	target/release/sdme config completions zsh > dist/out/completions/_sdme
+	target/release/sdme config completions fish > dist/out/completions/sdme.fish
 
-deb: dist/completions
+deb: dist/out/completions
 	cargo deb --no-build
 
-rpm: dist/completions
+rpm: dist/out/completions
 	cargo generate-rpm
 
-pkg: dist/completions
+pkg: dist/out/completions
 	./dist/arch/build-pkg.sh
 
 clean:
 	cargo clean
-	rm -rf dist
+	rm -rf dist/out
 
 .PHONY: all install install-extras install-man install-completions uninstall uninstall-man uninstall-completions deb rpm pkg clean

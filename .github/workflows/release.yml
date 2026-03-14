@@ -101,11 +101,11 @@ jobs:
       - name: Generate completions and AppArmor profile
         run: |
           chmod +x /tmp/sdme-bin/sdme
-          mkdir -p dist/completions dist/apparmor
-          /tmp/sdme-bin/sdme config completions bash > dist/completions/sdme.bash
-          /tmp/sdme-bin/sdme config completions zsh > dist/completions/_sdme
-          /tmp/sdme-bin/sdme config completions fish > dist/completions/sdme.fish
-          /tmp/sdme-bin/sdme config apparmor-profile > dist/apparmor/sdme-default
+          mkdir -p dist/out/completions dist/out/apparmor
+          /tmp/sdme-bin/sdme config completions bash > dist/out/completions/sdme.bash
+          /tmp/sdme-bin/sdme config completions zsh > dist/out/completions/_sdme
+          /tmp/sdme-bin/sdme config completions fish > dist/out/completions/sdme.fish
+          /tmp/sdme-bin/sdme config apparmor-profile > dist/out/apparmor/sdme-default
 
       - name: Ensure binaries are executable
         run: chmod +x target/${{ matrix.target }}/release/sdme

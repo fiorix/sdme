@@ -1,4 +1,3 @@
 /target
-/dist/completions/
-/dist/apparmor/
+/dist/out/
 /test/reports/
