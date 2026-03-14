@@ -903,19 +903,32 @@ const CGROUP_INNER_PATHS: &[&str] = &[
 
 /// Locate the cgroup directory for the OCI app's systemd service inside
 /// the container's cgroup hierarchy (cgroups v2).
+///
+/// Tries two cgroup root patterns:
+/// - `sdme@{name}.service` (systemd < 257, template unit cgroup)
+/// - `machine-{escaped}.scope` (systemd >= 257, machine scope cgroup)
 fn find_oci_service_cgroup(name: &str, app_name: &str) -> Result<PathBuf> {
     let service_name = format!("sdme-oci-{app_name}.service");
-    let container_cgroup =
-        PathBuf::from(format!("/sys/fs/cgroup/machine.slice/sdme@{name}.service"));
-    for inner in CGROUP_INNER_PATHS {
-        let candidate = container_cgroup.join(inner).join(&service_name);
-        if candidate.is_dir() {
-            return Ok(candidate);
+    let machine_slice = PathBuf::from("/sys/fs/cgroup/machine.slice");
+
+    // systemd >= 257 uses machine-{name}.scope with hyphens escaped as \x2d.
+    let escaped_name = name.replace('-', "\\x2d");
+    let cgroup_roots = [
+        machine_slice.join(format!("sdme@{name}.service")),
+        machine_slice.join(format!("machine-{escaped_name}.scope")),
+    ];
+
+    for root in &cgroup_roots {
+        for inner in CGROUP_INNER_PATHS {
+            let candidate = root.join(inner).join(&service_name);
+            if candidate.is_dir() {
+                return Ok(candidate);
+            }
         }
     }
     bail!(
         "cgroup for {service_name} not found under {}",
-        container_cgroup.display()
+        machine_slice.display()
     )
 }
 
