@@ -213,6 +213,13 @@ pub fn remove(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
     // `sdme create --fs <name>` will fail with "fs not found" instead
     // of creating a container with a dangling reference.
     let removing_path = datadir.join("fs").join(format!(".{name}.removing"));
+
+    // Clean up a leftover staging dir from a previous failed removal.
+    if removing_path.exists() {
+        let _ = make_removable(&removing_path);
+        let _ = fs::remove_dir_all(&removing_path);
+    }
+
     fs::rename(&rootfs_path, &removing_path).with_context(|| {
         format!(
             "failed to rename {} to {}",
