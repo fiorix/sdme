@@ -787,9 +787,11 @@ impl ChrootGuard {
     }
 
     fn cleanup(&mut self) {
-        // Unmount in reverse order.
+        // Unmount in reverse order. Use -R (recursive) because package
+        // managers inside the chroot may create submounts (e.g. /dev/shm,
+        // /dev/mqueue) that prevent a plain umount from succeeding.
         for mount_point in self.mounts.drain(..).rev() {
-            match Command::new("umount").arg(&mount_point).status() {
+            match Command::new("umount").arg("-R").arg(&mount_point).status() {
                 Ok(s) if !s.success() => {
                     eprintln!("warning: failed to unmount {}", mount_point.display());
                 }
