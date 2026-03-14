@@ -571,7 +571,9 @@ to select the filesystem type for raw disk images
 .RI ( ext4
 or
 .IR btrfs ;
-default:
+default: config
+.BR default_export_fs ,
+initially
 .BR ext4 ).
 .SS sdme fs cache info
 Show the OCI blob cache location, total size, and blob count.

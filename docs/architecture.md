@@ -1335,6 +1335,7 @@ sdme stores its settings in a TOML file at `/etc/sdme.conf`:
 | `host_rootfs_opaque_dirs` | `/etc/systemd/system,/var/log`   |
 | `hardened_drop_caps`      | `CAP_SYS_PTRACE,CAP_NET_RAW,...` |
 | `default_base_fs`         | (empty)                          |
+| `default_export_fs`       | `ext4`                           |
 | `docker_user`             | (empty)                          |
 | `docker_token`            | (empty)                          |
 | `oci_cache_dir`           | (empty = `{datadir}/cache/oci`)  |
@@ -1349,6 +1350,8 @@ sdme stores its settings in a TOML file at `/etc/sdme.conf`:
   containers (empty string disables).
 - `hardened_drop_caps`: capabilities dropped by `--hardened`.
 - `default_base_fs`: default base rootfs for OCI app images.
+- `default_export_fs`: filesystem type for raw disk image export
+  (`ext4` or `btrfs`).
 - `docker_user`: Docker Hub username for authenticated pulls.
 - `docker_token`: Docker Hub personal access token.
 - `oci_cache_dir`: OCI blob cache directory.

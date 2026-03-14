@@ -48,6 +48,10 @@ pub struct Config {
     #[serde(default)]
     pub docker_token: String,
 
+    /// Default filesystem type for raw disk image export (ext4 or btrfs).
+    #[serde(default = "default_export_fs")]
+    pub default_export_fs: String,
+
     /// OCI blob cache directory (empty = {datadir}/cache/oci).
     #[serde(default)]
     pub oci_cache_dir: String,
@@ -81,6 +85,10 @@ fn default_hardened_drop_caps() -> String {
     crate::security::HARDENED_DROP_CAPS.join(",")
 }
 
+fn default_export_fs() -> String {
+    "ext4".to_string()
+}
+
 fn default_oci_cache_max_size() -> String {
     "10G".to_string()
 }
@@ -95,6 +103,7 @@ impl Default for Config {
             host_rootfs_opaque_dirs: default_host_rootfs_opaque_dirs(),
             hardened_drop_caps: default_hardened_drop_caps(),
             default_base_fs: String::new(),
+            default_export_fs: default_export_fs(),
             docker_user: String::new(),
             docker_token: String::new(),
             oci_cache_dir: String::new(),
@@ -115,6 +124,7 @@ impl Config {
         println!("host_rootfs_opaque_dirs = {}", self.host_rootfs_opaque_dirs);
         println!("hardened_drop_caps = {}", self.hardened_drop_caps);
         println!("default_base_fs = {}", self.default_base_fs);
+        println!("default_export_fs = {}", self.default_export_fs);
         println!("docker_user = {}", self.docker_user);
         let docker_token_display = if self.docker_token.is_empty() {
             String::new()

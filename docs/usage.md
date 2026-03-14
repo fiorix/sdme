@@ -357,7 +357,8 @@ Supported tarball formats: `.tar`, `.tar.gz`/`.tgz`, `.tar.bz2`/`.tbz2`,
 (e.g. `sdme fs export ubuntu /tmp/output -f tar.gz`).
 
 Raw disk images are bare ext4 (default) or btrfs filesystems (no partition
-table), selectable with `--filesystem`. The size
+table), selectable with `--filesystem`. The default can be changed with
+`sdme config set default_export_fs btrfs`. The size
 is auto-calculated as `max(256M, content * 1.5)` unless overridden with
 `--size`. Container exports: running containers are exported from the live
 filesystem (with a consistency warning); stopped containers have overlayfs

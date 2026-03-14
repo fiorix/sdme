@@ -512,9 +512,9 @@ EXAMPLE:
         /// Override disk image size for raw format (auto-calculated if omitted; e.g. "2G")
         #[arg(short, long)]
         size: Option<String>,
-        /// Filesystem type for raw disk images (ext4 or btrfs; default: ext4)
-        #[arg(long, default_value = "ext4")]
-        filesystem: String,
+        /// Filesystem type for raw disk images (ext4 or btrfs; default: config default_export_fs)
+        #[arg(long)]
+        filesystem: Option<String>,
     },
     /// Manage the OCI blob cache
     #[command(subcommand)]
@@ -1299,6 +1299,15 @@ fn main() -> Result<()> {
                             sdme::validate_name(&value)?;
                         }
                         cfg.default_base_fs = value;
+                    }
+                    "default_export_fs" => {
+                        match value.as_str() {
+                            "ext4" | "btrfs" => {}
+                            other => {
+                                bail!("invalid default_export_fs '{other}': expected ext4 or btrfs")
+                            }
+                        }
+                        cfg.default_export_fs = value;
                     }
                     "docker_user" => {
                         cfg.docker_user = value;
@@ -2243,9 +2252,10 @@ fn main() -> Result<()> {
                 filesystem,
             } => {
                 let fmt = export::detect_format(&output, format.as_deref())?;
+                let fs_str = filesystem.as_deref().unwrap_or(&cfg.default_export_fs);
                 let fmt = match fmt {
                     export::ExportFormat::Raw(_) => {
-                        let fs_type = match filesystem.as_str() {
+                        let fs_type = match fs_str {
                             "ext4" => export::RawFs::Ext4,
                             "btrfs" => export::RawFs::Btrfs,
                             other => bail!("unknown filesystem '{other}': expected ext4 or btrfs"),
@@ -2253,7 +2263,7 @@ fn main() -> Result<()> {
                         export::ExportFormat::Raw(fs_type)
                     }
                     _ => {
-                        if filesystem != "ext4" {
+                        if filesystem.is_some() {
                             bail!("--filesystem only applies to raw disk image format");
                         }
                         fmt
