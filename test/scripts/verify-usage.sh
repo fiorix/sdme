@@ -326,7 +326,7 @@ test_oci_apps() {
             fi
 
             # sdme logs --oci
-            if output=$(timeout "$TIMEOUT_TEST" $SDME logs --oci "$nginx_ct" --no-pager -n 5 2>&1); then
+            if output=$(timeout "$TIMEOUT_TEST" $SDME logs --oci -- "$nginx_ct" --no-pager -n 5 2>&1); then
                 record "oci/nginx-logs" PASS
             else
                 record "oci/nginx-logs" FAIL "$output"
@@ -367,7 +367,7 @@ test_oci_apps() {
 
             # sdme exec --oci <name> redis-cli ping
             local reply
-            reply=$(timeout "$TIMEOUT_TEST" $SDME exec --oci "$redis_ct" \
+            reply=$(timeout "$TIMEOUT_TEST" $SDME exec --oci -- "$redis_ct" \
                 /usr/local/bin/redis-cli ping 2>&1) || true
             if [[ "$reply" == *"PONG"* ]]; then
                 record "oci/redis-exec-oci" PASS
@@ -409,7 +409,7 @@ test_oci_apps() {
             sleep 10
 
             # Verify the env var took effect: pg_isready should succeed
-            if output=$(timeout "$TIMEOUT_TEST" $SDME exec --oci "$pg_ct" \
+            if output=$(timeout "$TIMEOUT_TEST" $SDME exec --oci -- "$pg_ct" \
                     /bin/sh -c 'pg_isready -h 127.0.0.1 -p 5432' 2>&1); then
                 record "oci/pg-env" PASS
             else

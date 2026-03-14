@@ -327,7 +327,7 @@ HTMLEOF
         fi
 
         # -- Check OCI app logs via sdme logs --oci --
-        if output=$(timeout "$TIMEOUT_TEST" sdme logs --oci "$ct_name" --no-pager -n 5 2>&1); then
+        if output=$(timeout "$TIMEOUT_TEST" sdme logs --oci -- "$ct_name" --no-pager -n 5 2>&1); then
             record "$distro/oci-logs" PASS
         else
             record "$distro/oci-logs" FAIL "$output"

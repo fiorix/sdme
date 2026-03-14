@@ -296,12 +296,12 @@ app_verify() {
             fi
             ;;
         postgresql)
-            timeout 10 sdme exec --oci "$ct_name" \
+            timeout 10 sdme exec --oci -- "$ct_name" \
                 /bin/sh -c 'pg_isready -h 127.0.0.1 -p 5432' 2>&1
             ;;
         redis)
             local reply
-            reply=$(timeout 10 sdme exec --oci "$ct_name" \
+            reply=$(timeout 10 sdme exec --oci -- "$ct_name" \
                 /usr/local/bin/redis-cli ping 2>&1) || true
             if [[ "$reply" == *"PONG"* ]]; then
                 return 0
@@ -420,7 +420,7 @@ phase3_apps() {
             fi
 
             # Logs
-            if output=$(timeout "$TIMEOUT_TEST" sdme logs --oci "$ct_name" --no-pager -n 10 2>&1); then
+            if output=$(timeout "$TIMEOUT_TEST" sdme logs --oci -- "$ct_name" --no-pager -n 10 2>&1); then
                 record "app/$app-on-$distro/logs" PASS
             else
                 record "app/$app-on-$distro/logs" FAIL "$output"
