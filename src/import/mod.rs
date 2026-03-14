@@ -85,12 +85,8 @@ pub struct ImportOptions<'a> {
     pub docker_credentials: Option<(&'a str, &'a str)>,
     /// OCI blob cache for registry downloads.
     pub cache: &'a crate::oci::cache::BlobCache,
-    /// HTTP connect/resolve timeout in seconds.
-    pub http_timeout: u64,
-    /// HTTP body receive timeout in seconds.
-    pub http_body_timeout: u64,
-    /// Maximum download size in bytes (0 = unlimited).
-    pub max_download_size: u64,
+    /// HTTP configuration for downloads and OCI pulls.
+    pub http: crate::config::HttpConfig,
 }
 
 // --- Source detection ---
@@ -447,15 +443,13 @@ fn download_file(
     url: &str,
     dest: &Path,
     verbose: bool,
-    connect_timeout: u64,
-    body_timeout: u64,
-    max_download_size: u64,
+    http: &crate::config::HttpConfig,
 ) -> Result<Option<String>> {
     if verbose {
         eprintln!("downloading {url}");
     }
 
-    let agent = build_http_agent(verbose, connect_timeout, body_timeout)?;
+    let agent = build_http_agent(verbose, http.connect_timeout, http.body_timeout)?;
     let response = agent
         .get(url)
         .call()
@@ -479,10 +473,10 @@ fn download_file(
         std::io::Write::write_all(&mut file, &buf[..n])
             .with_context(|| format!("failed to write download to {}", dest.display()))?;
         total += n as u64;
-        if max_download_size > 0 && total > max_download_size {
+        if http.max_download_size > 0 && total > http.max_download_size {
             bail!(
                 "download from {url} exceeds maximum size of {} bytes",
-                max_download_size
+                http.max_download_size
             );
         }
     }
@@ -504,21 +498,12 @@ fn import_url(
     rootfs_dir: &Path,
     name: &str,
     verbose: bool,
-    connect_timeout: u64,
-    body_timeout: u64,
-    max_download_size: u64,
+    http: &crate::config::HttpConfig,
 ) -> Result<()> {
     let temp_file = rootfs_dir.join(format!(".{name}.download"));
 
     let result = (|| -> Result<()> {
-        let content_type = download_file(
-            url,
-            &temp_file,
-            verbose,
-            connect_timeout,
-            body_timeout,
-            max_download_size,
-        )?;
+        let content_type = download_file(url, &temp_file, verbose, http)?;
 
         // Tier 1: Content-Type header.
         let kind = content_type
@@ -1044,9 +1029,7 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
         base_fs,
         docker_credentials,
         cache,
-        http_timeout,
-        http_body_timeout,
-        max_download_size,
+        ref http,
     } = *opts;
 
     validate_name(name)?;
@@ -1086,16 +1069,7 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
         SourceKind::Tarball(ref path) => tar::import_tarball(path, &staging_dir, verbose),
         SourceKind::QcowImage(ref path) => img::import_qcow2(path, &staging_dir, verbose),
         SourceKind::RawImage(ref path) => img::import_raw(path, &staging_dir, verbose),
-        SourceKind::Url(ref url) => import_url(
-            url,
-            &staging_dir,
-            &rootfs_dir,
-            name,
-            verbose,
-            http_timeout,
-            http_body_timeout,
-            max_download_size,
-        ),
+        SourceKind::Url(ref url) => import_url(url, &staging_dir, &rootfs_dir, name, verbose, http),
         SourceKind::RegistryImage(ref img) => {
             match crate::oci::registry::import_registry_image(
                 img,
@@ -1103,9 +1077,7 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
                 docker_credentials,
                 cache,
                 verbose,
-                http_timeout,
-                http_body_timeout,
-                max_download_size,
+                http,
             ) {
                 Ok(config) => {
                     oci_config = config;
@@ -1453,9 +1425,11 @@ pub(crate) mod tests {
                 base_fs: None,
                 docker_credentials: None,
                 cache: &cache,
-                http_timeout: cfg.http_timeout,
-                http_body_timeout: cfg.http_body_timeout,
-                max_download_size: 0,
+                http: crate::config::HttpConfig {
+                    connect_timeout: cfg.http_timeout,
+                    body_timeout: cfg.http_body_timeout,
+                    max_download_size: 0,
+                },
             },
         )
     }
@@ -2379,9 +2353,11 @@ pub(crate) mod tests {
                 base_fs: None,
                 docker_credentials: None,
                 cache: &cache,
-                http_timeout: cfg.http_timeout,
-                http_body_timeout: cfg.http_body_timeout,
-                max_download_size: 0,
+                http: crate::config::HttpConfig {
+                    connect_timeout: cfg.http_timeout,
+                    body_timeout: cfg.http_body_timeout,
+                    max_download_size: 0,
+                },
             },
         )
         .unwrap();

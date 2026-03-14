@@ -1959,10 +1959,8 @@ fn main() -> Result<()> {
                 timeout,
                 pod,
                 oci_pod,
-                // TODO: wire security flags into kube_create():
-                // - call parse_security(security, &cfg) to get (sec, hardened)
-                // - if hardened, force private_network = true
-                // - pass SecurityConfig into kube_create() and through to CreateOptions
+                // Known limitation: security flags (--strict, --hardened, etc.)
+                // are not yet wired into kube containers.
                 security: _,
             } => {
                 system_check::check_systemd_version(252)?;
@@ -1991,9 +1989,7 @@ fn main() -> Result<()> {
                     pod.as_deref(),
                     oci_pod.as_deref(),
                     cli.verbose,
-                    cfg.http_timeout,
-                    cfg.http_body_timeout,
-                    sdme::parse_size(&cfg.max_download_size)?,
+                    &cfg.http_config()?,
                 )?;
                 eprintln!("starting '{name}'");
                 let boot_result = (|| -> Result<()> {
@@ -2022,10 +2018,8 @@ fn main() -> Result<()> {
                 base_fs,
                 pod,
                 oci_pod,
-                // TODO: wire security flags into kube_create():
-                // - call parse_security(security, &cfg) to get (sec, hardened)
-                // - if hardened, force private_network = true
-                // - pass SecurityConfig into kube_create() and through to CreateOptions
+                // Known limitation: security flags (--strict, --hardened, etc.)
+                // are not yet wired into kube containers.
                 security: _,
             } => {
                 system_check::check_systemd_version(252)?;
@@ -2054,9 +2048,7 @@ fn main() -> Result<()> {
                     pod.as_deref(),
                     oci_pod.as_deref(),
                     cli.verbose,
-                    cfg.http_timeout,
-                    cfg.http_body_timeout,
-                    sdme::parse_size(&cfg.max_download_size)?,
+                    &cfg.http_config()?,
                 )?;
                 println!("{name}");
             }
@@ -2202,9 +2194,7 @@ fn main() -> Result<()> {
                         base_fs: effective_base_fs.as_deref(),
                         docker_credentials: docker_creds_ref,
                         cache: &blob_cache,
-                        http_timeout: cfg.http_timeout,
-                        http_body_timeout: cfg.http_body_timeout,
-                        max_download_size: sdme::parse_size(&cfg.max_download_size)?,
+                        http: cfg.http_config()?,
                     },
                 )?;
                 println!("{name}");

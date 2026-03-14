@@ -148,8 +148,9 @@ The `dist/` directory contains both checked-in packaging files and generated bui
 | `machinectl` | `systemd-container` | `sdme join`, `sdme exec`, `sdme new` |
 | `busctl` | `systemd` | Boot-wait D-Bus probe for `--userns` containers |
 | `journalctl` | `systemd` | `sdme logs` |
-| `nsenter` | `util-linux` | `sdme exec --oci` (namespace entry) |
+| `nsenter` | `util-linux` | `sdme exec --oci`, `sdme join --oci` (namespace entry) |
 | `qemu-nbd` | `qemu-utils` | `sdme fs import` (QCOW2 images only) |
+| `mkfs.ext4` | `e2fsprogs` | `sdme fs export` (ext4 raw images, default) |
 | `mkfs.btrfs` | `btrfs-progs` | `sdme fs export` (btrfs raw images only) |
 
 Dependencies are checked at runtime before use via `system_check::check_dependencies()`, which resolves each binary in PATH and prints the resolved path with `-v`.

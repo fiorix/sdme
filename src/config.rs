@@ -148,7 +148,27 @@ impl Default for Config {
     }
 }
 
+/// HTTP-related configuration for downloads and OCI registry pulls.
+#[derive(Debug, Clone)]
+pub struct HttpConfig {
+    /// HTTP connect/resolve timeout in seconds.
+    pub connect_timeout: u64,
+    /// HTTP body receive timeout in seconds.
+    pub body_timeout: u64,
+    /// Maximum download size in bytes (0 = unlimited).
+    pub max_download_size: u64,
+}
+
 impl Config {
+    /// Build an [`HttpConfig`] from this config, parsing the `max_download_size` string.
+    pub fn http_config(&self) -> Result<HttpConfig> {
+        Ok(HttpConfig {
+            connect_timeout: self.http_timeout,
+            body_timeout: self.http_body_timeout,
+            max_download_size: crate::parse_size(&self.max_download_size)?,
+        })
+    }
+
     /// Print all configuration values to stdout.
     pub fn display(&self) {
         let interactive = if self.interactive { "yes" } else { "no" };

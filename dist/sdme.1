@@ -1006,6 +1006,47 @@ and
 .BR "sdme kube create" .
 Default: empty (not set).
 .TP
+.B default_export_fs
+String.
+Default filesystem type for raw disk image export.
+Accepted values:
+.B ext4
+or
+.BR btrfs .
+Default:
+.BR ext4 .
+.TP
+.B docker_user
+String.
+Docker Hub username for authenticated image pulls.
+Increases rate limits and grants access to private repositories.
+Default: empty (anonymous pulls).
+.TP
+.B docker_token
+String.
+Docker Hub personal access token for authenticated image pulls.
+Used together with
+.BR docker_user .
+Default: empty.
+.TP
+.B oci_cache_dir
+String.
+Directory for the OCI blob cache.
+When empty, defaults to
+.IR {datadir}/cache/oci .
+Default: empty.
+.TP
+.B oci_cache_max_size
+String.
+Maximum size of the OCI blob cache.
+Uses the same size syntax as other options (e.g.\&
+.IR 10G ", " 5G ).
+Set to
+.B 0
+to disable caching.
+Default:
+.BR 10G .
+.TP
 .B tasks_max
 Integer.
 Maximum number of tasks (processes/threads) allowed per container,

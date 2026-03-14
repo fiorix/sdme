@@ -263,6 +263,7 @@ fn do_copy(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_build(
     datadir: &Path,
     container_name: &str,

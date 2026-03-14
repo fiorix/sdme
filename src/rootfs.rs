@@ -292,9 +292,11 @@ mod tests {
                 base_fs: None,
                 docker_credentials: None,
                 cache: &cache,
-                http_timeout: cfg.http_timeout,
-                http_body_timeout: cfg.http_body_timeout,
-                max_download_size: 0,
+                http: crate::config::HttpConfig {
+                    connect_timeout: cfg.http_timeout,
+                    body_timeout: cfg.http_body_timeout,
+                    max_download_size: 0,
+                },
             },
         )
     }

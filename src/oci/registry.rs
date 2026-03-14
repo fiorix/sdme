@@ -707,21 +707,19 @@ pub(crate) fn import_registry_image(
     docker_credentials: Option<(&str, &str)>,
     cache: &crate::oci::cache::BlobCache,
     verbose: bool,
-    http_timeout: u64,
-    http_body_timeout: u64,
-    max_download_size: u64,
+    http: &crate::config::HttpConfig,
 ) -> Result<Option<OciContainerConfig>> {
     eprintln!("pulling {image}");
 
-    let agent = build_http_agent(verbose, http_timeout, http_body_timeout)?;
+    let agent = build_http_agent(verbose, http.connect_timeout, http.body_timeout)?;
     let token = obtain_token(
         &agent,
         &image.registry,
         &image.repository,
         docker_credentials,
         verbose,
-        http_timeout,
-        http_body_timeout,
+        http.connect_timeout,
+        http.body_timeout,
     )?;
     let token_ref = token.as_deref();
 
@@ -819,7 +817,7 @@ pub(crate) fn import_registry_image(
                 token_ref,
                 cache,
                 verbose,
-                max_download_size,
+                http.max_download_size,
             )?;
 
             let decoder = open_decoder(&temp_path)?;
@@ -1094,17 +1092,8 @@ mod tests {
         let image = ImageReference::parse("quay.io/centos-bootc/centos-bootc:stream10").unwrap();
         let cfg = crate::config::Config::default();
         let cache = crate::oci::cache::BlobCache::from_config(&cfg).unwrap();
-        import_registry_image(
-            &image,
-            &dest,
-            None,
-            &cache,
-            true,
-            30,
-            300,
-            50 * 1024 * 1024 * 1024,
-        )
-        .unwrap();
+        let http = cfg.http_config().unwrap();
+        import_registry_image(&image, &dest, None, &cache, true, &http).unwrap();
 
         // Basic sanity checks.
         assert!(dest.is_dir());
