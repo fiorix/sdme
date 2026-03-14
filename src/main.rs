@@ -751,10 +751,11 @@ fn for_each_container(
 fn start_and_await_boot(
     datadir: &std::path::Path,
     name: &str,
+    tasks_max: u32,
     boot_timeout: std::time::Duration,
     verbose: bool,
 ) -> Result<()> {
-    systemd::start(datadir, name, verbose)?;
+    systemd::start(datadir, name, tasks_max, verbose)?;
     if let Err(e) = systemd::await_boot(name, boot_timeout, verbose) {
         sdme::reset_interrupt();
         eprintln!("boot failed, stopping '{name}'");
@@ -1309,6 +1310,15 @@ fn main() -> Result<()> {
                         }
                         cfg.default_export_fs = value;
                     }
+                    "tasks_max" => {
+                        let v: u32 = value
+                            .parse()
+                            .context("tasks_max must be a positive integer")?;
+                        if v == 0 {
+                            bail!("tasks_max must be greater than 0");
+                        }
+                        cfg.tasks_max = v;
+                    }
                     "docker_user" => {
                         cfg.docker_user = value;
                     }
@@ -1328,6 +1338,25 @@ fn main() -> Result<()> {
                         sdme::parse_size(&value)
                             .with_context(|| format!("invalid oci_cache_max_size: {value}"))?;
                         cfg.oci_cache_max_size = value;
+                    }
+                    "http_timeout" => {
+                        let v: u64 = value
+                            .parse()
+                            .context("http_timeout must be a number of seconds")?;
+                        cfg.http_timeout = v;
+                    }
+                    "http_body_timeout" => {
+                        let v: u64 = value
+                            .parse()
+                            .context("http_body_timeout must be a number of seconds")?;
+                        cfg.http_body_timeout = v;
+                    }
+                    "max_download_size" => {
+                        if value != "0" {
+                            sdme::parse_size(&value)
+                                .with_context(|| format!("invalid max_download_size: {value}"))?;
+                        }
+                        cfg.max_download_size = value;
                     }
                     _ => bail!("unknown config key: {key}"),
                 }
@@ -1416,7 +1445,7 @@ fn main() -> Result<()> {
 
             eprintln!("creating '{name}'");
             if enable {
-                systemd::enable(&cfg.datadir, &name, cli.verbose)?;
+                systemd::enable(&cfg.datadir, &name, cfg.tasks_max, cli.verbose)?;
                 eprintln!("enabled '{name}' for auto-start on boot");
             }
             println!("{name}");
@@ -1476,7 +1505,7 @@ fn main() -> Result<()> {
             let verbose = cli.verbose;
             for_each_container(datadir, &targets, "starting", "started", |name| {
                 containers::ensure_exists(datadir, name)?;
-                start_and_await_boot(datadir, name, boot_timeout, verbose)
+                start_and_await_boot(datadir, name, cfg.tasks_max, boot_timeout, verbose)
             })?;
         }
         Command::Enable { names } => {
@@ -1484,7 +1513,7 @@ fn main() -> Result<()> {
             let verbose = cli.verbose;
             for_each_container(datadir, &names, "enabling", "enabled", |name| {
                 containers::ensure_exists(datadir, name)?;
-                systemd::enable(datadir, name, verbose)
+                systemd::enable(datadir, name, cfg.tasks_max, verbose)
             })?;
         }
         Command::Disable { names } => {
@@ -1523,7 +1552,13 @@ fn main() -> Result<()> {
                 eprintln!("starting '{name}'");
                 let boot_timeout =
                     std::time::Duration::from_secs(timeout.unwrap_or(cfg.boot_timeout));
-                start_and_await_boot(&cfg.datadir, &name, boot_timeout, cli.verbose)?;
+                start_and_await_boot(
+                    &cfg.datadir,
+                    &name,
+                    cfg.tasks_max,
+                    boot_timeout,
+                    cli.verbose,
+                )?;
             }
 
             if let Some(ref oci_app) = oci {
@@ -1682,7 +1717,7 @@ fn main() -> Result<()> {
             eprintln!("creating '{name}'");
 
             if enable {
-                systemd::enable(&cfg.datadir, &name, cli.verbose)?;
+                systemd::enable(&cfg.datadir, &name, cfg.tasks_max, cli.verbose)?;
                 eprintln!("enabled '{name}' for auto-start on boot");
             }
 
@@ -1694,7 +1729,7 @@ fn main() -> Result<()> {
 
             eprintln!("starting '{name}'");
             let boot_result = (|| -> Result<()> {
-                systemd::start(&cfg.datadir, &name, cli.verbose)?;
+                systemd::start(&cfg.datadir, &name, cfg.tasks_max, cli.verbose)?;
                 let boot_timeout =
                     std::time::Duration::from_secs(timeout.unwrap_or(cfg.boot_timeout));
                 systemd::await_boot(&name, boot_timeout, cli.verbose)?;
@@ -1956,10 +1991,13 @@ fn main() -> Result<()> {
                     pod.as_deref(),
                     oci_pod.as_deref(),
                     cli.verbose,
+                    cfg.http_timeout,
+                    cfg.http_body_timeout,
+                    sdme::parse_size(&cfg.max_download_size)?,
                 )?;
                 eprintln!("starting '{name}'");
                 let boot_result = (|| -> Result<()> {
-                    systemd::start(&cfg.datadir, &name, cli.verbose)?;
+                    systemd::start(&cfg.datadir, &name, cfg.tasks_max, cli.verbose)?;
                     let boot_timeout =
                         std::time::Duration::from_secs(timeout.unwrap_or(cfg.boot_timeout));
                     systemd::await_boot(&name, boot_timeout, cli.verbose)?;
@@ -2016,6 +2054,9 @@ fn main() -> Result<()> {
                     pod.as_deref(),
                     oci_pod.as_deref(),
                     cli.verbose,
+                    cfg.http_timeout,
+                    cfg.http_body_timeout,
+                    sdme::parse_size(&cfg.max_download_size)?,
                 )?;
                 println!("{name}");
             }
@@ -2161,6 +2202,9 @@ fn main() -> Result<()> {
                         base_fs: effective_base_fs.as_deref(),
                         docker_credentials: docker_creds_ref,
                         cache: &blob_cache,
+                        http_timeout: cfg.http_timeout,
+                        http_body_timeout: cfg.http_body_timeout,
+                        max_download_size: sdme::parse_size(&cfg.max_download_size)?,
                     },
                 )?;
                 println!("{name}");
@@ -2238,6 +2282,7 @@ fn main() -> Result<()> {
                     &name,
                     &config,
                     boot_timeout,
+                    cfg.tasks_max,
                     force,
                     cli.verbose,
                 )?;

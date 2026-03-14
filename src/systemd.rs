@@ -713,8 +713,8 @@ pub fn is_active(name: &str) -> Result<bool> {
 }
 
 /// Enable a container to auto-start on boot.
-pub fn enable(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
-    ensure_template_unit(verbose)?;
+pub fn enable(datadir: &Path, name: &str, tasks_max: u32, verbose: bool) -> Result<()> {
+    ensure_template_unit(tasks_max, verbose)?;
     let unit = service_name(name);
     if verbose {
         eprintln!("enabling unit: {unit}");
@@ -830,8 +830,9 @@ pub fn resolve_paths() -> Result<UnitPaths> {
 /// Contains only the Unit section and Service metadata. The actual
 /// ExecStartPre/ExecStart/ExecStopPost commands are written per-container
 /// in a drop-in file by [`write_nspawn_dropin`].
-pub fn unit_template() -> String {
-    r#"[Unit]
+pub fn unit_template(tasks_max: u32) -> String {
+    format!(
+        r#"[Unit]
 Description=sdme container %i
 After=network.target local-fs.target
 
@@ -842,7 +843,7 @@ SuccessExitStatus=133
 ExecStart=/bin/false
 KillMode=mixed
 Delegate=yes
-TasksMax=16384
+TasksMax={tasks_max}
 DevicePolicy=closed
 DeviceAllow=/dev/net/tun rwm
 DeviceAllow=char-pts rw
@@ -851,7 +852,7 @@ TimeoutStartSec=2min
 [Install]
 WantedBy=multi-user.target
 "#
-    .to_string()
+    )
 }
 
 /// Escape an argument for a systemd unit file `ExecStart` line.
@@ -936,9 +937,9 @@ fn write_unit_if_changed(unit_path: &Path, content: &str, verbose: bool) -> Resu
     Ok(true)
 }
 
-fn ensure_template_unit(verbose: bool) -> Result<()> {
+fn ensure_template_unit(tasks_max: u32, verbose: bool) -> Result<()> {
     let unit_path = Path::new("/etc/systemd/system/sdme@.service");
-    let content = unit_template();
+    let content = unit_template(tasks_max);
     if write_unit_if_changed(unit_path, &content, verbose)? {
         dbus::daemon_reload()?;
     }
@@ -1118,8 +1119,8 @@ pub fn remove_limits_dropin(name: &str, verbose: bool) -> Result<()> {
 }
 
 /// Install the template unit, write the drop-in, and start a container via D-Bus.
-pub fn start(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
-    ensure_template_unit(verbose)?;
+pub fn start(datadir: &Path, name: &str, tasks_max: u32, verbose: bool) -> Result<()> {
+    ensure_template_unit(tasks_max, verbose)?;
 
     crate::containers::ensure_permissions(datadir, name)?;
 
@@ -1168,7 +1169,7 @@ mod tests {
 
     #[test]
     fn test_unit_template() {
-        let template = unit_template();
+        let template = unit_template(16384);
         assert!(template.contains("Description=sdme container %i"));
         assert!(template.contains("Type=notify"));
         assert!(!template.contains("Type=simple"));

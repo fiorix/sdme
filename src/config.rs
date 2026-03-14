@@ -52,6 +52,10 @@ pub struct Config {
     #[serde(default = "default_export_fs")]
     pub default_export_fs: String,
 
+    /// Maximum number of tasks (processes/threads) per container.
+    #[serde(default = "default_tasks_max")]
+    pub tasks_max: u32,
+
     /// OCI blob cache directory (empty = {datadir}/cache/oci).
     #[serde(default)]
     pub oci_cache_dir: String,
@@ -59,6 +63,18 @@ pub struct Config {
     /// Maximum OCI blob cache size (e.g. "10G"). "0" disables the cache.
     #[serde(default = "default_oci_cache_max_size")]
     pub oci_cache_max_size: String,
+
+    /// HTTP connect/resolve timeout in seconds for downloads and OCI pulls.
+    #[serde(default = "default_http_timeout")]
+    pub http_timeout: u64,
+
+    /// HTTP body receive timeout in seconds for downloads and OCI pulls.
+    #[serde(default = "default_http_body_timeout")]
+    pub http_body_timeout: u64,
+
+    /// Maximum download size for rootfs imports and OCI pulls (e.g. "50G", "0" = unlimited).
+    #[serde(default = "default_max_download_size")]
+    pub max_download_size: String,
 }
 
 fn default_interactive() -> bool {
@@ -89,8 +105,24 @@ fn default_export_fs() -> String {
     "ext4".to_string()
 }
 
+fn default_tasks_max() -> u32 {
+    16384
+}
+
 fn default_oci_cache_max_size() -> String {
     "10G".to_string()
+}
+
+fn default_http_timeout() -> u64 {
+    30
+}
+
+fn default_http_body_timeout() -> u64 {
+    300
+}
+
+fn default_max_download_size() -> String {
+    "50G".to_string()
 }
 
 impl Default for Config {
@@ -104,10 +136,14 @@ impl Default for Config {
             hardened_drop_caps: default_hardened_drop_caps(),
             default_base_fs: String::new(),
             default_export_fs: default_export_fs(),
+            tasks_max: default_tasks_max(),
             docker_user: String::new(),
             docker_token: String::new(),
             oci_cache_dir: String::new(),
             oci_cache_max_size: default_oci_cache_max_size(),
+            http_timeout: default_http_timeout(),
+            http_body_timeout: default_http_body_timeout(),
+            max_download_size: default_max_download_size(),
         }
     }
 }
@@ -125,6 +161,7 @@ impl Config {
         println!("hardened_drop_caps = {}", self.hardened_drop_caps);
         println!("default_base_fs = {}", self.default_base_fs);
         println!("default_export_fs = {}", self.default_export_fs);
+        println!("tasks_max = {}", self.tasks_max);
         println!("docker_user = {}", self.docker_user);
         let docker_token_display = if self.docker_token.is_empty() {
             String::new()
@@ -143,6 +180,9 @@ impl Config {
         println!("docker_token = {docker_token_display}");
         println!("oci_cache_dir = {}", self.oci_cache_dir);
         println!("oci_cache_max_size = {}", self.oci_cache_max_size);
+        println!("http_timeout = {}", self.http_timeout);
+        println!("http_body_timeout = {}", self.http_body_timeout);
+        println!("max_download_size = {}", self.max_download_size);
     }
 }
 

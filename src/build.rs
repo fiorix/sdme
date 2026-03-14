@@ -270,6 +270,7 @@ fn execute_build(
     config: &BuildConfig,
     opaque_dirs: &[String],
     boot_timeout: u64,
+    tasks_max: u32,
     verbose: bool,
 ) -> Result<()> {
     let mut container_running = false;
@@ -282,7 +283,7 @@ fn execute_build(
             BuildOp::Run { command, lineno } => {
                 if !container_running {
                     eprintln!("starting build container '{container_name}'");
-                    systemd::start(datadir, container_name, verbose)?;
+                    systemd::start(datadir, container_name, tasks_max, verbose)?;
                     systemd::await_boot(container_name, timeout, verbose)?;
                     container_running = true;
                 }
@@ -323,6 +324,7 @@ pub fn build(
     name: &str,
     config_path: &Path,
     boot_timeout: u64,
+    tasks_max: u32,
     force: bool,
     verbose: bool,
 ) -> Result<()> {
@@ -365,6 +367,7 @@ pub fn build(
         &config,
         &create_opts.opaque_dirs,
         boot_timeout,
+        tasks_max,
         verbose,
     ) {
         crate::reset_interrupt();

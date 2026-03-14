@@ -41,6 +41,9 @@ pub fn kube_create(
     pod: Option<&str>,
     oci_pod: Option<&str>,
     verbose: bool,
+    http_timeout: u64,
+    http_body_timeout: u64,
+    max_download_size: u64,
 ) -> Result<String> {
     validate_name(base_fs)?;
     let base_dir = datadir.join("fs").join(base_fs);
@@ -249,6 +252,9 @@ pub fn kube_create(
                 docker_credentials,
                 cache,
                 verbose,
+                http_timeout,
+                http_body_timeout,
+                max_download_size,
             )
             .with_context(|| format!("failed to pull image for container '{}'", kc.name))?
         } else {

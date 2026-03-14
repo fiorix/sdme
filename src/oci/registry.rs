@@ -20,7 +20,7 @@ use crate::check_interrupted;
 
 use super::layout::unpack_oci_layer;
 use super::sorted_keys_csv;
-use crate::import::{build_http_agent, build_http_agent_no_error, open_decoder, MAX_DOWNLOAD_SIZE};
+use crate::import::{build_http_agent, build_http_agent_no_error, open_decoder};
 
 /// Parsed OCI image reference (e.g. `quay.io/centos/centos:stream10`).
 #[derive(Debug, PartialEq)]
@@ -186,6 +186,8 @@ fn obtain_token(
     repository: &str,
     docker_credentials: Option<(&str, &str)>,
     verbose: bool,
+    connect_timeout: u64,
+    body_timeout: u64,
 ) -> Result<Option<String>> {
     let v2_url = format!("https://{registry}/v2/");
     if verbose {
@@ -193,7 +195,7 @@ fn obtain_token(
     }
 
     // Use an agent that doesn't error on non-2xx so we can read 401 headers.
-    let probe_agent = build_http_agent_no_error()?;
+    let probe_agent = build_http_agent_no_error(connect_timeout, body_timeout)?;
     let response = probe_agent
         .get(&v2_url)
         .call()
@@ -606,6 +608,7 @@ fn download_blob(
     token: Option<&str>,
     cache: &crate::oci::cache::BlobCache,
     verbose: bool,
+    max_download_size: u64,
 ) -> Result<()> {
     // Check cache first.
     if let Some(cached_path) = cache.get(digest, verbose) {
@@ -665,10 +668,10 @@ fn download_blob(
             .with_context(|| format!("failed to write blob to {}", dest.display()))?;
         hasher.update(&buf[..n]);
         total += n as u64;
-        if total > MAX_DOWNLOAD_SIZE {
+        if max_download_size > 0 && total > max_download_size {
             bail!(
                 "blob {digest} exceeds maximum download size of {} bytes",
-                MAX_DOWNLOAD_SIZE
+                max_download_size
             );
         }
     }
@@ -704,16 +707,21 @@ pub(crate) fn import_registry_image(
     docker_credentials: Option<(&str, &str)>,
     cache: &crate::oci::cache::BlobCache,
     verbose: bool,
+    http_timeout: u64,
+    http_body_timeout: u64,
+    max_download_size: u64,
 ) -> Result<Option<OciContainerConfig>> {
     eprintln!("pulling {image}");
 
-    let agent = build_http_agent(verbose)?;
+    let agent = build_http_agent(verbose, http_timeout, http_body_timeout)?;
     let token = obtain_token(
         &agent,
         &image.registry,
         &image.repository,
         docker_credentials,
         verbose,
+        http_timeout,
+        http_body_timeout,
     )?;
     let token_ref = token.as_deref();
 
@@ -811,6 +819,7 @@ pub(crate) fn import_registry_image(
                 token_ref,
                 cache,
                 verbose,
+                max_download_size,
             )?;
 
             let decoder = open_decoder(&temp_path)?;
@@ -1085,7 +1094,17 @@ mod tests {
         let image = ImageReference::parse("quay.io/centos-bootc/centos-bootc:stream10").unwrap();
         let cfg = crate::config::Config::default();
         let cache = crate::oci::cache::BlobCache::from_config(&cfg).unwrap();
-        import_registry_image(&image, &dest, None, &cache, true).unwrap();
+        import_registry_image(
+            &image,
+            &dest,
+            None,
+            &cache,
+            true,
+            30,
+            300,
+            50 * 1024 * 1024 * 1024,
+        )
+        .unwrap();
 
         // Basic sanity checks.
         assert!(dest.is_dir());

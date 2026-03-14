@@ -892,6 +892,36 @@ flag can be omitted from
 and
 .BR "sdme kube create" .
 Default: empty (not set).
+.TP
+.B tasks_max
+Maximum number of tasks (processes/threads) per container in the
+systemd template unit.
+Values: positive integer.
+Default:
+.BR 16384 .
+.TP
+.B http_timeout
+HTTP connect and resolve timeout in seconds for downloads and OCI
+registry pulls.
+Values: non\-negative integer.
+Default:
+.BR 30 .
+.TP
+.B http_body_timeout
+HTTP body receive timeout in seconds for downloads and OCI registry
+pulls.
+Values: non\-negative integer.
+Default:
+.BR 300 .
+.TP
+.B max_download_size
+Maximum download size for rootfs imports and OCI pulls (e.g.\&
+.IR 50G ", " 10G ).
+Set to
+.B 0
+for unlimited.
+Default:
+.BR 50G .
 .RE
 .SH CONFIGURATION
 The configuration file is in TOML format, located at
@@ -975,6 +1005,40 @@ flag can be omitted from
 and
 .BR "sdme kube create" .
 Default: empty (not set).
+.TP
+.B tasks_max
+Integer.
+Maximum number of tasks (processes/threads) allowed per container,
+set as
+.B TasksMax=
+in the systemd template unit.
+Default:
+.BR 16384 .
+.TP
+.B http_timeout
+Integer.
+HTTP connect and resolve timeout in seconds for URL downloads and
+OCI registry pulls.
+Default:
+.BR 30 .
+.TP
+.B http_body_timeout
+Integer.
+HTTP body receive timeout in seconds.
+Increase this for large downloads over slow connections.
+Default:
+.BR 300 .
+.TP
+.B max_download_size
+String.
+Maximum size for a single download (rootfs import or OCI blob).
+Uses the same size syntax as other options (e.g.\&
+.IR 50G ", " 10G ).
+Set to
+.B 0
+for unlimited.
+Default:
+.BR 50G .
 .SH FILES
 .TP
 .I /var/lib/sdme/

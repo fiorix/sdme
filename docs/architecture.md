@@ -1336,10 +1336,14 @@ sdme stores its settings in a TOML file at `/etc/sdme.conf`:
 | `hardened_drop_caps`      | `CAP_SYS_PTRACE,CAP_NET_RAW,...` |
 | `default_base_fs`         | (empty)                          |
 | `default_export_fs`       | `ext4`                           |
+| `tasks_max`               | `16384`                          |
 | `docker_user`             | (empty)                          |
 | `docker_token`            | (empty)                          |
 | `oci_cache_dir`           | (empty = `{datadir}/cache/oci`)  |
 | `oci_cache_max_size`      | `10G`                            |
+| `http_timeout`            | `30`                             |
+| `http_body_timeout`       | `300`                            |
+| `max_download_size`       | `50G`                            |
 
 - `interactive`: enable interactive prompts.
 - `datadir`: root directory for all container and rootfs data.
@@ -1352,10 +1356,17 @@ sdme stores its settings in a TOML file at `/etc/sdme.conf`:
 - `default_base_fs`: default base rootfs for OCI app images.
 - `default_export_fs`: filesystem type for raw disk image export
   (`ext4` or `btrfs`).
+- `tasks_max`: maximum tasks (processes/threads) per container
+  in the systemd template unit.
 - `docker_user`: Docker Hub username for authenticated pulls.
 - `docker_token`: Docker Hub personal access token.
 - `oci_cache_dir`: OCI blob cache directory.
 - `oci_cache_max_size`: max cache size (`0` disables).
+- `http_timeout`: HTTP connect/resolve timeout in seconds for
+  downloads and OCI registry pulls.
+- `http_body_timeout`: HTTP body receive timeout in seconds.
+- `max_download_size`: maximum download size for imports and
+  OCI pulls (e.g. `50G`; `0` = unlimited).
 
 Settings are read with `sdme config get` and written with
 `sdme config set <key> <value>`.

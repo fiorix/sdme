@@ -85,6 +85,12 @@ pub struct ImportOptions<'a> {
     pub docker_credentials: Option<(&'a str, &'a str)>,
     /// OCI blob cache for registry downloads.
     pub cache: &'a crate::oci::cache::BlobCache,
+    /// HTTP connect/resolve timeout in seconds.
+    pub http_timeout: u64,
+    /// HTTP body receive timeout in seconds.
+    pub http_body_timeout: u64,
+    /// Maximum download size in bytes (0 = unlimited).
+    pub max_download_size: u64,
 }
 
 // --- Source detection ---
@@ -386,14 +392,18 @@ pub(crate) fn proxy_from_env() -> Option<String> {
 /// blocked `read()` syscalls return `EINTR` immediately on Ctrl+C. The download
 /// loops in `download_file()` and `download_blob()` call `check_interrupted()` on
 /// each iteration, which will catch the flag set by the signal handler.
-pub(crate) fn build_http_agent(verbose: bool) -> Result<ureq::Agent> {
+pub(crate) fn build_http_agent(
+    verbose: bool,
+    connect_timeout: u64,
+    body_timeout: u64,
+) -> Result<ureq::Agent> {
     let mut config = ureq::Agent::config_builder()
         .user_agent("sdme/0.1")
         .redirect_auth_headers(ureq::config::RedirectAuthHeaders::SameHost)
-        .timeout_connect(Some(Duration::from_secs(30)))
-        .timeout_resolve(Some(Duration::from_secs(30)))
-        .timeout_recv_response(Some(Duration::from_secs(60)))
-        .timeout_recv_body(Some(Duration::from_secs(300)));
+        .timeout_connect(Some(Duration::from_secs(connect_timeout)))
+        .timeout_resolve(Some(Duration::from_secs(connect_timeout)))
+        .timeout_recv_response(Some(Duration::from_secs(connect_timeout * 2)))
+        .timeout_recv_body(Some(Duration::from_secs(body_timeout)));
     if let Some(proxy_uri) = proxy_from_env() {
         let redacted = redact_proxy_credentials(&proxy_uri);
         if verbose {
@@ -412,14 +422,17 @@ pub(crate) fn build_http_agent(verbose: bool) -> Result<ureq::Agent> {
 ///
 /// Same proxy/timeout configuration as [`build_http_agent`], but with
 /// `http_status_as_error(false)` so callers can inspect non-2xx responses.
-pub(crate) fn build_http_agent_no_error() -> Result<ureq::Agent> {
+pub(crate) fn build_http_agent_no_error(
+    connect_timeout: u64,
+    body_timeout: u64,
+) -> Result<ureq::Agent> {
     let mut config = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .user_agent("sdme/0.1")
-        .timeout_connect(Some(Duration::from_secs(30)))
-        .timeout_resolve(Some(Duration::from_secs(30)))
-        .timeout_recv_response(Some(Duration::from_secs(60)))
-        .timeout_recv_body(Some(Duration::from_secs(300)));
+        .timeout_connect(Some(Duration::from_secs(connect_timeout)))
+        .timeout_resolve(Some(Duration::from_secs(connect_timeout)))
+        .timeout_recv_response(Some(Duration::from_secs(connect_timeout * 2)))
+        .timeout_recv_body(Some(Duration::from_secs(body_timeout)));
     if let Some(proxy_uri) = proxy_from_env() {
         let proxy = ureq::Proxy::new(&proxy_uri)
             .with_context(|| format!("invalid proxy URI: {proxy_uri}"))?;
@@ -428,17 +441,21 @@ pub(crate) fn build_http_agent_no_error() -> Result<ureq::Agent> {
     Ok(config.build().into())
 }
 
-/// Maximum download size (50 GiB) to prevent disk exhaustion from malicious servers.
-pub(crate) const MAX_DOWNLOAD_SIZE: u64 = 50 * 1024 * 1024 * 1024;
-
 /// Download a URL to a local file, streaming to constant memory.
 /// Returns the Content-Type mime type from the response, if present.
-fn download_file(url: &str, dest: &Path, verbose: bool) -> Result<Option<String>> {
+fn download_file(
+    url: &str,
+    dest: &Path,
+    verbose: bool,
+    connect_timeout: u64,
+    body_timeout: u64,
+    max_download_size: u64,
+) -> Result<Option<String>> {
     if verbose {
         eprintln!("downloading {url}");
     }
 
-    let agent = build_http_agent(verbose)?;
+    let agent = build_http_agent(verbose, connect_timeout, body_timeout)?;
     let response = agent
         .get(url)
         .call()
@@ -462,10 +479,10 @@ fn download_file(url: &str, dest: &Path, verbose: bool) -> Result<Option<String>
         std::io::Write::write_all(&mut file, &buf[..n])
             .with_context(|| format!("failed to write download to {}", dest.display()))?;
         total += n as u64;
-        if total > MAX_DOWNLOAD_SIZE {
+        if max_download_size > 0 && total > max_download_size {
             bail!(
                 "download from {url} exceeds maximum size of {} bytes",
-                MAX_DOWNLOAD_SIZE
+                max_download_size
             );
         }
     }
@@ -487,11 +504,21 @@ fn import_url(
     rootfs_dir: &Path,
     name: &str,
     verbose: bool,
+    connect_timeout: u64,
+    body_timeout: u64,
+    max_download_size: u64,
 ) -> Result<()> {
     let temp_file = rootfs_dir.join(format!(".{name}.download"));
 
     let result = (|| -> Result<()> {
-        let content_type = download_file(url, &temp_file, verbose)?;
+        let content_type = download_file(
+            url,
+            &temp_file,
+            verbose,
+            connect_timeout,
+            body_timeout,
+            max_download_size,
+        )?;
 
         // Tier 1: Content-Type header.
         let kind = content_type
@@ -1017,6 +1044,9 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
         base_fs,
         docker_credentials,
         cache,
+        http_timeout,
+        http_body_timeout,
+        max_download_size,
     } = *opts;
 
     validate_name(name)?;
@@ -1056,7 +1086,16 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
         SourceKind::Tarball(ref path) => tar::import_tarball(path, &staging_dir, verbose),
         SourceKind::QcowImage(ref path) => img::import_qcow2(path, &staging_dir, verbose),
         SourceKind::RawImage(ref path) => img::import_raw(path, &staging_dir, verbose),
-        SourceKind::Url(ref url) => import_url(url, &staging_dir, &rootfs_dir, name, verbose),
+        SourceKind::Url(ref url) => import_url(
+            url,
+            &staging_dir,
+            &rootfs_dir,
+            name,
+            verbose,
+            http_timeout,
+            http_body_timeout,
+            max_download_size,
+        ),
         SourceKind::RegistryImage(ref img) => {
             match crate::oci::registry::import_registry_image(
                 img,
@@ -1064,6 +1103,9 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
                 docker_credentials,
                 cache,
                 verbose,
+                http_timeout,
+                http_body_timeout,
+                max_download_size,
             ) {
                 Ok(config) => {
                     oci_config = config;
@@ -1411,6 +1453,9 @@ pub(crate) mod tests {
                 base_fs: None,
                 docker_credentials: None,
                 cache: &cache,
+                http_timeout: cfg.http_timeout,
+                http_body_timeout: cfg.http_body_timeout,
+                max_download_size: 0,
             },
         )
     }
@@ -2334,6 +2379,9 @@ pub(crate) mod tests {
                 base_fs: None,
                 docker_credentials: None,
                 cache: &cache,
+                http_timeout: cfg.http_timeout,
+                http_body_timeout: cfg.http_body_timeout,
+                max_download_size: 0,
             },
         )
         .unwrap();
