@@ -334,6 +334,33 @@ sudo sdme fs cache clean --all     # remove all cached blobs
 The cache directory and maximum size are configurable via `oci_cache_dir`
 and `oci_cache_max_size` (default: 10G).
 
+### 4.4 Exporting root filesystems
+
+`sdme fs export` exports an imported rootfs or a container's merged
+overlayfs view to a directory, tarball, or raw disk image. The output
+format is auto-detected from the file extension:
+
+```bash
+# Export an imported rootfs
+sudo sdme fs export ubuntu /tmp/ubuntu-rootfs             # directory copy
+sudo sdme fs export ubuntu /tmp/ubuntu.tar.gz             # gzip tarball
+sudo sdme fs export ubuntu /tmp/ubuntu.raw                # ext4 disk image
+sudo sdme fs export ubuntu /tmp/ubuntu.raw --size 2G      # explicit size
+
+# Export a container's merged view
+sudo sdme fs export mybox /tmp/mybox.tar.xz --container
+```
+
+Supported tarball formats: `.tar`, `.tar.gz`/`.tgz`, `.tar.bz2`/`.tbz2`,
+`.tar.xz`/`.txz`, `.tar.zst`/`.tzst`. Use `-f` to override auto-detection
+(e.g. `sdme fs export ubuntu /tmp/output -f tar.gz`).
+
+Raw disk images are bare ext4 filesystems (no partition table). The size
+is auto-calculated as `max(256M, content * 1.5)` unless overridden with
+`--size`. Container exports: running containers are exported from the live
+filesystem (with a consistency warning); stopped containers have overlayfs
+temporarily mounted.
+
 For more on how the fs subsystem works internally, see
 [architecture.md, Section 6](architecture.md#6-the-fs-subsystem-managing-root-filesystems).
 

@@ -136,6 +136,23 @@ sudo ./test/scripts/verify-matrix.sh --keep
 sudo ./test/scripts/verify-security.sh
 ```
 
+### verify-export.sh
+
+Rootfs export end-to-end validation. Tests all output formats: directory
+copy, tarballs (uncompressed, gzip, bzip2, xz, zstd), raw ext4 disk
+images (auto-size and explicit `--size`), format override (`-f`), and
+error handling for nonexistent rootfs.
+
+Requires the `ubuntu` rootfs imported beforehand:
+
+```bash
+sudo sdme fs import ubuntu docker.io/ubuntu:24.04 -v --install-packages=yes
+sudo ./test/scripts/verify-export.sh
+```
+
+Skips zstd test if `zstdcat` is not available. Skips raw image tests if
+`mkfs.ext4` is not available.
+
 ### verify-usage.sh
 
 Verifies the commands documented in [usage.md](../docs/usage.md). Walks
@@ -224,6 +241,7 @@ sudo ./test/scripts/verify-matrix.sh --keep
 sudo ./test/scripts/verify-pods.sh
 sudo ./test/scripts/verify-oci.sh
 sudo ./test/scripts/verify-security.sh
+sudo ./test/scripts/verify-export.sh
 sudo ./test/scripts/verify-usage.sh
 sudo ./test/scripts/verify-nixos.sh   # requires nix
 

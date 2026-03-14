@@ -521,6 +521,52 @@ Use a different path (e.g.\&
 Lines starting with
 .B #
 and blank lines are ignored.
+.SS sdme fs export \fIname\fR \fIoutput\fR [\-\-container] [\-f \fIformat\fR] [\-s \fIsize\fR]
+Export a root filesystem or container to a directory, tarball, or disk image.
+The output format is auto\-detected from the file extension:
+.RS
+.TP
+.BR .tar
+uncompressed tar archive
+.TP
+.BR .tar.gz ", " .tgz
+gzip\-compressed tar archive
+.TP
+.BR .tar.bz2 ", " .tbz2
+bzip2\-compressed tar archive
+.TP
+.BR .tar.xz ", " .txz
+xz\-compressed tar archive
+.TP
+.BR .tar.zst ", " .tzst
+zstandard\-compressed tar archive
+.TP
+.BR .img ", " .raw
+bare ext4 filesystem in a raw disk image (no partition table)
+.TP
+anything else
+directory copy
+.RE
+.PP
+Use
+.B \-f
+to override the auto\-detected format
+.RI ( dir ", " tar ", " tar.gz ", " tar.bz2 ", " tar.xz ", " tar.zst ", " raw ).
+.PP
+Use
+.B \-\-container
+to export a container's merged overlayfs view instead of an imported rootfs.
+Running containers are exported directly from the live filesystem (with a
+consistency warning); stopped containers have overlayfs temporarily mounted
+for the export.
+.PP
+Use
+.B \-s
+to override the disk image size for raw format (e.g.\&
+.IR 2G ", " 500M ).
+If omitted, the size is auto\-calculated as
+.RI max(256M, " content \(mu 1.5" )
+to accommodate ext4 metadata overhead.
 .SS sdme fs cache info
 Show the OCI blob cache location, total size, and blob count.
 .SS sdme fs cache ls

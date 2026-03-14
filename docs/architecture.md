@@ -402,6 +402,68 @@ After all operations complete, the engine mounts the overlayfs manually
 directory, and does an atomic rename to the final location. The staging
 container is cleaned up regardless of success or failure.
 
+## 7b. fs export: Exporting Root Filesystems
+
+`sdme fs export` is the inverse of import: it takes an imported rootfs
+(or a container's merged overlayfs view) and writes it to a directory,
+tarball, or raw ext4 disk image. The implementation lives in
+`src/export.rs`.
+
+### Format detection
+
+The output format is determined by file extension, following the same
+convention as import's compression detection but using extensions
+instead of magic bytes (since we are creating, not reading):
+
+| Extension                  | Format              |
+|----------------------------|---------------------|
+| `.tar`                     | uncompressed tar    |
+| `.tar.gz`, `.tgz`         | gzip tar            |
+| `.tar.bz2`, `.tbz2`       | bzip2 tar           |
+| `.tar.xz`, `.txz`         | xz tar              |
+| `.tar.zst`, `.tzst`       | zstandard tar       |
+| `.img`, `.raw`            | bare ext4 raw image |
+| anything else              | directory copy      |
+
+The `-f` flag overrides detection. Format names match the extension
+without the dot: `dir`, `tar`, `tar.gz`, `tar.bz2`, `tar.xz`,
+`tar.zst`, `raw`.
+
+### Directory export
+
+Delegates to `copy_tree()` (the same function used by import), so
+ownership, permissions, xattrs, and special files are preserved. The
+destination must not already exist.
+
+### Tarball export
+
+Creates a tar archive using the Rust `tar` crate. Each entry preserves
+uid/gid, permissions, and symlink targets. Compression uses the same
+Rust crates as import decompression (flate2, bzip2, xz2, zstd) but on
+the write side. Symlinks are stored as symlink entries (not followed).
+Block/char devices, FIFOs, and sockets are stored as header-only
+entries.
+
+### Raw disk image export
+
+Creates a sparse file, formats it with `mkfs.ext4`, loop-mounts it,
+copies the tree, and unmounts. The mount point is a temporary directory
+under `/tmp`. If the copy fails, the image file is cleaned up.
+
+Size auto-calculation: `max(256 MiB, content_size * 1.5)`. The 1.5x
+multiplier accounts for ext4 metadata overhead (journal, inode tables,
+superblock, block groups). The `--size` flag overrides this with a
+human-readable value (e.g. `2G`, `500M`).
+
+### Container export
+
+When `--container` is passed, the export reads the container's merged
+overlayfs view instead of an imported rootfs. If the container is
+running, it reads directly from `merged/` with a consistency warning.
+If stopped, it temporarily mounts overlayfs (lower=rootfs,
+upper=container upper, work=container work) for the duration of the
+export, then unmounts.
+
 ## 8. OCI Integration
 
 > *The goal isn't to replace Docker or Podman. It's to give systemd-nspawn users

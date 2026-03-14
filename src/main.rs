@@ -1,3 +1,8 @@
+//! CLI entry point for sdme.
+//!
+//! Parses command-line arguments via clap and dispatches to the
+//! appropriate library function.
+
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 
@@ -6,7 +11,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 use sdme::import::{ImportOptions, InstallPackages, OciMode};
 use sdme::{
-    config, confirm, containers, kube, oci, pod, rootfs, security, system_check, systemd,
+    config, confirm, containers, export, kube, oci, pod, rootfs, security, system_check, systemd,
     BindConfig, EnvConfig, NetworkConfig, ResourceLimits, SecurityConfig,
 };
 
@@ -491,6 +496,22 @@ EXAMPLE:
         /// Remove existing rootfs with the same name before building
         #[arg(short, long)]
         force: bool,
+    },
+    /// Export a root filesystem or container to a directory, tarball, or disk image
+    Export {
+        /// Name of the rootfs or container to export
+        name: String,
+        /// Output path (format auto-detected from extension, or use --format)
+        output: String,
+        /// Export a container's merged rootfs instead of an imported rootfs
+        #[arg(long)]
+        container: bool,
+        /// Output format: dir, tar, tar.gz, tar.bz2, tar.xz, tar.zst, raw
+        #[arg(short, long)]
+        format: Option<String>,
+        /// Override disk image size for raw format (auto-calculated if omitted; e.g. "2G")
+        #[arg(short, long)]
+        size: Option<String>,
     },
     /// Manage the OCI blob cache
     #[command(subcommand)]
@@ -2209,6 +2230,36 @@ fn main() -> Result<()> {
                     cli.verbose,
                 )?;
                 println!("{name}");
+            }
+            RootfsCommand::Export {
+                name,
+                output,
+                container,
+                format,
+                size,
+            } => {
+                let fmt = export::detect_format(&output, format.as_deref())?;
+                let output_path = std::path::PathBuf::from(&output);
+                if container {
+                    export::export_container(
+                        &cfg.datadir,
+                        &name,
+                        &output_path,
+                        &fmt,
+                        size.as_deref(),
+                        cli.verbose,
+                    )?;
+                } else {
+                    export::export_rootfs(
+                        &cfg.datadir,
+                        &name,
+                        &output_path,
+                        &fmt,
+                        size.as_deref(),
+                        cli.verbose,
+                    )?;
+                }
+                println!("{}", output_path.display());
             }
             RootfsCommand::Cache(cmd) => match cmd {
                 CacheCommand::Info => {

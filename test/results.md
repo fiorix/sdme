@@ -1,6 +1,6 @@
 # Test Results
 
-Last verified: 2026-03-13
+Last verified: 2026-03-14
 
 System: Linux 6.19.6-2-cachyos (x86_64), systemd 259 (259.3-1-arch), sdme 0.3.2
 
@@ -246,6 +246,34 @@ pod. The standalone L3-secrets test (which tests the same functionality
 in isolation) passes all 16 checks, suggesting this is a test ordering
 or resource contention issue in the combined test rather than a
 code bug. PVC, configMap, envFrom, and read-only mount tests all pass.
+
+## Export Tests
+
+| Test                    | Result |
+|-------------------------|--------|
+| dir export              | PASS   |
+| tar export              | PASS   |
+| tar.gz export           | PASS   |
+| tar.bz2 export          | PASS   |
+| tar.xz export           | PASS   |
+| tar.zst export          | PASS   |
+| raw export (auto-size)  | PASS   |
+| raw export --size 2G    | PASS   |
+| format override (-f)    | PASS   |
+| nonexistent rootfs      | PASS   |
+
+- **dir export**: exports ubuntu rootfs to a directory, verifies
+  `etc/os-release` exists.
+- **tar/tar.gz/tar.bz2/tar.xz/tar.zst**: creates compressed tarballs,
+  verifies archive contains `etc/os-release`.
+- **raw export**: creates a bare ext4 disk image (auto-sized), loop-mounts
+  it, verifies `etc/os-release` exists.
+- **raw export --size 2G**: creates a 2 GiB raw image, verifies file size
+  matches exactly.
+- **format override**: exports with `-f tar.gz` to a file without extension,
+  verifies the output is a valid gzip tarball.
+- **nonexistent rootfs**: `sdme fs export nonexistent` correctly exits
+  non-zero.
 
 ## Usage Guide Verification
 
