@@ -302,9 +302,9 @@ Base OS       Source                              Tested
 debian        docker.io/debian:stable             Yes
 ubuntu        docker.io/ubuntu:24.04              Yes
 fedora        quay.io/fedora/fedora:41            Yes
-centos        quay.io/centos/centos:stream9       Yes
+centos        quay.io/centos/centos:stream10      Yes
 almalinux     quay.io/almalinuxorg/almalinux:9    Yes
-suse          docker.io/opensuse/tumbleweed       Yes
+suse          docker.io/opensuse/leap:15.6        Yes
 archlinux     docker.io/archlinux                 Yes
 ```
 

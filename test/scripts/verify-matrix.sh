@@ -13,9 +13,9 @@ declare -A DISTRO_IMAGES=(
     [debian]="docker.io/debian:stable"
     [ubuntu]="docker.io/ubuntu:24.04"
     [fedora]="quay.io/fedora/fedora:41"
-    [centos]="quay.io/centos/centos:stream9"
+    [centos]="quay.io/centos/centos:stream10"
     [almalinux]="quay.io/almalinuxorg/almalinux:9"
-    [suse]="docker.io/opensuse/tumbleweed:latest"
+    [suse]="docker.io/opensuse/leap:15.6"
     [archlinux]="docker.io/lopsided/archlinux:latest"
 )
 
