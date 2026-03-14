@@ -3,18 +3,25 @@ set -euo pipefail
 
 # Build an Arch Linux .pkg.tar.zst package from pre-built artifacts.
 # Usage: ./dist/arch/build-pkg.sh [TARGET]
-#   TARGET defaults to x86_64-unknown-linux-musl
+#   Without TARGET, uses the native binary at target/release/sdme.
+#   With TARGET (e.g. x86_64-unknown-linux-musl), uses target/$TARGET/release/sdme.
 
-TARGET="${1:-x86_64-unknown-linux-musl}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-# Map Rust target to Arch architecture
-case "$TARGET" in
-    x86_64-*)  ARCH="x86_64" ;;
-    aarch64-*) ARCH="aarch64" ;;
-    *) echo "error: unsupported target: $TARGET" >&2; exit 1 ;;
-esac
+# Resolve architecture and binary path
+if [[ -n "${1:-}" ]]; then
+    TARGET="$1"
+    case "$TARGET" in
+        x86_64-*)  ARCH="x86_64" ;;
+        aarch64-*) ARCH="aarch64" ;;
+        *) echo "error: unsupported target: $TARGET" >&2; exit 1 ;;
+    esac
+    BINARY="$PROJECT_DIR/target/$TARGET/release/sdme"
+else
+    ARCH="$(uname -m)"
+    BINARY="$PROJECT_DIR/target/release/sdme"
+fi
 
 # Read version from Cargo.toml
 VERSION=$(grep '^version' "$PROJECT_DIR/Cargo.toml" | head -1 | sed 's/.*"\(.*\)".*/\1/')
@@ -23,7 +30,6 @@ PKGVER="${VERSION}-${PKGREL}"
 PKGNAME="sdme"
 
 # Locate pre-built artifacts
-BINARY="$PROJECT_DIR/target/$TARGET/release/sdme"
 MANPAGE="$PROJECT_DIR/dist/sdme.1"
 COMPLETIONS_DIR="$PROJECT_DIR/dist/out/completions"
 APPARMOR_DIR="$PROJECT_DIR/dist/out/apparmor"
@@ -38,13 +44,22 @@ for f in "$BINARY" "$MANPAGE" "$COMPLETIONS_DIR/sdme.bash" "$COMPLETIONS_DIR/_sd
 done
 
 # Check build dependencies
-for cmd in bsdtar fakeroot zstd; do
+for cmd in bsdtar zstd; do
     if ! command -v "$cmd" &>/dev/null; then
         echo "error: $cmd not found in PATH" >&2
-        echo "  install with: sudo apt-get install libarchive-tools fakeroot zstd" >&2
         exit 1
     fi
 done
+
+# fakeroot is only needed when not running as root
+FAKEROOT=""
+if [[ $(id -u) -ne 0 ]]; then
+    if ! command -v fakeroot &>/dev/null; then
+        echo "error: fakeroot not found in PATH (required when not running as root)" >&2
+        exit 1
+    fi
+    FAKEROOT="fakeroot --"
+fi
 
 STAGING=$(mktemp -d)
 trap 'rm -rf "$STAGING"' EXIT
@@ -82,18 +97,22 @@ cp "$INSTALL_FILE" "$STAGING/.INSTALL"
 
 # Generate .MTREE
 cd "$STAGING"
-fakeroot -- bsdtar \
+$FAKEROOT bsdtar \
     --format=mtree \
     --options='!all,use-set,type,uid,gid,mode,time,size,md5,sha256,link' \
     -czf .MTREE \
     .PKGINFO .INSTALL *
 
 # Build final package
-OUTPUT_DIR="$PROJECT_DIR/target/$TARGET/pkg"
+if [[ -n "${TARGET:-}" ]]; then
+    OUTPUT_DIR="$PROJECT_DIR/target/$TARGET/pkg"
+else
+    OUTPUT_DIR="$PROJECT_DIR/target/pkg"
+fi
 mkdir -p "$OUTPUT_DIR"
 OUTPUT="${OUTPUT_DIR}/${PKGNAME}-${VERSION}-${PKGREL}-${ARCH}.pkg.tar.zst"
 
-fakeroot -- bsdtar -cf - .PKGINFO .INSTALL .MTREE * | zstd -c -T0 --ultra -20 > "$OUTPUT"
+$FAKEROOT bsdtar -cf - .PKGINFO .INSTALL .MTREE * | zstd -c -T0 --ultra -20 > "$OUTPUT"
 
 echo "Built: $OUTPUT"
 echo "  size: $(du -h "$OUTPUT" | cut -f1)"
