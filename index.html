@@ -12,11 +12,21 @@
     background: #0d1117;
     line-height: 1.6;
     padding: 3rem 1.5rem;
-    max-width: 640px;
+    max-width: 720px;
     margin: 0 auto;
   }
-  h1 { font-size: 1.5rem; margin-bottom: 0.25rem; }
-  .tagline { color: #8b949e; margin-bottom: 2rem; }
+  h1 { font-size: 2rem; margin-bottom: 0.25rem; }
+  .tagline { color: #8b949e; margin-bottom: 0.5rem; }
+  .header-links { margin-bottom: 2rem; display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }
+  .version-badge {
+    display: none;
+    font-size: 0.75rem;
+    background: #1f6feb;
+    color: #fff;
+    padding: 0.15rem 0.5rem;
+    border-radius: 10px;
+    font-weight: 600;
+  }
   a { color: #58a6ff; text-decoration: none; }
   a:hover { text-decoration: underline; }
   h2 { font-size: 1.1rem; margin-bottom: 0.5rem; color: #c9d1d9; }
@@ -27,54 +37,373 @@
     padding: 0.75rem 1rem;
     overflow-x: auto;
     font-size: 0.875rem;
-    margin-bottom: 2rem;
+    margin-bottom: 1rem;
+    position: relative;
   }
+  pre[data-copy] { padding-right: 3.5rem; }
   code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; }
   section { margin-bottom: 2rem; }
-  table { border-collapse: collapse; width: 100%; margin-bottom: 0.5rem; }
-  th, td {
-    text-align: left;
-    padding: 0.4rem 0.75rem;
-    border-bottom: 1px solid #21262d;
+  .note { color: #8b949e; font-size: 0.8rem; margin-top: 0.25rem; }
+
+  /* Copy button */
+  .copy-btn {
+    position: absolute;
+    top: 0.5rem;
+    right: 0.5rem;
+    background: #21262d;
+    border: 1px solid #30363d;
+    color: #8b949e;
+    font-size: 0.75rem;
+    padding: 0.2rem 0.5rem;
+    border-radius: 4px;
+    cursor: pointer;
+    font-family: inherit;
+    transition: color 0.15s, border-color 0.15s;
+  }
+  .copy-btn:hover { color: #e6edf3; border-color: #8b949e; }
+  .copy-btn.copied { color: #3fb950; border-color: #3fb950; }
+
+  /* Download cards */
+  .card {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    padding: 1rem 1.25rem;
+    margin-bottom: 1rem;
+  }
+  .card h3 {
+    font-size: 1rem;
+    color: #e6edf3;
+    margin-bottom: 0.15rem;
+  }
+  .card .distros {
+    color: #8b949e;
+    font-size: 0.8rem;
+    margin-bottom: 0.75rem;
+  }
+  .card .deps {
+    color: #8b949e;
+    font-size: 0.8rem;
+    margin-bottom: 0.75rem;
+  }
+  .card .deps strong { color: #c9d1d9; font-weight: 600; }
+  .asset-row {
+    display: flex;
+    align-items: baseline;
+    gap: 0.75rem;
+    margin-bottom: 0.35rem;
     font-size: 0.875rem;
   }
-  th { color: #8b949e; font-weight: 600; }
-  .note { color: #8b949e; font-size: 0.8rem; }
+  .asset-row .size {
+    color: #8b949e;
+    font-size: 0.8rem;
+    white-space: nowrap;
+  }
+  .card pre {
+    margin-top: 0.75rem;
+    margin-bottom: 0;
+  }
+  .checksum-link {
+    text-align: center;
+    margin-top: 0.5rem;
+    font-size: 0.85rem;
+  }
+  #downloads { display: none; }
+  #fallback a { color: #58a6ff; }
 </style>
 </head>
 <body>
   <h1>sdme</h1>
   <p class="tagline">Lightweight systemd containers with overlayfs</p>
-
-  <section>
-    <p>Details on <a href="https://github.com/fiorix/sdme">GitHub</a></p>
-  </section>
+  <div class="header-links">
+    <a href="https://github.com/fiorix/sdme">GitHub</a>
+    <span id="version-badge" class="version-badge"></span>
+  </div>
 
   <section>
     <h2>Quick install</h2>
-    <pre><code>curl -fsSL https://fiorix.github.io/sdme/install.sh | sudo sh</code></pre>
+    <pre data-copy><code>curl -fsSL https://fiorix.github.io/sdme/install.sh | sudo sh</code></pre>
+    <p class="note">Auto-detects architecture (x86_64 / aarch64) and verifies SHA256 checksums.</p>
   </section>
 
-  <section>
-    <h2>Binary downloads</h2>
-    <p class="note">Static musl binaries — no dependencies.</p>
-    <table>
-      <tr><th>Architecture</th><th>Binary</th></tr>
-      <tr>
-        <td>x86_64</td>
-        <td><a href="https://github.com/fiorix/sdme/releases/latest/download/sdme-x86_64-linux">sdme-x86_64-linux</a></td>
-      </tr>
-      <tr>
-        <td>aarch64</td>
-        <td><a href="https://github.com/fiorix/sdme/releases/latest/download/sdme-aarch64-linux">sdme-aarch64-linux</a></td>
-      </tr>
-    </table>
+  <section id="downloads"></section>
+
+  <section id="fallback">
+    <noscript>
+      <h2>Downloads</h2>
+      <p>Static binaries, .deb, .rpm, and .pkg.tar.zst packages are available on the
+        <a href="https://github.com/fiorix/sdme/releases/latest">releases page</a>.</p>
+      <p class="note">All artifacts are published with
+        <a href="https://github.com/fiorix/sdme/releases/latest/download/SHA256SUMS">SHA256 checksums</a>.</p>
+    </noscript>
+    <div id="fallback-content" style="display:none">
+      <h2>Downloads</h2>
+      <p>Static binaries, .deb, .rpm, and .pkg.tar.zst packages are available on the
+        <a href="https://github.com/fiorix/sdme/releases/latest">releases page</a>.</p>
+      <p class="note">All artifacts are published with
+        <a href="https://github.com/fiorix/sdme/releases/latest/download/SHA256SUMS">SHA256 checksums</a>.</p>
+    </div>
   </section>
 
-  <section>
-    <h2>Packages</h2>
-    <p>Deb and RPM packages (with man page and shell completions) are available on the <a href="https://github.com/fiorix/sdme/releases/latest">releases page</a>.</p>
-    <p class="note">All artifacts are published with <a href="https://github.com/fiorix/sdme/releases/latest/download/SHA256SUMS">SHA256 checksums</a>.</p>
-  </section>
+  <footer>
+    <p class="note">All release artifacts include
+      <a href="https://github.com/fiorix/sdme/releases/latest/download/SHA256SUMS">SHA256 checksums</a>.</p>
+  </footer>
+
+<script>
+(function() {
+  'use strict';
+
+  // --- Copy-to-clipboard buttons ---
+  function addCopyButtons() {
+    document.querySelectorAll('pre[data-copy]').forEach(function(pre) {
+      if (pre.querySelector('.copy-btn')) return;
+      var btn = document.createElement('button');
+      btn.className = 'copy-btn';
+      btn.textContent = 'Copy';
+      btn.addEventListener('click', function() {
+        var text = pre.querySelector('code')
+          ? pre.querySelector('code').textContent
+          : pre.textContent;
+        copyText(text.trim(), btn);
+      });
+      pre.appendChild(btn);
+    });
+  }
+
+  function copyText(text, btn) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function() {
+        showCopied(btn);
+      }, function() {
+        fallbackCopy(text, btn);
+      });
+    } else {
+      fallbackCopy(text, btn);
+    }
+  }
+
+  function fallbackCopy(text, btn) {
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); showCopied(btn); }
+    catch(e) { /* silently fail */ }
+    document.body.removeChild(ta);
+  }
+
+  function showCopied(btn) {
+    btn.textContent = 'Copied!';
+    btn.classList.add('copied');
+    setTimeout(function() {
+      btn.textContent = 'Copy';
+      btn.classList.remove('copied');
+    }, 2000);
+  }
+
+  addCopyButtons();
+
+  // --- GitHub release fetch ---
+  var CACHE_KEY = 'sdme_release';
+  var CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+  function getCached() {
+    try {
+      var raw = sessionStorage.getItem(CACHE_KEY);
+      if (!raw) return null;
+      var cached = JSON.parse(raw);
+      if (Date.now() - cached.ts > CACHE_TTL) {
+        sessionStorage.removeItem(CACHE_KEY);
+        return null;
+      }
+      return cached.data;
+    } catch(e) { return null; }
+  }
+
+  function setCache(data) {
+    try {
+      sessionStorage.setItem(CACHE_KEY, JSON.stringify({ ts: Date.now(), data: data }));
+    } catch(e) { /* quota exceeded, ignore */ }
+  }
+
+  function formatSize(bytes) {
+    if (bytes >= 1048576) return (bytes / 1048576).toFixed(1) + ' MB';
+    if (bytes >= 1024) return (bytes / 1024).toFixed(0) + ' KB';
+    return bytes + ' B';
+  }
+
+  function archLabel(filename) {
+    if (/x86_64|amd64/.test(filename)) return 'x86_64';
+    if (/aarch64|arm64/.test(filename)) return 'aarch64';
+    return '';
+  }
+
+  function classify(name) {
+    if (/^sdme-(x86_64|aarch64)-linux$/.test(name)) return 'binary';
+    if (/\.deb$/.test(name)) return 'deb';
+    if (/\.rpm$/.test(name)) return 'rpm';
+    if (/\.pkg\.tar\.zst$/.test(name)) return 'pkg';
+    if (name === 'SHA256SUMS') return 'checksum';
+    return null;
+  }
+
+  var categories = [
+    {
+      type: 'binary',
+      title: 'Static Binaries',
+      distros: 'Any Linux distro',
+      deps: 'Requires <strong>systemd &ge; 252</strong> and <strong>systemd-container</strong> at runtime',
+      cmdTemplate: function(url, filename) {
+        return 'curl -fSL -o /usr/local/bin/sdme ' + url + ' && chmod +x /usr/local/bin/sdme';
+      }
+    },
+    {
+      type: 'deb',
+      title: '.deb Packages',
+      distros: 'Debian, Ubuntu',
+      deps: 'Dependencies auto-resolved: <strong>systemd (&ge; 252)</strong>, <strong>systemd-container</strong>. Suggests: qemu-utils, apparmor',
+      cmdTemplate: function(url, filename) {
+        return 'curl -fSLO ' + url + ' && sudo apt install ./' + filename;
+      }
+    },
+    {
+      type: 'rpm',
+      title: '.rpm Packages',
+      distros: 'Fedora, CentOS Stream, AlmaLinux, RHEL',
+      deps: 'Dependencies auto-resolved: <strong>systemd &ge; 252</strong>, <strong>systemd-container</strong>',
+      cmdTemplate: function(url, filename) {
+        return 'curl -fSLO ' + url + ' && sudo dnf install ./' + filename;
+      }
+    },
+    {
+      type: 'pkg',
+      title: '.pkg.tar.zst Packages',
+      distros: 'Arch Linux',
+      deps: 'Requires <strong>systemd &ge; 252</strong> (includes systemd-nspawn on Arch)',
+      cmdTemplate: function(url, filename) {
+        return 'curl -fSLO ' + url + ' && sudo pacman -U ' + filename;
+      }
+    }
+  ];
+
+  function renderDownloads(release) {
+    // Set version badge
+    var badge = document.getElementById('version-badge');
+    badge.textContent = release.tag_name;
+    badge.style.display = 'inline-block';
+
+    // Classify assets
+    var groups = {};
+    var checksumUrl = null;
+    release.assets.forEach(function(a) {
+      var type = classify(a.name);
+      if (!type) return;
+      if (type === 'checksum') { checksumUrl = a.browser_download_url; return; }
+      if (!groups[type]) groups[type] = [];
+      groups[type].push(a);
+    });
+
+    // Sort each group by architecture (x86_64 first)
+    Object.keys(groups).forEach(function(k) {
+      groups[k].sort(function(a, b) {
+        var aa = archLabel(a.name), bb = archLabel(b.name);
+        if (aa === 'x86_64' && bb !== 'x86_64') return -1;
+        if (bb === 'x86_64' && aa !== 'x86_64') return 1;
+        return a.name.localeCompare(b.name);
+      });
+    });
+
+    var html = '<h2>Downloads</h2>';
+
+    categories.forEach(function(cat) {
+      var assets = groups[cat.type];
+      if (!assets || assets.length === 0) return;
+
+      html += '<div class="card">';
+      html += '<h3>' + cat.title + '</h3>';
+      html += '<p class="distros">' + cat.distros + '</p>';
+      html += '<p class="deps">' + cat.deps + '</p>';
+
+      assets.forEach(function(a) {
+        var arch = archLabel(a.name);
+        html += '<div class="asset-row">';
+        html += '<a href="' + a.browser_download_url + '">' + a.name + '</a>';
+        html += '<span class="size">' + (arch ? arch + ' · ' : '') + formatSize(a.size) + '</span>';
+        html += '</div>';
+      });
+
+      // Install command — show one per architecture
+      assets.forEach(function(a) {
+        var arch = archLabel(a.name);
+        var cmd = cat.cmdTemplate(a.browser_download_url, a.name);
+        html += '<pre data-copy><code>' + escapeHtml(cmd) + '</code></pre>';
+      });
+
+      html += '</div>';
+    });
+
+    if (checksumUrl) {
+      html += '<p class="checksum-link"><a href="' + checksumUrl + '">SHA256SUMS</a></p>';
+    }
+
+    var section = document.getElementById('downloads');
+    section.innerHTML = html;
+    section.style.display = 'block';
+
+    // Hide fallback
+    var fb = document.getElementById('fallback');
+    if (fb) fb.style.display = 'none';
+
+    // Add copy buttons to new pre elements
+    addCopyButtons();
+  }
+
+  function escapeHtml(str) {
+    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  function showFallback() {
+    var fb = document.getElementById('fallback-content');
+    if (fb) fb.style.display = 'block';
+  }
+
+  function fetchRelease() {
+    var cached = getCached();
+    if (cached) {
+      renderDownloads(cached);
+      return;
+    }
+
+    var xhr = new XMLHttpRequest();
+    xhr.open('GET', 'https://api.github.com/repos/fiorix/sdme/releases/latest');
+    xhr.setRequestHeader('Accept', 'application/vnd.github.v3+json');
+    xhr.onload = function() {
+      if (xhr.status === 200) {
+        try {
+          var data = JSON.parse(xhr.responseText);
+          setCache(data);
+          renderDownloads(data);
+        } catch(e) {
+          console.error('sdme: failed to parse release data', e);
+          showFallback();
+        }
+      } else {
+        console.error('sdme: GitHub API returned', xhr.status);
+        showFallback();
+      }
+    };
+    xhr.onerror = function() {
+      console.error('sdme: GitHub API request failed');
+      showFallback();
+    };
+    xhr.send();
+  }
+
+  fetchRelease();
+})();
+</script>
 </body>
 </html>
