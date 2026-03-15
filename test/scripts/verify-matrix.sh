@@ -6,7 +6,7 @@ set -uo pipefail
 
 source "$(dirname "$0")/lib.sh"
 
-DISTROS=(debian ubuntu fedora centos almalinux suse archlinux)
+DISTROS=(debian ubuntu fedora centos almalinux archlinux)
 APPS=(nginx-unprivileged redis postgresql)
 
 declare -A DISTRO_IMAGES=(
@@ -15,7 +15,6 @@ declare -A DISTRO_IMAGES=(
     [fedora]="quay.io/fedora/fedora:41"
     [centos]="quay.io/centos/centos:stream10"
     [almalinux]="quay.io/almalinuxorg/almalinux:9"
-    [suse]="docker.io/opensuse/leap:15.6"
     [archlinux]="docker.io/lopsided/archlinux:latest"
 )
 
@@ -36,6 +35,28 @@ DATADIR="/var/lib/sdme"
 REPORT_DIR="."
 FILTER_DISTROS=()
 FILTER_APPS=()
+
+# Redis 8.x workarounds for container environments:
+# - ARM64: tests for a kernel COW bug, fails inside containers, and exits.
+#   Suppress with --ignore-warnings ARM64-COW-BUG.
+# - Locale: redis treats locale config failure as fatal. The OCI root may
+#   lack the host container's locale (e.g. en_US.UTF-8 on archlinux).
+#   Force LANG=C.UTF-8 which is universally available.
+fix_redis_oci() {
+    local ct_name="$1"
+    local svc_dir="$DATADIR/containers/$ct_name/upper/etc/systemd/system/sdme-oci-redis.service.d"
+    mkdir -p "$svc_dir"
+    local extra_args=""
+    if [[ "$(uname -m)" == "aarch64" ]]; then
+        extra_args=" --ignore-warnings ARM64-COW-BUG"
+    fi
+    cat > "$svc_dir/workarounds.conf" <<DROPIN
+[Service]
+Environment=LANG=C.UTF-8
+ExecStart=
+ExecStart=/.sdme-isolate 0 0 /data /usr/local/bin/docker-entrypoint.sh redis-server${extra_args}
+DROPIN
+}
 
 # Timeouts (seconds)
 TIMEOUT_IMPORT=600
@@ -349,6 +370,11 @@ phase3_apps() {
                 echo "$NGINX_MARKER" > "$html_dir/sdme-test.txt"
             fi
 
+            # Work around Redis 8.x ARM64-COW-BUG test failure in containers.
+            if [[ "$app" == "redis" ]]; then
+                fix_redis_oci "$ct_name"
+            fi
+
             # Start
             if ! output=$(timeout "$TIMEOUT_BOOT" sdme start "$ct_name" -t 120 2>&1); then
                 record "app/$app-on-$distro/boot" FAIL "start failed: $output"
@@ -498,6 +524,11 @@ phase3c_hardened_apps() {
                 record "hardened-app/$app-on-$distro/boot" FAIL "create failed: $output"
                 record "hardened-app/$app-on-$distro/service" SKIP "create failed"
                 continue
+            fi
+
+            # Work around Redis 8.x ARM64-COW-BUG test failure in containers.
+            if [[ "$app" == "redis" ]]; then
+                fix_redis_oci "$ct_name"
             fi
 
             # Start

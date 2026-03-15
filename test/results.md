@@ -19,7 +19,6 @@ See [README.md](README.md) for how to run the tests.
 | fedora    | quay.io/fedora/fedora:41          | PASS   | PASS |
 | centos    | quay.io/centos/centos:stream9     | PASS   | PASS |
 | almalinux | quay.io/almalinuxorg/almalinux:9  | PASS   | PASS |
-| suse      | docker.io/opensuse/tumbleweed     | PASS   | PASS |
 | archlinux | docker.io/archlinux               | PASS   | PASS |
 
 Boot tests verify: container create, systemd reaching `running` state,
@@ -30,11 +29,11 @@ publishes `linux/amd64` manifests.
 
 ## OCI App Matrix
 
-| App                | Image                              | deb  | ubu  | fed  | cen  | alma | suse | arch |
-|--------------------|------------------------------------|------|------|------|------|------|------|------|
-| nginx-unprivileged | docker.io/nginxinc/nginx-unpriv... | PASS | PASS | PASS | PASS | PASS | PASS | PASS |
-| redis              | docker.io/redis                    | PASS | PASS | PASS | PASS | PASS | PASS | PASS |
-| postgresql         | docker.io/postgres                 | PASS | PASS | PASS | PASS | PASS | PASS | PASS |
+| App                | Image                              | deb  | ubu  | fed  | cen  | alma | arch |
+|--------------------|------------------------------------|------|------|------|------|------|------|
+| nginx-unprivileged | docker.io/nginxinc/nginx-unpriv... | PASS | PASS | PASS | PASS | PASS | PASS |
+| redis              | docker.io/redis                    | PASS | PASS | PASS | PASS | PASS | PASS |
+| postgresql         | docker.io/postgres                 | PASS | PASS | PASS | PASS | PASS | PASS |
 
 Each cell verifies: app import with `--base-fs`, container boot,
 `sdme-oci-{name}.service` active, journal and status accessible, and
@@ -128,9 +127,7 @@ redis-cli ping, pg_isready).
   test is skipped when the profile name used doesn't exist on the host
   (expected; the create-time persistence test covers state correctness).
 - **--userns boot**: each distro boots with `--userns`, systemd reaches
-  `running` or `degraded` state. suse skipped (requires rootfs from
-  `verify-matrix.sh --keep`; suse userns has a systemd UID/GID shift
-  incompatibility).
+  `running` or `degraded` state.
 - **--userns OCI app**: nginx imported as OCI app on ubuntu base, container
   created with `--userns`, `sdme-oci-{name}.service` is active.
 
@@ -143,7 +140,6 @@ redis-cli ping, pg_isready).
 | fedora    | PASS   | PASS    |
 | centos    | PASS   | PASS    |
 | almalinux | PASS   | PASS    |
-| suse      | PASS   | PASS    |
 | archlinux | PASS   | PASS    |
 
 Each distro is created with `--hardened` and verified to reach `running`
@@ -160,32 +156,24 @@ private network, no-new-privileges, and drops
 | nginx-unprivileged | fedora    | PASS | PASS    |
 | nginx-unprivileged | centos    | PASS | PASS    |
 | nginx-unprivileged | almalinux | PASS | PASS    |
-| nginx-unprivileged | suse      | FAIL | SKIP    |
 | nginx-unprivileged | archlinux | PASS | PASS    |
 | redis              | debian    | PASS | PASS    |
 | redis              | ubuntu    | PASS | PASS    |
 | redis              | fedora    | PASS | PASS    |
 | redis              | centos    | PASS | PASS    |
 | redis              | almalinux | PASS | PASS    |
-| redis              | suse      | FAIL | SKIP    |
 | redis              | archlinux | PASS | PASS    |
 | postgresql         | debian    | PASS | PASS    |
 | postgresql         | ubuntu    | PASS | PASS    |
 | postgresql         | fedora    | PASS | PASS    |
 | postgresql         | centos    | PASS | PASS    |
 | postgresql         | almalinux | PASS | PASS    |
-| postgresql         | suse      | FAIL | SKIP    |
 | postgresql         | archlinux | PASS | PASS    |
 
 Each cell verifies: container created with `--hardened`, boots
 successfully, and `sdme-oci-{name}.service` is active. App-specific
 health checks (HTTP, CLI) are skipped because `--hardened` enables
 private network, blocking host-side connectivity.
-
-Hardened suse OCI apps fail because the openSUSE Tumbleweed rootfs
-has a UID/GID shift incompatibility (`Failed to adjust UID/GID shift
-of OS tree`). The suse base OS boots fine with `--hardened` (no OCI
-app overlay). This is a systemd version mismatch, not an sdme issue.
 
 ## OCI Port Forwarding and Volume Mounting
 

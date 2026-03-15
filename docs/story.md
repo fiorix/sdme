@@ -223,7 +223,6 @@ qemu-nbd), raw disk image, OCI registry.
 | Debian  | Debian, Ubuntu, derivatives            | apt-get                  |
 | Fedora  | Fedora, CentOS, AlmaLinux, RHEL, Rocky | dnf                      |
 | Arch    | Arch Linux, derivatives                | pacman                   |
-| SUSE    | openSUSE Tumbleweed, Leap, SLES        | zypper                   |
 | NixOS   | NixOS                                  | declarative (no install) |
 | Unknown | others                                 | best-effort              |
 

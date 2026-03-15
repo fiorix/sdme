@@ -315,6 +315,97 @@ pub(crate) fn make_removable(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Safely remove a directory tree, refusing to proceed if stale bind
+/// mounts are detected underneath it.
+///
+/// During rootfs import, `ChrootGuard` bind-mounts `/dev`, `/proc`, `/sys`
+/// from the host into the rootfs for chroot package installation. If cleanup
+/// is interrupted (SIGKILL, power loss), these mounts persist. A plain
+/// `remove_dir_all` on such a directory would traverse the bind mounts and
+/// **delete files from the host filesystem** (e.g. `/dev/null`).
+///
+/// This function:
+/// 1. Restores directory permissions so deletion can succeed
+/// 2. Reads `/proc/self/mountinfo` to find mounts under `dir`
+/// 3. Runs `umount -R` on each stale mount point
+/// 4. Refuses to proceed if any mount could not be removed
+pub(crate) fn safe_remove_dir(dir: &Path) -> anyhow::Result<()> {
+    if !dir.exists() {
+        return Ok(());
+    }
+    let _ = make_removable(dir);
+    unmount_stale_mounts(dir)?;
+    fs::remove_dir_all(dir).with_context(|| format!("failed to remove {}", dir.display()))?;
+    Ok(())
+}
+
+/// Find and remove stale bind mounts under a directory.
+///
+/// Returns `Ok(())` if no mounts remain. Returns `Err` if mounts could
+/// not be removed, preventing the caller from accidentally deleting
+/// host filesystem contents through a stale bind mount.
+fn unmount_stale_mounts(dir: &Path) -> anyhow::Result<()> {
+    let mounts = find_mounts_under(dir)?;
+    if mounts.is_empty() {
+        return Ok(());
+    }
+
+    eprintln!(
+        "warning: found {} stale mount(s) under {}, unmounting",
+        mounts.len(),
+        dir.display()
+    );
+
+    // Unmount deepest first (mounts are sorted by path length, longest first).
+    for mount_point in &mounts {
+        let _ = std::process::Command::new("umount")
+            .arg("-R")
+            .arg(mount_point)
+            .status();
+    }
+
+    // Verify all mounts are gone.
+    let remaining = find_mounts_under(dir)?;
+    if !remaining.is_empty() {
+        let paths: Vec<String> = remaining.iter().map(|p| p.display().to_string()).collect();
+        bail!(
+            "refusing to remove {}: stale mounts could not be unmounted: {}",
+            dir.display(),
+            paths.join(", ")
+        );
+    }
+
+    Ok(())
+}
+
+/// Read `/proc/self/mountinfo` and return mount points under `dir`,
+/// sorted deepest-first for safe unmounting.
+fn find_mounts_under(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    let mountinfo = fs::read_to_string("/proc/self/mountinfo")
+        .context("failed to read /proc/self/mountinfo")?;
+
+    let dir_str = format!("{}/", dir.display());
+
+    let mut mounts: Vec<PathBuf> = mountinfo
+        .lines()
+        .filter_map(|line| {
+            // mountinfo format: id parent major:minor root mount_point options ...
+            let mut fields = line.split_whitespace();
+            let mount_point = fields.nth(4)?;
+            // Match mounts strictly under dir (not dir itself).
+            if mount_point.starts_with(&dir_str) {
+                Some(PathBuf::from(mount_point))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Sort by path length descending (deepest first) for unmounting.
+    mounts.sort_by_key(|b| std::cmp::Reverse(b.as_os_str().len()));
+    Ok(mounts)
+}
+
 /// Call lstat on a path and return the raw stat result.
 pub(crate) fn lstat_entry(path: &Path) -> Result<libc::stat> {
     let c_path = path_to_cstring(path)?;

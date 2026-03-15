@@ -50,8 +50,6 @@ sudo dnf install systemd-container
 # Arch Linux (nspawn is included in the base systemd package)
 sudo pacman -S systemd
 
-# openSUSE
-sudo zypper install systemd-container
 ```
 
 If you plan to import QCOW2 cloud images, also install `qemu-utils` (or
@@ -290,7 +288,7 @@ sudo sdme new -r fedora
 After importing a rootfs, sdme detects the distribution, checks for
 systemd, and if systemd is missing, installs it via chroot. The
 `--install-packages` flag controls this behavior. Supported distro
-families: Debian (apt-get), Fedora (dnf), Arch (pacman), SUSE (zypper).
+families: Debian (apt-get), Fedora (dnf), Arch (pacman).
 NixOS is a special case: it must be pre-built with systemd, since there is
 no chroot-based package installation for Nix.
 
@@ -304,7 +302,6 @@ ubuntu        docker.io/ubuntu:24.04              Yes
 fedora        quay.io/fedora/fedora:41            Yes
 centos        quay.io/centos/centos:stream10      Yes
 almalinux     quay.io/almalinuxorg/almalinux:9    Yes
-suse          docker.io/opensuse/leap:15.6        Yes
 archlinux     docker.io/archlinux                 Yes
 ```
 

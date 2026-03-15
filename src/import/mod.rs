@@ -20,7 +20,6 @@ use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use crate::copy::make_removable;
 use crate::rootfs::DistroFamily;
 use crate::{check_interrupted, validate_name, State};
 
@@ -560,13 +559,7 @@ fn cleanup_staging(staging_dir: &Path, force: bool, verbose: bool) -> Result<()>
             staging_dir.display()
         );
     }
-    let _ = make_removable(staging_dir);
-    fs::remove_dir_all(staging_dir).with_context(|| {
-        format!(
-            "failed to remove staging directory {}",
-            staging_dir.display()
-        )
-    })?;
+    crate::copy::safe_remove_dir(staging_dir)?;
     Ok(())
 }
 
@@ -1074,9 +1067,7 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
         if verbose {
             eprintln!("removing existing fs '{name}' (forced)");
         }
-        let _ = make_removable(&final_dir);
-        fs::remove_dir_all(&final_dir)
-            .with_context(|| format!("failed to remove existing fs {}", final_dir.display()))?;
+        crate::copy::safe_remove_dir(&final_dir)?;
         let meta_path = rootfs_dir.join(format!(".{name}.meta"));
         let _ = fs::remove_file(meta_path);
         let env_path = rootfs_dir.join(format!(".{name}.env"));
@@ -1118,8 +1109,7 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
     };
 
     if let Err(e) = result {
-        let _ = make_removable(&staging_dir);
-        let _ = fs::remove_dir_all(&staging_dir);
+        let _ = crate::copy::safe_remove_dir(&staging_dir);
         return Err(e);
     }
 
@@ -1161,8 +1151,7 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
                         verbose,
                     );
                     if let Err(e) = setup_result {
-                        let _ = make_removable(&staging_dir);
-                        let _ = fs::remove_dir_all(&staging_dir);
+                        let _ = crate::copy::safe_remove_dir(&staging_dir);
                         return Err(e);
                     }
                     true // skip systemd detection; base already has it
@@ -1185,8 +1174,7 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
                             .as_ref()
                             .map(|v| shell_join(v))
                             .unwrap_or_else(|| "(none)".to_string());
-                        let _ = make_removable(&staging_dir);
-                        let _ = fs::remove_dir_all(&staging_dir);
+                        let _ = crate::copy::safe_remove_dir(&staging_dir);
                         bail!(
                             "image appears to be an application container \
                              (Entrypoint: {ep_str}, Cmd: {cmd_str}); \
@@ -1313,16 +1301,14 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
         })();
 
         if let Err(e) = install_result {
-            let _ = make_removable(&staging_dir);
-            let _ = fs::remove_dir_all(&staging_dir);
+            let _ = crate::copy::safe_remove_dir(&staging_dir);
             return Err(e);
         }
 
         // Re-scan after installation.
         presence = detect_systemd_presence(&staging_dir);
         if !presence.is_bootable() && !force {
-            let _ = make_removable(&staging_dir);
-            let _ = fs::remove_dir_all(&staging_dir);
+            let _ = crate::copy::safe_remove_dir(&staging_dir);
             bail!(
                 "{} still not found after package installation",
                 presence.missing()

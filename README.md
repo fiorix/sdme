@@ -31,7 +31,7 @@ sudo sdme rm <name>       # remove a container
 Import from OCI registries, local directories, tarballs, URLs, or QCOW2 cloud
 images. Each imported rootfs is a reusable template -- spin up as many
 containers as you want from it. Supported distros: Debian, Ubuntu, Fedora,
-CentOS, AlmaLinux, Arch Linux, CachyOS, openSUSE, and NixOS.
+CentOS, AlmaLinux, Arch Linux, CachyOS, and NixOS.
 
 ```bash
 sudo sdme fs import ubuntu docker.io/ubuntu:24.04

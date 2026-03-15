@@ -13,7 +13,6 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 
-use crate::copy::make_removable;
 use crate::{validate_name, State};
 
 /// An entry returned by [`list`].
@@ -216,8 +215,7 @@ pub fn remove(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
 
     // Clean up a leftover staging dir from a previous failed removal.
     if removing_path.exists() {
-        let _ = make_removable(&removing_path);
-        let _ = fs::remove_dir_all(&removing_path);
+        crate::copy::safe_remove_dir(&removing_path)?;
     }
 
     fs::rename(&rootfs_path, &removing_path).with_context(|| {
@@ -236,9 +234,7 @@ pub fn remove(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
         return Err(e);
     }
 
-    make_removable(&removing_path)?;
-    fs::remove_dir_all(&removing_path)
-        .with_context(|| format!("failed to remove {}", removing_path.display()))?;
+    crate::copy::safe_remove_dir(&removing_path)?;
 
     let meta_path = datadir.join("fs").join(format!(".{name}.meta"));
     let _ = fs::remove_file(meta_path);
