@@ -38,30 +38,38 @@
     overflow-x: auto;
     font-size: 0.875rem;
     margin-bottom: 1rem;
-    position: relative;
   }
-  pre[data-copy] { padding-right: 3.5rem; }
+  .code-row {
+    display: flex;
+    align-items: stretch;
+    gap: 0.5rem;
+    margin-bottom: 1rem;
+  }
+  .code-row pre {
+    flex: 1;
+    min-width: 0;
+    margin-bottom: 0;
+  }
   code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; }
   section { margin-bottom: 2rem; }
   .note { color: #8b949e; font-size: 0.8rem; margin-top: 0.25rem; }
 
   /* Copy button */
   .copy-btn {
-    position: absolute;
-    top: 0.5rem;
-    right: 0.5rem;
+    flex-shrink: 0;
+    align-self: stretch;
     background: #21262d;
     border: 1px solid #30363d;
     color: #8b949e;
-    font-size: 0.75rem;
-    padding: 0.2rem 0.5rem;
+    padding: 0 0.4rem;
     border-radius: 4px;
     cursor: pointer;
-    font-family: inherit;
+    line-height: 0;
     transition: color 0.15s, border-color 0.15s;
   }
   .copy-btn:hover { color: #e6edf3; border-color: #8b949e; }
   .copy-btn.copied { color: #3fb950; border-color: #3fb950; }
+  .copy-btn svg { width: 16px; height: 16px; fill: currentColor; }
 
   /* Download cards */
   .card {
@@ -99,10 +107,11 @@
     font-size: 0.8rem;
     white-space: nowrap;
   }
-  .card pre {
+  .card .code-row {
     margin-top: 0.75rem;
     margin-bottom: 0;
   }
+  .card .code-row pre { margin-bottom: 0; }
   .checksum-link {
     text-align: center;
     margin-top: 0.5rem;
@@ -116,7 +125,7 @@
   <h1>sdme</h1>
   <p class="tagline">Lightweight systemd containers with overlayfs</p>
   <div class="header-links">
-    <a href="https://github.com/fiorix/sdme">GitHub</a>
+    <a href="https://github.com/fiorix/sdme">github.com/fiorix/sdme</a>
     <span id="version-badge" class="version-badge"></span>
   </div>
 
@@ -154,20 +163,29 @@
 (function() {
   'use strict';
 
+  // --- SVG icons (GitHub Octicons) ---
+  var ICON_COPY = '<svg viewBox="0 0 16 16"><path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 0 1 0 1.5h-1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-1.5a.75.75 0 0 1 1.5 0v1.5A1.75 1.75 0 0 1 9.25 16h-7.5A1.75 1.75 0 0 1 0 14.25Z"></path><path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0 1 14.25 11h-7.5A1.75 1.75 0 0 1 5 9.25Zm1.75-.25a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z"></path></svg>';
+  var ICON_CHECK = '<svg viewBox="0 0 16 16"><path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.75.75 0 0 1 1.06-1.06L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0Z"></path></svg>';
+
   // --- Copy-to-clipboard buttons ---
   function addCopyButtons() {
     document.querySelectorAll('pre[data-copy]').forEach(function(pre) {
-      if (pre.querySelector('.copy-btn')) return;
+      if (pre.parentNode.classList.contains('code-row')) return;
+      var wrapper = document.createElement('div');
+      wrapper.className = 'code-row';
+      pre.parentNode.insertBefore(wrapper, pre);
+      wrapper.appendChild(pre);
       var btn = document.createElement('button');
       btn.className = 'copy-btn';
-      btn.textContent = 'Copy';
+      btn.innerHTML = ICON_COPY;
+      btn.title = 'Copy';
       btn.addEventListener('click', function() {
         var text = pre.querySelector('code')
           ? pre.querySelector('code').textContent
           : pre.textContent;
         copyText(text.trim(), btn);
       });
-      pre.appendChild(btn);
+      wrapper.appendChild(btn);
     });
   }
 
@@ -196,10 +214,10 @@
   }
 
   function showCopied(btn) {
-    btn.textContent = 'Copied!';
+    btn.innerHTML = ICON_CHECK;
     btn.classList.add('copied');
     setTimeout(function() {
-      btn.textContent = 'Copy';
+      btn.innerHTML = ICON_COPY;
       btn.classList.remove('copied');
     }, 2000);
   }
@@ -263,7 +281,7 @@
     {
       type: 'deb',
       title: '.deb Packages',
-      distros: 'Debian, Ubuntu',
+      distros: 'Debian, Ubuntu, and derivatives',
       deps: 'Dependencies auto-resolved: <strong>systemd (&ge; 252)</strong>, <strong>systemd-container</strong>. Suggests: qemu-utils, apparmor',
       cmdTemplate: function(url, filename) {
         return 'curl -fSLO ' + url + ' && sudo apt install ./' + filename;
@@ -272,7 +290,7 @@
     {
       type: 'rpm',
       title: '.rpm Packages',
-      distros: 'Fedora, CentOS Stream, AlmaLinux, RHEL',
+      distros: 'Fedora, CentOS Stream, AlmaLinux, RHEL, and derivatives',
       deps: 'Dependencies auto-resolved: <strong>systemd &ge; 252</strong>, <strong>systemd-container</strong>',
       cmdTemplate: function(url, filename) {
         return 'curl -fSLO ' + url + ' && sudo dnf install ./' + filename;
@@ -281,7 +299,7 @@
     {
       type: 'pkg',
       title: '.pkg.tar.zst Packages',
-      distros: 'Arch Linux',
+      distros: 'Arch Linux, CachyOS, and derivatives',
       deps: 'Requires <strong>systemd &ge; 252</strong> (includes systemd-nspawn on Arch)',
       cmdTemplate: function(url, filename) {
         return 'curl -fSLO ' + url + ' && sudo pacman -U ' + filename;
