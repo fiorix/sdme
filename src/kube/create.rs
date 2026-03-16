@@ -292,6 +292,9 @@ pub fn kube_create(
                 || kc.probes.readiness.is_some()
         });
     if has_probes {
+        // PROBE_BINARY is populated by build.rs from an external artifact;
+        // its emptiness depends on build ordering, not source code.
+        #[allow(clippy::const_is_empty)]
         if PROBE_BINARY.is_empty() {
             bail!(
                 "probe binary not available; build with: \
@@ -532,8 +535,12 @@ pub(crate) fn setup_kube_container(
 
     // Use container-level securityContext user override, then pod-level, then OCI config.
     let user_override;
-    let user = if let Some(uid) = kc.run_as_user.or(plan.run_as_user) {
-        let gid = kc.run_as_group.or(plan.run_as_group).unwrap_or(uid);
+    let user = if let Some(uid) = kc.security.run_as_user.or(plan.run_as_user) {
+        let gid = kc
+            .security
+            .run_as_group
+            .or(plan.run_as_group)
+            .unwrap_or(uid);
         user_override = format!("{uid}:{gid}");
         &user_override
     } else {
@@ -618,8 +625,12 @@ pub(crate) fn setup_kube_container(
     // Create mount point directories inside the app root (needed as bind targets
     // for sdme-kube-volumes.service). Owned by the container's effective user so
     // the app process can access them.
-    let mount_uid = kc.run_as_user.or(plan.run_as_user).unwrap_or(0);
-    let mount_gid = kc.run_as_group.or(plan.run_as_group).unwrap_or(mount_uid);
+    let mount_uid = kc.security.run_as_user.or(plan.run_as_user).unwrap_or(0);
+    let mount_gid = kc
+        .security
+        .run_as_group
+        .or(plan.run_as_group)
+        .unwrap_or(mount_uid);
     for vm in &kc.volume_mounts {
         let mount_dir = app_root.join(vm.mount_path.trim_start_matches('/'));
         fs::create_dir_all(&mount_dir)
@@ -651,8 +662,8 @@ pub(crate) fn setup_kube_container(
         // Seccomp: container overrides pod. If the container explicitly set a
         // seccomp profile (even Unconfined with empty filters), use the container's
         // filters and skip the pod-level fallback.
-        let syscall_filters = if kc.has_seccomp_profile {
-            kc.syscall_filters.clone()
+        let syscall_filters = if kc.security.has_seccomp_profile {
+            kc.security.syscall_filters.clone()
         } else if let Some(ref spt) = plan.seccomp_profile_type {
             match spt.as_str() {
                 "RuntimeDefault" => crate::security::STRICT_SYSCALL_FILTERS
@@ -666,27 +677,27 @@ pub(crate) fn setup_kube_container(
         };
 
         // AppArmor: container overrides pod.
-        let apparmor_profile = if kc.apparmor_profile.is_some() {
-            kc.apparmor_profile.clone()
+        let apparmor_profile = if kc.security.apparmor_profile.is_some() {
+            kc.security.apparmor_profile.clone()
         } else {
             plan.apparmor_profile.clone()
         };
         // Filter out empty string (Unconfined resolved to "").
         let apparmor_profile = apparmor_profile.filter(|s| !s.is_empty());
 
-        let has_overrides = !kc.add_caps.is_empty()
-            || !kc.drop_caps.is_empty()
-            || kc.allow_privilege_escalation.is_some()
-            || kc.read_only_root_filesystem
+        let has_overrides = !kc.security.add_caps.is_empty()
+            || !kc.security.drop_caps.is_empty()
+            || kc.security.allow_privilege_escalation.is_some()
+            || kc.security.read_only_root_filesystem
             || !syscall_filters.is_empty()
             || apparmor_profile.is_some();
 
         if has_overrides {
             Some(crate::oci::app::OciServiceSecurity {
-                add_caps: kc.add_caps.clone(),
-                drop_caps: kc.drop_caps.clone(),
-                allow_privilege_escalation: kc.allow_privilege_escalation,
-                read_only_root_filesystem: kc.read_only_root_filesystem,
+                add_caps: kc.security.add_caps.clone(),
+                drop_caps: kc.security.drop_caps.clone(),
+                allow_privilege_escalation: kc.security.allow_privilege_escalation,
+                read_only_root_filesystem: kc.security.read_only_root_filesystem,
                 syscall_filters,
                 apparmor_profile,
             })

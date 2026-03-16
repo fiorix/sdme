@@ -32,20 +32,9 @@ pub(crate) struct KubePlan {
     pub(crate) apparmor_profile: Option<String>,
 }
 
-#[derive(Debug)]
-pub(crate) struct KubeContainer {
-    pub(crate) name: String,
-    pub(crate) image: String,
-    pub(crate) image_ref: ImageReference,
-    pub(crate) command_override: Option<Vec<String>>,
-    pub(crate) args_override: Option<Vec<String>>,
-    pub(crate) env: Vec<(String, KubeEnvValue)>,
-    pub(crate) volume_mounts: Vec<KubeVolumeMount>,
-    pub(crate) working_dir_override: Option<String>,
-    pub(crate) image_pull_policy: String,
-    pub(crate) resource_lines: Vec<String>,
-    /// Validated probe specifications for startup, liveness, and readiness.
-    pub(crate) probes: KubeProbes,
+/// Validated container-level security context fields.
+#[derive(Debug, Default)]
+pub(crate) struct ContainerSecurity {
     /// Per-container user override (overrides pod-level).
     pub(crate) run_as_user: Option<u32>,
     /// Per-container group override (overrides pod-level).
@@ -65,6 +54,24 @@ pub(crate) struct KubeContainer {
     pub(crate) has_seccomp_profile: bool,
     /// AppArmor profile name.
     pub(crate) apparmor_profile: Option<String>,
+}
+
+#[derive(Debug)]
+pub(crate) struct KubeContainer {
+    pub(crate) name: String,
+    pub(crate) image: String,
+    pub(crate) image_ref: ImageReference,
+    pub(crate) command_override: Option<Vec<String>>,
+    pub(crate) args_override: Option<Vec<String>>,
+    pub(crate) env: Vec<(String, KubeEnvValue)>,
+    pub(crate) volume_mounts: Vec<KubeVolumeMount>,
+    pub(crate) working_dir_override: Option<String>,
+    pub(crate) image_pull_policy: String,
+    pub(crate) resource_lines: Vec<String>,
+    /// Validated probe specifications for startup, liveness, and readiness.
+    pub(crate) probes: KubeProbes,
+    /// Per-container security context.
+    pub(crate) security: ContainerSecurity,
 }
 
 /// Validated probe configuration for a container.
@@ -646,17 +653,7 @@ fn validate_container(c: Container) -> Result<KubeContainer> {
     }
 
     // Validate container-level securityContext.
-    let (
-        c_run_as_user,
-        c_run_as_group,
-        add_caps,
-        drop_caps,
-        allow_privilege_escalation,
-        read_only_root_filesystem,
-        c_syscall_filters,
-        c_has_seccomp_profile,
-        c_apparmor_profile,
-    ) = if let Some(ref sc) = c.security_context {
+    let security = if let Some(ref sc) = c.security_context {
         // runAsNonRoot consistency.
         if sc.run_as_non_root == Some(true) && sc.run_as_user.is_none() {
             bail!(
@@ -672,29 +669,29 @@ fn validate_container(c: Container) -> Result<KubeContainer> {
         }
 
         // Validate capabilities.
-        let mut add = Vec::new();
-        let mut drop = Vec::new();
+        let mut add_caps = Vec::new();
+        let mut drop_caps = Vec::new();
         if let Some(ref caps) = sc.capabilities {
             for cap in &caps.add {
                 let normalized = security::normalize_cap(cap);
                 security::validate_capability(&normalized)
                     .with_context(|| format!("container '{}': capabilities.add", c.name))?;
-                add.push(normalized);
+                add_caps.push(normalized);
             }
             for cap in &caps.drop {
                 if cap.eq_ignore_ascii_case("ALL") {
-                    drop.push("ALL".to_string());
+                    drop_caps.push("ALL".to_string());
                 } else {
                     let normalized = security::normalize_cap(cap);
                     security::validate_capability(&normalized)
                         .with_context(|| format!("container '{}': capabilities.drop", c.name))?;
-                    drop.push(normalized);
+                    drop_caps.push(normalized);
                 }
             }
         }
 
         // Validate seccomp profile.
-        let has_seccomp = sc.seccomp_profile.is_some();
+        let has_seccomp_profile = sc.seccomp_profile.is_some();
         let syscall_filters = if let Some(ref sp) = sc.seccomp_profile {
             validate_seccomp_profile(sp, &c.name)?
         } else {
@@ -702,25 +699,25 @@ fn validate_container(c: Container) -> Result<KubeContainer> {
         };
 
         // Validate apparmor profile.
-        let apparmor = if let Some(ref ap) = sc.apparmor_profile {
+        let apparmor_profile = if let Some(ref ap) = sc.apparmor_profile {
             Some(validate_apparmor_k8s(ap, &c.name)?)
         } else {
             None
         };
 
-        (
-            sc.run_as_user,
-            sc.run_as_group,
-            add,
-            drop,
-            sc.allow_privilege_escalation,
-            sc.read_only_root_filesystem.unwrap_or(false),
+        ContainerSecurity {
+            run_as_user: sc.run_as_user,
+            run_as_group: sc.run_as_group,
+            add_caps,
+            drop_caps,
+            allow_privilege_escalation: sc.allow_privilege_escalation,
+            read_only_root_filesystem: sc.read_only_root_filesystem.unwrap_or(false),
             syscall_filters,
-            has_seccomp,
-            apparmor,
-        )
+            has_seccomp_profile,
+            apparmor_profile,
+        }
     } else {
-        (None, None, vec![], vec![], None, false, vec![], false, None)
+        ContainerSecurity::default()
     };
 
     Ok(KubeContainer {
@@ -735,15 +732,7 @@ fn validate_container(c: Container) -> Result<KubeContainer> {
         image_pull_policy,
         resource_lines,
         probes,
-        run_as_user: c_run_as_user,
-        run_as_group: c_run_as_group,
-        add_caps,
-        drop_caps,
-        allow_privilege_escalation,
-        read_only_root_filesystem,
-        syscall_filters: c_syscall_filters,
-        has_seccomp_profile: c_has_seccomp_profile,
-        apparmor_profile: c_apparmor_profile,
+        security,
     })
 }
 
@@ -2066,15 +2055,7 @@ spec:
             image_pull_policy: "Always".to_string(),
             resource_lines: vec![],
             probes: KubeProbes::default(),
-            run_as_user: None,
-            run_as_group: None,
-            add_caps: vec![],
-            drop_caps: vec![],
-            allow_privilege_escalation: None,
-            read_only_root_filesystem: false,
-            syscall_filters: vec![],
-            has_seccomp_profile: false,
-            apparmor_profile: None,
+            security: ContainerSecurity::default(),
         }
     }
 
@@ -2954,8 +2935,8 @@ spec:
         let (name, spec) = parse_yaml(yaml).unwrap();
         let plan = validate_and_plan(&name, spec).unwrap();
         let c = &plan.containers[0];
-        assert_eq!(c.add_caps, vec!["CAP_NET_ADMIN"]);
-        assert_eq!(c.drop_caps, vec!["CAP_NET_RAW"]);
+        assert_eq!(c.security.add_caps, vec!["CAP_NET_ADMIN"]);
+        assert_eq!(c.security.drop_caps, vec!["CAP_NET_RAW"]);
     }
 
     #[test]
@@ -2977,8 +2958,8 @@ spec:
         let (name, spec) = parse_yaml(yaml).unwrap();
         let plan = validate_and_plan(&name, spec).unwrap();
         let c = &plan.containers[0];
-        assert_eq!(c.add_caps, vec!["CAP_CHOWN"]);
-        assert_eq!(c.drop_caps, vec!["ALL"]);
+        assert_eq!(c.security.add_caps, vec!["CAP_CHOWN"]);
+        assert_eq!(c.security.drop_caps, vec!["ALL"]);
     }
 
     #[test]
@@ -3023,9 +3004,9 @@ spec:
         let (name, spec) = parse_yaml(yaml).unwrap();
         let plan = validate_and_plan(&name, spec).unwrap();
         let c = &plan.containers[0];
-        assert!(!c.syscall_filters.is_empty(), "should have syscall filters");
+        assert!(!c.security.syscall_filters.is_empty(), "should have syscall filters");
         assert!(
-            c.syscall_filters.iter().any(|f| f.contains("@raw-io")),
+            c.security.syscall_filters.iter().any(|f| f.contains("@raw-io")),
             "should include @raw-io filter"
         );
     }
@@ -3049,7 +3030,7 @@ spec:
         let plan = validate_and_plan(&name, spec).unwrap();
         let c = &plan.containers[0];
         assert!(
-            c.syscall_filters.is_empty(),
+            c.security.syscall_filters.is_empty(),
             "Unconfined should have no filters"
         );
     }
@@ -3096,7 +3077,7 @@ spec:
         let (name, spec) = parse_yaml(yaml).unwrap();
         let plan = validate_and_plan(&name, spec).unwrap();
         let c = &plan.containers[0];
-        assert_eq!(c.apparmor_profile.as_deref(), Some("sdme-default"));
+        assert_eq!(c.security.apparmor_profile.as_deref(), Some("sdme-default"));
     }
 
     #[test]
@@ -3118,7 +3099,7 @@ spec:
         let (name, spec) = parse_yaml(yaml).unwrap();
         let plan = validate_and_plan(&name, spec).unwrap();
         let c = &plan.containers[0];
-        assert_eq!(c.apparmor_profile.as_deref(), Some("my-custom-profile"));
+        assert_eq!(c.security.apparmor_profile.as_deref(), Some("my-custom-profile"));
     }
 
     #[test]
@@ -3140,7 +3121,7 @@ spec:
         let plan = validate_and_plan(&name, spec).unwrap();
         let c = &plan.containers[0];
         // Unconfined resolves to empty string.
-        assert_eq!(c.apparmor_profile.as_deref(), Some(""));
+        assert_eq!(c.security.apparmor_profile.as_deref(), Some(""));
     }
 
     #[test]
@@ -3161,8 +3142,8 @@ spec:
         let (name, spec) = parse_yaml(yaml).unwrap();
         let plan = validate_and_plan(&name, spec).unwrap();
         let c = &plan.containers[0];
-        assert_eq!(c.run_as_user, Some(1000));
-        assert_eq!(c.run_as_group, Some(1000));
+        assert_eq!(c.security.run_as_user, Some(1000));
+        assert_eq!(c.security.run_as_group, Some(1000));
     }
 
     #[test]
@@ -3204,7 +3185,7 @@ spec:
         let (name, spec) = parse_yaml(yaml).unwrap();
         let plan = validate_and_plan(&name, spec).unwrap();
         let c = &plan.containers[0];
-        assert_eq!(c.allow_privilege_escalation, Some(false));
+        assert_eq!(c.security.allow_privilege_escalation, Some(false));
     }
 
     #[test]
@@ -3224,7 +3205,7 @@ spec:
         let (name, spec) = parse_yaml(yaml).unwrap();
         let plan = validate_and_plan(&name, spec).unwrap();
         let c = &plan.containers[0];
-        assert!(c.read_only_root_filesystem);
+        assert!(c.security.read_only_root_filesystem);
     }
 
     #[test]
@@ -3255,14 +3236,14 @@ spec:
         let (name, spec) = parse_yaml(yaml).unwrap();
         let plan = validate_and_plan(&name, spec).unwrap();
         let c = &plan.containers[0];
-        assert_eq!(c.run_as_user, Some(1000));
-        assert_eq!(c.run_as_group, Some(1000));
-        assert_eq!(c.add_caps, vec!["CAP_NET_ADMIN"]);
-        assert_eq!(c.drop_caps, vec!["CAP_NET_RAW"]);
-        assert_eq!(c.allow_privilege_escalation, Some(false));
-        assert!(c.read_only_root_filesystem);
-        assert!(!c.syscall_filters.is_empty());
-        assert_eq!(c.apparmor_profile.as_deref(), Some("sdme-default"));
+        assert_eq!(c.security.run_as_user, Some(1000));
+        assert_eq!(c.security.run_as_group, Some(1000));
+        assert_eq!(c.security.add_caps, vec!["CAP_NET_ADMIN"]);
+        assert_eq!(c.security.drop_caps, vec!["CAP_NET_RAW"]);
+        assert_eq!(c.security.allow_privilege_escalation, Some(false));
+        assert!(c.security.read_only_root_filesystem);
+        assert!(!c.security.syscall_filters.is_empty());
+        assert_eq!(c.security.apparmor_profile.as_deref(), Some("sdme-default"));
     }
 
     #[test]
@@ -3309,7 +3290,7 @@ spec:
     fn test_unit_container_security_caps_drop() {
         let _lock = UNIT_TEST_LOCK.lock().unwrap();
         let mut kc = make_test_container("app");
-        kc.drop_caps = vec!["CAP_NET_RAW".to_string()];
+        kc.security.drop_caps = vec!["CAP_NET_RAW".to_string()];
         let plan = make_test_plan();
         let unit = setup_test_container("app", &kc, &plan, false, &[]);
         assert!(
@@ -3323,8 +3304,8 @@ spec:
     fn test_unit_container_security_drop_all() {
         let _lock = UNIT_TEST_LOCK.lock().unwrap();
         let mut kc = make_test_container("app");
-        kc.drop_caps = vec!["ALL".to_string()];
-        kc.add_caps = vec!["CAP_CHOWN".to_string()];
+        kc.security.drop_caps = vec!["ALL".to_string()];
+        kc.security.add_caps = vec!["CAP_CHOWN".to_string()];
         let plan = make_test_plan();
         let unit = setup_test_container("app", &kc, &plan, false, &[]);
         assert!(unit.contains("CAP_SYS_ADMIN"), "must keep CAP_SYS_ADMIN");
@@ -3340,7 +3321,7 @@ spec:
     fn test_unit_container_security_read_only() {
         let _lock = UNIT_TEST_LOCK.lock().unwrap();
         let mut kc = make_test_container("app");
-        kc.read_only_root_filesystem = true;
+        kc.security.read_only_root_filesystem = true;
         let plan = make_test_plan();
         let unit = setup_test_container("app", &kc, &plan, false, &[]);
         assert!(
@@ -3353,7 +3334,7 @@ spec:
     fn test_unit_container_security_apparmor() {
         let _lock = UNIT_TEST_LOCK.lock().unwrap();
         let mut kc = make_test_container("app");
-        kc.apparmor_profile = Some("sdme-default".to_string());
+        kc.security.apparmor_profile = Some("sdme-default".to_string());
         let plan = make_test_plan();
         let unit = setup_test_container("app", &kc, &plan, false, &[]);
         assert!(
@@ -3366,8 +3347,8 @@ spec:
     fn test_unit_container_security_syscall_filters() {
         let _lock = UNIT_TEST_LOCK.lock().unwrap();
         let mut kc = make_test_container("app");
-        kc.syscall_filters = vec!["~@raw-io".to_string()];
-        kc.has_seccomp_profile = true;
+        kc.security.syscall_filters = vec!["~@raw-io".to_string()];
+        kc.security.has_seccomp_profile = true;
         let plan = make_test_plan();
         let unit = setup_test_container("app", &kc, &plan, false, &[]);
         assert!(
@@ -3394,8 +3375,8 @@ spec:
         let _lock = UNIT_TEST_LOCK.lock().unwrap();
         let mut kc = make_test_container("app");
         // Container explicitly sets Unconfined (empty filters, but has_seccomp_profile=true).
-        kc.has_seccomp_profile = true;
-        kc.syscall_filters = vec![];
+        kc.security.has_seccomp_profile = true;
+        kc.security.syscall_filters = vec![];
         let mut plan = make_test_plan();
         plan.seccomp_profile_type = Some("RuntimeDefault".to_string());
         let unit = setup_test_container("app", &kc, &plan, false, &[]);
@@ -3409,8 +3390,8 @@ spec:
     fn test_unit_container_user_overrides_pod() {
         let _lock = UNIT_TEST_LOCK.lock().unwrap();
         let mut kc = make_test_container("app");
-        kc.run_as_user = Some(2000);
-        kc.run_as_group = Some(2000);
+        kc.security.run_as_user = Some(2000);
+        kc.security.run_as_group = Some(2000);
         let mut plan = make_test_plan();
         plan.run_as_user = Some(1000);
         plan.run_as_group = Some(1000);
