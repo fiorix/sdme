@@ -1,0 +1,31 @@
+# Adapted from: https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/
+# Original: pods/probe/tcp-liveness-readiness.yaml (uses registry.k8s.io/goproxy)
+#
+# Listens on TCP port 8080 using BusyBox nc. Both readiness and liveness
+# probes use tcpSocket checks to verify the port is open.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: goproxy
+  labels:
+    app: goproxy
+spec:
+  containers:
+  - name: goproxy
+    image: docker.io/alpine:latest
+    command:
+    - /bin/sh
+    - -c
+    - while true; do echo ok | nc -l -p 8080; done
+    ports:
+    - containerPort: 8080
+    readinessProbe:
+      tcpSocket:
+        port: 8080
+      initialDelaySeconds: 15
+      periodSeconds: 10
+    livenessProbe:
+      tcpSocket:
+        port: 8080
+      initialDelaySeconds: 15
+      periodSeconds: 10

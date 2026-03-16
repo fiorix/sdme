@@ -1,0 +1,30 @@
+# Adapted from: https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/
+# Original: pods/probe/http-liveness.yaml (uses registry.k8s.io/e2e-test-images/agnhost)
+#
+# Serves HTTP on port 8080 using BusyBox nc. The liveness probe does an
+# httpGet to /healthz every 3s. As long as the server is running, the
+# probe succeeds and the container stays alive.
+#
+# Note: httpHeaders are accepted by sdme but not sent by the probe
+# (wget --spider doesn't support custom headers). Included here to
+# verify parsing compatibility with the original K8s example.
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    test: liveness
+  name: liveness-http
+spec:
+  containers:
+  - name: liveness
+    image: docker.io/alpine:latest
+    command: ["/bin/sh", "-c", "while true; do echo -ne 'HTTP/1.1 200 OK\\r\\nContent-Length: 2\\r\\n\\r\\nok' | nc -l -p 8080; done"]
+    livenessProbe:
+      httpGet:
+        path: /healthz
+        port: 8080
+        httpHeaders:
+        - name: Custom-Header
+          value: Awesome
+      initialDelaySeconds: 3
+      periodSeconds: 3

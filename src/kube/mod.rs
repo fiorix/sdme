@@ -8,3 +8,5 @@ mod store;
 mod types;
 
 pub use create::{kube_create, kube_delete};
+pub(crate) use plan::KubeProbes;
+pub(crate) use plan::ProbeCheck;

@@ -19,6 +19,15 @@ path = "src/lib.rs"
 name = "sdme"
 path = "src/main.rs"
 
+[[bin]]
+name = "sdme-kube-probe"
+path = "src/kube/probe/main.rs"
+required-features = ["probe"]
+
+[features]
+default = []
+probe = ["dep:tonic", "dep:prost", "dep:tokio"]
+
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
@@ -36,6 +45,9 @@ zbus = { version = "5", default-features = false, features = ["async-io", "block
 zstd = "0.13"
 sha2 = "0.10"
 serde_yml = "0.0.12"
+tonic = { version = "0.12", optional = true }
+prost = { version = "0.13", optional = true }
+tokio = { version = "1", features = ["rt", "net", "time"], optional = true }
 
 [package.metadata.deb]
 maintainer = "Alexandre Fiori"

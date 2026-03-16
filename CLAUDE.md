@@ -11,15 +11,22 @@ Runs on Linux with systemd. Requires root for all operations. Uses kernel overla
 ## Build & Test
 
 ```bash
-cargo build --release       # build the binary
+cargo build --release       # build the binary (without probe binary)
 cargo test                  # run all tests
 cargo test <test_name>      # run a single test
-make                        # same as cargo build --release
+make                        # build probe binary + sdme (with embedded probe)
 make deb                    # build .deb package
 make rpm                    # build .rpm package
 make pkg                    # build .pkg.tar.zst package (Arch Linux)
 sudo make install           # install to /usr/local (does NOT rebuild)
 ```
+
+The probe binary (`sdme-kube-probe`) is built separately and embedded into sdme:
+```bash
+cargo build --release --features probe --bin sdme-kube-probe  # build probe binary
+cargo build --release                                          # build sdme (embeds probe)
+```
+`make` handles both steps automatically.
 
 ### Release
 
@@ -116,6 +123,7 @@ The `dist/` directory contains both checked-in packaging files and generated bui
 | `src/network.rs` | Network configuration validation and state serialization |
 | `src/security.rs` | Security hardening: `SecurityConfig` (capabilities, seccomp, no-new-privileges, read-only, AppArmor), state file roundtrip, nspawn arg generation, validation |
 | `src/kube/` | Kubernetes Pod YAML support: types, plan validation, container creation, kube delete, shared store abstraction for secrets and configmaps |
+| `src/kube/probe/` | Embedded `sdme-kube-probe` binary: CLI entry point, probe runner (failure counting/actions), exec/http/tcp/grpc check implementations |
 | `src/pod.rs` | Pod (shared network namespace) lifecycle: create, list, remove, runtime netns management |
 | `src/elf.rs` | Shared `Arch` enum and minimal ELF64 header builder for static binaries (used by isolate and devfd_shim) |
 | `src/isolate/` | Static ELF binary generation for PID/IPC namespace isolation in OCI app services |
@@ -137,6 +145,9 @@ The `dist/` directory contains both checked-in packaging files and generated bui
 - `ureq`: HTTP client for URL downloads and OCI registry pulling (blocking, rustls TLS)
 - `sha2`: SHA-256 hashing (OCI digest verification)
 - `serde_yml`: YAML parsing (Kubernetes Pod manifests)
+- `tonic`: gRPC client for probe binary (optional, `probe` feature)
+- `prost`: protobuf serialization for gRPC health checks (optional, `probe` feature)
+- `tokio`: async runtime for gRPC probes (optional, `probe` feature)
 - `clap_complete`: shell completion generation (Bash, Fish, Zsh)
 
 ### External Dependencies
@@ -177,6 +188,7 @@ Dependencies are checked at runtime before use via `system_check::check_dependen
 - **Rootfs export**: `sdme fs export` exports an imported rootfs or a container's merged overlayfs view. Output formats: directory copy, tarball (uncompressed, gzip, bzip2, xz, zstd), or raw disk image (ext4 default, btrfs via `--filesystem btrfs`; no partition table). Format auto-detected from extension or overridden with `--format`. Container export (`--container`): if running, reads directly from `merged/` with a consistency warning; if stopped, temporarily mounts overlayfs. Raw image: sparse file formatted with `mkfs.ext4` or `mkfs.btrfs`, loop-mounted, tree copied, unmounted. Size auto-calculated as `max(256M, content * 1.5)` or overridden with `--size`. The `default_export_fs` config key sets the default filesystem type when `--filesystem` is not specified (default: `ext4`).
 - **Build COPY restrictions**: `sdme fs build` COPY writes to the overlayfs upper layer while stopped. Destinations under tmpfs-mounted dirs (`/tmp`, `/run`, `/dev/shm`) or opaque dirs are rejected. Validation in `check_shadowed_dest()` (`src/build.rs`); errors include config file path and line number.
 - **Kubernetes Pod YAML**: `sdme kube` accepts `kind: Pod` (v1) and `kind: Deployment` (apps/v1; extracts pod template). Multi-container pods run as a single nspawn container with one systemd service (`sdme-oci-{name}.service`) per app container; all containers share the network namespace and can communicate via localhost. Rootfs is named `kube-{podname}` and built atomically via a staging directory. K8s command/args semantics: `command` overrides Docker ENTRYPOINT, `args` overrides Docker CMD. Volumes: emptyDir (directories at `/oci/volumes/{name}` inside the rootfs, bind-mounted into each app's root by a generated `sdme-kube-volumes.service` oneshot unit), hostPath (nspawn `--bind=` mounts to `/oci/volumes/{name}`), secret (files populated from `{datadir}/secrets/{name}/data/` into `/oci/volumes/{vol}/`), configMap (files populated from `{datadir}/configmaps/{name}/data/` into `/oci/volumes/{vol}/`), and persistentVolumeClaim (host dir at `{datadir}/volumes/{claimName}` bind-mounted to `/oci/volumes/{vol}/`). Secret and configMap volumes support `items` for projected key paths and `defaultMode` for file permissions. The volume mount service runs `mount --bind` in the container's PID 1 mount namespace before app services start (app units have `After=`/`Requires=sdme-kube-volumes.service`); read-only mounts get an additional `remount,ro,bind`. Env vars support `valueFrom` with `secretKeyRef` and `configMapKeyRef` for deferred resolution from secrets/configmaps at create time. `envFrom` bulk-imports all keys from a configMap or secret as env vars, with an optional `prefix`; explicit `env[]` entries take priority over `envFrom` for the same key. Ports are aggregated across all containers; `--private-network` is enabled when any ports are declared. Restart policy mapping: Always=always, OnFailure=on-failure, Never=no. State keys: `KUBE=yes`, `KUBE_CONTAINERS={csv}`, `KUBE_YAML_HASH={sha256}`. `kube delete` removes both the container and its kube rootfs. `sdme ps` shows a `kube:{container_names}` column for kube containers. For multi-container kube pods, `--oci APP` on `exec`, `join`, and `logs` requires the app name to select which container to target; single-container pods auto-select the only app when `--oci` is used without a value.
+- **Kubernetes probes**: Four probe types supported via an embedded `sdme-kube-probe` binary deployed at `/oci/.sdme-kube-probe` inside the container rootfs. All three probe types (startup, liveness, readiness) use systemd timer + oneshot service pairs that invoke the probe binary. No shell scripts or external tool dependencies (wget, bash). Startup probe: timer writes `/run/sdme-probe-startup-{name}.done` on success; restarts service on threshold failure. Liveness probe: timer + service that restarts the OCI app service on failure threshold. Readiness probe: timer + service that writes `ready` or `not-ready` to `/oci/apps/{name}/probe-ready` (in overlayfs, readable from host for `sdme ps`). Liveness/readiness timers use `ConditionPathExists=/run/sdme-probe-startup-{name}.done` to gate on startup probe completion when present. Four probe mechanisms: `exec` (chroot + Command, std only), `httpGet` (raw HTTP/1.0 GET via TcpStream, std only), `tcpSocket` (TcpStream::connect_timeout, std only), `grpc` (gRPC Health Checking Protocol via tonic). Timer units use `BindsTo=sdme-oci-{name}.service` to stop when the main service stops. Probe parameters: `initialDelaySeconds`, `periodSeconds`, `timeoutSeconds`, `failureThreshold`, `successThreshold`. Probe binary is built separately (`cargo build --features probe --bin sdme-kube-probe`) and embedded into sdme via `include_bytes!()` in `build.rs`. `HAS_PROBES=yes` stored in container state. `sdme ps` health column shows `ready`/`not-ready` for kube containers with readiness probes. Probe check validation in `src/kube/plan.rs:build_probe_check()` returns `ProbeCheck` enum (`Exec`, `Http`, `Tcp`, `Grpc`). Unit generation in `src/oci/app.rs:generate_probe_units()`. Probe binary sources in `src/kube/probe/`.
 - **Boot failure cleanup**: `sdme new` removes the just-created container on boot failure, join failure, or Ctrl+C. `sdme start` stops the container on boot failure or Ctrl+C (preserving it on disk for debugging). Both reset the interrupt flag before cleanup so that the stop/remove operations (which internally call `check_interrupted()`) can complete.
 - **Input sanitization**: sdme runs as root and handles untrusted input; hardening measures:
   - OCI tar paths: `..` rejected, leading `/` stripped (`sanitize_dest_path()` in `src/copy.rs`).

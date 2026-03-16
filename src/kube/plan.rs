@@ -5,7 +5,6 @@ use std::collections::HashSet;
 use anyhow::{bail, Context, Result};
 
 use super::types::*;
-use crate::import::shell_join;
 use crate::oci::registry::ImageReference;
 use crate::security;
 use crate::validate_name;
@@ -45,10 +44,8 @@ pub(crate) struct KubeContainer {
     pub(crate) working_dir_override: Option<String>,
     pub(crate) image_pull_policy: String,
     pub(crate) resource_lines: Vec<String>,
-    pub(crate) readiness_exec: Option<String>,
-    /// Parsed but not yet enforced at runtime (future: watchdog integration).
-    #[allow(dead_code)]
-    pub(crate) liveness_probe: Option<Probe>,
+    /// Validated probe specifications for startup, liveness, and readiness.
+    pub(crate) probes: KubeProbes,
     /// Per-container user override (overrides pod-level).
     pub(crate) run_as_user: Option<u32>,
     /// Per-container group override (overrides pod-level).
@@ -65,6 +62,46 @@ pub(crate) struct KubeContainer {
     pub(crate) syscall_filters: Vec<String>,
     /// AppArmor profile name.
     pub(crate) apparmor_profile: Option<String>,
+}
+
+/// Validated probe configuration for a container.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct KubeProbes {
+    pub(crate) startup: Option<ProbeSpec>,
+    pub(crate) liveness: Option<ProbeSpec>,
+    pub(crate) readiness: Option<ProbeSpec>,
+}
+
+/// A validated probe specification with a structured check.
+#[derive(Debug, Clone)]
+pub(crate) struct ProbeSpec {
+    pub(crate) check: ProbeCheck,
+    pub(crate) initial_delay_seconds: u32,
+    pub(crate) period_seconds: u32,
+    pub(crate) timeout_seconds: u32,
+    pub(crate) failure_threshold: u32,
+    #[allow(dead_code)]
+    pub(crate) success_threshold: u32,
+}
+
+/// The check to execute for a probe.
+#[derive(Debug, Clone)]
+pub(crate) enum ProbeCheck {
+    Exec {
+        command: Vec<String>,
+    },
+    Http {
+        port: u16,
+        path: String,
+        scheme: String,
+    },
+    Tcp {
+        port: u16,
+    },
+    Grpc {
+        port: u16,
+        service: Option<String>,
+    },
 }
 
 #[derive(Debug)]
@@ -146,6 +183,7 @@ const KNOWN_CONTAINER_FIELDS: &[&str] = &[
     "resources",
     "livenessProbe",
     "readinessProbe",
+    "startupProbe",
     "securityContext",
 ];
 
@@ -359,23 +397,79 @@ fn build_resource_lines(resources: &ResourceRequirements) -> Result<Vec<String>>
     Ok(lines)
 }
 
-/// Build a readiness check ExecStartPost command from a readiness probe.
-fn build_readiness_exec(probe: &Probe) -> Result<String> {
-    let exec = probe
-        .exec
-        .as_ref()
-        .context("only exec readiness probes are supported")?;
-    if exec.command.is_empty() {
-        bail!("readiness probe exec command is empty");
+/// Validate a probe's action and return a structured `ProbeCheck`.
+///
+/// Exactly one action must be set: exec, httpGet, tcpSocket, or grpc.
+fn build_probe_check(probe: &Probe, container_name: &str) -> Result<ProbeCheck> {
+    let action_count = probe.exec.is_some() as u8
+        + probe.http_get.is_some() as u8
+        + probe.tcp_socket.is_some() as u8
+        + probe.grpc.is_some() as u8;
+    if action_count == 0 {
+        bail!("container '{container_name}': probe must specify exec, httpGet, tcpSocket, or grpc");
     }
-    let initial_delay = probe.initial_delay_seconds.unwrap_or(0);
-    let period = probe.period_seconds.unwrap_or(10);
-    let threshold = probe.failure_threshold.unwrap_or(3);
-    let cmd = shell_join(&exec.command);
-    // The `-` prefix means systemd won't fail the unit if the check fails.
-    Ok(format!(
-        "-/bin/sh -c 'sleep {initial_delay}; for i in $(seq 1 {threshold}); do if {cmd}; then exit 0; fi; sleep {period}; done; exit 1'"
-    ))
+    if action_count > 1 {
+        bail!(
+            "container '{container_name}': probe must specify exactly one of exec, httpGet, tcpSocket, or grpc"
+        );
+    }
+
+    if let Some(ref exec) = probe.exec {
+        if exec.command.is_empty() {
+            bail!("container '{container_name}': probe exec command is empty");
+        }
+        Ok(ProbeCheck::Exec {
+            command: exec.command.clone(),
+        })
+    } else if let Some(ref http) = probe.http_get {
+        if http.port == 0 {
+            bail!("container '{container_name}': httpGet probe port must be > 0");
+        }
+        let scheme = match http.scheme.as_deref() {
+            None | Some("HTTP") | Some("http") => "http".to_string(),
+            Some("HTTPS") | Some("https") => "https".to_string(),
+            Some(other) => {
+                bail!("container '{container_name}': unsupported httpGet scheme: {other}")
+            }
+        };
+        let path = http.path.as_deref().unwrap_or("/").to_string();
+        if !path.starts_with('/') {
+            bail!("container '{container_name}': httpGet path must start with '/': {path}");
+        }
+        Ok(ProbeCheck::Http {
+            port: http.port,
+            path,
+            scheme,
+        })
+    } else if let Some(ref tcp) = probe.tcp_socket {
+        if tcp.port == 0 {
+            bail!("container '{container_name}': tcpSocket probe port must be > 0");
+        }
+        Ok(ProbeCheck::Tcp { port: tcp.port })
+    } else if let Some(ref grpc) = probe.grpc {
+        if grpc.port == 0 {
+            bail!("container '{container_name}': grpc probe port must be > 0");
+        }
+        Ok(ProbeCheck::Grpc {
+            port: grpc.port,
+            service: grpc.service.clone(),
+        })
+    } else {
+        unreachable!()
+    }
+}
+
+/// Validate a probe and build a ProbeSpec.
+fn build_probe_spec(probe: &Probe, container_name: &str) -> Result<ProbeSpec> {
+    let check = build_probe_check(probe, container_name)?;
+    Ok(ProbeSpec {
+        check,
+        initial_delay_seconds: probe.initial_delay_seconds.unwrap_or(0),
+        period_seconds: probe.period_seconds.unwrap_or(10),
+        timeout_seconds: probe.timeout_seconds.unwrap_or(1),
+        failure_threshold: probe.failure_threshold.unwrap_or(3),
+        success_threshold: probe.success_threshold.unwrap_or(1),
+    })
 }
 
 /// Validate a K8s seccomp profile and return systemd syscall filter lines.
@@ -528,22 +622,25 @@ fn validate_container(c: Container) -> Result<KubeContainer> {
     };
 
     // Validate probes.
-    if let Some(ref probe) = c.liveness_probe {
-        if probe.exec.is_none() {
-            bail!(
-                "container '{}': only exec liveness probes are supported (httpGet/tcpSocket are not implemented)",
-                c.name
-            );
-        }
+    let mut probes = KubeProbes::default();
+    if let Some(ref probe) = c.startup_probe {
+        probes.startup = Some(
+            build_probe_spec(probe, &c.name)
+                .with_context(|| format!("container '{}': invalid startup probe", c.name))?,
+        );
     }
-    let readiness_exec = if let Some(ref probe) = c.readiness_probe {
-        Some(
-            build_readiness_exec(probe)
+    if let Some(ref probe) = c.liveness_probe {
+        probes.liveness = Some(
+            build_probe_spec(probe, &c.name)
+                .with_context(|| format!("container '{}': invalid liveness probe", c.name))?,
+        );
+    }
+    if let Some(ref probe) = c.readiness_probe {
+        probes.readiness = Some(
+            build_probe_spec(probe, &c.name)
                 .with_context(|| format!("container '{}': invalid readiness probe", c.name))?,
-        )
-    } else {
-        None
-    };
+        );
+    }
 
     // Validate container-level securityContext.
     let (
@@ -631,8 +728,7 @@ fn validate_container(c: Container) -> Result<KubeContainer> {
         working_dir_override: c.working_dir,
         image_pull_policy,
         resource_lines,
-        readiness_exec,
-        liveness_probe: c.liveness_probe,
+        probes,
         run_as_user: c_run_as_user,
         run_as_group: c_run_as_group,
         add_caps,
@@ -1714,15 +1810,18 @@ spec:
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
         let plan = validate_and_plan(&name, spec).unwrap();
-        let exec = plan.containers[0].readiness_exec.as_ref().unwrap();
-        assert!(exec.contains("sleep 5"));
-        assert!(exec.contains("seq 1 5"));
-        assert!(exec.contains("sleep 3"));
-        assert!(exec.contains("test -f /tmp/ready"));
+        let probe = plan.containers[0].probes.readiness.as_ref().unwrap();
+        assert!(
+            matches!(&probe.check, ProbeCheck::Exec { command } if command.iter().any(|a| a.contains("test -f"))),
+            "expected exec probe with 'test -f' command"
+        );
+        assert_eq!(probe.initial_delay_seconds, 5);
+        assert_eq!(probe.period_seconds, 3);
+        assert_eq!(probe.failure_threshold, 5);
     }
 
     #[test]
-    fn test_liveness_probe_non_exec_rejected() {
+    fn test_liveness_probe_no_action_rejected() {
         let yaml = r#"
 apiVersion: v1
 kind: Pod
@@ -1737,7 +1836,11 @@ spec:
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
         let err = validate_and_plan(&name, spec).unwrap_err();
-        assert!(err.to_string().contains("only exec liveness probes"));
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("must specify exec, httpGet, tcpSocket, or grpc"),
+            "unexpected error: {msg}"
+        );
     }
 
     #[test]
@@ -1757,7 +1860,88 @@ spec:
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
         let plan = validate_and_plan(&name, spec).unwrap();
-        assert!(plan.containers[0].liveness_probe.is_some());
+        assert!(plan.containers[0].probes.liveness.is_some());
+    }
+
+    #[test]
+    fn test_liveness_probe_http_get() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: probe-pod
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+    livenessProbe:
+      httpGet:
+        path: /healthz
+        port: 8080
+      periodSeconds: 5
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let plan = validate_and_plan(&name, spec).unwrap();
+        let probe = plan.containers[0].probes.liveness.as_ref().unwrap();
+        assert!(
+            matches!(&probe.check, ProbeCheck::Http { port: 8080, ref path, .. } if path == "/healthz"),
+            "expected HTTP probe on port 8080 path /healthz"
+        );
+        assert_eq!(probe.period_seconds, 5);
+    }
+
+    #[test]
+    fn test_readiness_probe_tcp_socket() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: probe-pod
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+    readinessProbe:
+      tcpSocket:
+        port: 3306
+      periodSeconds: 10
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let plan = validate_and_plan(&name, spec).unwrap();
+        let probe = plan.containers[0].probes.readiness.as_ref().unwrap();
+        assert!(
+            matches!(&probe.check, ProbeCheck::Tcp { port: 3306 }),
+            "expected TCP probe on port 3306"
+        );
+    }
+
+    #[test]
+    fn test_startup_probe() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: probe-pod
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+    startupProbe:
+      httpGet:
+        path: /ready
+        port: 8080
+      failureThreshold: 30
+      periodSeconds: 2
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let plan = validate_and_plan(&name, spec).unwrap();
+        let probe = plan.containers[0].probes.startup.as_ref().unwrap();
+        assert!(
+            matches!(&probe.check, ProbeCheck::Http { port: 8080, ref path, .. } if path == "/ready"),
+            "expected HTTP probe on port 8080 path /ready"
+        );
+        assert_eq!(probe.failure_threshold, 30);
+        assert_eq!(probe.period_seconds, 2);
     }
 
     // --- Combined feature test ---
@@ -1817,7 +2001,7 @@ spec:
         assert!(app.resource_lines.contains(&"CPUQuota=100%".to_string()));
         assert!(app.resource_lines.contains(&"MemoryLow=128M".to_string()));
         assert!(app.resource_lines.contains(&"CPUWeight=250".to_string()));
-        assert!(app.readiness_exec.is_some());
+        assert!(app.probes.readiness.is_some());
     }
 
     // --- Unit file integration tests ---
@@ -1874,8 +2058,7 @@ spec:
             working_dir_override: None,
             image_pull_policy: "Always".to_string(),
             resource_lines: vec![],
-            readiness_exec: None,
-            liveness_probe: None,
+            probes: KubeProbes::default(),
             run_as_user: None,
             run_as_group: None,
             add_caps: vec![],
@@ -2016,16 +2199,208 @@ spec:
     }
 
     #[test]
-    fn test_unit_readiness_probe() {
+    fn test_unit_startup_probe() {
         let _lock = UNIT_TEST_LOCK.lock().unwrap();
         let mut kc = make_test_container("app");
-        kc.readiness_exec = Some("/bin/sh -c 'test -f /tmp/ready'".to_string());
+        kc.probes.startup = Some(ProbeSpec {
+            check: ProbeCheck::Exec {
+                command: vec![
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    "test -f /tmp/ready".to_string(),
+                ],
+            },
+            initial_delay_seconds: 0,
+            period_seconds: 2,
+            timeout_seconds: 1,
+            failure_threshold: 30,
+            success_threshold: 1,
+        });
         let plan = make_test_plan();
-        let unit = setup_test_container("app", &kc, &plan, false, &[]);
 
+        let tmp = TempDataDir::new("kube-unit-startup");
+        let staging = tmp.path().join("staging");
+        let app_dir = staging.join("oci/apps/app");
+        let app_root = app_dir.join("root");
+        fs::create_dir_all(&app_root).unwrap();
+        fs::create_dir_all(staging.join("etc/systemd/system/multi-user.target.wants")).unwrap();
+
+        super::super::create::setup_kube_container(
+            tmp.path(),
+            &staging,
+            &app_dir,
+            &kc,
+            None,
+            &plan.restart_policy,
+            &plan.volumes,
+            &plan,
+            false,
+            &[],
+            false,
+        )
+        .unwrap();
+
+        // Startup probe should NOT use ExecStartPost (all probes use timers).
+        let unit_path = staging.join("etc/systemd/system/sdme-oci-app.service");
+        let unit = fs::read_to_string(&unit_path).unwrap();
         assert!(
-            unit.contains("ExecStartPost=/bin/sh -c 'test -f /tmp/ready'"),
-            "should have ExecStartPost for readiness probe"
+            !unit.contains("ExecStartPost="),
+            "startup probe should not use ExecStartPost"
+        );
+
+        // Startup timer and service units should exist.
+        let timer_path = staging.join("etc/systemd/system/sdme-probe-startup-app.timer");
+        assert!(timer_path.exists(), "startup timer unit should exist");
+        let svc_path = staging.join("etc/systemd/system/sdme-probe-startup-app.service");
+        assert!(svc_path.exists(), "startup service unit should exist");
+        let svc = fs::read_to_string(&svc_path).unwrap();
+        assert!(
+            svc.contains("/oci/.sdme-kube-probe"),
+            "startup service should reference probe binary"
+        );
+        assert!(
+            svc.contains("--type startup"),
+            "startup service should have --type startup"
+        );
+        assert!(
+            svc.contains("--threshold 30"),
+            "startup service should have --threshold 30"
+        );
+
+        // Timer should be enabled.
+        let symlink =
+            staging.join("etc/systemd/system/multi-user.target.wants/sdme-probe-startup-app.timer");
+        assert!(symlink.exists(), "startup timer should be enabled");
+    }
+
+    #[test]
+    fn test_unit_liveness_probe_timer() {
+        let _lock = UNIT_TEST_LOCK.lock().unwrap();
+        let mut kc = make_test_container("app");
+        kc.probes.liveness = Some(ProbeSpec {
+            check: ProbeCheck::Exec {
+                command: vec!["true".to_string()],
+            },
+            initial_delay_seconds: 5,
+            period_seconds: 10,
+            timeout_seconds: 1,
+            failure_threshold: 3,
+            success_threshold: 1,
+        });
+        let plan = make_test_plan();
+
+        let tmp = TempDataDir::new("kube-unit-liveness");
+        let staging = tmp.path().join("staging");
+        let app_dir = staging.join("oci/apps/app");
+        let app_root = app_dir.join("root");
+        fs::create_dir_all(&app_root).unwrap();
+        fs::create_dir_all(staging.join("etc/systemd/system/multi-user.target.wants")).unwrap();
+
+        super::super::create::setup_kube_container(
+            tmp.path(),
+            &staging,
+            &app_dir,
+            &kc,
+            None,
+            &plan.restart_policy,
+            &plan.volumes,
+            &plan,
+            false,
+            &[],
+            false,
+        )
+        .unwrap();
+
+        // Check timer unit exists.
+        let timer_path = staging.join("etc/systemd/system/sdme-probe-liveness-app.timer");
+        assert!(timer_path.exists(), "liveness timer unit should exist");
+        let timer = fs::read_to_string(&timer_path).unwrap();
+        assert!(
+            timer.contains("OnActiveSec=5s"),
+            "timer should have initial delay"
+        );
+        assert!(
+            timer.contains("OnUnitActiveSec=10s"),
+            "timer should have period"
+        );
+        assert!(
+            timer.contains("BindsTo=sdme-oci-app.service"),
+            "timer should bind to main service"
+        );
+
+        // Check service unit references the probe binary (no scripts).
+        let svc_path = staging.join("etc/systemd/system/sdme-probe-liveness-app.service");
+        assert!(svc_path.exists(), "liveness service unit should exist");
+        let svc = fs::read_to_string(&svc_path).unwrap();
+        assert!(
+            svc.contains("/oci/.sdme-kube-probe"),
+            "service should reference probe binary"
+        );
+        assert!(
+            svc.contains("--type liveness"),
+            "service should have --type liveness"
+        );
+
+        // No probe scripts should exist.
+        let script_path = staging.join("oci/apps/app/probe-liveness.sh");
+        assert!(
+            !script_path.exists(),
+            "no probe scripts should be generated"
+        );
+
+        // Check timer symlink in wants dir.
+        let symlink = staging
+            .join("etc/systemd/system/multi-user.target.wants/sdme-probe-liveness-app.timer");
+        assert!(symlink.exists(), "liveness timer should be enabled");
+    }
+
+    #[test]
+    fn test_unit_readiness_probe_timer() {
+        let _lock = UNIT_TEST_LOCK.lock().unwrap();
+        let mut kc = make_test_container("app");
+        kc.probes.readiness = Some(ProbeSpec {
+            check: ProbeCheck::Http {
+                port: 8080,
+                path: "/".to_string(),
+                scheme: "http".to_string(),
+            },
+            initial_delay_seconds: 0,
+            period_seconds: 5,
+            timeout_seconds: 1,
+            failure_threshold: 3,
+            success_threshold: 1,
+        });
+        let plan = make_test_plan();
+
+        let tmp = TempDataDir::new("kube-unit-readiness");
+        let staging = tmp.path().join("staging");
+        let app_dir = staging.join("oci/apps/app");
+        let app_root = app_dir.join("root");
+        fs::create_dir_all(&app_root).unwrap();
+        fs::create_dir_all(staging.join("etc/systemd/system/multi-user.target.wants")).unwrap();
+
+        super::super::create::setup_kube_container(
+            tmp.path(),
+            &staging,
+            &app_dir,
+            &kc,
+            None,
+            &plan.restart_policy,
+            &plan.volumes,
+            &plan,
+            false,
+            &[],
+            false,
+        )
+        .unwrap();
+
+        // Check readiness service references probe binary with --type readiness.
+        let svc_path = staging.join("etc/systemd/system/sdme-probe-readiness-app.service");
+        assert!(svc_path.exists(), "readiness service unit should exist");
+        let svc = fs::read_to_string(&svc_path).unwrap();
+        assert!(
+            svc.contains("/oci/.sdme-kube-probe") && svc.contains("--type readiness"),
+            "readiness service should reference probe binary with --type readiness"
         );
     }
 

@@ -67,11 +67,18 @@ for target in "${targets[@]}"; do
 
     rustup target add "$target" 2>/dev/null || true
 
+    # Build probe binary first (embedded into sdme via build.rs).
+    probe_args=(zigbuild --locked --release --target "$target" --features probe --bin sdme-kube-probe)
+    if (( VERBOSE )); then
+        probe_args+=(--verbose)
+    fi
+    cargo "${probe_args[@]}"
+
+    # Build sdme (build.rs auto-discovers and embeds the probe binary).
     cargo_args=(zigbuild --locked --release --target "$target")
     if (( VERBOSE )); then
         cargo_args+=(--verbose)
     fi
-
     cargo "${cargo_args[@]}"
 
     cp "target/$target/release/sdme" "$DIST_DIR/$binary"

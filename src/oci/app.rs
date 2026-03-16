@@ -333,8 +333,10 @@ pub(crate) struct OciAppSetup<'a> {
     pub after_units: Vec<String>,
     /// `Requires=` dependencies for the [Unit] section.
     pub requires_units: Vec<String>,
-    /// `ExecStartPost=` command for readiness checks.
+    /// `ExecStartPost=` command for readiness checks (non-kube path only).
     pub readiness_exec: Option<String>,
+    /// Validated probe specifications (kube path only).
+    pub probes: Option<crate::kube::KubeProbes>,
     /// Per-service security overrides from K8s `securityContext`.
     pub security: Option<OciServiceSecurity>,
 }
@@ -515,11 +517,16 @@ ExecStart={isolate_exec}
         opts.resource_lines.join("\n") + "\n"
     };
 
-    let readiness_line = opts
-        .readiness_exec
-        .as_ref()
-        .map(|cmd| format!("ExecStartPost={cmd}\n"))
-        .unwrap_or_default();
+    // Build ExecStartPost line for non-kube readiness checks.
+    // Kube probes use timer+service pairs exclusively (no ExecStartPost).
+    let readiness_line = match &opts.probes {
+        Some(_) => String::new(),
+        None => opts
+            .readiness_exec
+            .as_ref()
+            .map(|cmd| format!("ExecStartPost={cmd}\n"))
+            .unwrap_or_default(),
+    };
 
     // Hardening directives: always applied since all OCI apps use isolate.
     // CAP_SYS_ADMIN is kept in the bounding set because the isolate binary
@@ -580,7 +587,269 @@ WantedBy=multi-user.target
         eprintln!("wrote unit file: {}", unit_path.display());
     }
 
+    // Generate probe timer + service unit pairs (no scripts).
+    if let Some(ref probes) = opts.probes {
+        for (rel_path, content) in generate_probe_units(opts.name, probes) {
+            let full_path = opts.staging_dir.join(&rel_path);
+            if let Some(parent) = full_path.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("failed to create {}", parent.display()))?;
+            }
+            fs::write(&full_path, &content)
+                .with_context(|| format!("failed to write {}", full_path.display()))?;
+            // Enable timer units via symlink.
+            if rel_path.ends_with(".timer") {
+                let timer_filename = full_path.file_name().unwrap().to_str().unwrap();
+                let symlink_path = wants_dir.join(timer_filename);
+                std::os::unix::fs::symlink(format!("../{timer_filename}"), &symlink_path)
+                    .with_context(|| {
+                        format!("failed to create symlink {}", symlink_path.display())
+                    })?;
+            }
+            if opts.verbose {
+                eprintln!("wrote probe unit: {}", full_path.display());
+            }
+        }
+    }
+
     Ok(())
+}
+
+/// Generate systemd timer + service unit pairs for probes.
+///
+/// All probes use timer + service pairs that invoke `/oci/.sdme-kube-probe`.
+/// No shell scripts are generated. Returns `(path_relative_to_staging, content)`.
+fn generate_probe_units(name: &str, probes: &crate::kube::KubeProbes) -> Vec<(String, String)> {
+    use crate::kube::ProbeCheck;
+
+    let mut units = Vec::new();
+    let service_name = format!("sdme-oci-{name}.service");
+    let has_startup = probes.startup.is_some();
+
+    // Helper: format the check-specific args for the probe binary CLI.
+    let format_check_args = |check: &ProbeCheck, timeout: u32| -> String {
+        match check {
+            ProbeCheck::Exec { command } => {
+                let cmd_parts: Vec<String> = command.iter().map(|a| systemd_quote_arg(a)).collect();
+                format!(
+                    "exec --app-root /oci/apps/{name}/root --timeout {timeout} -- {}",
+                    cmd_parts.join(" ")
+                )
+            }
+            ProbeCheck::Http { port, path, scheme } => {
+                format!(
+                    "http --port {port} --path {} --scheme {scheme} --timeout {timeout}",
+                    systemd_quote_arg(path)
+                )
+            }
+            ProbeCheck::Tcp { port } => {
+                format!("tcp --port {port} --timeout {timeout}")
+            }
+            ProbeCheck::Grpc { port, service } => {
+                let svc_arg = service
+                    .as_ref()
+                    .map(|s| format!(" --service {}", systemd_quote_arg(s)))
+                    .unwrap_or_default();
+                format!("grpc --port {port}{svc_arg} --timeout {timeout}")
+            }
+        }
+    };
+
+    // Startup probe: timer + service that writes a done file on success.
+    if let Some(ref p) = probes.startup {
+        let timer_name = format!("sdme-probe-startup-{name}.timer");
+        let svc_name = format!("sdme-probe-startup-{name}.service");
+        let check_args = format_check_args(&p.check, p.timeout_seconds);
+
+        units.push((
+            format!("etc/systemd/system/{timer_name}"),
+            format!(
+                "\
+# Generated by sdme
+[Unit]
+Description=Startup probe timer for {name}
+After={service_name}
+BindsTo={service_name}
+
+[Timer]
+OnActiveSec={delay}s
+OnUnitActiveSec={period}s
+AccuracySec=1s
+
+[Install]
+WantedBy=multi-user.target
+",
+                delay = p.initial_delay_seconds,
+                period = p.period_seconds,
+            ),
+        ));
+
+        units.push((
+            format!("etc/systemd/system/{svc_name}"),
+            format!(
+                "\
+# Generated by sdme
+[Unit]
+Description=Startup probe for {name}
+
+[Service]
+Type=oneshot
+ExecStart=/oci/.sdme-kube-probe run --type startup --name {name} \
+  --threshold {threshold} --service {service_name} \
+  {check_args}
+",
+                threshold = p.failure_threshold,
+            ),
+        ));
+    }
+
+    // Liveness probe: timer + service that restarts the main service on threshold.
+    if let Some(ref p) = probes.liveness {
+        let timer_name = format!("sdme-probe-liveness-{name}.timer");
+        let svc_name = format!("sdme-probe-liveness-{name}.service");
+        let check_args = format_check_args(&p.check, p.timeout_seconds);
+
+        // Gate on startup probe completion: condition goes on the service
+        // (not the timer), so the timer fires on schedule but the service
+        // silently skips if the startup probe hasn't completed yet.
+        let condition = if has_startup {
+            format!("ConditionPathExists=/run/sdme-probe-startup-{name}.done\n")
+        } else {
+            String::new()
+        };
+
+        units.push((
+            format!("etc/systemd/system/{timer_name}"),
+            format!(
+                "\
+# Generated by sdme
+[Unit]
+Description=Liveness probe timer for {name}
+After={service_name}
+BindsTo={service_name}
+
+[Timer]
+OnActiveSec={delay}s
+OnUnitActiveSec={period}s
+AccuracySec=1s
+
+[Install]
+WantedBy=multi-user.target
+",
+                delay = p.initial_delay_seconds,
+                period = p.period_seconds,
+            ),
+        ));
+
+        units.push((
+            format!("etc/systemd/system/{svc_name}"),
+            format!(
+                "\
+# Generated by sdme
+[Unit]
+Description=Liveness probe for {name}
+{condition}
+[Service]
+Type=oneshot
+ExecStart=/oci/.sdme-kube-probe run --type liveness --name {name} \
+  --threshold {threshold} --service {service_name} \
+  {check_args}
+",
+                threshold = p.failure_threshold,
+            ),
+        ));
+    }
+
+    // Readiness probe: timer + service that writes ready/not-ready state.
+    if let Some(ref p) = probes.readiness {
+        let timer_name = format!("sdme-probe-readiness-{name}.timer");
+        let svc_name = format!("sdme-probe-readiness-{name}.service");
+        let check_args = format_check_args(&p.check, p.timeout_seconds);
+
+        // Gate on startup probe completion: condition goes on the service.
+        let condition = if has_startup {
+            format!("ConditionPathExists=/run/sdme-probe-startup-{name}.done\n")
+        } else {
+            String::new()
+        };
+
+        units.push((
+            format!("etc/systemd/system/{timer_name}"),
+            format!(
+                "\
+# Generated by sdme
+[Unit]
+Description=Readiness probe timer for {name}
+After={service_name}
+BindsTo={service_name}
+
+[Timer]
+OnActiveSec={delay}s
+OnUnitActiveSec={period}s
+AccuracySec=1s
+
+[Install]
+WantedBy=multi-user.target
+",
+                delay = p.initial_delay_seconds,
+                period = p.period_seconds,
+            ),
+        ));
+
+        units.push((
+            format!("etc/systemd/system/{svc_name}"),
+            format!(
+                "\
+# Generated by sdme
+[Unit]
+Description=Readiness probe for {name}
+{condition}
+[Service]
+Type=oneshot
+ExecStart=/oci/.sdme-kube-probe run --type readiness --name {name} \
+  --threshold {threshold} --service {service_name} \
+  {check_args}
+",
+                threshold = p.failure_threshold,
+            ),
+        ));
+    }
+
+    units
+}
+
+/// Quote a string for use in a systemd ExecStart= line.
+///
+/// Handles whitespace, double quotes, backslashes, and percent signs.
+fn systemd_quote_arg(s: &str) -> String {
+    if s.is_empty() {
+        return "\"\"".to_string();
+    }
+    if s.bytes().all(|b| {
+        !b.is_ascii_whitespace()
+            && b != b'"'
+            && b != b'\''
+            && b != b'\\'
+            && b != b'%'
+            && b != b'$'
+            && b != b'`'
+    }) {
+        return s.to_string();
+    }
+    let mut result = String::with_capacity(s.len() + 4);
+    result.push('"');
+    for c in s.chars() {
+        match c {
+            '"' | '\\' | '$' | '`' => {
+                result.push('\\');
+                result.push(c);
+            }
+            '%' => result.push_str("%%"),
+            _ => result.push(c),
+        }
+    }
+    result.push('"');
+    result
 }
 
 /// Set up an application image by combining a base rootfs with the OCI rootfs.
@@ -699,6 +968,7 @@ pub(crate) fn setup_app_image(
         after_units: Vec::new(),
         requires_units: Vec::new(),
         readiness_exec: None,
+        probes: None,
         security: None,
     })?;
 
@@ -1009,5 +1279,35 @@ mod tests {
             block.contains("AppArmorProfile=sdme-default"),
             "should have AppArmor profile"
         );
+    }
+
+    #[test]
+    fn test_systemd_quote_simple() {
+        assert_eq!(systemd_quote_arg("hello"), "hello");
+        assert_eq!(systemd_quote_arg("/bin/sh"), "/bin/sh");
+        assert_eq!(systemd_quote_arg("--port"), "--port");
+    }
+
+    #[test]
+    fn test_systemd_quote_empty() {
+        assert_eq!(systemd_quote_arg(""), "\"\"");
+    }
+
+    #[test]
+    fn test_systemd_quote_spaces() {
+        assert_eq!(systemd_quote_arg("hello world"), "\"hello world\"");
+        assert_eq!(
+            systemd_quote_arg("test -f /tmp/ready"),
+            "\"test -f /tmp/ready\""
+        );
+    }
+
+    #[test]
+    fn test_systemd_quote_special_chars() {
+        assert_eq!(systemd_quote_arg("say \"hi\""), "\"say \\\"hi\\\"\"");
+        assert_eq!(systemd_quote_arg("a\\b"), "\"a\\\\b\"");
+        assert_eq!(systemd_quote_arg("$HOME"), "\"\\$HOME\"");
+        assert_eq!(systemd_quote_arg("100%"), "\"100%%\"");
+        assert_eq!(systemd_quote_arg("`cmd`"), "\"\\`cmd\\`\"");
     }
 }

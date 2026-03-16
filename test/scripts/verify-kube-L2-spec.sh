@@ -42,7 +42,7 @@ set -uo pipefail
 #     v1 Pod, apps/v1 Deployment (extracts pod template)
 #
 # NOT SUPPORTED (notable):
-#   Probes: httpGet, tcpSocket, grpc; startupProbe; lifecycle hooks
+#   Probes: lifecycle hooks; supported: exec, httpGet, tcpSocket, grpc (startup/liveness/readiness)
 #   Volumes: projected, downwardAPI, subPath, subPathExpr
 #   Networking: hostNetwork, dnsPolicy, dnsConfig, hostAliases
 #   Security: seLinux

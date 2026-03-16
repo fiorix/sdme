@@ -1,0 +1,27 @@
+# Adapted from: https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/
+# Original: pods/probe/exec-liveness.yaml
+#
+# The container creates /tmp/healthy on startup, then removes it after 30s.
+# The liveness probe checks for this file every 5s. After the file is removed,
+# the probe fails and the OCI app service is restarted.
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    test: liveness
+  name: liveness-exec
+spec:
+  containers:
+  - name: liveness
+    image: docker.io/alpine:latest
+    command:
+    - /bin/sh
+    - -c
+    - touch /tmp/healthy; sleep 30; rm -f /tmp/healthy; sleep 600
+    livenessProbe:
+      exec:
+        command:
+        - cat
+        - /tmp/healthy
+      initialDelaySeconds: 5
+      periodSeconds: 5

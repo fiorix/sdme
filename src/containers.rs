@@ -1951,7 +1951,11 @@ mod tests {
         let tmp = tmp();
 
         let distros = [
-            ("deb", "mydebian", "PRETTY_NAME=\"Debian GNU/Linux 12 (bookworm)\""),
+            (
+                "deb",
+                "mydebian",
+                "PRETTY_NAME=\"Debian GNU/Linux 12 (bookworm)\"",
+            ),
             ("ubu", "myubuntu", "PRETTY_NAME=\"Ubuntu 24.04 LTS\""),
             ("fed", "myfedora", "PRETTY_NAME=\"Fedora Linux 41\""),
             ("cos", "mycentos", "PRETTY_NAME=\"CentOS Stream 9\""),

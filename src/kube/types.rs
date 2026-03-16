@@ -15,6 +15,10 @@ pub(super) struct KubeManifest {
 #[derive(serde::Deserialize, Debug)]
 pub(super) struct Metadata {
     pub name: Option<String>,
+    /// Labels (accepted but not used).
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub labels: Option<serde_yml::Value>,
 }
 
 /// Deployment spec wrapper to extract the pod template.
@@ -74,6 +78,8 @@ pub(crate) struct Container {
     pub(crate) liveness_probe: Option<Probe>,
     #[serde(default)]
     pub(crate) readiness_probe: Option<Probe>,
+    #[serde(default)]
+    pub(crate) startup_probe: Option<Probe>,
     #[serde(default)]
     pub(crate) security_context: Option<ContainerSecurityContext>,
 }
@@ -147,19 +153,52 @@ pub(crate) struct ResourceList {
 pub(crate) struct Probe {
     pub(crate) exec: Option<ExecAction>,
     #[serde(default)]
+    pub(crate) http_get: Option<HttpGetAction>,
+    #[serde(default)]
+    pub(crate) tcp_socket: Option<TcpSocketAction>,
+    #[serde(default)]
+    pub(crate) grpc: Option<GrpcAction>,
+    #[serde(default)]
     pub(crate) initial_delay_seconds: Option<u32>,
     #[serde(default)]
     pub(crate) period_seconds: Option<u32>,
     #[serde(default)]
-    #[allow(dead_code)]
     pub(crate) timeout_seconds: Option<u32>,
     #[serde(default)]
     pub(crate) failure_threshold: Option<u32>,
+    #[serde(default)]
+    pub(crate) success_threshold: Option<u32>,
+}
+
+#[derive(serde::Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct HttpGetAction {
+    #[serde(default)]
+    pub(crate) path: Option<String>,
+    pub(crate) port: u16,
+    #[serde(default)]
+    pub(crate) scheme: Option<String>,
+    /// HTTP headers (accepted but not used; wget --spider doesn't support custom headers).
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub(crate) http_headers: Option<serde_yml::Value>,
+}
+
+#[derive(serde::Deserialize, Debug)]
+pub(crate) struct TcpSocketAction {
+    pub(crate) port: u16,
 }
 
 #[derive(serde::Deserialize, Debug)]
 pub(crate) struct ExecAction {
     pub(crate) command: Vec<String>,
+}
+
+#[derive(serde::Deserialize, Debug)]
+pub(crate) struct GrpcAction {
+    pub(crate) port: u16,
+    #[serde(default)]
+    pub(crate) service: Option<String>,
 }
 
 #[derive(serde::Deserialize, Debug)]

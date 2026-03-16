@@ -12,6 +12,13 @@ use crate::import::shell_join;
 use crate::oci::registry::OciContainerConfig;
 use crate::{check_interrupted, validate_name, State};
 
+/// Embedded `sdme-kube-probe` binary for Kubernetes probes.
+///
+/// Built separately via `cargo build --features probe --bin sdme-kube-probe`.
+/// If the probe binary wasn't built, this is an empty slice and probe
+/// creation will fail with a clear error message.
+const PROBE_BINARY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/sdme-kube-probe"));
+
 /// Set ownership of a path to the given uid:gid.
 fn chown_path(path: &Path, uid: u32, gid: u32) -> Result<()> {
     if uid == 0 && gid == 0 {
@@ -274,6 +281,38 @@ pub fn kube_create(
         .with_context(|| format!("failed to set up container '{}'", kc.name))?;
     }
 
+    // 3b. Deploy probe binary if any containers have probes.
+    let has_probes = plan
+        .init_containers
+        .iter()
+        .chain(plan.containers.iter())
+        .any(|kc| {
+            kc.probes.startup.is_some()
+                || kc.probes.liveness.is_some()
+                || kc.probes.readiness.is_some()
+        });
+    if has_probes {
+        if PROBE_BINARY.is_empty() {
+            bail!(
+                "probe binary not available; build with: \
+                 cargo build --features probe --bin sdme-kube-probe"
+            );
+        }
+        let probe_path = staging_dir.join("oci/.sdme-kube-probe");
+        fs::write(&probe_path, PROBE_BINARY)
+            .with_context(|| format!("failed to write {}", probe_path.display()))?;
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&probe_path, fs::Permissions::from_mode(0o755))
+            .with_context(|| format!("failed to set permissions on {}", probe_path.display()))?;
+        if verbose {
+            eprintln!(
+                "deployed probe binary ({} bytes): {}",
+                PROBE_BINARY.len(),
+                probe_path.display()
+            );
+        }
+    }
+
     // 4. Generate sdme-kube-volumes.service for shared volume mounts.
     //
     // This oneshot service runs `mount --bind` in the container's PID 1 mount
@@ -394,6 +433,9 @@ WantedBy=multi-user.target
     state.set("KUBE", "yes");
     state.set("KUBE_CONTAINERS", container_names.join(","));
     state.set("KUBE_YAML_HASH", &yaml_hash);
+    if has_probes {
+        state.set("HAS_PROBES", "yes");
+    }
     state.write_to(&state_path)?;
 
     Ok(name)
@@ -672,7 +714,8 @@ pub(crate) fn setup_kube_container(
         remain_after_exit: is_init,
         after_units,
         requires_units,
-        readiness_exec: kc.readiness_exec.clone(),
+        readiness_exec: None,
+        probes: Some(kc.probes.clone()),
         security,
     })
 }
