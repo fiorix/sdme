@@ -14,6 +14,14 @@ set -uo pipefail
 #   4. Import nginx-unprivileged OCI app on the NixOS base
 #   5. Create, boot, and test the OCI app container
 #   6. Cleanup
+#
+# Known limitation: Phase 5 (OCI app on NixOS) fails because NixOS
+# manages /etc entirely via its activation script, which tries to replace
+# /etc/systemd/system with a symlink to the Nix store. sdme's OCI app
+# setup writes unit files into /etc/systemd/system in the overlayfs
+# upper layer, causing the NixOS activation to fail with "could not
+# create symlink /etc/systemd/system". Without working targets, systemd
+# inside the container can't find default.target and crashes.
 
 source "$(dirname "$0")/lib.sh"
 
