@@ -875,7 +875,7 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
         let os = {
             let merged = container_dir.join("merged");
             let upper = container_dir.join("upper");
-            [&merged, &upper]
+            let detected = [&merged, &upper]
                 .iter()
                 .map(|p| rootfs::detect_distro(p))
                 .find(|d| !d.is_empty())
@@ -887,7 +887,12 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
                         // (stopped): the lower layer is the host's /.
                         rootfs::detect_distro(Path::new("/"))
                     }
-                })
+                });
+            if detected.is_empty() {
+                "unknown".to_string()
+            } else {
+                detected
+            }
         };
 
         // Status (running/stopped).
@@ -1434,6 +1439,26 @@ mod tests {
         fs::create_dir_all(container_dir.join("merged")).unwrap();
     }
 
+    fn create_dummy_container_with_rootfs(tmp: &TempDataDir, name: &str, rootfs_name: &str) {
+        let state_dir = tmp.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+        fs::write(
+            state_dir.join(name),
+            format!("NAME={name}\nROOTFS={rootfs_name}\n"),
+        )
+        .unwrap();
+        let container_dir = tmp.path().join("containers").join(name);
+        fs::create_dir_all(container_dir.join("upper")).unwrap();
+        fs::create_dir_all(container_dir.join("work")).unwrap();
+        fs::create_dir_all(container_dir.join("merged")).unwrap();
+    }
+
+    fn write_os_release(rootfs: &Path, content: &str) {
+        let etc = rootfs.join("etc");
+        fs::create_dir_all(&etc).unwrap();
+        fs::write(etc.join("os-release"), content).unwrap();
+    }
+
     #[test]
     fn test_resolve_name_exact_match() {
         let tmp = tmp();
@@ -1876,5 +1901,111 @@ mod tests {
         let app_nspids = parse_nspid(app_status).unwrap();
         assert!(app_nspids.len() >= 3);
         assert_eq!(*app_nspids.last().unwrap(), 1u32);
+    }
+
+    // --- OS detection tests ---
+
+    #[test]
+    fn test_list_os_host_rootfs_fallback() {
+        // Stopped host-rootfs container with no os-release in merged/ or upper/.
+        // Cascade falls to detect_distro(Path::new("/")) — the host's os-release.
+        // On hosts without os-release (rare but possible), falls back to "unknown".
+        let tmp = tmp();
+        create_dummy_container(&tmp, "hostbox");
+        let infos = list(tmp.path()).unwrap();
+        let info = infos.iter().find(|i| i.name == "hostbox").unwrap();
+        assert!(!info.os.is_empty(), "os should never be empty");
+    }
+
+    #[test]
+    fn test_list_os_unknown_when_no_os_release() {
+        // Imported rootfs container with no os-release anywhere — should show "unknown".
+        let tmp = tmp();
+        create_dummy_container_with_rootfs(&tmp, "bare", "emptyfs");
+        // Create the rootfs dir but don't write os-release.
+        fs::create_dir_all(tmp.path().join("fs/emptyfs")).unwrap();
+        let infos = list(tmp.path()).unwrap();
+        let info = infos.iter().find(|i| i.name == "bare").unwrap();
+        assert_eq!(info.os, "unknown");
+    }
+
+    #[test]
+    fn test_list_os_merged_takes_priority() {
+        // os-release in merged/ should win over upper/ and rootfs.
+        let tmp = tmp();
+        create_dummy_container(&tmp, "mergedbox");
+        let merged = tmp.path().join("containers/mergedbox/merged");
+        write_os_release(&merged, "PRETTY_NAME=\"Merged Distro\"\n");
+        let upper = tmp.path().join("containers/mergedbox/upper");
+        write_os_release(&upper, "PRETTY_NAME=\"Upper Distro\"\n");
+
+        let infos = list(tmp.path()).unwrap();
+        let info = infos.iter().find(|i| i.name == "mergedbox").unwrap();
+        assert_eq!(info.os, "Merged Distro");
+    }
+
+    #[test]
+    fn test_list_os_imported_rootfs_distros() {
+        let tmp = tmp();
+
+        let distros = [
+            ("deb", "mydebian", "PRETTY_NAME=\"Debian GNU/Linux 12 (bookworm)\""),
+            ("ubu", "myubuntu", "PRETTY_NAME=\"Ubuntu 24.04 LTS\""),
+            ("fed", "myfedora", "PRETTY_NAME=\"Fedora Linux 41\""),
+            ("cos", "mycentos", "PRETTY_NAME=\"CentOS Stream 9\""),
+            ("alm", "myalma", "PRETTY_NAME=\"AlmaLinux 9.3\""),
+            ("arc", "myarch", "PRETTY_NAME=\"Arch Linux\""),
+            ("cch", "mycachyos", "PRETTY_NAME=\"CachyOS\""),
+        ];
+
+        for (cname, rootfs_name, os_release) in &distros {
+            create_dummy_container_with_rootfs(&tmp, cname, rootfs_name);
+            let rootfs_dir = tmp.path().join("fs").join(rootfs_name);
+            write_os_release(&rootfs_dir, &format!("{os_release}\n"));
+        }
+
+        let infos = list(tmp.path()).unwrap();
+        for (cname, _, os_release) in &distros {
+            let info = infos.iter().find(|i| i.name == *cname).unwrap();
+            // Extract the value from PRETTY_NAME="..."
+            let expected = os_release
+                .strip_prefix("PRETTY_NAME=\"")
+                .unwrap()
+                .strip_suffix('"')
+                .unwrap();
+            assert_eq!(info.os, expected, "os mismatch for container {cname}");
+        }
+    }
+
+    #[test]
+    fn test_list_os_cascade_priority() {
+        let tmp = tmp();
+        let rootfs_name = "testfs";
+        create_dummy_container_with_rootfs(&tmp, "cascade", rootfs_name);
+
+        let merged = tmp.path().join("containers/cascade/merged");
+        let upper = tmp.path().join("containers/cascade/upper");
+        let rootfs_dir = tmp.path().join("fs").join(rootfs_name);
+
+        write_os_release(&merged, "PRETTY_NAME=\"Merged OS\"\n");
+        write_os_release(&upper, "PRETTY_NAME=\"Upper OS\"\n");
+        write_os_release(&rootfs_dir, "PRETTY_NAME=\"Rootfs OS\"\n");
+
+        // merged/ wins
+        let infos = list(tmp.path()).unwrap();
+        let info = infos.iter().find(|i| i.name == "cascade").unwrap();
+        assert_eq!(info.os, "Merged OS");
+
+        // Remove merged os-release — upper/ wins
+        fs::remove_file(merged.join("etc/os-release")).unwrap();
+        let infos = list(tmp.path()).unwrap();
+        let info = infos.iter().find(|i| i.name == "cascade").unwrap();
+        assert_eq!(info.os, "Upper OS");
+
+        // Remove upper os-release — rootfs wins
+        fs::remove_file(upper.join("etc/os-release")).unwrap();
+        let infos = list(tmp.path()).unwrap();
+        let info = infos.iter().find(|i| i.name == "cascade").unwrap();
+        assert_eq!(info.os, "Rootfs OS");
     }
 }

@@ -1,44 +1,51 @@
 # Test Results
 
-Last verified: 2026-03-14
+Last verified: 2026-03-16
 
-System: Linux 6.19.6-2-cachyos (x86_64), systemd 259 (259.3-1-arch), sdme 0.3.2
+System: Linux 6.19.6-2-cachyos (x86_64), systemd 259 (259.3-1-arch), sdme 0.4.0
 
 See [README.md](README.md) for how to run the tests.
 
-## Unit tests
-
-497 passed, 0 failed, 3 ignored.
-
 ## Base OS Import and Boot
 
-| Distro    | Image                             | Import | Boot |
-|-----------|-----------------------------------|--------|------|
-| debian    | docker.io/debian:stable           | PASS   | PASS |
-| ubuntu    | docker.io/ubuntu:24.04            | PASS   | PASS |
-| fedora    | quay.io/fedora/fedora:41          | PASS   | PASS |
-| centos    | quay.io/centos/centos:stream9     | PASS   | PASS |
-| almalinux | quay.io/almalinuxorg/almalinux:9  | PASS   | PASS |
-| archlinux | docker.io/archlinux               | PASS   | PASS |
+| Distro    | Image                             | Import | Boot | OS (running) | OS (stopped) |
+|-----------|-----------------------------------|--------|------|--------------|--------------|
+| debian    | docker.io/debian:stable           | PASS   | PASS | PASS         | PASS         |
+| ubuntu    | docker.io/ubuntu:24.04            | PASS   | PASS | PASS         | PASS         |
+| fedora    | quay.io/fedora/fedora:41          | PASS   | PASS | PASS         | PASS         |
+| centos    | quay.io/centos/centos:stream10    | PASS   | PASS | PASS         | PASS         |
+| almalinux | quay.io/almalinuxorg/almalinux:9  | PASS   | PASS | PASS         | PASS         |
+| archlinux | docker.io/lopsided/archlinux      | PASS   | PASS | PASS         | PASS         |
 
 Boot tests verify: container create, systemd reaching `running` state,
 journalctl access, and systemctl unit listing.
 
-archlinux requires x86_64: the `docker.io/archlinux` image only
-publishes `linux/amd64` manifests.
+OS detection tests verify that `sdme ps` shows the correct distro name
+(from `PRETTY_NAME` in os-release) both while the container is running
+(reads from overlayfs `merged/`) and after stop (cascade through
+`upper/` then the imported rootfs).
+
+archlinux requires x86_64: the `docker.io/lopsided/archlinux` image
+only publishes `linux/amd64` manifests.
 
 ## OCI App Matrix
 
 | App                | Image                              | deb  | ubu  | fed  | cen  | alma | arch |
 |--------------------|------------------------------------|------|------|------|------|------|------|
 | nginx-unprivileged | docker.io/nginxinc/nginx-unpriv... | PASS | PASS | PASS | PASS | PASS | PASS |
-| redis              | docker.io/redis                    | PASS | PASS | PASS | PASS | PASS | PASS |
-| postgresql         | docker.io/postgres                 | PASS | PASS | PASS | PASS | PASS | PASS |
+| redis              | docker.io/redis                    | FAIL | FAIL | FAIL | FAIL | FAIL | FAIL |
+| postgresql         | docker.io/postgres                 | FAIL | FAIL | FAIL | FAIL | FAIL | FAIL |
 
 Each cell verifies: app import with `--base-fs`, container boot,
 `sdme-oci-{name}.service` active, journal and status accessible, and
 app-specific health check (marker file served by nginx-unprivileged,
 redis-cli ping, pg_isready).
+
+redis and postgresql verify checks fail on all distros: `sdme exec --oci`
+cannot find the cgroup for the OCI service under
+`/sys/fs/cgroup/machine.slice`. Import, boot, service, logs, and status
+checks all pass. This is a cgroup lookup regression in `exec --oci`,
+not an OS detection issue.
 
 ## Pod Tests
 

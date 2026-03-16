@@ -24,6 +24,16 @@ declare -A APP_IMAGES=(
     [postgresql]="docker.io/postgres"
 )
 
+# Expected substring in the OS column of `sdme ps` for each distro.
+declare -A DISTRO_OS_PATTERN=(
+    [debian]="Debian"
+    [ubuntu]="Ubuntu"
+    [fedora]="Fedora"
+    [centos]="CentOS"
+    [almalinux]="AlmaLinux"
+    [archlinux]="Arch Linux"
+)
+
 declare -A APP_READY_WAIT=(
     [nginx-unprivileged]=3
     [redis]=3
@@ -56,6 +66,30 @@ Environment=LANG=C.UTF-8
 ExecStart=
 ExecStart=/.sdme-isolate 0 0 /data /usr/local/bin/docker-entrypoint.sh redis-server${extra_args}
 DROPIN
+}
+
+# Check that `sdme ps` shows the expected OS pattern for a container.
+#   check_os <container_name> <distro>
+# Returns 0 on match, 1 on mismatch. On mismatch, prints the actual OS value.
+check_os() {
+    local ct_name="$1" distro="$2"
+    local pattern="${DISTRO_OS_PATTERN[$distro]}"
+    local os_col
+    os_col=$($SDME ps 2>/dev/null | awk -v name="$ct_name" '$1 == name {
+        # OS is the 4th column — but it may contain spaces (e.g. "Arch Linux").
+        # Columns 1-3 are single-word (NAME, STATUS, HEALTH). Print from field 4
+        # to the end, then strip trailing columns that start with known suffixes.
+        for (i=4; i<=NF; i++) printf "%s ", $i
+        printf "\n"
+    }')
+    # Trim trailing whitespace.
+    os_col="${os_col%"${os_col##*[![:space:]]}"}"
+    if [[ "$os_col" == *"$pattern"* ]]; then
+        return 0
+    else
+        echo "$os_col"
+        return 1
+    fi
 }
 
 # Timeouts (seconds)
@@ -202,6 +236,8 @@ phase2_boot() {
             record "boot/$distro/systemd" SKIP "base import failed"
             record "boot/$distro/journalctl" SKIP "base import failed"
             record "boot/$distro/systemctl" SKIP "base import failed"
+            record "boot/$distro/os-running" SKIP "base import failed"
+            record "boot/$distro/os-stopped" SKIP "base import failed"
             continue
         fi
 
@@ -214,6 +250,8 @@ phase2_boot() {
             record "boot/$distro/systemd" SKIP "create failed"
             record "boot/$distro/journalctl" SKIP "create failed"
             record "boot/$distro/systemctl" SKIP "create failed"
+            record "boot/$distro/os-running" SKIP "create failed"
+            record "boot/$distro/os-stopped" SKIP "create failed"
             continue
         fi
         record "boot/$distro/create" PASS
@@ -223,6 +261,8 @@ phase2_boot() {
             record "boot/$distro/systemd" FAIL "start failed: $output"
             record "boot/$distro/journalctl" SKIP "start failed"
             record "boot/$distro/systemctl" SKIP "start failed"
+            record "boot/$distro/os-running" SKIP "start failed"
+            record "boot/$distro/os-stopped" SKIP "start failed"
             sdme rm -f "$ct_name" 2>/dev/null || true
             continue
         fi
@@ -248,8 +288,23 @@ phase2_boot() {
             record "boot/$distro/systemctl" FAIL "$output"
         fi
 
+        # OS detection (running)
+        if output=$(check_os "$ct_name" "$distro"); then
+            record "boot/$distro/os-running" PASS
+        else
+            record "boot/$distro/os-running" FAIL "expected *${DISTRO_OS_PATTERN[$distro]}*, got: $output"
+        fi
+
         # Cleanup
         stop_container "$ct_name"
+
+        # OS detection (stopped)
+        if output=$(check_os "$ct_name" "$distro"); then
+            record "boot/$distro/os-stopped" PASS
+        else
+            record "boot/$distro/os-stopped" FAIL "expected *${DISTRO_OS_PATTERN[$distro]}*, got: $output"
+        fi
+
         sdme rm -f "$ct_name" 2>/dev/null || true
     done
 }
@@ -631,15 +686,17 @@ generate_report() {
         # Phase 2 table
         echo "## Phase 2: Boot Tests"
         echo ""
-        echo "| Distro | Create | systemd | journalctl | systemctl |"
-        echo "|--------|--------|---------|------------|-----------|"
+        echo "| Distro | Create | systemd | journalctl | systemctl | OS (running) | OS (stopped) |"
+        echo "|--------|--------|---------|------------|-----------|--------------|--------------|"
         for distro in "${DISTROS[@]}"; do
-            local c s j u
+            local c s j u or os
             c=$(result_status "boot/$distro/create")
             s=$(result_status "boot/$distro/systemd")
             j=$(result_status "boot/$distro/journalctl")
             u=$(result_status "boot/$distro/systemctl")
-            echo "| $distro | $c | $s | $j | $u |"
+            or=$(result_status "boot/$distro/os-running")
+            os=$(result_status "boot/$distro/os-stopped")
+            echo "| $distro | $c | $s | $j | $u | $or | $os |"
         done
         echo ""
 
