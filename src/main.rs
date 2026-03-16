@@ -530,6 +530,12 @@ EXAMPLE:
         /// SSH public key or path to .pub file for root authorized_keys
         #[arg(long, requires = "vm")]
         ssh_key: Option<String>,
+        /// Set VM hostname (default: rootfs/container name)
+        #[arg(long, requires = "vm")]
+        hostname: Option<String>,
+        /// Install missing packages (e.g. udev) into rootfs for VM boot
+        #[arg(long, value_enum, default_value_t = InstallPackages::Auto, requires = "vm")]
+        install_packages: InstallPackages,
     },
     /// Manage the OCI blob cache
     #[command(subcommand)]
@@ -2314,6 +2320,8 @@ fn main() -> Result<()> {
                 net_ifaces,
                 root_password,
                 ssh_key,
+                hostname,
+                install_packages,
             } => {
                 let fmt = export::detect_format(&output, format.as_deref())?;
                 let fs_str = filesystem.as_deref().unwrap_or(&cfg.default_export_fs);
@@ -2359,11 +2367,15 @@ fn main() -> Result<()> {
                         }
                         None => None,
                     };
+                    let hostname = hostname.unwrap_or_else(|| name.clone());
                     Some(export::VmOptions {
+                        hostname,
                         nameservers,
                         net_ifaces,
                         root_password,
                         ssh_key,
+                        install_packages,
+                        interactive,
                     })
                 } else {
                     None

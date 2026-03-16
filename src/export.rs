@@ -10,14 +10,19 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 
+use crate::import::InstallPackages;
+use crate::rootfs::DistroFamily;
 use crate::{check_interrupted, containers, copy, system_check, systemd, validate_name, State};
 
 /// Options for preparing a raw disk image for VM boot.
 pub struct VmOptions {
+    pub hostname: String,
     pub nameservers: Vec<String>,
     pub net_ifaces: u32,
     pub root_password: Option<String>,
     pub ssh_key: Option<String>,
+    pub install_packages: InstallPackages,
+    pub interactive: bool,
 }
 
 /// Filesystem type for raw disk image export.
@@ -582,6 +587,7 @@ fn ensure_init_symlink(mount: &Path) -> Result<()> {
 ///
 /// | What | Path(s) | Why |
 /// |------|---------|-----|
+/// | udev install | (via chroot) | Container rootfs images lack udev; installed if `--install-packages` allows |
 /// | init symlink | `/usr/sbin/init` → `../../lib/systemd/systemd` | Kernel needs `/sbin/init`; nspawn finds systemd directly |
 /// | serial-getty template | `/etc/systemd/system/serial-getty@.service` | Copy of distro template with `BindsTo=dev-%i.device` removed (no udev) |
 /// | serial-getty enable | `/etc/systemd/system/getty.target.wants/serial-getty@ttyS0.service` | Explicit enable for ttyS0 |
@@ -590,6 +596,7 @@ fn ensure_init_symlink(mount: &Path) -> Result<()> {
 /// | resolved unmask | `/etc/systemd/system/systemd-resolved.service` | Remove mask symlink (nspawn import masks it) |
 /// | resolv.conf | `/etc/resolv.conf` | Nameserver entries (VM has no host resolver) |
 /// | networkd units | `/etc/systemd/network/20-sdme-en.network` | DHCP on `en*` interfaces; enables `systemd-networkd.service` |
+/// | hostname | `/etc/hostname` | VM hostname (defaults to rootfs/container name) |
 /// | root password | `/etc/shadow` | Direct hash write (no chpasswd dependency) |
 /// | SSH key | `/root/.ssh/authorized_keys` | Optional authorized_keys for root |
 ///
@@ -610,15 +617,11 @@ fn ensure_init_symlink(mount: &Path) -> Result<()> {
 ///   same image. Workaround: use `--serial pty` and connect with
 ///   `screen /dev/pts/N`, or use SSH instead of the serial console.
 ///
-/// - **Hostname**: exported VMs inherit the build host's hostname unless the
-///   rootfs already contains `/etc/hostname`. A future `--hostname` flag
-///   should write this file during export.
-///
 /// - **No udev**: container-imported rootfs images typically lack
-///   `systemd-udevd`. The serial-getty template is patched to remove the
-///   `BindsTo=dev-%i.device` dependency, but other services that depend on
-///   udev device units may not start. Full VM use may require installing
-///   udev into the rootfs before export.
+///   `systemd-udevd`. Use `--install-packages=yes` to install udev into the
+///   rootfs during export. The serial-getty template is patched to remove the
+///   `BindsTo=dev-%i.device` dependency regardless, so the serial console
+///   works even without udev.
 ///
 /// - **NixOS**: VM export works with NixOS rootfs built via
 ///   `sdme fs import --install-packages=yes` from the `nixos/nix` OCI image,
@@ -640,6 +643,11 @@ fn ensure_init_symlink(mount: &Path) -> Result<()> {
 /// isolate binary, volume mounts) should be its own package so it can be
 /// cleanly removed or inspected inside a running container.
 fn prep_vm_rootfs(mount: &Path, fs_type: RawFs, opts: &VmOptions, verbose: bool) -> Result<()> {
+    // Install udev first — ChrootGuard copies host resolv.conf for DNS,
+    // and cleanup restores the original. The later write_resolv_conf()
+    // writes the final VM nameservers.
+    install_udev_if_needed(mount, opts, verbose)?;
+
     ensure_init_symlink(mount)?;
 
     enable_serial_console(mount)?;
@@ -669,6 +677,11 @@ fn prep_vm_rootfs(mount: &Path, fs_type: RawFs, opts: &VmOptions, verbose: bool)
         }
     }
 
+    write_hostname(mount, &opts.hostname)?;
+    if verbose {
+        eprintln!("wrote /etc/hostname: {}", opts.hostname);
+    }
+
     if let Some(password) = &opts.root_password {
         set_root_password(mount, password)?;
         if verbose {
@@ -686,6 +699,90 @@ fn prep_vm_rootfs(mount: &Path, fs_type: RawFs, opts: &VmOptions, verbose: bool)
             eprintln!("installed SSH authorized key for root");
         }
     }
+
+    Ok(())
+}
+
+/// Write /etc/hostname with the given hostname.
+fn write_hostname(mount: &Path, hostname: &str) -> Result<()> {
+    let path = mount.join("etc/hostname");
+    fs::write(&path, format!("{hostname}\n"))
+        .with_context(|| format!("failed to write {}", path.display()))
+}
+
+/// Check whether udev (systemd-udevd) is present in the rootfs.
+fn detect_udev_presence(mount: &Path) -> bool {
+    mount.join("usr/lib/systemd/systemd-udevd").exists()
+        || mount.join("lib/systemd/systemd-udevd").exists()
+        || mount.join("usr/bin/udevd").exists()
+}
+
+/// Return the chroot commands to install udev for the given distro family.
+fn udev_install_commands(family: &DistroFamily) -> Vec<String> {
+    use crate::import::APT_NO_SANDBOX;
+    match *family {
+        DistroFamily::Debian => vec![format!(
+            "apt-get update -qq {APT_NO_SANDBOX} && apt-get install -y {APT_NO_SANDBOX} udev"
+        )],
+        DistroFamily::Fedora => vec!["dnf install -y systemd-udevd".to_string()],
+        DistroFamily::Arch => vec!["pacman -Sy --noconfirm systemd".to_string()],
+        DistroFamily::Suse => vec!["zypper --non-interactive install udev".to_string()],
+        _ => vec![],
+    }
+}
+
+/// Install udev into the rootfs if it is missing, respecting the
+/// `--install-packages` policy (Auto/Yes/No).
+fn install_udev_if_needed(mount: &Path, opts: &VmOptions, verbose: bool) -> Result<()> {
+    if detect_udev_presence(mount) {
+        if verbose {
+            eprintln!("udev already present, skipping install");
+        }
+        return Ok(());
+    }
+
+    match opts.install_packages {
+        InstallPackages::No => {
+            if verbose {
+                eprintln!("udev not found; skipping install (--install-packages=no)");
+            }
+            return Ok(());
+        }
+        InstallPackages::Auto => {
+            if opts.interactive {
+                let proceed = crate::confirm_default_yes(
+                    "udev not found in rootfs; install it for VM boot? [Y/n] ",
+                )?;
+                if !proceed {
+                    eprintln!("skipping udev install");
+                    return Ok(());
+                }
+            } else {
+                bail!(
+                    "udev not found in rootfs and cannot prompt in non-interactive mode; \
+                     use --install-packages=yes to install or --install-packages=no to skip"
+                );
+            }
+        }
+        InstallPackages::Yes => {}
+    }
+
+    let family = crate::rootfs::detect_distro_family(mount);
+    let commands = udev_install_commands(&family);
+    if commands.is_empty() {
+        eprintln!(
+            "warning: udev not found but no install commands for distro family {:?}; skipping",
+            family
+        );
+        return Ok(());
+    }
+
+    eprintln!("installing udev into rootfs...");
+    let mut guard = crate::import::ChrootGuard::setup(mount, verbose)?;
+    let result = crate::import::run_chroot_commands(mount, &commands, verbose);
+    guard.cleanup();
+    result?;
+    eprintln!("udev installed successfully");
 
     Ok(())
 }
@@ -1387,6 +1484,64 @@ mod tests {
 
         assert!(output.join("hello").is_file());
         assert_eq!(fs::read_to_string(output.join("hello")).unwrap(), "world");
+    }
+
+    // --- write_hostname tests ---
+
+    #[test]
+    fn test_write_hostname() {
+        let tmp = crate::testutil::TempDataDir::new("export-vm-hostname");
+        fs::create_dir_all(tmp.path().join("etc")).unwrap();
+
+        write_hostname(tmp.path(), "myvm").unwrap();
+
+        let content = fs::read_to_string(tmp.path().join("etc/hostname")).unwrap();
+        assert_eq!(content, "myvm\n");
+    }
+
+    // --- detect_udev_presence tests ---
+
+    #[test]
+    fn test_detect_udev_presence_found() {
+        let tmp = crate::testutil::TempDataDir::new("export-vm-udev-found");
+        fs::create_dir_all(tmp.path().join("usr/lib/systemd")).unwrap();
+        fs::write(tmp.path().join("usr/lib/systemd/systemd-udevd"), "fake").unwrap();
+
+        assert!(detect_udev_presence(tmp.path()));
+    }
+
+    #[test]
+    fn test_detect_udev_presence_not_found() {
+        let tmp = crate::testutil::TempDataDir::new("export-vm-udev-missing");
+        assert!(!detect_udev_presence(tmp.path()));
+    }
+
+    // --- udev_install_commands tests ---
+
+    #[test]
+    fn test_udev_install_commands_per_distro() {
+        use crate::rootfs::DistroFamily;
+
+        let cmds = udev_install_commands(&DistroFamily::Debian);
+        assert_eq!(cmds.len(), 1);
+        assert!(cmds[0].contains("apt-get"), "got: {}", cmds[0]);
+        assert!(cmds[0].contains("udev"), "got: {}", cmds[0]);
+
+        let cmds = udev_install_commands(&DistroFamily::Fedora);
+        assert_eq!(cmds.len(), 1);
+        assert!(cmds[0].contains("dnf"), "got: {}", cmds[0]);
+        assert!(cmds[0].contains("systemd-udevd"), "got: {}", cmds[0]);
+
+        let cmds = udev_install_commands(&DistroFamily::Arch);
+        assert_eq!(cmds.len(), 1);
+        assert!(cmds[0].contains("pacman"), "got: {}", cmds[0]);
+
+        let cmds = udev_install_commands(&DistroFamily::Suse);
+        assert_eq!(cmds.len(), 1);
+        assert!(cmds[0].contains("zypper"), "got: {}", cmds[0]);
+
+        assert!(udev_install_commands(&DistroFamily::NixOS).is_empty());
+        assert!(udev_install_commands(&DistroFamily::Unknown).is_empty());
     }
 
     // --- sha512_crypt tests ---

@@ -680,7 +680,7 @@ fn proxy_env_vars() -> Vec<(String, String)> {
 ///
 /// Manages `/proc`, `/sys`, `/dev`, `/dev/pts` bind mounts and
 /// `/etc/resolv.conf` for DNS resolution during package installation.
-struct ChrootGuard {
+pub(crate) struct ChrootGuard {
     rootfs: PathBuf,
     mounts: Vec<PathBuf>,
     resolv_backup: Option<PathBuf>,
@@ -688,7 +688,7 @@ struct ChrootGuard {
 
 impl ChrootGuard {
     /// Set up bind mounts and resolv.conf for chroot package installation.
-    fn setup(rootfs: &Path, verbose: bool) -> Result<Self> {
+    pub(crate) fn setup(rootfs: &Path, verbose: bool) -> Result<Self> {
         let mut guard = Self {
             rootfs: rootfs.to_path_buf(),
             mounts: Vec::new(),
@@ -779,7 +779,7 @@ impl ChrootGuard {
         Ok(guard)
     }
 
-    fn cleanup(&mut self) {
+    pub(crate) fn cleanup(&mut self) {
         // Unmount in reverse order. Use -R (recursive) because package
         // managers inside the chroot may create submounts (e.g. /dev/shm,
         // /dev/mqueue) that prevent a plain umount from succeeding.
@@ -821,7 +821,7 @@ impl Drop for ChrootGuard {
 /// inherited by the chroot process, so proxy vars set in the parent are
 /// automatically available to package managers (apt-get, dnf).
 /// The function checks for interrupts between commands and bails on failure.
-fn run_chroot_commands(rootfs: &Path, commands: &[String], verbose: bool) -> Result<()> {
+pub(crate) fn run_chroot_commands(rootfs: &Path, commands: &[String], verbose: bool) -> Result<()> {
     if verbose {
         let proxy_vars = proxy_env_vars();
         if proxy_vars.is_empty() {
@@ -865,7 +865,7 @@ fn run_chroot_commands(rootfs: &Path, commands: &[String], verbose: bool) -> Res
 /// In a chroot the sandboxed user may lack network access (e.g. on IPv6-only
 /// networks where the `_apt` user cannot reach the proxy). Since we are
 /// already running as root in a throwaway chroot, disabling the sandbox is safe.
-const APT_NO_SANDBOX: &str = r#"-o APT::Sandbox::User="""#;
+pub(crate) const APT_NO_SANDBOX: &str = r#"-o APT::Sandbox::User="""#;
 
 /// Return the shell commands that would be run to install systemd packages.
 fn install_commands(family: &DistroFamily) -> Vec<String> {
