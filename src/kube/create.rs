@@ -648,8 +648,10 @@ pub(crate) fn setup_kube_container(
 
     // Build per-service security overrides from merged pod+container security context.
     let security = {
-        // Seccomp: container overrides pod.
-        let syscall_filters = if !kc.syscall_filters.is_empty() {
+        // Seccomp: container overrides pod. If the container explicitly set a
+        // seccomp profile (even Unconfined with empty filters), use the container's
+        // filters and skip the pod-level fallback.
+        let syscall_filters = if kc.has_seccomp_profile {
             kc.syscall_filters.clone()
         } else if let Some(ref spt) = plan.seccomp_profile_type {
             match spt.as_str() {

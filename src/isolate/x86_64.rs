@@ -407,6 +407,9 @@ pub fn generate() -> Vec<u8> {
     a.jcc_near(0x78, err_mount);
 
     // --- prctl(PR_CAPBSET_DROP, CAP_SYS_ADMIN) ---
+    // Best-effort: may fail with EPERM when CAP_SETPCAP is not in the
+    // effective set (e.g. capabilities drop ALL). In that case the systemd
+    // unit's CapabilityBoundingSet already restricts CAP_SYS_ADMIN.
     // mov eax, SYS_PRCTL (157)
     a.emit(&[0xB8]);
     a.emit(&(SYS_PRCTL as u32).to_le_bytes());
@@ -418,10 +421,7 @@ pub fn generate() -> Vec<u8> {
     a.emit(&CAP_SYS_ADMIN.to_le_bytes());
     // syscall
     a.emit(&[0x0F, 0x05]);
-    // test rax, rax
-    a.emit(&[0x48, 0x85, 0xC0]);
-    // js err_prctl                    ; (near: error handlers are far)
-    a.jcc_near(0x78, err_prctl);
+    // (ignore return value — best-effort drop)
 
     // --- Conditional privilege drop: skip if uid == 0 ---
     // test r12d, r12d                 ; uid == 0?

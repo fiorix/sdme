@@ -192,10 +192,10 @@ test_unit_hardened_caps_drop_all() {
     local unit
     unit=$(read_unit "hardened")
 
-    # With drop ALL + add CHOWN,NET_BIND_SERVICE: only SYS_ADMIN (always) +
-    # CHOWN + NET_BIND_SERVICE should be in the bounding set.
+    # With drop ALL + add CHOWN,NET_BIND_SERVICE: SYS_ADMIN (always for isolate),
+    # SETUID/SETGID/SETPCAP (always for privilege drop), CHOWN, NET_BIND_SERVICE.
     local fail=0
-    for cap in CAP_SYS_ADMIN CAP_CHOWN CAP_NET_BIND_SERVICE; do
+    for cap in CAP_SYS_ADMIN CAP_CHOWN CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID CAP_SETPCAP; do
         if ! echo "$unit" | grep -q "CapabilityBoundingSet=.*${cap}"; then
             echo "    missing expected cap: $cap"
             fail=1
@@ -203,7 +203,7 @@ test_unit_hardened_caps_drop_all() {
     done
 
     # Default caps that should be absent after drop ALL.
-    for cap in CAP_NET_RAW CAP_SETUID CAP_KILL CAP_FOWNER; do
+    for cap in CAP_NET_RAW CAP_KILL CAP_FOWNER; do
         if echo "$unit" | grep "CapabilityBoundingSet=" | grep -q "${cap}"; then
             echo "    unexpected cap present: $cap"
             fail=1

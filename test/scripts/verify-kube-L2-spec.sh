@@ -208,7 +208,7 @@ test_unit_termination_grace_period() {
     fi
 
     local unit
-    unit=$(read_unit "app")
+    unit=$(read_unit "testapp")
     if echo "$unit" | grep -q 'TimeoutStopSec=45s'; then
         record "$test_name" PASS
     else
@@ -224,7 +224,7 @@ test_unit_working_dir() {
     fi
 
     local unit
-    unit=$(read_unit "app")
+    unit=$(read_unit "testapp")
     # With isolate mode, the working dir is passed as an argument to .sdme-isolate,
     # so it appears in ExecStart rather than WorkingDirectory.
     if echo "$unit" | grep -q '/tmp'; then
@@ -244,7 +244,7 @@ test_unit_resources() {
     fi
 
     local unit fail=0
-    unit=$(read_unit "app")
+    unit=$(read_unit "testapp")
 
     for directive in "MemoryMax=256M" "CPUQuota=100%" "MemoryLow=128M" "CPUWeight=250"; do
         if ! echo "$unit" | grep -q "$directive"; then
@@ -270,7 +270,7 @@ test_unit_security_context() {
     fi
 
     local unit
-    unit=$(read_unit "app")
+    unit=$(read_unit "testapp")
     if echo "$unit" | grep -q '\.sdme-isolate 65534 65534'; then
         record "$test_name" PASS
     else
@@ -320,7 +320,7 @@ test_unit_init_deps() {
     fi
 
     local app_unit fail=0
-    app_unit=$(read_unit "app")
+    app_unit=$(read_unit "testapp")
 
     if ! echo "$app_unit" | grep -q 'After=.*sdme-oci-init-setup.service'; then
         echo "    missing: After= dependency on init-setup"
@@ -348,8 +348,12 @@ test_unit_readiness_probe() {
     fi
 
     local unit
-    unit=$(read_unit "app")
-    if echo "$unit" | grep -q 'ExecStartPost='; then
+    unit=$(read_unit "testapp")
+    # Kube probes use timer+service pairs, not ExecStartPost.
+    # Check for the startup probe timer or service instead.
+    local probe_svc
+    probe_svc=$(cat "$DATADIR/fs/kube-$POD_NAME/etc/systemd/system/sdme-probe-readiness-testapp.service" 2>/dev/null || echo "")
+    if [[ -n "$probe_svc" ]] && echo "$probe_svc" | grep -q 'sdme-kube-probe'; then
         record "$test_name" PASS
     else
         record "$test_name" FAIL "ExecStartPost not found"

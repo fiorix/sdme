@@ -60,6 +60,9 @@ pub(crate) struct KubeContainer {
     pub(crate) read_only_root_filesystem: bool,
     /// Seccomp SystemCallFilter lines.
     pub(crate) syscall_filters: Vec<String>,
+    /// Whether the container explicitly set a seccomp profile (even Unconfined).
+    /// Used to prevent pod-level seccomp from overriding a container's Unconfined.
+    pub(crate) has_seccomp_profile: bool,
     /// AppArmor profile name.
     pub(crate) apparmor_profile: Option<String>,
 }
@@ -651,6 +654,7 @@ fn validate_container(c: Container) -> Result<KubeContainer> {
         allow_privilege_escalation,
         read_only_root_filesystem,
         c_syscall_filters,
+        c_has_seccomp_profile,
         c_apparmor_profile,
     ) = if let Some(ref sc) = c.security_context {
         // runAsNonRoot consistency.
@@ -690,6 +694,7 @@ fn validate_container(c: Container) -> Result<KubeContainer> {
         }
 
         // Validate seccomp profile.
+        let has_seccomp = sc.seccomp_profile.is_some();
         let syscall_filters = if let Some(ref sp) = sc.seccomp_profile {
             validate_seccomp_profile(sp, &c.name)?
         } else {
@@ -711,10 +716,11 @@ fn validate_container(c: Container) -> Result<KubeContainer> {
             sc.allow_privilege_escalation,
             sc.read_only_root_filesystem.unwrap_or(false),
             syscall_filters,
+            has_seccomp,
             apparmor,
         )
     } else {
-        (None, None, vec![], vec![], None, false, vec![], None)
+        (None, None, vec![], vec![], None, false, vec![], false, None)
     };
 
     Ok(KubeContainer {
@@ -736,6 +742,7 @@ fn validate_container(c: Container) -> Result<KubeContainer> {
         allow_privilege_escalation,
         read_only_root_filesystem,
         syscall_filters: c_syscall_filters,
+        has_seccomp_profile: c_has_seccomp_profile,
         apparmor_profile: c_apparmor_profile,
     })
 }
@@ -2066,6 +2073,7 @@ spec:
             allow_privilege_escalation: None,
             read_only_root_filesystem: false,
             syscall_filters: vec![],
+            has_seccomp_profile: false,
             apparmor_profile: None,
         }
     }
@@ -3321,7 +3329,17 @@ spec:
         let unit = setup_test_container("app", &kc, &plan, false, &[]);
         assert!(unit.contains("CAP_SYS_ADMIN"), "must keep CAP_SYS_ADMIN");
         assert!(unit.contains("CAP_CHOWN"), "should have added cap");
-        assert!(!unit.contains("CAP_SETUID"), "defaults should be dropped");
+        // CAP_SETUID, CAP_SETGID, CAP_SETPCAP are always kept for isolate binary.
+        for required in ["CAP_SETUID", "CAP_SETGID", "CAP_SETPCAP"] {
+            assert!(
+                unit.contains(required),
+                "must keep {required} for isolate"
+            );
+        }
+        assert!(
+            !unit.contains("CAP_NET_RAW"),
+            "defaults should be dropped"
+        );
     }
 
     #[test]
@@ -3355,6 +3373,7 @@ spec:
         let _lock = UNIT_TEST_LOCK.lock().unwrap();
         let mut kc = make_test_container("app");
         kc.syscall_filters = vec!["~@raw-io".to_string()];
+        kc.has_seccomp_profile = true;
         let plan = make_test_plan();
         let unit = setup_test_container("app", &kc, &plan, false, &[]);
         assert!(
@@ -3373,6 +3392,22 @@ spec:
         assert!(
             unit.contains("SystemCallFilter="),
             "pod-level seccomp should produce syscall filters"
+        );
+    }
+
+    #[test]
+    fn test_unit_container_seccomp_unconfined_overrides_pod() {
+        let _lock = UNIT_TEST_LOCK.lock().unwrap();
+        let mut kc = make_test_container("app");
+        // Container explicitly sets Unconfined (empty filters, but has_seccomp_profile=true).
+        kc.has_seccomp_profile = true;
+        kc.syscall_filters = vec![];
+        let mut plan = make_test_plan();
+        plan.seccomp_profile_type = Some("RuntimeDefault".to_string());
+        let unit = setup_test_container("app", &kc, &plan, false, &[]);
+        assert!(
+            !unit.contains("SystemCallFilter="),
+            "container Unconfined should override pod-level RuntimeDefault"
         );
     }
 

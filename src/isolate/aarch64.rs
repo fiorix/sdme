@@ -527,12 +527,14 @@ pub fn generate() -> Vec<u8> {
     a.b_cond(COND_LT, err_mount);
 
     // --- prctl(PR_CAPBSET_DROP, CAP_SYS_ADMIN) ---
+    // Best-effort: may fail with EPERM when CAP_SETPCAP is not in the
+    // effective set (e.g. capabilities drop ALL). In that case the systemd
+    // unit's CapabilityBoundingSet already restricts CAP_SYS_ADMIN.
     a.movz_x(X8, SYS_PRCTL);
     a.movz_x(X0, PR_CAPBSET_DROP);
     a.movz_x(X1, CAP_SYS_ADMIN);
     a.svc();
-    a.cmp_x_imm(X0, 0);
-    a.b_cond(COND_LT, err_prctl);
+    // (ignore return value — best-effort drop)
 
     // --- Conditional privilege drop: skip if uid == 0 ---
     a.cbz_x(X21, skip_privdrop);

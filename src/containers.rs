@@ -797,6 +797,50 @@ impl ContainerInfo {
     }
 }
 
+/// Check readiness probe files for a kube container with probes.
+///
+/// Looks for `probe-ready` files under `/oci/apps/{name}/` in the container's
+/// overlayfs (merged when running, upper when stopped). Returns "ready" if all
+/// apps with probe-ready files report "ready", "not-ready" if any report
+/// "not-ready", or "ok" if no probe-ready files exist.
+fn probe_readiness_health(container_dir: &Path, state: &State) -> String {
+    // Determine which apps to check from KUBE_CONTAINERS or OCI_APP.
+    let app_names: Vec<&str> = if let Some(kc) = state.get("KUBE_CONTAINERS") {
+        kc.split(',').collect()
+    } else if let Some(app) = state.get("OCI_APP") {
+        vec![app]
+    } else {
+        return "ok".to_string();
+    };
+
+    // Check merged first (running), then upper (stopped).
+    let bases = [container_dir.join("merged"), container_dir.join("upper")];
+
+    let mut found_any = false;
+    let mut all_ready = true;
+    for name in &app_names {
+        for base in &bases {
+            let probe_file = base.join("oci/apps").join(name).join("probe-ready");
+            if let Ok(content) = fs::read_to_string(&probe_file) {
+                let trimmed = content.trim();
+                found_any = true;
+                if trimmed != "ready" {
+                    all_ready = false;
+                }
+                break; // Found in this base, no need to check the other.
+            }
+        }
+    }
+
+    if !found_any {
+        "ok".to_string()
+    } else if all_ready {
+        "ready".to_string()
+    } else {
+        "not-ready".to_string()
+    }
+}
+
 /// List all containers with their status, health, OS, and metadata.
 pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
     let state_dir = datadir.join("state");
@@ -864,10 +908,18 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
             problems.push("missing fs");
         }
 
-        let health = if problems.is_empty() {
-            "ok".to_string()
-        } else {
+        let health = if !problems.is_empty() {
             problems.join(", ")
+        } else if let Ok(ref s) = state {
+            // For kube containers with readiness probes, check the probe-ready
+            // file in the container's overlayfs to report ready/not-ready.
+            if s.is_yes("HAS_PROBES") {
+                probe_readiness_health(&container_dir, s)
+            } else {
+                "ok".to_string()
+            }
+        } else {
+            "ok".to_string()
         };
 
         // OS detection: prefer the container's overlayfs view (merged when

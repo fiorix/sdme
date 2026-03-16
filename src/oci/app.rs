@@ -231,6 +231,15 @@ fn build_hardening_block(security: Option<&OciServiceSecurity>) -> String {
         None => OCI_DEFAULT_CAPS.iter().map(|c| c.to_string()).collect(),
     };
 
+    // The isolate binary needs these caps to drop privileges (setuid/setgid/
+    // setgroups) and to drop CAP_SYS_ADMIN from the bounding set. They must
+    // be present even when the user drops ALL capabilities.
+    for required in ["CAP_SETUID", "CAP_SETGID", "CAP_SETPCAP"] {
+        if !caps.iter().any(|c| c == required) {
+            caps.push(required.to_string());
+        }
+    }
+
     // Add requested caps.
     if let Some(sec) = security {
         for cap in &sec.add_caps {
@@ -262,7 +271,10 @@ ProcSubset=pid
 
     // 4. Optional read-only root filesystem.
     let read_only = if security.is_some_and(|s| s.read_only_root_filesystem) {
-        "ReadOnlyPaths=/\n"
+        // ReadWritePaths=/proc allows the isolate binary to remount /proc
+        // in the new PID namespace. This mirrors Kubernetes semantics where
+        // readOnlyRootFilesystem only affects the app's rootfs, not /proc.
+        "ReadOnlyPaths=/\nReadWritePaths=/proc\n"
     } else {
         ""
     };
@@ -1175,18 +1187,21 @@ mod tests {
             apparmor_profile: None,
         };
         let block = build_hardening_block(Some(&sec));
-        // Only CAP_SYS_ADMIN (always) and CAP_CHOWN (explicitly added) should remain.
+        // After drop ALL: CAP_SYS_ADMIN, CAP_SETUID, CAP_SETGID, CAP_SETPCAP
+        // (always for isolate binary), and CAP_CHOWN (explicitly added).
         assert!(
             block.contains("CAP_SYS_ADMIN"),
             "must preserve CAP_SYS_ADMIN"
         );
         assert!(block.contains("CAP_CHOWN"), "should include added cap");
+        for required in ["CAP_SETUID", "CAP_SETGID", "CAP_SETPCAP"] {
+            assert!(
+                block.contains(required),
+                "must preserve {required} for isolate privilege drop"
+            );
+        }
         assert!(
             !block.contains("CAP_NET_RAW"),
-            "should not include defaults after ALL drop"
-        );
-        assert!(
-            !block.contains("CAP_SETUID"),
             "should not include defaults after ALL drop"
         );
     }
@@ -1240,6 +1255,10 @@ mod tests {
         assert!(
             block.contains("ReadOnlyPaths=/"),
             "should add ReadOnlyPaths"
+        );
+        assert!(
+            block.contains("ReadWritePaths=/proc"),
+            "should allow /proc remount for isolate binary"
         );
     }
 
