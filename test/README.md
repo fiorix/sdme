@@ -93,6 +93,14 @@ the highest-priority persistent unit search path that NixOS activation does not
 manage. Detection uses `detect_distro_family()` via os-release; see
 `oci::app::systemd_unit_dir()` in `src/oci/app.rs`.
 
+### Redis 8 locale (workaround)
+
+Redis 8+ treats locale configuration failure as fatal. The OCI image's
+minimal chroot may lack the locale expected by the base container. The
+workaround is to set `LANG=C.UTF-8` via `--oci-env` or the kube YAML
+`env` field. The verify-matrix.sh test suite applies this automatically.
+See `fix_redis_oci()` in verify-matrix.sh.
+
 ## Integration tests
 
 Integration tests run real containers end-to-end. They require root,
@@ -192,8 +200,9 @@ sudo ./test/scripts/verify-usage.sh
 
 NixOS end-to-end verification. Imports a NixOS rootfs via
 `docker.io/nixos/nix --install-packages=yes` (no local nix required),
-boots a plain NixOS container, then tests an OCI nginx-unprivileged app
-and a Kubernetes Pod YAML on the NixOS base.
+boots a plain NixOS container, tests an OCI nginx-unprivileged app,
+a single-container Kubernetes Pod, and a multi-service Kubernetes Pod
+(nginx + redis + mysql) on the NixOS base.
 
 ```bash
 sudo ./test/scripts/verify-nixos.sh

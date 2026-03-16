@@ -584,6 +584,25 @@ from `-e`/`--env`, which sets environment variables for the container's
 systemd init (PID 1) via nspawn `--setenv=` flags. The distinction
 matters: `--oci-env` reaches the app, `-e` reaches init.
 
+**Redis 8 locale requirement.** Redis 8+ treats locale configuration
+failure as fatal. The OCI image's minimal chroot may lack the locale
+expected by the host container. Set `LANG=C.UTF-8` via `--oci-env`
+(or `env` in kube YAML) to provide a universally available locale:
+
+```bash
+sudo sdme new -r redis --oci-env LANG=C.UTF-8
+```
+
+In a Kubernetes Pod YAML:
+
+```yaml
+  - name: redis
+    image: docker.io/redis:latest
+    env:
+    - name: LANG
+      value: C.UTF-8
+```
+
 **OCI ports and volumes.** OCI images declare exposed ports and volumes
 in their metadata. sdme reads these at import time and auto-wires them
 when you create a container. Ports become `--port` rules (when the

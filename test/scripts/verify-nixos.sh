@@ -12,8 +12,9 @@ set -uo pipefail
 #   2. Boot a plain NixOS container and verify it's running
 #   3. Import nginx-unprivileged OCI app on the NixOS base
 #   4. Create, boot, and test the OCI app container
-#   5. Apply a Kubernetes Pod YAML on the NixOS base and test it
-#   6. Cleanup
+#   5. Apply a single-container Kubernetes Pod YAML on the NixOS base
+#   6. Apply a multi-service Kubernetes Pod (nginx + redis + mysql)
+#   7. Cleanup
 #
 # NixOS note: OCI app unit files are placed in /etc/systemd/system.control/
 # instead of /etc/systemd/system/ because NixOS activation replaces the
@@ -25,6 +26,7 @@ FS_NAME="vfy-nix-nixos"
 CT_PLAIN="vfy-nix-plain"
 CT_OCI="vfy-nix-oci"
 CT_KUBE="vfy-nix-kube"
+CT_KUBE_MULTI="vfy-nix-kube-multi"
 
 APP_IMAGE="quay.io/nginx/nginx-unprivileged"
 APP_FS="vfy-nix-nginx"
@@ -109,6 +111,7 @@ cleanup() {
     log "Cleaning up vfy-nix- artifacts..."
 
     # Delete kube containers first (removes both container and kube rootfs).
+    sdme kube delete "$CT_KUBE_MULTI" 2>/dev/null || true
     sdme kube delete "$CT_KUBE" 2>/dev/null || true
 
     # Stop and remove remaining containers.
@@ -434,6 +437,143 @@ YAMLEOF
     fi
 }
 
+# -- Phase 6: Multi-service kube pod (nginx + redis + mysql) -------------------
+
+phase6_test_kube_multi() {
+    log "Phase 6: Multi-service Kubernetes Pod on NixOS (nginx + redis + mysql)"
+
+    if [[ "$(result_status import)" != "PASS" ]]; then
+        record "kube-multi/create" SKIP "base import failed"
+        record "kube-multi/boot" SKIP "base import failed"
+        record "kube-multi/service-nginx" SKIP "base import failed"
+        record "kube-multi/service-redis" SKIP "base import failed"
+        record "kube-multi/service-mysql" SKIP "base import failed"
+        record "kube-multi/redis-ping" SKIP "base import failed"
+        record "kube-multi/nginx-http" SKIP "base import failed"
+        record "kube-multi/mysql-connect" SKIP "base import failed"
+        record "kube-multi/delete" SKIP "base import failed"
+        return
+    fi
+
+    # Write a multi-service Pod YAML (the README example with LANG fix for redis 8).
+    local yaml
+    yaml=$(mktemp /tmp/vfy-nix-kube-multi-XXXXXX.yaml)
+    cat > "$yaml" <<'YAMLEOF'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: vfy-nix-kube-multi
+spec:
+  containers:
+  - name: nginx
+    image: docker.io/nginx:latest
+    ports:
+    - containerPort: 80
+  - name: redis
+    image: docker.io/redis:latest
+    env:
+    - name: LANG
+      value: C.UTF-8
+  - name: mysql
+    image: docker.io/mysql:latest
+    env:
+    - name: MYSQL_ROOT_PASSWORD
+      value: secret
+YAMLEOF
+
+    # Create
+    local output
+    if ! output=$(timeout "$TIMEOUT_BOOT" sdme kube create -f "$yaml" --base-fs "$FS_NAME" -v 2>&1); then
+        record "kube-multi/create" FAIL "$output"
+        record "kube-multi/boot" SKIP "create failed"
+        record "kube-multi/service-nginx" SKIP "create failed"
+        record "kube-multi/service-redis" SKIP "create failed"
+        record "kube-multi/service-mysql" SKIP "create failed"
+        record "kube-multi/redis-ping" SKIP "create failed"
+        record "kube-multi/nginx-http" SKIP "create failed"
+        record "kube-multi/mysql-connect" SKIP "create failed"
+        record "kube-multi/delete" SKIP "create failed"
+        rm -f "$yaml"
+        sdme kube delete "$CT_KUBE_MULTI" 2>/dev/null || true
+        return
+    fi
+    record "kube-multi/create" PASS
+    rm -f "$yaml"
+
+    # Start
+    if ! output=$(timeout "$TIMEOUT_BOOT" sdme start "$CT_KUBE_MULTI" -t 120 2>&1); then
+        record "kube-multi/boot" FAIL "start failed: $output"
+        record "kube-multi/service-nginx" SKIP "start failed"
+        record "kube-multi/service-redis" SKIP "start failed"
+        record "kube-multi/service-mysql" SKIP "start failed"
+        record "kube-multi/redis-ping" SKIP "start failed"
+        record "kube-multi/nginx-http" SKIP "start failed"
+        record "kube-multi/mysql-connect" SKIP "start failed"
+        record "kube-multi/delete" SKIP "start failed"
+        sdme kube delete "$CT_KUBE_MULTI" 2>/dev/null || true
+        return
+    fi
+    record "kube-multi/boot" PASS
+
+    # Wait for services to settle
+    sleep 15
+
+    # Check all three OCI app services
+    for svc in nginx redis mysql; do
+        local test_key="kube-multi/service-$svc"
+        if output=$(timeout "$TIMEOUT_TEST" sdme exec "$CT_KUBE_MULTI" \
+                "$NIXOS_BIN/systemctl" is-active "sdme-oci-${svc}.service" 2>&1) && \
+           [[ "$output" == *"active"* ]]; then
+            record "$test_key" PASS
+        else
+            record "$test_key" FAIL "$output"
+        fi
+    done
+
+    # Redis PING/PONG
+    local ping_out
+    ping_out=$(timeout "$TIMEOUT_TEST" sdme exec "$CT_KUBE_MULTI" \
+        "$NIXOS_BIN/bash" -c "echo PING | $NIXOS_BIN/nc -w2 127.0.0.1 6379" 2>&1) || true
+    if [[ "$ping_out" == *"+PONG"* ]]; then
+        record "kube-multi/redis-ping" PASS
+    else
+        record "kube-multi/redis-ping" FAIL "$ping_out"
+    fi
+
+    # Nginx HTTP via nsenter
+    local leader
+    leader=$(machinectl show "$CT_KUBE_MULTI" -p Leader --value 2>/dev/null) || true
+    if [[ -n "$leader" ]] && [[ -d "/proc/$leader" ]]; then
+        local http_code
+        http_code=$(timeout 10 nsenter -t "$leader" -n curl -s -o /dev/null -w '%{http_code}' \
+            "http://127.0.0.1:80" 2>&1) || true
+        if [[ "$http_code" == "200" ]]; then
+            record "kube-multi/nginx-http" PASS "HTTP $http_code"
+        else
+            record "kube-multi/nginx-http" FAIL "HTTP $http_code"
+        fi
+    else
+        record "kube-multi/nginx-http" FAIL "could not find container leader PID"
+    fi
+
+    # MySQL TCP connect
+    local mysql_out
+    mysql_out=$(timeout "$TIMEOUT_TEST" sdme exec "$CT_KUBE_MULTI" \
+        "$NIXOS_BIN/bash" -c "echo '' | $NIXOS_BIN/nc -w2 127.0.0.1 3306 | head -c1 | wc -c" 2>&1) || true
+    if [[ "$mysql_out" == *"1"* ]]; then
+        record "kube-multi/mysql-connect" PASS "port 3306 responded"
+    else
+        record "kube-multi/mysql-connect" FAIL "$mysql_out"
+    fi
+
+    # Delete
+    if output=$(timeout "$TIMEOUT_TEST" sdme kube delete "$CT_KUBE_MULTI" 2>&1); then
+        record "kube-multi/delete" PASS
+    else
+        record "kube-multi/delete" FAIL "$output"
+    fi
+}
+
 # -- Report generation ---------------------------------------------------------
 
 generate_report() {
@@ -479,7 +619,11 @@ generate_report() {
         for key in import plain/create plain/boot plain/exec \
                    oci/import oci/create oci/state-ports oci/volume-dir \
                    oci/boot oci/service oci/logs oci/curl-port oci/curl-content \
-                   kube/create kube/boot kube/service kube/curl-port kube/delete; do
+                   kube/create kube/boot kube/service kube/curl-port kube/delete \
+                   kube-multi/create kube-multi/boot \
+                   kube-multi/service-nginx kube-multi/service-redis kube-multi/service-mysql \
+                   kube-multi/redis-ping kube-multi/nginx-http kube-multi/mysql-connect \
+                   kube-multi/delete; do
             if [[ -n "${RESULTS[$key]+x}" ]]; then
                 local st msg
                 st=$(result_status "$key")
@@ -528,7 +672,7 @@ main() {
     ensure_root
     ensure_sdme
 
-    echo "NixOS verification: import, boot, OCI nginx, kube"
+    echo "NixOS verification: import, boot, OCI nginx, kube, multi-service kube"
     echo ""
 
     phase1_import
@@ -536,6 +680,7 @@ main() {
     phase3_import_oci
     phase4_test_oci
     phase5_test_kube
+    phase6_test_kube_multi
     generate_report
 
     print_summary
