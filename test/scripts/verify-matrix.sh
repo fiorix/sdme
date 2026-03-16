@@ -6,7 +6,7 @@ set -uo pipefail
 
 source "$(dirname "$0")/lib.sh"
 
-DISTROS=(debian ubuntu fedora centos almalinux archlinux opensuse)
+DISTROS=(debian ubuntu fedora centos almalinux archlinux opensuse nixos)
 APPS=(nginx-unprivileged redis postgresql)
 
 declare -A DISTRO_IMAGES=(
@@ -17,6 +17,7 @@ declare -A DISTRO_IMAGES=(
     [almalinux]="quay.io/almalinuxorg/almalinux:9"
     [archlinux]="docker.io/lopsided/archlinux:latest"
     [opensuse]="registry.opensuse.org/opensuse/tumbleweed:latest"
+    [nixos]="docker.io/nixos/nix"
 )
 
 declare -A APP_IMAGES=(
@@ -34,6 +35,7 @@ declare -A DISTRO_OS_PATTERN=(
     [almalinux]="AlmaLinux"
     [archlinux]="Arch Linux"
     [opensuse]="openSUSE Tumbleweed"
+    [nixos]="NixOS"
 )
 
 declare -A APP_READY_WAIT=(
@@ -41,6 +43,23 @@ declare -A APP_READY_WAIT=(
     [redis]=3
     [postgresql]=10
 )
+
+# NixOS import needs --install-packages=yes (to trigger nix-build) and a
+# longer timeout because nix-build downloads nixpkgs + builds a closure.
+declare -A DISTRO_IMPORT_FLAGS=(
+    [nixos]="--install-packages=yes"
+)
+TIMEOUT_IMPORT_NIXOS=900
+
+# NixOS puts binaries under /run/current-system/sw/bin instead of /usr/bin.
+distro_bin() {
+    local distro="$1" cmd="$2"
+    if [[ "$distro" == "nixos" ]]; then
+        echo "/run/current-system/sw/bin/$cmd"
+    else
+        echo "/usr/bin/$cmd"
+    fi
+}
 
 NGINX_MARKER="sdme-matrix-test-$$"
 DATADIR="/var/lib/sdme"
@@ -216,8 +235,12 @@ phase1_import() {
             continue
         fi
         log "  Importing $fs_name from $image"
-        local output
-        if output=$(timeout "$TIMEOUT_IMPORT" sdme fs import "$fs_name" "$image" -v --install-packages=yes -f 2>&1); then
+        local output extra_flags="${DISTRO_IMPORT_FLAGS[$distro]:-}"
+        local import_timeout="$TIMEOUT_IMPORT"
+        if [[ "$distro" == "nixos" ]]; then
+            import_timeout="$TIMEOUT_IMPORT_NIXOS"
+        fi
+        if output=$(timeout "$import_timeout" sdme fs import "$fs_name" "$image" -v $extra_flags -f 2>&1); then
             record "import/$distro" PASS
         else
             record "import/$distro" FAIL "$output"
@@ -270,21 +293,25 @@ phase2_boot() {
         fi
 
         # systemctl is-system-running --wait
-        if output=$(timeout "$TIMEOUT_TEST" sdme exec "$ct_name" /usr/bin/systemctl is-system-running --wait 2>&1); then
+        local systemctl journalctl
+        systemctl=$(distro_bin "$distro" systemctl)
+        journalctl=$(distro_bin "$distro" journalctl)
+
+        if output=$(timeout "$TIMEOUT_TEST" sdme exec "$ct_name" "$systemctl" is-system-running --wait 2>&1); then
             record "boot/$distro/systemd" PASS
         else
             record "boot/$distro/systemd" FAIL "$output"
         fi
 
         # journalctl
-        if output=$(timeout "$TIMEOUT_TEST" sdme exec "$ct_name" /usr/bin/journalctl --no-pager -n 5 2>&1); then
+        if output=$(timeout "$TIMEOUT_TEST" sdme exec "$ct_name" "$journalctl" --no-pager -n 5 2>&1); then
             record "boot/$distro/journalctl" PASS
         else
             record "boot/$distro/journalctl" FAIL "$output"
         fi
 
         # systemctl list-units
-        if output=$(timeout "$TIMEOUT_TEST" sdme exec "$ct_name" /usr/bin/systemctl list-units --no-pager -q 2>&1); then
+        if output=$(timeout "$TIMEOUT_TEST" sdme exec "$ct_name" "$systemctl" list-units --no-pager -q 2>&1); then
             record "boot/$distro/systemctl" PASS
         else
             record "boot/$distro/systemctl" FAIL "$output"
@@ -449,10 +476,11 @@ phase3_apps() {
             sleep "$wait_secs"
 
             # Service active check
-            local svc_name
+            local svc_name systemctl
             svc_name=$(oci_service_name "$image")
+            systemctl=$(distro_bin "$distro" systemctl)
             if output=$(timeout "$TIMEOUT_TEST" sdme exec "$ct_name" \
-                    /usr/bin/systemctl is-active "$svc_name" 2>&1); then
+                    "$systemctl" is-active "$svc_name" 2>&1); then
                 record "app/$app-on-$distro/service" PASS
             else
                 record "app/$app-on-$distro/service" FAIL "$output"
@@ -467,7 +495,7 @@ phase3_apps() {
 
             # Status
             if output=$(timeout "$TIMEOUT_TEST" sdme exec "$ct_name" \
-                    /usr/bin/systemctl status "$svc_name" --no-pager 2>&1); then
+                    "$systemctl" status "$svc_name" --no-pager 2>&1); then
                 record "app/$app-on-$distro/status" PASS
             else
                 record "app/$app-on-$distro/status" FAIL "$output"
@@ -520,7 +548,9 @@ phase3b_hardened_boot() {
         fi
 
         # systemctl is-system-running --wait
-        if output=$(timeout "$TIMEOUT_TEST" sdme exec "$ct_name" /usr/bin/systemctl is-system-running --wait 2>&1); then
+        local systemctl
+        systemctl=$(distro_bin "$distro" systemctl)
+        if output=$(timeout "$TIMEOUT_TEST" sdme exec "$ct_name" "$systemctl" is-system-running --wait 2>&1); then
             record "hardened-boot/$distro/systemd" PASS
         else
             if [[ "$output" == *"degraded"* ]]; then
@@ -602,10 +632,11 @@ phase3c_hardened_apps() {
             sleep "$wait_secs"
 
             # Service active check
-            local svc_name
+            local svc_name systemctl
             svc_name=$(oci_service_name "${APP_IMAGES[$app]}")
+            systemctl=$(distro_bin "$distro" systemctl)
             if output=$(timeout "$TIMEOUT_TEST" sdme exec "$ct_name" \
-                    /usr/bin/systemctl is-active "$svc_name" 2>&1); then
+                    "$systemctl" is-active "$svc_name" 2>&1); then
                 record "hardened-app/$app-on-$distro/service" PASS
             else
                 record "hardened-app/$app-on-$distro/service" FAIL "$output"

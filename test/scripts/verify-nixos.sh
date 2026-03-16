@@ -2,20 +2,18 @@
 set -uo pipefail
 
 # verify-nixos.sh - end-to-end verification of NixOS rootfs import, container boot,
-# OCI nginx-unprivileged on a NixOS base, and nix-build import from docker.io/nixos/nix.
+# OCI nginx-unprivileged on a NixOS base, and Kubernetes Pod YAML.
 #
-# Run as root. Requires nix (with daemon running) to build the rootfs.
+# Run as root. Imports NixOS rootfs via docker.io/nixos/nix (no local nix required).
 # Uses vfy-nix- prefix for all artifacts.
 #
 # Phases:
-#   1. Build NixOS rootfs via nix-build
-#   2. Import rootfs into sdme (verifies systemd+dbus detection)
-#   3. Boot a plain NixOS container and verify it's running
-#   4. Import nginx-unprivileged OCI app on the NixOS base
-#   5. Create, boot, and test the OCI app container
-#   6. Apply a Kubernetes Pod YAML on the NixOS base and test it
-#   7. Import NixOS rootfs via nix-build (docker.io/nixos/nix), boot, exec
-#   8. Cleanup
+#   1. Import NixOS rootfs via docker.io/nixos/nix --install-packages=yes
+#   2. Boot a plain NixOS container and verify it's running
+#   3. Import nginx-unprivileged OCI app on the NixOS base
+#   4. Create, boot, and test the OCI app container
+#   5. Apply a Kubernetes Pod YAML on the NixOS base and test it
+#   6. Cleanup
 #
 # NixOS note: OCI app unit files are placed in /etc/systemd/system.control/
 # instead of /etc/systemd/system/ because NixOS activation replaces the
@@ -23,16 +21,10 @@ set -uo pipefail
 
 source "$(dirname "$0")/lib.sh"
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-BUILD_SCRIPT="$SCRIPT_DIR/nix/build-rootfs.sh"
-ROOTFS_DIR="$SCRIPT_DIR/nix/nixos-rootfs"
-
 FS_NAME="vfy-nix-nixos"
 CT_PLAIN="vfy-nix-plain"
 CT_OCI="vfy-nix-oci"
 CT_KUBE="vfy-nix-kube"
-CT_NIXBUILD="vfy-nix-nixbuild"
-FS_NAME_NIX="vfy-nix-nixbuild"
 
 APP_IMAGE="quay.io/nginx/nginx-unprivileged"
 APP_FS="vfy-nix-nginx"
@@ -43,9 +35,11 @@ TEST_MARKER="sdme-nixos-test"
 DATADIR="/var/lib/sdme"
 REPORT_DIR="."
 
+# NixOS binaries are under /run/current-system/sw/bin.
+NIXOS_BIN="/run/current-system/sw/bin"
+
 # Timeouts (seconds)
-TIMEOUT_BUILD=900
-TIMEOUT_IMPORT=300
+TIMEOUT_IMPORT=900
 TIMEOUT_BOOT=120
 TIMEOUT_TEST=60
 
@@ -57,7 +51,7 @@ usage() {
 Usage: $(basename "$0") [OPTIONS]
 
 End-to-end verification of NixOS rootfs import, container boot, and OCI app.
-Must be run as root. Requires nix to build the rootfs.
+Must be run as root. Imports NixOS via docker.io/nixos/nix (no local nix required).
 
 Options:
   --report-dir DIR Write report to DIR (default: .)
@@ -125,48 +119,19 @@ cleanup() {
         sdme rm -f "$name" 2>/dev/null || true
     done
 
-    # Remove rootfs (including kube- prefixed rootfs for kube and nix-build containers).
+    # Remove rootfs (including kube- prefixed rootfs for kube containers).
     names=$(sdme fs ls 2>/dev/null | awk 'NR>1 {print $1}' | grep -E '^(vfy-nix-|kube-vfy-nix-)' || true)
     for name in $names; do
         sdme fs rm "$name" 2>/dev/null || true
     done
-
-    # Remove built rootfs directory
-    if [[ -d "$ROOTFS_DIR" ]]; then
-        rm -rf "$ROOTFS_DIR"
-    fi
 }
 
 trap cleanup EXIT INT TERM
 
-# -- Phase 1: Build NixOS rootfs -----------------------------------------------
+# -- Phase 1: Import NixOS rootfs ----------------------------------------------
 
-phase1_build() {
-    log "Phase 1: Build NixOS rootfs"
-
-    if [[ -d "$ROOTFS_DIR" ]] && [[ -e "$ROOTFS_DIR/sbin/init" ]]; then
-        log "  Rootfs already built at $ROOTFS_DIR, skipping"
-        record "build" PASS "exists"
-        return
-    fi
-
-    local output
-    if output=$(timeout "$TIMEOUT_BUILD" "$BUILD_SCRIPT" "$ROOTFS_DIR" 2>&1); then
-        record "build" PASS
-    else
-        record "build" FAIL "$output"
-    fi
-}
-
-# -- Phase 2: Import rootfs into sdme ------------------------------------------
-
-phase2_import() {
-    log "Phase 2: Import NixOS rootfs"
-
-    if [[ "$(result_status build)" != "PASS" ]]; then
-        record "import" SKIP "build failed"
-        return
-    fi
+phase1_import() {
+    log "Phase 1: Import NixOS rootfs via docker.io/nixos/nix"
 
     if fs_exists "$FS_NAME"; then
         log "  $FS_NAME already exists, skipping import"
@@ -175,17 +140,18 @@ phase2_import() {
     fi
 
     local output
-    if output=$(timeout "$TIMEOUT_IMPORT" sdme fs import "$FS_NAME" "$ROOTFS_DIR" -v -f 2>&1); then
+    if output=$(timeout "$TIMEOUT_IMPORT" sdme fs import "$FS_NAME" docker.io/nixos/nix \
+            -v --install-packages=yes -f 2>&1); then
         record "import" PASS
     else
         record "import" FAIL "$output"
     fi
 }
 
-# -- Phase 3: Boot plain NixOS container ----------------------------------------
+# -- Phase 2: Boot plain NixOS container ----------------------------------------
 
-phase3_boot_plain() {
-    log "Phase 3: Boot plain NixOS container"
+phase2_boot_plain() {
+    log "Phase 2: Boot plain NixOS container"
 
     if [[ "$(result_status import)" != "PASS" ]]; then
         record "plain/create" SKIP "import failed"
@@ -214,7 +180,7 @@ phase3_boot_plain() {
     record "plain/boot" PASS
 
     # Exec a basic command
-    if output=$(timeout "$TIMEOUT_TEST" sdme exec "$CT_PLAIN" /run/current-system/sw/bin/uname -a 2>&1); then
+    if output=$(timeout "$TIMEOUT_TEST" sdme exec "$CT_PLAIN" "$NIXOS_BIN/uname" -a 2>&1); then
         record "plain/exec" PASS "$output"
     else
         record "plain/exec" FAIL "$output"
@@ -224,10 +190,10 @@ phase3_boot_plain() {
     sdme rm -f "$CT_PLAIN" 2>/dev/null || true
 }
 
-# -- Phase 4: Import nginx-unprivileged OCI app ---------------------------------
+# -- Phase 3: Import nginx-unprivileged OCI app ---------------------------------
 
-phase4_import_oci() {
-    log "Phase 4: Import nginx-unprivileged OCI app on NixOS base"
+phase3_import_oci() {
+    log "Phase 3: Import nginx-unprivileged OCI app on NixOS base"
 
     if [[ "$(result_status import)" != "PASS" ]]; then
         record "oci/import" SKIP "base import failed"
@@ -249,10 +215,10 @@ phase4_import_oci() {
     fi
 }
 
-# -- Phase 5: Create, boot, and test OCI app container --------------------------
+# -- Phase 4: Create, boot, and test OCI app container --------------------------
 
-phase5_test_oci() {
-    log "Phase 5: Test OCI nginx-unprivileged on NixOS"
+phase4_test_oci() {
+    log "Phase 4: Test OCI nginx-unprivileged on NixOS"
 
     if [[ "$(result_status "oci/import")" != "PASS" ]]; then
         record "oci/create" SKIP "app import failed"
@@ -318,12 +284,6 @@ phase5_test_oci() {
 HTMLEOF
     log "  Wrote test content to $vol_dir/index.html"
 
-    # NixOS already enables systemd-networkd via its configuration
-    # (networking.useNetworkd = true in container.nix), so no manual
-    # enablement in the overlayfs upper layer is needed.  Writing to
-    # upper/etc/systemd/system/ would conflict with NixOS activation,
-    # which replaces /etc/systemd/system with an immutable symlink.
-
     # Start container
     if ! output=$(timeout "$TIMEOUT_BOOT" sdme start "$CT_OCI" -t 120 2>&1); then
         record "oci/boot" FAIL "start failed: $output"
@@ -341,7 +301,7 @@ HTMLEOF
 
     # Check sdme-oci-nginx-unprivileged.service
     if output=$(timeout "$TIMEOUT_TEST" sdme exec "$CT_OCI" \
-            /run/current-system/sw/bin/systemctl is-active sdme-oci-nginx-unprivileged.service 2>&1); then
+            "$NIXOS_BIN/systemctl" is-active sdme-oci-nginx-unprivileged.service 2>&1); then
         record "oci/service" PASS
     else
         record "oci/service" FAIL "$output"
@@ -355,10 +315,6 @@ HTMLEOF
     fi
 
     # Curl the nginx service from inside the container's network namespace.
-    # NixOS containers with veth get a link-local IP (DHCP isn't served by
-    # the host networkd for the container subnet), so host-side curl can't
-    # route to the container.  Instead, nsenter into the network namespace
-    # and curl localhost, which reliably tests the OCI app service.
     local leader
     leader=$(machinectl show "$CT_OCI" -p Leader --value 2>/dev/null) || true
     if [[ -z "$leader" ]] || [[ ! -d "/proc/$leader" ]]; then
@@ -389,10 +345,10 @@ HTMLEOF
     sdme rm -f "$CT_OCI" 2>/dev/null || true
 }
 
-# -- Phase 6: Kubernetes Pod YAML on NixOS base --------------------------------
+# -- Phase 5: Kubernetes Pod YAML on NixOS base --------------------------------
 
-phase6_test_kube() {
-    log "Phase 6: Test Kubernetes Pod YAML on NixOS base"
+phase5_test_kube() {
+    log "Phase 5: Test Kubernetes Pod YAML on NixOS base"
 
     if [[ "$(result_status import)" != "PASS" ]]; then
         record "kube/create" SKIP "base import failed"
@@ -447,7 +403,7 @@ YAMLEOF
 
     # Check the OCI app service inside the container.
     if output=$(timeout "$TIMEOUT_TEST" sdme exec "$CT_KUBE" \
-            /run/current-system/sw/bin/systemctl is-active sdme-oci-nginx-unprivileged.service 2>&1); then
+            "$NIXOS_BIN/systemctl" is-active sdme-oci-nginx-unprivileged.service 2>&1); then
         record "kube/service" PASS
     else
         record "kube/service" FAIL "$output"
@@ -476,54 +432,6 @@ YAMLEOF
     else
         record "kube/delete" FAIL "$output"
     fi
-}
-
-# -- Phase 7: NixOS rootfs via nix-build import --------------------------------
-
-phase7_nixbuild_import() {
-    log "Phase 7: NixOS rootfs via nix-build import (docker.io/nixos/nix)"
-
-    if fs_exists "$FS_NAME_NIX"; then
-        log "  $FS_NAME_NIX already exists, skipping import"
-        record "nixbuild/import" PASS "exists"
-    else
-        local output
-        if output=$(timeout "$TIMEOUT_BUILD" sdme fs import "$FS_NAME_NIX" docker.io/nixos/nix \
-                -v --install-packages=yes -f 2>&1); then
-            record "nixbuild/import" PASS
-        else
-            record "nixbuild/import" FAIL "$output"
-            record "nixbuild/boot" SKIP "import failed"
-            record "nixbuild/exec" SKIP "import failed"
-            return
-        fi
-    fi
-
-    # Create and boot a container from the nix-build rootfs.
-    local output
-    if ! output=$(timeout "$TIMEOUT_BOOT" sdme create -r "$FS_NAME_NIX" "$CT_NIXBUILD" 2>&1); then
-        record "nixbuild/boot" FAIL "create failed: $output"
-        record "nixbuild/exec" SKIP "create failed"
-        return
-    fi
-
-    if ! output=$(timeout "$TIMEOUT_BOOT" sdme start "$CT_NIXBUILD" -t 120 2>&1); then
-        record "nixbuild/boot" FAIL "start failed: $output"
-        record "nixbuild/exec" SKIP "start failed"
-        sdme rm -f "$CT_NIXBUILD" 2>/dev/null || true
-        return
-    fi
-    record "nixbuild/boot" PASS
-
-    # Exec a basic command to verify the container works.
-    if output=$(timeout "$TIMEOUT_TEST" sdme exec "$CT_NIXBUILD" /run/current-system/sw/bin/uname -a 2>&1); then
-        record "nixbuild/exec" PASS "$output"
-    else
-        record "nixbuild/exec" FAIL "$output"
-    fi
-
-    stop_container "$CT_NIXBUILD"
-    sdme rm -f "$CT_NIXBUILD" 2>/dev/null || true
 }
 
 # -- Report generation ---------------------------------------------------------
@@ -568,11 +476,10 @@ generate_report() {
         echo ""
         echo "| Test | Status | Details |"
         echo "|------|--------|---------|"
-        for key in build import plain/create plain/boot plain/exec \
+        for key in import plain/create plain/boot plain/exec \
                    oci/import oci/create oci/state-ports oci/volume-dir \
                    oci/boot oci/service oci/logs oci/curl-port oci/curl-content \
-                   kube/create kube/boot kube/service kube/curl-port kube/delete \
-                   nixbuild/import nixbuild/boot nixbuild/exec; do
+                   kube/create kube/boot kube/service kube/curl-port kube/delete; do
             if [[ -n "${RESULTS[$key]+x}" ]]; then
                 local st msg
                 st=$(result_status "$key")
@@ -621,38 +528,14 @@ main() {
     ensure_root
     ensure_sdme
 
-    # Check nix availability early.
-    local has_nix=1
-    if ! command -v nix-build &>/dev/null; then
-        # Try sourcing nix profile.
-        for f in /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh \
-                 /etc/profile.d/nix.sh; do
-            if [[ -f "$f" ]]; then
-                # shellcheck source=/dev/null
-                . "$f"
-                break
-            fi
-        done
-        if ! command -v nix-build &>/dev/null; then
-            has_nix=0
-        fi
-    fi
-
-    if [[ $has_nix -eq 0 ]]; then
-        echo "error: nix not found; install it first: https://nixos.org/download" >&2
-        exit 1
-    fi
-
-    echo "NixOS verification: rootfs build, import, boot, OCI nginx, kube"
+    echo "NixOS verification: import, boot, OCI nginx, kube"
     echo ""
 
-    phase1_build
-    phase2_import
-    phase3_boot_plain
-    phase4_import_oci
-    phase5_test_oci
-    phase6_test_kube
-    phase7_nixbuild_import
+    phase1_import
+    phase2_boot_plain
+    phase3_import_oci
+    phase4_test_oci
+    phase5_test_kube
     generate_report
 
     print_summary

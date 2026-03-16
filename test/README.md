@@ -190,17 +190,14 @@ sudo ./test/scripts/verify-usage.sh
 
 ### verify-nixos.sh
 
-NixOS end-to-end verification. Builds a NixOS rootfs via `nix-build`,
-imports it into sdme, boots a plain NixOS container, then tests an OCI
-nginx-unprivileged app on the NixOS base. Requires `nix` with the
-daemon running.
+NixOS end-to-end verification. Imports a NixOS rootfs via
+`docker.io/nixos/nix --install-packages=yes` (no local nix required),
+boots a plain NixOS container, then tests an OCI nginx-unprivileged app
+and a Kubernetes Pod YAML on the NixOS base.
 
 ```bash
 sudo ./test/scripts/verify-nixos.sh
 ```
-
-The `test/scripts/nix/build-rootfs.sh` helper builds the NixOS rootfs
-from `test/scripts/nix/container.nix`.
 
 ### Kube Tests
 
