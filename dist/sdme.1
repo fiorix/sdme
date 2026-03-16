@@ -726,10 +726,38 @@ map to systemd properties:
 and
 .BR CPUWeight .
 .PP
-Readiness probes (exec only) are translated to
-.B ExecStartPre
-commands in the generated service unit.
-Liveness probes are parsed but not yet enforced at runtime.
+Startup, liveness, and readiness probes are supported via an embedded
+.B sdme\-kube\-probe
+binary deployed at
+.I /oci/.sdme\-kube\-probe
+inside the container rootfs.
+Four probe mechanisms are available:
+.BR exec
+(runs a command inside the app rootfs via chroot),
+.BR httpGet
+(raw HTTP GET, checks for 2xx/3xx status),
+.BR tcpSocket
+(TCP connect),
+and
+.BR grpc
+(gRPC Health Checking Protocol).
+.PP
+All probes use systemd timer + oneshot service pairs.
+Startup probes gate liveness and readiness probes via a
+.BR ConditionPathExists
+directive on the probe service unit.
+Readiness state is written to
+.I /oci/apps/{name}/probe\-ready
+and reflected in the
+.B sdme ps
+health column.
+Standard Kubernetes probe parameters are supported:
+.BR initialDelaySeconds ,
+.BR periodSeconds ,
+.BR timeoutSeconds ,
+.BR failureThreshold ,
+and
+.BR successThreshold .
 .PP
 Environment variables support
 .B valueFrom

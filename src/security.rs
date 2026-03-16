@@ -322,10 +322,10 @@ pub fn check_apparmor_loaded(profile: &str) -> Result<()> {
             "AppArmor profile '{profile}' is not loaded.\n\
              Install and load it with:\n\
              \n\
-             \x20 sdme apparmor-profile > /etc/apparmor.d/{profile}\n\
+             \x20 sdme config apparmor-profile > /etc/apparmor.d/{profile}\n\
              \x20 apparmor_parser -r /etc/apparmor.d/{profile}\n\
              \n\
-             See: sdme apparmor-profile --help"
+             See: sdme config apparmor-profile --help"
         );
     }
 
@@ -433,7 +433,7 @@ pub const APPARMOR_PROFILE: &str = r#"# AppArmor profile for sdme systemd-nspawn
 #   sdme create mybox --strict
 #
 # Install:
-#   sdme apparmor-profile > /etc/apparmor.d/sdme-default
+#   sdme config apparmor-profile > /etc/apparmor.d/sdme-default
 #   apparmor_parser -r /etc/apparmor.d/sdme-default
 #
 # The profile is applied via AppArmorProfile= in the systemd service

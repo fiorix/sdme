@@ -718,6 +718,7 @@ Pod networking        Per-container    --pod / --oci-pod
 - Seccomp `Localhost` profile type not supported (custom BPF profiles cannot be loaded via systemd's `SystemCallFilter`)
 - No network policies
 - No service accounts or RBAC
-- Liveness probes parsed but not enforced at runtime
-- No startup probes
+- Probe checks (exec, httpGet, tcpSocket, grpc) run inside the
+  container's mount namespace via `/oci/.sdme-kube-probe`; exec
+  probes chroot into the app rootfs before executing
 - Secrets not encrypted at rest

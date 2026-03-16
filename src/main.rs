@@ -108,7 +108,7 @@ struct SecurityArgs {
 
     /// Maximum security (hardened + Docker-equivalent cap drops, seccomp, AppArmor).
     /// Retains CAP_SYS_ADMIN for systemd init. Requires the sdme-default AppArmor
-    /// profile to be loaded (see: sdme apparmor-profile --help)
+    /// profile to be loaded (see: sdme config apparmor-profile --help)
     #[arg(long)]
     strict: bool,
 }

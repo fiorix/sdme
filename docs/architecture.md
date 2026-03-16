@@ -1225,8 +1225,9 @@ usage examples and CLI reference, see
 | `containers[].workingDir`        | Override working directory         |
 | `containers[].imagePullPolicy`   | Always, IfNotPresent, or Never     |
 | `containers[].resources`         | Memory/CPU limits and weights      |
-| `containers[].readinessProbe`    | Exec-based (ExecStartPre)          |
-| `containers[].livenessProbe`     | Exec-based (parsed, not enforced)  |
+| `containers[].startupProbe`      | exec, httpGet, tcpSocket, grpc     |
+| `containers[].livenessProbe`     | exec, httpGet, tcpSocket, grpc     |
+| `containers[].readinessProbe`    | exec, httpGet, tcpSocket, grpc     |
 | `initContainers[]`               | Run-to-completion before app start |
 | `volumes` (emptyDir)             | Shared directory between apps      |
 | `volumes` (hostPath)             | Mount host directory into the pod  |
@@ -1260,14 +1261,20 @@ paths and `defaultMode` for file permissions.
 +-- volumes/
     +-- cache-vol/          # emptyDir shared volume
 
+/oci/
++-- .sdme-kube-probe               # probe binary (when probes defined)
+
 /etc/systemd/system/
 |-- sdme-oci-nginx.service
 |-- sdme-oci-redis.service
 |-- sdme-kube-volumes.service    # oneshot: bind-mounts volumes
+|-- sdme-probe-liveness-nginx.timer
+|-- sdme-probe-liveness-nginx.service
 +-- multi-user.target.wants/
     |-- sdme-oci-nginx.service -> ...
     |-- sdme-oci-redis.service -> ...
-    +-- sdme-kube-volumes.service -> ...
+    |-- sdme-kube-volumes.service -> ...
+    +-- sdme-probe-liveness-nginx.timer -> ...
 ```
 
 ### Generated service units
@@ -1330,6 +1337,58 @@ This runs `mount --bind` in the container's PID 1 mount namespace before
 app services start, so all services see the same shared directories.
 Read-only mounts get an additional `remount,ro,bind` line.
 
+### Probes
+
+Startup, liveness, and readiness probes are implemented via an embedded
+`sdme-kube-probe` binary deployed at `/oci/.sdme-kube-probe` inside the
+container rootfs. The binary is built separately (`cargo build --features
+probe --bin sdme-kube-probe`) and embedded into sdme via `include_bytes!()`
+at compile time.
+
+All three probe types use systemd timer + oneshot service pairs. No
+shell scripts are generated and no external tools are required (wget,
+bash, etc.).
+
+Four probe mechanisms are supported:
+
+- **exec**: runs a command inside the app rootfs via `chroot` + `Command`
+  (std only, no external deps)
+- **httpGet**: raw HTTP/1.0 GET via `TcpStream`, checks for 2xx/3xx
+  status (std only)
+- **tcpSocket**: `TcpStream::connect_timeout()` (std only)
+- **grpc**: gRPC Health Checking Protocol via tonic (optional `probe`
+  feature)
+
+Standard Kubernetes probe parameters are supported:
+`initialDelaySeconds`, `periodSeconds`, `timeoutSeconds`,
+`failureThreshold`, `successThreshold`.
+
+**Probe lifecycle.** When a startup probe exists, it gates liveness
+and readiness probes: the liveness/readiness service units include
+`ConditionPathExists=/run/sdme-probe-startup-{name}.done`, so they
+silently skip until the startup probe writes its done file.
+
+On success, the startup probe writes
+`/run/sdme-probe-startup-{name}.done`; the readiness probe writes
+`ready` to `/oci/apps/{name}/probe-ready` (readable from the host
+via the overlayfs merged dir, shown in `sdme ps`). On failure
+threshold, startup/liveness probes restart the app service via
+`systemctl restart`; readiness probes write `not-ready`.
+
+The probe binary always exits 0 so systemd does not mark the
+oneshot service as failed. Failure counting is managed internally
+via counter files in `/run/`.
+
+**Generated units.** For an app named `nginx` with a liveness probe:
+
+```
+sdme-probe-liveness-nginx.timer     # fires periodically
+sdme-probe-liveness-nginx.service   # runs /oci/.sdme-kube-probe
+```
+
+The timer binds to the main service (`BindsTo=sdme-oci-nginx.service`)
+and stops automatically when the app stops.
+
 ### State management
 
 Kube pods are tracked with additional state fields:
@@ -1338,6 +1397,7 @@ Kube pods are tracked with additional state fields:
 - `KUBE_CONTAINERS=nginx,redis,...`: list of container names
 - `KUBE_YAML_HASH={sha256}`: hash of the source YAML (for future update
   detection)
+- `HAS_PROBES=yes`: set when the pod has any probe definitions
 
 `sdme ps` shows kube pods with a KUBE column, e.g.: `kube:nginx,redis`
 
@@ -1346,8 +1406,6 @@ Kube pods are tracked with additional state fields:
 - No idempotent re-apply: `kube apply` on an existing pod fails; delete
   first, then re-apply
 - No per-container securityContext (only pod-level `runAsUser`/`runAsGroup`)
-- Liveness probes are parsed but not enforced at runtime
-- No startup probes
 
 ## 12. Resource Limits
 

@@ -704,8 +704,10 @@ sudo sdme kube apply -f nginx-pod.yaml --base-fs ubuntu --strict
 **Supported Pod spec features:**
 
 - `containers[].image`, `name`, `command`, `args`, `env`, `ports`,
-  `volumeMounts`, `workingDir`, `imagePullPolicy`, `resources`,
-  `readinessProbe`
+  `volumeMounts`, `workingDir`, `imagePullPolicy`, `resources`
+- `startupProbe`, `livenessProbe`, `readinessProbe` with exec,
+  httpGet, tcpSocket, and grpc checks (see
+  [Kubernetes probe docs](https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/))
 - `initContainers[]` (run-to-completion before app containers)
 - Volumes: `emptyDir`, `hostPath`, `secret`, `configMap`,
   `persistentVolumeClaim`
@@ -746,7 +748,7 @@ value is sufficient.
 
 **What's tested.** The kube test suite runs eight progressive levels:
 L1 (basic lifecycle), L2-spec (pod spec features: command/args, env,
-init containers, restart policy, resources, readiness probes),
+init containers, restart policy, resources, probes),
 L2-security (container securityContext: capabilities, privilege
 escalation, seccomp, AppArmor, runAsUser/runAsGroup), L3-volumes
 (emptyDir, hostPath, configmaps, envFrom, read-only mounts, PVCs),
