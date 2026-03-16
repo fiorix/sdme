@@ -167,11 +167,17 @@ interface to acquire an IP after boot.
 
 ### verify-matrix.sh (3 failures, 3 skips)
 
-- Hardened OCI apps (nginx, redis, postgresql) on openSUSE Tumbleweed fail to boot
-  within the timeout during the long matrix run.
-- **Root cause:** Transient — the same configuration boots successfully when reproduced
-  manually. Likely a boot timing issue under load during the 800s matrix run (all other
-  distros pass hardened tests). Not a code bug.
+- Hardened OCI apps (nginx, redis, postgresql) on openSUSE Tumbleweed fail to boot.
+- `systemd-nspawn` logs: `Failed to adjust UID/GID shift of OS tree: Operation not permitted`
+- **Root cause:** openSUSE Tumbleweed uses `security.capability` xattrs on
+  `/usr/bin/newgidmap` and `/usr/bin/newuidmap` (file capabilities instead of setuid
+  bits). Kernel idmapped mounts (`--private-users-ownership=auto`) fail when the
+  filesystem contains files with `security.capability` xattrs that can't be remapped
+  across user namespace boundaries. Other distros (Debian, Ubuntu, Fedora, CentOS,
+  AlmaLinux, Arch) use setuid bits on these binaries and are unaffected.
+- **Verified:** stripping the xattrs (`setfattr -x security.capability`) fixes the boot.
+- **Fix:** strip `security.capability` xattrs from rootfs during import (to be done
+  in the import codebase).
 
 ### verify-nixos.sh (1 failure, 4 skips)
 
