@@ -867,11 +867,26 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
             problems.join(", ")
         };
 
-        // OS detection from rootfs.
-        let os = if rootfs_name.is_empty() {
-            String::new()
-        } else {
-            rootfs::detect_distro(&datadir.join("fs").join(&rootfs_name))
+        // OS detection: prefer the container's overlayfs view (merged when
+        // running, upper when stopped), fall back to the imported rootfs.
+        let os = {
+            let merged = container_dir.join("merged");
+            let upper = container_dir.join("upper");
+            let distro = rootfs::detect_distro(&merged);
+            if !distro.is_empty() {
+                distro
+            } else {
+                let distro = rootfs::detect_distro(&upper);
+                if !distro.is_empty() {
+                    distro
+                } else if !rootfs_name.is_empty() {
+                    rootfs::detect_distro(&datadir.join("fs").join(&rootfs_name))
+                } else {
+                    // Host-rootfs container with overlayfs not mounted
+                    // (stopped): the lower layer is the host's /.
+                    rootfs::detect_distro(Path::new("/"))
+                }
+            }
         };
 
         // Status (running/stopped).
