@@ -380,12 +380,16 @@ fn do_create(
     if !opts.security.drop_caps.is_empty() {
         let app_names = crate::oci::rootfs::detect_all_oci_app_names(rootfs);
         if !app_names.is_empty() {
+            use std::collections::HashSet;
+
             use crate::security::OCI_DEFAULT_CAPS;
 
+            let drop_set: HashSet<&str> =
+                opts.security.drop_caps.iter().map(|s| s.as_str()).collect();
             let caps: Vec<&str> = OCI_DEFAULT_CAPS
                 .iter()
                 .copied()
-                .filter(|c| !opts.security.drop_caps.iter().any(|d| d == *c))
+                .filter(|c| !drop_set.contains(c))
                 .collect();
 
             // Always keep CAP_SYS_ADMIN for the isolate binary.
@@ -714,8 +718,7 @@ pub fn remove(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
 
     let container_dir = datadir.join("containers").join(name);
     if container_dir.exists() {
-        fs::remove_dir_all(&container_dir)
-            .with_context(|| format!("failed to remove {}", container_dir.display()))?;
+        crate::copy::safe_remove_dir(&container_dir)?;
         if verbose {
             eprintln!("removed {}", container_dir.display());
         }
@@ -872,21 +875,19 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
         let os = {
             let merged = container_dir.join("merged");
             let upper = container_dir.join("upper");
-            let distro = rootfs::detect_distro(&merged);
-            if !distro.is_empty() {
-                distro
-            } else {
-                let distro = rootfs::detect_distro(&upper);
-                if !distro.is_empty() {
-                    distro
-                } else if !rootfs_name.is_empty() {
-                    rootfs::detect_distro(&datadir.join("fs").join(&rootfs_name))
-                } else {
-                    // Host-rootfs container with overlayfs not mounted
-                    // (stopped): the lower layer is the host's /.
-                    rootfs::detect_distro(Path::new("/"))
-                }
-            }
+            [&merged, &upper]
+                .iter()
+                .map(|p| rootfs::detect_distro(p))
+                .find(|d| !d.is_empty())
+                .unwrap_or_else(|| {
+                    if !rootfs_name.is_empty() {
+                        rootfs::detect_distro(&datadir.join("fs").join(&rootfs_name))
+                    } else {
+                        // Host-rootfs container with overlayfs not mounted
+                        // (stopped): the lower layer is the host's /.
+                        rootfs::detect_distro(Path::new("/"))
+                    }
+                })
         };
 
         // Status (running/stopped).
@@ -976,7 +977,8 @@ fn find_oci_service_cgroup(name: &str, app_name: &str) -> Result<PathBuf> {
 
     // Retry briefly: the cgroup directory may not be visible on the
     // filesystem immediately after systemd reports the unit as active.
-    for _ in 0..30 {
+    let mut attempts = 0;
+    loop {
         for root in &cgroup_roots {
             for inner in CGROUP_INNER_PATHS {
                 let candidate = root.join(inner).join(&service_name);
@@ -984,6 +986,10 @@ fn find_oci_service_cgroup(name: &str, app_name: &str) -> Result<PathBuf> {
                     return Ok(candidate);
                 }
             }
+        }
+        attempts += 1;
+        if attempts >= 30 {
+            break;
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }

@@ -1,0 +1,17 @@
+# Reliability: `.removing` directory enumeration
+
+## Current behavior
+
+`rootfs::remove()` renames the rootfs to `{name}.removing` before deletion.
+If a previous `.removing` directory already exists (from a prior failed removal),
+the rename fails and the removal is blocked.
+
+## Desired behavior
+
+1. Enumerate the `.removing` path: try `.removing`, `.removing1`, `.removing2`, ...
+   so multiple failed removals don't block each other.
+
+2. On startup or during `rootfs::remove()`, iterate all `.removingN` variants
+   and attempt best-effort cleanup (warn on failure, don't bail).
+
+3. `rootfs::list()` should skip `.removingN` variants when listing rootfs entries.

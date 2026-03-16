@@ -391,7 +391,7 @@ fn find_mounts_under(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
         .filter_map(|line| {
             // mountinfo format: id parent major:minor root mount_point options ...
             let mut fields = line.split_whitespace();
-            let mount_point = fields.nth(4)?;
+            let mount_point = decode_mountinfo_path(fields.nth(4)?);
             // Match mounts strictly under dir (not dir itself).
             if mount_point.starts_with(&dir_str) {
                 Some(PathBuf::from(mount_point))
@@ -404,6 +404,35 @@ fn find_mounts_under(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
     // Sort by path length descending (deepest first) for unmounting.
     mounts.sort_by_key(|b| std::cmp::Reverse(b.as_os_str().len()));
     Ok(mounts)
+}
+
+/// Decode octal escape sequences (`\NNN`) in mountinfo mount-point fields.
+///
+/// The kernel escapes space (040), tab (011), newline (012), and backslash
+/// (134) in mount-point strings. This function reverses those escapes so the
+/// returned string matches the actual filesystem path.
+fn decode_mountinfo_path(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            let oct: String = chars.clone().take(3).collect();
+            if oct.len() == 3 && oct.chars().all(|c| c.is_ascii_digit()) {
+                if let Ok(byte) = u8::from_str_radix(&oct, 8) {
+                    out.push(byte as char);
+                    // Advance past the three octal digits.
+                    for _ in 0..3 {
+                        chars.next();
+                    }
+                    continue;
+                }
+            }
+            out.push(c);
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Call lstat on a path and return the raw stat result.
