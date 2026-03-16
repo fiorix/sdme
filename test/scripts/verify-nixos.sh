@@ -358,31 +358,32 @@ HTMLEOF
         record "oci/logs" FAIL "$output"
     fi
 
-    # Curl the port-forwarded nginx via the host-side veth IP.
-    local veth_ip
-    veth_ip=$(ip -4 addr show to 192.168.0.0/16 dev "$(ip -o link show | grep "altname ve-${CT_OCI}" | awk -F'[ :]+' '{print $2}')" 2>/dev/null \
-        | grep -oP 'inet \K[0-9.]+' || true)
-    if [[ -z "$veth_ip" ]]; then
-        veth_ip=$(ip -4 addr show | grep -A2 "ve-" | grep -oP 'inet \K192\.168\.[0-9.]+' | head -1 || true)
+    # Curl the nginx service via the container's IP.
+    local curl_ip=""
+    local leader nsout
+    leader=$(machinectl show "$CT_OCI" -p Leader --value 2>/dev/null) || true
+    if [[ -n "$leader" ]] && [[ -d "/proc/$leader" ]]; then
+        nsout=$(nsenter -t "$leader" -n ip -4 addr show host0 2>/dev/null) || true
+        curl_ip=$(echo "$nsout" | grep -oP 'inet \K[0-9.]+') || true
     fi
-    if [[ -z "$veth_ip" ]]; then
-        record "oci/curl-port" FAIL "could not find veth IP"
-        record "oci/curl-content" SKIP "no veth IP"
+    if [[ -z "$curl_ip" ]]; then
+        record "oci/curl-port" FAIL "could not find container IP"
+        record "oci/curl-content" SKIP "no container IP"
         stop_container "$CT_OCI"
         sdme rm -f "$CT_OCI" 2>/dev/null || true
         return
     fi
-    log "  Using veth IP $veth_ip for port-forwarded curl"
+    log "  Using IP $curl_ip for curl"
 
     local http_code body
-    http_code=$(timeout 10 curl -s -o /dev/null -w '%{http_code}' "http://${veth_ip}:${APP_PORT}" 2>&1) || true
+    http_code=$(timeout 10 curl -s -o /dev/null -w '%{http_code}' "http://${curl_ip}:${APP_PORT}" 2>&1) || true
     if [[ "$http_code" == "200" ]]; then
-        record "oci/curl-port" PASS "HTTP $http_code via $veth_ip"
+        record "oci/curl-port" PASS "HTTP $http_code via $curl_ip"
     else
-        record "oci/curl-port" FAIL "HTTP $http_code via $veth_ip"
+        record "oci/curl-port" FAIL "HTTP $http_code via $curl_ip"
     fi
 
-    body=$(timeout 10 curl -s "http://${veth_ip}:${APP_PORT}" 2>&1) || true
+    body=$(timeout 10 curl -s "http://${curl_ip}:${APP_PORT}" 2>&1) || true
     if [[ "$body" == *"$TEST_MARKER"* ]]; then
         record "oci/curl-content" PASS
     else
