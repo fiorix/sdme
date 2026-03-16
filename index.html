@@ -290,7 +290,7 @@
     {
       type: 'rpm',
       title: '.rpm Packages',
-      distros: 'Fedora, CentOS Stream, AlmaLinux, RHEL, and derivatives',
+      distros: 'Fedora, CentOS Stream, AlmaLinux, openSUSE, RHEL, and derivatives',
       deps: 'Dependencies auto-resolved: <strong>systemd &ge; 252</strong>, <strong>systemd-container</strong>',
       cmdTemplate: function(url, filename) {
         return 'curl -fSLO ' + url + ' && sudo dnf install ./' + filename;
