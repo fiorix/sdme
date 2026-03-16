@@ -126,6 +126,12 @@ sudo sdme enable mybox           # auto-start on host boot
 sudo sdme disable mybox          # remove auto-start
 ```
 
+The OS column in `sdme ps` shows the distribution name from the
+container's os-release file. For running containers it reads the
+overlayfs merged view; for stopped containers it falls back to the
+upper layer, then the imported rootfs, then the host root. If no
+os-release file is found anywhere, it shows "unknown".
+
 `sdme new` is a shortcut that combines create, start, and join. When you
 want more control over the process, use them separately:
 

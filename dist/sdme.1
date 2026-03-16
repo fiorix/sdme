@@ -324,7 +324,10 @@ A USERNS column is shown when any container uses \fB\-\-userns\fR.
 A BINDS column is shown when any container has bind mounts configured.
 An ENABLED column is shown when any container has auto\-start enabled.
 Health checks detect broken containers (missing directories, missing rootfs).
-The OS column shows the distro name from the rootfs os\-release file.
+The OS column shows the distro name from the os\-release file, resolved
+via a cascade: the overlayfs merged view (when running), the upper layer
+(when stopped), the imported rootfs, or the host root filesystem.
+If no os\-release file is found in any location, the column shows "unknown".
 .SS sdme enable \fIname\fR...
 Enable one or more containers to start automatically on boot.
 Creates a systemd

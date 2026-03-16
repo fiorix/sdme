@@ -186,8 +186,25 @@ and offers to clean up with `--force`.
 **Health detection** in `sdme ps` checks that a container's expected
 directories actually exist and that its rootfs (if specified) is
 present. A container whose rootfs has been removed shows as `broken`.
-OS detection reads `/etc/os-release` from the rootfs to show distro
-names in the listing.
+OS detection uses a 5-step cascade to resolve the distro name shown
+in the listing:
+
+1. **merged/** — the overlayfs merged view (available when the
+   container is running; reflects both the base rootfs and any
+   upper-layer changes such as a distro upgrade).
+2. **upper/** — the overlayfs upper layer alone (works when the
+   container is stopped, since merged is not mounted).
+3. **{datadir}/fs/{rootfs}/** — the imported rootfs on disk (for
+   containers created with `-r`; useful when upper has no
+   os-release of its own).
+4. **/** — the host root filesystem (for host-rootfs containers
+   that have no imported rootfs).
+5. **"unknown"** — returned when none of the above paths contain
+   an os-release file.
+
+This cascade ensures that `sdme ps` always shows a meaningful OS
+column regardless of whether the container is running, stopped, or
+based on the host rootfs.
 
 **Conflict detection** checks three places before accepting a name: the
 sdme state directory, `/var/lib/machines/` (systemd's own machine
@@ -242,10 +259,23 @@ timeout), and `--kill` sends SIGKILL to all processes via `KillMachine`
 (15s timeout). Multiple containers can be stopped in one invocation.
 
 **rm** stops the container if running, removes the state file, and
-deletes the container's directories. The `make_removable()` helper
-recursively fixes permissions before deletion, since containers can
-create files owned by arbitrary UIDs with restrictive modes, and
-`remove_dir_all()` would fail without this.
+deletes the container's directories via `safe_remove_dir()`. This
+function guards against stale bind mounts that can survive a host
+crash or unclean shutdown:
+
+1. `make_removable()` recursively fixes directory permissions to
+   ensure owner read/write/execute (`0o700`), since containers can
+   create files owned by arbitrary UIDs with restrictive modes.
+2. `find_mounts_under()` reads `/proc/self/mountinfo` to discover
+   any filesystems still mounted under the directory. Mount paths
+   in mountinfo use kernel octal escapes (`\040` for space, etc.);
+   `decode_mountinfo_path()` decodes them before comparison.
+3. If mounts are found, they are sorted deepest-first by path
+   length and unmounted with `umount -R`.
+4. A second check verifies all mounts are gone. If any remain,
+   `safe_remove_dir()` refuses to delete the directory and returns
+   an error, preventing accidental removal of host filesystem
+   contents that were visible through a stale bind mount.
 
 **Boot failure cleanup** differs between `sdme new` and `sdme start`.
 If `sdme new` fails to boot or join the container (or is interrupted
@@ -948,6 +978,47 @@ so image-defined variables are preserved unless explicitly overridden.
 - **One OCI service per container.** Each rootfs generates a single
   `sdme-oci-{name}.service`.
 - **No health checks.** OCI HEALTHCHECK directives are ignored.
+### OCI namespace entry: cgroup discovery
+
+`sdme exec --oci` and `sdme join --oci` need to find the host PID of
+the OCI app process so they can call `nsenter`. The PID is discovered
+from the app's cgroup: `find_oci_service_cgroup()` searches for the
+`sdme-oci-{name}.service` cgroup directory under
+`/sys/fs/cgroup/machine.slice/`.
+
+Three cgroup root patterns are tried, because systemd versions lay out
+the container's cgroup differently:
+
+1. **`{name}.scope`** — systemd 259+ registers the machine scope
+   directly under the container name.
+2. **`sdme@{name}.service`** — older systemd versions (< 257) use
+   the template unit name as the cgroup path.
+3. **`machine-{escaped}.scope`** — systemd 257–258 use a
+   `machine-` prefix with hyphens escaped as `\x2d`.
+
+Within each root, three inner path candidates are searched:
+`init.scope/system.slice`, `payload/system.slice`, and
+`system.slice`. The function retries for up to 3 seconds (30 × 100 ms)
+because the cgroup directory may not appear on the filesystem
+immediately after systemd reports the unit as active.
+
+### OCI capability filtering for hardened containers
+
+When `--drop-capability` is used on a container that has OCI apps,
+`create()` writes a `hardening.conf` systemd drop-in into the
+overlayfs upper layer at
+`/etc/systemd/system/sdme-oci-{name}.service.d/hardening.conf`. The
+drop-in resets and re-sets `CapabilityBoundingSet`, filtering the
+dropped capabilities out of `OCI_DEFAULT_CAPS`. `CAP_SYS_ADMIN` is
+always preserved because the isolate binary needs it for
+`unshare()`/`mount()`.
+
+Without this drop-in, the inner OCI service would inherit the full
+default capability set, which can conflict with the container-level
+capability restrictions and cause boot failures (systemd refuses to
+start a service whose bounding set includes capabilities the container
+does not have).
+
 ### Future direction
 
 At this point this is all very exploratory. This journey is 1% complete.

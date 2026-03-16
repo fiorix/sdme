@@ -563,7 +563,18 @@ for `unshare()` and `mount()`. The `isolate` binary drops it via
 effectively runs with Docker's 14 caps (or zero effective caps for
 non-root users).
 
-Source: `src/security.rs` (`OCI_DEFAULT_CAPS`)
+When `--drop-capability` is used at the container level, a
+`hardening.conf` systemd drop-in is written into the overlayfs upper
+layer at `/etc/systemd/system/sdme-oci-{name}.service.d/`. The drop-in
+resets and re-sets `CapabilityBoundingSet`, filtering the dropped
+capabilities out of the 15-cap default. `CAP_SYS_ADMIN` is always
+preserved regardless of what is dropped, since the isolate binary
+requires it. Without this drop-in, the inner OCI service would retain
+capabilities that the container itself has lost, causing systemd to
+refuse to start the service.
+
+Source: `src/security.rs` (`OCI_DEFAULT_CAPS`), `src/containers.rs`
+(`do_create`, hardening drop-in generation)
 
 ## 15. Effective Workload Isolation
 
