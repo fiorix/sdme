@@ -2363,11 +2363,9 @@ fn main() -> Result<()> {
                         Some(key) => {
                             let path = std::path::Path::new(&key);
                             if path.is_file() {
-                                Some(
-                                    std::fs::read_to_string(path).with_context(|| {
-                                        format!("failed to read SSH key file: {}", path.display())
-                                    })?,
-                                )
+                                Some(std::fs::read_to_string(path).with_context(|| {
+                                    format!("failed to read SSH key file: {}", path.display())
+                                })?)
                             } else {
                                 Some(key)
                             }

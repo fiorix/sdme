@@ -105,6 +105,9 @@ struct HttpArgs {
     /// URL scheme (http or https).
     #[arg(long, default_value = "http")]
     scheme: String,
+    /// Custom HTTP headers (format: "Name: Value"), repeatable.
+    #[arg(long)]
+    header: Vec<String>,
     /// Timeout in seconds.
     #[arg(long, default_value_t = 1)]
     timeout: u32,
@@ -156,7 +159,12 @@ fn main() -> ExitCode {
             let check_desc = match &args.check {
                 Check::Exec(a) => format!("exec {:?}", a.command),
                 Check::Http(a) => {
-                    format!("{}://127.0.0.1:{}{}", a.scheme, a.port, a.path)
+                    let hdr = if a.header.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" (+{} headers)", a.header.len())
+                    };
+                    format!("{}://127.0.0.1:{}{}{hdr}", a.scheme, a.port, a.path)
                 }
                 Check::Tcp(a) => format!("tcp 127.0.0.1:{}", a.port),
                 #[cfg(feature = "probe")]
@@ -172,7 +180,7 @@ fn main() -> ExitCode {
 
             let success = match &args.check {
                 Check::Exec(a) => exec::check(&a.app_root, a.timeout, &a.command),
-                Check::Http(a) => http::check(a.port, &a.path, &a.scheme, a.timeout),
+                Check::Http(a) => http::check(a.port, &a.path, &a.scheme, &a.header, a.timeout),
                 Check::Tcp(a) => tcp::check(a.port, a.timeout),
                 #[cfg(feature = "probe")]
                 Check::Grpc(a) => grpc::check(a.port, a.service.as_deref(), a.timeout),

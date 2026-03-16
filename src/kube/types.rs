@@ -170,6 +170,13 @@ pub(crate) struct Probe {
     pub(crate) success_threshold: Option<u32>,
 }
 
+/// An HTTP header name-value pair for httpGet probes.
+#[derive(serde::Deserialize, Debug, Clone)]
+pub(crate) struct HttpHeader {
+    pub(crate) name: String,
+    pub(crate) value: String,
+}
+
 #[derive(serde::Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct HttpGetAction {
@@ -178,10 +185,9 @@ pub(crate) struct HttpGetAction {
     pub(crate) port: u16,
     #[serde(default)]
     pub(crate) scheme: Option<String>,
-    /// HTTP headers (accepted but not used; wget --spider doesn't support custom headers).
+    /// Custom HTTP headers to include in the probe request.
     #[serde(default)]
-    #[allow(dead_code)]
-    pub(crate) http_headers: Option<serde_yml::Value>,
+    pub(crate) http_headers: Vec<HttpHeader>,
 }
 
 #[derive(serde::Deserialize, Debug)]

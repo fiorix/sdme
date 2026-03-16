@@ -5,7 +5,10 @@ use std::net::TcpStream;
 use std::time::Duration;
 
 /// Send an HTTP GET request and check for a 2xx/3xx status code.
-pub fn check(port: u16, path: &str, scheme: &str, timeout_secs: u32) -> bool {
+///
+/// Custom headers are passed as pre-formatted `"Name: Value"` strings
+/// and appended to the request before the final blank line.
+pub fn check(port: u16, path: &str, scheme: &str, headers: &[String], timeout_secs: u32) -> bool {
     if scheme == "https" {
         eprintln!("sdme-kube-probe: HTTPS probes not supported, using HTTP");
     }
@@ -24,8 +27,12 @@ pub fn check(port: u16, path: &str, scheme: &str, timeout_secs: u32) -> bool {
     let _ = stream.set_read_timeout(Some(timeout));
     let _ = stream.set_write_timeout(Some(timeout));
 
-    let request =
-        format!("GET {path} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
+    let mut request = format!("GET {path} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n");
+    for h in headers {
+        request.push_str(h);
+        request.push_str("\r\n");
+    }
+    request.push_str("Connection: close\r\n\r\n");
 
     if stream.write_all(request.as_bytes()).is_err() {
         return false;

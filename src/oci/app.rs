@@ -692,11 +692,23 @@ fn generate_probe_units(
                     cmd_parts.join(" ")
                 )
             }
-            ProbeCheck::Http { port, path, scheme } => {
-                format!(
+            ProbeCheck::Http {
+                port,
+                path,
+                scheme,
+                ref headers,
+            } => {
+                let mut args = format!(
                     "http --port {port} --path {} --scheme {scheme} --timeout {timeout}",
                     systemd_quote_arg(path)
-                )
+                );
+                for (name, value) in headers {
+                    args.push_str(&format!(
+                        " --header {}",
+                        systemd_quote_arg(&format!("{name}: {value}"))
+                    ));
+                }
+                args
             }
             ProbeCheck::Tcp { port } => {
                 format!("tcp --port {port} --timeout {timeout}")

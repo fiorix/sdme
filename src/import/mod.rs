@@ -640,8 +640,7 @@ fn detect_systemd_nixos(rootfs: &Path) -> bool {
             return true;
         }
     }
-    scan_nix_store(rootfs, "lib/systemd/systemd")
-        || scan_nix_store(rootfs, "bin/systemd")
+    scan_nix_store(rootfs, "lib/systemd/systemd") || scan_nix_store(rootfs, "bin/systemd")
 }
 
 /// Check for dbus in NixOS-specific paths.
@@ -655,8 +654,7 @@ fn detect_dbus_nixos(rootfs: &Path) -> bool {
     {
         return true;
     }
-    scan_nix_store(rootfs, "bin/dbus-daemon")
-        || scan_nix_store(rootfs, "bin/dbus-broker")
+    scan_nix_store(rootfs, "bin/dbus-daemon") || scan_nix_store(rootfs, "bin/dbus-broker")
 }
 
 /// Scan the nix store for a binary matching the given suffix.

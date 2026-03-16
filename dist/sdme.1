@@ -521,7 +521,7 @@ Use a different path (e.g.\&
 Lines starting with
 .B #
 and blank lines are ignored.
-.SS sdme fs export \fIname\fR \fIoutput\fR [\-\-container] [\-f \fIformat\fR] [\-s \fIsize\fR]
+.SS sdme fs export \fIname\fR \fIoutput\fR [\-\-container] [\-f \fIformat\fR] [\-s \fIsize\fR] [\-\-filesystem \fItype\fR] [\-\-vm] [\-\-dns \fIip\fR]... [\-\-net\-ifaces \fIn\fR] [\-\-root\-password \fIpass\fR] [\-\-ssh\-key \fIpath\fR] [\-\-install\-packages \fImode\fR]
 Export a root filesystem or container to a directory, tarball, or disk image.
 The output format is auto\-detected from the file extension:
 .RS
@@ -578,6 +578,57 @@ default: config
 .BR default_export_fs ,
 initially
 .BR ext4 ).
+.PP
+Use
+.B \-\-vm
+to prepare a raw disk image for booting as a virtual machine.
+This flag only applies to raw disk image exports and performs the following
+modifications: enables serial console login via
+.BR serial\-getty@ttyS0.service ,
+writes
+.BR /etc/fstab ,
+configures
+.BR systemd\-resolved ,
+writes
+.BR /etc/resolv.conf ,
+and sets the hostname.
+The ext4 block size is set to 1024 and the
+.B orphan_file
+feature is disabled for compatibility with hypervisors such as cloud\-hypervisor.
+.PP
+VM\-specific options (only valid with
+.BR \-\-vm ):
+.TP
+.BR \-\-dns " " \fIip\fR
+Nameserver IP address for
+.IR /etc/resolv.conf .
+Repeatable; defaults to
+.BR 1.1.1.1 .
+.TP
+.BR \-\-net\-ifaces " " \fIn\fR
+Number of network interfaces to configure with DHCP via
+.BR systemd\-networkd .
+Default: 1.
+.TP
+.BR \-\-root\-password " " \fIpassword\fR
+Set the root password in
+.IR /etc/shadow
+(SHA\-512 crypt).
+.TP
+.BR \-\-ssh\-key " " \fIpath\fR
+Install an SSH authorized key for root from the given file path
+(or literal key string if not a file).
+.TP
+.BR \-\-install\-packages " " \fImode\fR
+Control package installation (e.g.\&
+.BR udev )
+inside the rootfs via chroot.
+.IR mode
+is one of
+.BR yes ", " no ", or " auto
+(default:
+.BR auto ,
+installs only if the package is missing).
 .SS sdme fs cache info
 Show the OCI blob cache location, total size, and blob count.
 .SS sdme fs cache ls

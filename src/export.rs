@@ -194,6 +194,15 @@ fn export_to_dir(src: &Path, dst: &Path, verbose: bool) -> Result<()> {
         .with_context(|| format!("failed to copy {} to {}", src.display(), dst.display()))
 }
 
+/// Build a tar archive from a source directory into the given writer.
+/// Returns the writer so callers can finalize compression encoders.
+fn write_tar<W: std::io::Write>(writer: W, src: &Path, verbose: bool) -> Result<W> {
+    let mut builder = tar::Builder::new(writer);
+    builder.follow_symlinks(false);
+    append_dir_recursive(&mut builder, src, src, verbose)?;
+    Ok(builder.into_inner()?)
+}
+
 /// Export by creating a tar archive, optionally compressed.
 fn export_to_tar(src: &Path, output: &Path, format: &ExportFormat, verbose: bool) -> Result<()> {
     if output.exists() {
@@ -203,53 +212,30 @@ fn export_to_tar(src: &Path, output: &Path, format: &ExportFormat, verbose: bool
         eprintln!("creating tarball: {}", output.display());
     }
 
+    let file =
+        File::create(output).with_context(|| format!("failed to create {}", output.display()))?;
+
     match format {
         ExportFormat::Tar => {
-            let file = File::create(output)
-                .with_context(|| format!("failed to create {}", output.display()))?;
-            let mut builder = tar::Builder::new(file);
-            builder.follow_symlinks(false);
-            append_dir_recursive(&mut builder, src, src, verbose)?;
-            builder.finish()?;
+            write_tar(file, src, verbose)?;
         }
         ExportFormat::TarGz => {
-            let file = File::create(output)
-                .with_context(|| format!("failed to create {}", output.display()))?;
             let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
-            let mut builder = tar::Builder::new(encoder);
-            builder.follow_symlinks(false);
-            append_dir_recursive(&mut builder, src, src, verbose)?;
-            let encoder = builder.into_inner()?;
+            let encoder = write_tar(encoder, src, verbose)?;
             encoder.finish()?;
         }
         ExportFormat::TarBz2 => {
-            let file = File::create(output)
-                .with_context(|| format!("failed to create {}", output.display()))?;
             let encoder = bzip2::write::BzEncoder::new(file, bzip2::Compression::default());
-            let mut builder = tar::Builder::new(encoder);
-            builder.follow_symlinks(false);
-            append_dir_recursive(&mut builder, src, src, verbose)?;
-            let encoder = builder.into_inner()?;
+            let encoder = write_tar(encoder, src, verbose)?;
             encoder.finish()?;
         }
         ExportFormat::TarXz => {
-            let file = File::create(output)
-                .with_context(|| format!("failed to create {}", output.display()))?;
             let encoder = xz2::write::XzEncoder::new(file, 6);
-            let mut builder = tar::Builder::new(encoder);
-            builder.follow_symlinks(false);
-            append_dir_recursive(&mut builder, src, src, verbose)?;
-            let encoder = builder.into_inner()?;
-            encoder.finish()?;
+            write_tar(encoder, src, verbose)?;
         }
         ExportFormat::TarZst => {
-            let file = File::create(output)
-                .with_context(|| format!("failed to create {}", output.display()))?;
             let encoder = zstd::stream::write::Encoder::new(file, 0)?;
-            let mut builder = tar::Builder::new(encoder);
-            builder.follow_symlinks(false);
-            append_dir_recursive(&mut builder, src, src, verbose)?;
-            let encoder = builder.into_inner()?;
+            let encoder = write_tar(encoder, src, verbose)?;
             encoder.finish()?;
         }
         _ => unreachable!(),
@@ -429,10 +415,21 @@ fn export_to_raw(
         Ok(())
     })();
 
-    // Always unmount.
-    let _ = std::process::Command::new("umount")
+    // Always unmount. Use -R (recursive) because VM prep or copy_tree
+    // may create submounts (matching ChrootGuard::cleanup behaviour).
+    match std::process::Command::new("umount")
+        .arg("-R")
         .arg(&mount_dir)
-        .status();
+        .status()
+    {
+        Ok(s) if !s.success() => {
+            eprintln!("warning: failed to unmount {}", mount_dir.display());
+        }
+        Err(e) => {
+            eprintln!("warning: failed to unmount {}: {e}", mount_dir.display());
+        }
+        _ => {}
+    }
     let _ = fs::remove_dir(&mount_dir);
 
     if let Err(e) = copy_result {
@@ -570,7 +567,10 @@ fn ensure_init_symlink(mount: &Path) -> Result<()> {
 
     eprintln!(
         "created init symlink: {} -> {}",
-        init_path.strip_prefix(mount).unwrap_or(&init_path).display(),
+        init_path
+            .strip_prefix(mount)
+            .unwrap_or(&init_path)
+            .display(),
         systemd_path,
     );
 
@@ -778,10 +778,8 @@ fn install_udev_if_needed(mount: &Path, opts: &VmOptions, verbose: bool) -> Resu
     }
 
     eprintln!("installing udev into rootfs...");
-    let mut guard = crate::import::ChrootGuard::setup(mount, verbose)?;
-    let result = crate::import::run_chroot_commands(mount, &commands, verbose);
-    guard.cleanup();
-    result?;
+    let _guard = crate::import::ChrootGuard::setup(mount, verbose)?;
+    crate::import::run_chroot_commands(mount, &commands, verbose)?;
     eprintln!("udev installed successfully");
 
     Ok(())
@@ -880,12 +878,9 @@ WantedBy=getty.target
         .with_context(|| format!("failed to create {}", wants_dir.display()))?;
 
     let link = wants_dir.join("serial-getty@ttyS0.service");
-    if !link.symlink_metadata().is_ok() {
-        std::os::unix::fs::symlink(
-            "/etc/systemd/system/serial-getty@.service",
-            &link,
-        )
-        .with_context(|| format!("failed to create symlink {}", link.display()))?;
+    if link.symlink_metadata().is_err() {
+        std::os::unix::fs::symlink("/etc/systemd/system/serial-getty@.service", &link)
+            .with_context(|| format!("failed to create symlink {}", link.display()))?;
     }
 
     // Ensure serial-getty@ttyS0 is pulled in by multi-user.target. Container
@@ -899,11 +894,8 @@ WantedBy=getty.target
         .with_context(|| format!("failed to create {}", dropin_dir.display()))?;
 
     let dropin = dropin_dir.join("wants-getty.conf");
-    fs::write(
-        &dropin,
-        "[Unit]\nWants=serial-getty@ttyS0.service\n",
-    )
-    .with_context(|| format!("failed to write {}", dropin.display()))?;
+    fs::write(&dropin, "[Unit]\nWants=serial-getty@ttyS0.service\n")
+        .with_context(|| format!("failed to write {}", dropin.display()))?;
 
     Ok(())
 }
@@ -912,8 +904,7 @@ WantedBy=getty.target
 fn write_vm_fstab(mount: &Path, fs_type: RawFs) -> Result<()> {
     let fstab = mount.join("etc/fstab");
     let content = format!("/dev/vda / {fs_type} defaults 0 1\n");
-    fs::write(&fstab, content)
-        .with_context(|| format!("failed to write {}", fstab.display()))
+    fs::write(&fstab, content).with_context(|| format!("failed to write {}", fstab.display()))
 }
 
 /// Unmask systemd-resolved if it is masked (symlink to /dev/null).
@@ -924,7 +915,10 @@ fn unmask_resolved(mount: &Path) -> Result<()> {
         if let Ok(target) = fs::read_link(&resolved) {
             if target.to_str() == Some("/dev/null") {
                 fs::remove_file(&resolved).with_context(|| {
-                    format!("failed to unmask systemd-resolved at {}", resolved.display())
+                    format!(
+                        "failed to unmask systemd-resolved at {}",
+                        resolved.display()
+                    )
                 })?;
             }
         }
@@ -943,8 +937,7 @@ fn write_resolv_conf(mount: &Path, nameservers: &[String]) -> Result<()> {
         .iter()
         .map(|ns| format!("nameserver {ns}\n"))
         .collect();
-    fs::write(&resolv, content)
-        .with_context(|| format!("failed to write {}", resolv.display()))
+    fs::write(&resolv, content).with_context(|| format!("failed to write {}", resolv.display()))
 }
 
 /// Configure systemd-networkd for DHCP on network interfaces.
@@ -960,9 +953,7 @@ fn configure_networkd(mount: &Path, net_ifaces: u32) -> Result<()> {
         "en* eth*".to_string()
     };
 
-    let content = format!(
-        "[Match]\nName={match_names}\n\n[Network]\nDHCP=yes\n"
-    );
+    let content = format!("[Match]\nName={match_names}\n\n[Network]\nDHCP=yes\n");
     let network_file = network_dir.join("80-vm-dhcp.network");
     fs::write(&network_file, content)
         .with_context(|| format!("failed to write {}", network_file.display()))?;
@@ -976,11 +967,8 @@ fn configure_networkd(mount: &Path, net_ifaces: u32) -> Result<()> {
 
     let link = wants_dir.join("systemd-networkd.service");
     if !link.exists() {
-        std::os::unix::fs::symlink(
-            "/lib/systemd/system/systemd-networkd.service",
-            &link,
-        )
-        .with_context(|| format!("failed to enable systemd-networkd at {}", link.display()))?;
+        std::os::unix::fs::symlink("/lib/systemd/system/systemd-networkd.service", &link)
+            .with_context(|| format!("failed to enable systemd-networkd at {}", link.display()))?;
     }
 
     Ok(())
@@ -1028,8 +1016,7 @@ fn set_root_password(mount: &Path, password: &str) -> Result<()> {
         new_content
     };
 
-    fs::write(&shadow, new_content)
-        .with_context(|| format!("failed to write {}", shadow.display()))
+    fs::write(&shadow, new_content).with_context(|| format!("failed to write {}", shadow.display()))
 }
 
 /// Install an SSH public key for root.
@@ -1550,7 +1537,10 @@ mod tests {
     #[test]
     fn test_sha512_crypt_format() {
         let result = sha512_crypt("test").unwrap();
-        assert!(result.starts_with("$6$"), "expected $6$ prefix, got: {result}");
+        assert!(
+            result.starts_with("$6$"),
+            "expected $6$ prefix, got: {result}"
+        );
         let parts: Vec<&str> = result.split('$').collect();
         // parts: ["", "6", salt, hash]
         assert_eq!(parts.len(), 4, "expected 4 parts, got: {parts:?}");
@@ -1641,9 +1631,7 @@ WantedBy=getty.target
         enable_serial_console(tmp.path()).unwrap();
 
         // Patched template should exist without BindsTo or After=dev-.
-        let template = tmp
-            .path()
-            .join("etc/systemd/system/serial-getty@.service");
+        let template = tmp.path().join("etc/systemd/system/serial-getty@.service");
         assert!(template.is_file());
         let content = fs::read_to_string(&template).unwrap();
         assert!(content.contains("TTYPath=/dev/%I"), "got: {content}");
@@ -1680,9 +1668,7 @@ WantedBy=getty.target
         // No distro template — should write the fallback.
         enable_serial_console(tmp.path()).unwrap();
 
-        let template = tmp
-            .path()
-            .join("etc/systemd/system/serial-getty@.service");
+        let template = tmp.path().join("etc/systemd/system/serial-getty@.service");
         assert!(template.is_file());
         let content = fs::read_to_string(&template).unwrap();
         assert!(content.contains("TTYPath=/dev/%I"), "got: {content}");
@@ -1832,11 +1818,7 @@ WantedBy=getty.target
         let tmp = crate::testutil::TempDataDir::new("export-vm-resolv");
         fs::create_dir_all(tmp.path().join("etc")).unwrap();
 
-        write_resolv_conf(
-            tmp.path(),
-            &["1.1.1.1".to_string(), "8.8.8.8".to_string()],
-        )
-        .unwrap();
+        write_resolv_conf(tmp.path(), &["1.1.1.1".to_string(), "8.8.8.8".to_string()]).unwrap();
 
         let content = fs::read_to_string(tmp.path().join("etc/resolv.conf")).unwrap();
         assert_eq!(content, "nameserver 1.1.1.1\nnameserver 8.8.8.8\n");

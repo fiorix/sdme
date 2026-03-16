@@ -104,6 +104,7 @@ pub(crate) enum ProbeCheck {
         port: u16,
         path: String,
         scheme: String,
+        headers: Vec<(String, String)>,
     },
     Tcp {
         port: u16,
@@ -446,10 +447,16 @@ fn build_probe_check(probe: &Probe, container_name: &str) -> Result<ProbeCheck> 
         if !path.starts_with('/') {
             bail!("container '{container_name}': httpGet path must start with '/': {path}");
         }
+        let headers = http
+            .http_headers
+            .iter()
+            .map(|h| (h.name.clone(), h.value.clone()))
+            .collect();
         Ok(ProbeCheck::Http {
             port: http.port,
             path,
             scheme,
+            headers,
         })
     } else if let Some(ref tcp) = probe.tcp_socket {
         if tcp.port == 0 {
@@ -1887,6 +1894,54 @@ spec:
     }
 
     #[test]
+    fn test_liveness_probe_http_headers() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: probe-pod
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+    livenessProbe:
+      httpGet:
+        path: /healthz
+        port: 8080
+        httpHeaders:
+        - name: X-Custom-Header
+          value: awesome
+        - name: Accept
+          value: application/json
+      periodSeconds: 5
+"#;
+        let (name, spec) = parse_yaml(yaml).unwrap();
+        let plan = validate_and_plan(&name, spec).unwrap();
+        let probe = plan.containers[0].probes.liveness.as_ref().unwrap();
+        match &probe.check {
+            ProbeCheck::Http {
+                port,
+                path,
+                headers,
+                ..
+            } => {
+                assert_eq!(*port, 8080);
+                assert_eq!(path, "/healthz");
+                assert_eq!(headers.len(), 2);
+                assert_eq!(
+                    headers[0],
+                    ("X-Custom-Header".to_string(), "awesome".to_string())
+                );
+                assert_eq!(
+                    headers[1],
+                    ("Accept".to_string(), "application/json".to_string())
+                );
+            }
+            other => panic!("expected Http probe, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_readiness_probe_tcp_socket() {
         let yaml = r#"
 apiVersion: v1
@@ -2352,6 +2407,7 @@ spec:
                 port: 8080,
                 path: "/".to_string(),
                 scheme: "http".to_string(),
+                headers: vec![],
             },
             initial_delay_seconds: 0,
             period_seconds: 5,
