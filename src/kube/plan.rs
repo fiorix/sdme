@@ -3004,9 +3004,15 @@ spec:
         let (name, spec) = parse_yaml(yaml).unwrap();
         let plan = validate_and_plan(&name, spec).unwrap();
         let c = &plan.containers[0];
-        assert!(!c.security.syscall_filters.is_empty(), "should have syscall filters");
         assert!(
-            c.security.syscall_filters.iter().any(|f| f.contains("@raw-io")),
+            !c.security.syscall_filters.is_empty(),
+            "should have syscall filters"
+        );
+        assert!(
+            c.security
+                .syscall_filters
+                .iter()
+                .any(|f| f.contains("@raw-io")),
             "should include @raw-io filter"
         );
     }
@@ -3099,7 +3105,10 @@ spec:
         let (name, spec) = parse_yaml(yaml).unwrap();
         let plan = validate_and_plan(&name, spec).unwrap();
         let c = &plan.containers[0];
-        assert_eq!(c.security.apparmor_profile.as_deref(), Some("my-custom-profile"));
+        assert_eq!(
+            c.security.apparmor_profile.as_deref(),
+            Some("my-custom-profile")
+        );
     }
 
     #[test]
