@@ -278,6 +278,31 @@ fn do_create(
     )
     .with_context(|| format!("failed to write {}", fstab_path.display()))?;
 
+    // When --network-veth is used, enable systemd-networkd inside the
+    // container so the container-side veth interface (host0) gets an IP
+    // via DHCP from the host's networkd DHCP server.
+    if opts.network.network_veth {
+        let networkd_unit = rootfs.join("usr/lib/systemd/system/systemd-networkd.service");
+        if networkd_unit.exists() {
+            let wants_dir = systemd_unit_dir.join("multi-user.target.wants");
+            fs::create_dir_all(&wants_dir)
+                .with_context(|| format!("failed to create {}", wants_dir.display()))?;
+            let link = wants_dir.join("systemd-networkd.service");
+            if !link.exists() {
+                symlink(
+                    "/usr/lib/systemd/system/systemd-networkd.service",
+                    &link,
+                )
+                .with_context(|| {
+                    format!("failed to enable systemd-networkd at {}", link.display())
+                })?;
+                if verbose {
+                    eprintln!("enabled systemd-networkd for --network-veth");
+                }
+            }
+        }
+    }
+
     if verbose {
         eprintln!("wrote hostname, hosts, resolv.conf, machine-id, and fstab files; masked systemd-resolved");
     }
