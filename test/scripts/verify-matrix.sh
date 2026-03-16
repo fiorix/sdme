@@ -74,8 +74,14 @@ FILTER_APPS=()
 #   lack the host container's locale (e.g. en_US.UTF-8 on archlinux).
 #   Force LANG=C.UTF-8 which is universally available.
 fix_redis_oci() {
-    local ct_name="$1"
-    local svc_dir="$DATADIR/containers/$ct_name/upper/etc/systemd/system/sdme-oci-redis.service.d"
+    local ct_name="$1" distro="${2:-}"
+    # NixOS replaces /etc/systemd/system with an immutable symlink;
+    # drop-ins must go to system.control instead.
+    local unit_dir="etc/systemd/system"
+    if [[ "$distro" == "nixos" ]]; then
+        unit_dir="etc/systemd/system.control"
+    fi
+    local svc_dir="$DATADIR/containers/$ct_name/upper/$unit_dir/sdme-oci-redis.service.d"
     mkdir -p "$svc_dir"
     local extra_args=""
     if [[ "$(uname -m)" == "aarch64" ]]; then
@@ -456,7 +462,7 @@ phase3_apps() {
 
             # Work around Redis 8.x ARM64-COW-BUG test failure in containers.
             if [[ "$app" == "redis" ]]; then
-                fix_redis_oci "$ct_name"
+                fix_redis_oci "$ct_name" "$distro"
             fi
 
             # Start
@@ -615,7 +621,7 @@ phase3c_hardened_apps() {
 
             # Work around Redis 8.x ARM64-COW-BUG test failure in containers.
             if [[ "$app" == "redis" ]]; then
-                fix_redis_oci "$ct_name"
+                fix_redis_oci "$ct_name" "$distro"
             fi
 
             # Start
