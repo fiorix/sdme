@@ -84,15 +84,14 @@ other distros. The kernel refuses to create an idmapped mount because
 boundaries. Error: `Failed to adjust UID/GID shift of OS tree: Operation not
 permitted`. Fix: strip `security.capability` xattrs during rootfs import.
 
-### NixOS + OCI apps
+### NixOS + OCI apps (resolved)
 
-NixOS manages `/etc` entirely via its activation script, which replaces
-`/etc/systemd/system` with a symlink to the Nix store. sdme's OCI app setup
-writes unit files (`sdme-oci-*.service`) into `/etc/systemd/system` in the
-overlayfs upper layer. The NixOS activation script fails with `could not create
-symlink /etc/systemd/system`, and systemd can't find `default.target`, crashing
-the container. Plain (non-OCI) NixOS containers work fine. Supporting OCI apps
-on NixOS would require a NixOS-specific unit placement strategy.
+NixOS activation replaces `/etc/systemd/system` with an immutable symlink to
+the Nix store, which used to destroy sdme's OCI app unit files. This is now
+handled by placing OCI app units in `/etc/systemd/system.control/` on NixOS,
+the highest-priority persistent unit search path that NixOS activation does not
+manage. Detection uses `detect_distro_family()` via os-release; see
+`oci::app::systemd_unit_dir()` in `src/oci/app.rs`.
 
 ## Integration tests
 

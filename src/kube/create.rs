@@ -195,7 +195,7 @@ pub fn kube_create(
     }
 
     // 3. Pull each container image and set up its app directory.
-    let unit_dir = staging_dir.join("etc/systemd/system");
+    let unit_dir = staging_dir.join(crate::oci::app::systemd_unit_dir(&staging_dir));
     fs::create_dir_all(&unit_dir)
         .with_context(|| format!("failed to create {}", unit_dir.display()))?;
     let wants_dir = unit_dir.join("multi-user.target.wants");
@@ -360,11 +360,8 @@ WantedBy=multi-user.target
             .with_context(|| format!("failed to write {}", vol_unit_path.display()))?;
         // Enable via symlink.
         let symlink_path = wants_dir.join("sdme-kube-volumes.service");
-        std::os::unix::fs::symlink(
-            "/etc/systemd/system/sdme-kube-volumes.service",
-            &symlink_path,
-        )
-        .with_context(|| format!("failed to symlink {}", symlink_path.display()))?;
+        std::os::unix::fs::symlink("../sdme-kube-volumes.service", &symlink_path)
+            .with_context(|| format!("failed to symlink {}", symlink_path.display()))?;
     }
 
     // 5. Atomic rename.

@@ -4,11 +4,21 @@
 //! to a directory, compressed tarball, or bare ext4/btrfs raw disk image.
 
 use std::fs::{self, File};
+use std::io::Read;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 
 use crate::{check_interrupted, containers, copy, system_check, systemd, validate_name, State};
+
+/// Options for preparing a raw disk image for VM boot.
+pub struct VmOptions {
+    pub nameservers: Vec<String>,
+    pub net_ifaces: u32,
+    pub root_password: Option<String>,
+    pub ssh_key: Option<String>,
+}
 
 /// Filesystem type for raw disk image export.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -87,6 +97,7 @@ pub fn export_rootfs(
     output: &Path,
     format: &ExportFormat,
     size: Option<&str>,
+    vm_opts: Option<&VmOptions>,
     verbose: bool,
 ) -> Result<()> {
     validate_name(name).context("invalid rootfs name")?;
@@ -94,7 +105,7 @@ pub fn export_rootfs(
     if !rootfs_dir.is_dir() {
         bail!("rootfs not found: {name}");
     }
-    export_from_dir(&rootfs_dir, output, format, size, verbose)
+    export_from_dir(&rootfs_dir, output, format, size, vm_opts, verbose)
 }
 
 /// Export a container's merged rootfs to the given output path.
@@ -108,6 +119,7 @@ pub fn export_container(
     output: &Path,
     format: &ExportFormat,
     size: Option<&str>,
+    vm_opts: Option<&VmOptions>,
     verbose: bool,
 ) -> Result<()> {
     validate_name(name)?;
@@ -122,7 +134,7 @@ pub fn export_container(
             "warning: container '{name}' is running; filesystem is live and \
              consistency is not guaranteed"
         );
-        export_from_dir(&merged_dir, output, format, size, verbose)
+        export_from_dir(&merged_dir, output, format, size, vm_opts, verbose)
     } else {
         // Read state to find the rootfs.
         let state_file = datadir.join("state").join(name);
@@ -138,7 +150,7 @@ pub fn export_container(
         )?;
 
         mount_overlay(&rootfs_dir, &container_dir)?;
-        let result = export_from_dir(&merged_dir, output, format, size, verbose);
+        let result = export_from_dir(&merged_dir, output, format, size, vm_opts, verbose);
         unmount_overlay(&container_dir);
         result
     }
@@ -151,6 +163,7 @@ fn export_from_dir(
     output: &Path,
     format: &ExportFormat,
     size: Option<&str>,
+    vm_opts: Option<&VmOptions>,
     verbose: bool,
 ) -> Result<()> {
     match format {
@@ -160,7 +173,7 @@ fn export_from_dir(
         | ExportFormat::TarBz2
         | ExportFormat::TarXz
         | ExportFormat::TarZst => export_to_tar(src, output, format, verbose),
-        ExportFormat::Raw(fs_type) => export_to_raw(src, output, *fs_type, size, verbose),
+        ExportFormat::Raw(fs_type) => export_to_raw(src, output, *fs_type, size, vm_opts, verbose),
     }
 }
 
@@ -312,6 +325,7 @@ fn export_to_raw(
     output: &Path,
     fs_type: RawFs,
     size: Option<&str>,
+    vm_opts: Option<&VmOptions>,
     verbose: bool,
 ) -> Result<()> {
     if output.exists() {
@@ -395,7 +409,11 @@ fn export_to_raw(
 
     let copy_result = (|| -> Result<()> {
         copy::copy_metadata(src, &mount_dir)?;
-        copy::copy_tree(src, &mount_dir, verbose)
+        copy::copy_tree(src, &mount_dir, verbose)?;
+        if let Some(opts) = vm_opts {
+            prep_vm_rootfs(&mount_dir, fs_type, opts, verbose)?;
+        }
+        Ok(())
     })();
 
     // Always unmount.
@@ -408,6 +426,9 @@ fn export_to_raw(
         let _ = fs::remove_file(output);
         return Err(e).context("failed to copy to raw image");
     }
+
+    // Align to 512-byte sector boundary (benefits all raw exports).
+    align_disk_image(output)?;
 
     Ok(())
 }
@@ -463,6 +484,477 @@ fn unmount_overlay(container_dir: &Path) {
     let _ = std::process::Command::new("umount")
         .arg(&merged_dir)
         .status();
+}
+
+/// Align a raw disk image to a 512-byte sector boundary.
+fn align_disk_image(path: &Path) -> Result<()> {
+    let size = fs::metadata(path)
+        .with_context(|| format!("failed to stat {}", path.display()))?
+        .len();
+    let remainder = size % 512;
+    if remainder != 0 {
+        let aligned = size + (512 - remainder);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .with_context(|| format!("failed to open {} for alignment", path.display()))?
+            .set_len(aligned)
+            .with_context(|| format!("failed to align {}", path.display()))?;
+    }
+    Ok(())
+}
+
+/// Ensure /sbin/init exists so the kernel can find systemd as PID 1.
+///
+/// On merged-usr systems `/sbin` is a symlink to `usr/sbin`, so the actual
+/// file is created at `usr/sbin/init` as a relative symlink to the systemd
+/// binary.
+fn ensure_init_symlink(mount: &Path) -> Result<()> {
+    let sbin_init = mount.join("sbin/init");
+    if sbin_init.exists() {
+        return Ok(());
+    }
+
+    // Find the systemd binary.
+    let (systemd_path, rel_target) = if mount.join("lib/systemd/systemd").exists() {
+        ("lib/systemd/systemd", "../../lib/systemd/systemd")
+    } else if mount.join("usr/lib/systemd/systemd").exists() {
+        ("usr/lib/systemd/systemd", "../lib/systemd/systemd")
+    } else {
+        bail!(
+            "systemd binary not found in rootfs (checked lib/systemd/systemd \
+             and usr/lib/systemd/systemd) — image cannot boot as a VM"
+        );
+    };
+
+    // Determine where to create the symlink. On merged-usr, /sbin -> usr/sbin,
+    // so create usr/sbin/init. Otherwise create sbin/init directly.
+    let sbin_meta = mount.join("sbin").symlink_metadata();
+    let init_path = if sbin_meta
+        .as_ref()
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        // merged-usr: /sbin -> usr/sbin
+        let usr_sbin = mount.join("usr/sbin");
+        fs::create_dir_all(&usr_sbin)
+            .with_context(|| format!("failed to create {}", usr_sbin.display()))?;
+        mount.join("usr/sbin/init")
+    } else {
+        let sbin = mount.join("sbin");
+        fs::create_dir_all(&sbin)
+            .with_context(|| format!("failed to create {}", sbin.display()))?;
+        mount.join("sbin/init")
+    };
+
+    std::os::unix::fs::symlink(rel_target, &init_path).with_context(|| {
+        format!(
+            "failed to symlink {} -> {}",
+            init_path.display(),
+            rel_target
+        )
+    })?;
+
+    eprintln!(
+        "created init symlink: {} -> {}",
+        init_path.strip_prefix(mount).unwrap_or(&init_path).display(),
+        systemd_path,
+    );
+
+    Ok(())
+}
+
+/// Prepare a mounted rootfs for VM boot.
+fn prep_vm_rootfs(mount: &Path, fs_type: RawFs, opts: &VmOptions, verbose: bool) -> Result<()> {
+    ensure_init_symlink(mount)?;
+
+    enable_serial_console(mount)?;
+    if verbose {
+        eprintln!("enabled serial-getty@ttyS0.service");
+    }
+
+    write_vm_fstab(mount, fs_type)?;
+    if verbose {
+        eprintln!("wrote /etc/fstab");
+    }
+
+    unmask_resolved(mount)?;
+    if verbose {
+        eprintln!("unmasked systemd-resolved");
+    }
+
+    write_resolv_conf(mount, &opts.nameservers)?;
+    if verbose {
+        eprintln!("wrote /etc/resolv.conf");
+    }
+
+    if opts.net_ifaces > 0 {
+        configure_networkd(mount, opts.net_ifaces)?;
+        if verbose {
+            eprintln!("configured systemd-networkd with DHCP");
+        }
+    }
+
+    if let Some(password) = &opts.root_password {
+        set_root_password(mount, password)?;
+        if verbose {
+            if password.is_empty() {
+                eprintln!("set passwordless root login");
+            } else {
+                eprintln!("set root password");
+            }
+        }
+    }
+
+    if let Some(key) = &opts.ssh_key {
+        install_ssh_key(mount, key)?;
+        if verbose {
+            eprintln!("installed SSH authorized key for root");
+        }
+    }
+
+    Ok(())
+}
+
+/// Enable serial console login via the kernel `console=ttyS0` cmdline param.
+///
+/// `systemd-getty-generator` reads `/proc/cmdline` and instantiates
+/// `serial-getty@ttyS0.service` from the template automatically. However, the
+/// upstream template has `BindsTo=dev-%i.device` which makes systemd wait for
+/// udev to tag the serial device — in minimal VMs without full udev rules
+/// this blocks boot indefinitely. A drop-in on the template clears the device
+/// dependency for all serial-getty instances.
+fn enable_serial_console(mount: &Path) -> Result<()> {
+    // Drop-in on the template so all instances (including generator-created
+    // ones) lose the BindsTo=dev-%i.device dependency.
+    let dropin_dir = mount.join("etc/systemd/system/serial-getty@.service.d");
+    fs::create_dir_all(&dropin_dir)
+        .with_context(|| format!("failed to create {}", dropin_dir.display()))?;
+
+    let dropin = dropin_dir.join("vm-no-device-wait.conf");
+    fs::write(
+        &dropin,
+        "\
+[Unit]
+# Clear device dependency — udev may not tag serial ports in minimal VMs.
+BindsTo=
+",
+    )
+    .with_context(|| format!("failed to write {}", dropin.display()))?;
+
+    Ok(())
+}
+
+/// Write /etc/fstab with the root device entry.
+fn write_vm_fstab(mount: &Path, fs_type: RawFs) -> Result<()> {
+    let fstab = mount.join("etc/fstab");
+    let content = format!("/dev/vda / {fs_type} defaults 0 1\n");
+    fs::write(&fstab, content)
+        .with_context(|| format!("failed to write {}", fstab.display()))
+}
+
+/// Unmask systemd-resolved if it is masked (symlink to /dev/null).
+fn unmask_resolved(mount: &Path) -> Result<()> {
+    let resolved = mount.join("etc/systemd/system/systemd-resolved.service");
+    if resolved.exists() || resolved.symlink_metadata().is_ok() {
+        // Check if it's a symlink to /dev/null (masked).
+        if let Ok(target) = fs::read_link(&resolved) {
+            if target.to_str() == Some("/dev/null") {
+                fs::remove_file(&resolved).with_context(|| {
+                    format!("failed to unmask systemd-resolved at {}", resolved.display())
+                })?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Write /etc/resolv.conf with the given nameservers.
+fn write_resolv_conf(mount: &Path, nameservers: &[String]) -> Result<()> {
+    let resolv = mount.join("etc/resolv.conf");
+    // Remove if it's a symlink (e.g. to ../run/systemd/resolve/stub-resolv.conf).
+    if resolv.symlink_metadata().is_ok() {
+        let _ = fs::remove_file(&resolv);
+    }
+    let content: String = nameservers
+        .iter()
+        .map(|ns| format!("nameserver {ns}\n"))
+        .collect();
+    fs::write(&resolv, content)
+        .with_context(|| format!("failed to write {}", resolv.display()))
+}
+
+/// Configure systemd-networkd for DHCP on network interfaces.
+fn configure_networkd(mount: &Path, net_ifaces: u32) -> Result<()> {
+    let network_dir = mount.join("etc/systemd/network");
+    fs::create_dir_all(&network_dir)
+        .with_context(|| format!("failed to create {}", network_dir.display()))?;
+
+    let match_names = if net_ifaces == 1 {
+        "en* eth*".to_string()
+    } else {
+        // For multiple interfaces, match all common names.
+        "en* eth*".to_string()
+    };
+
+    let content = format!(
+        "[Match]\nName={match_names}\n\n[Network]\nDHCP=yes\n"
+    );
+    let network_file = network_dir.join("80-vm-dhcp.network");
+    fs::write(&network_file, content)
+        .with_context(|| format!("failed to write {}", network_file.display()))?;
+
+    // Enable systemd-networkd.service via symlink.
+    let system_dir = mount.join("etc/systemd/system");
+    fs::create_dir_all(&system_dir)?;
+
+    let wants_dir = system_dir.join("multi-user.target.wants");
+    fs::create_dir_all(&wants_dir)?;
+
+    let link = wants_dir.join("systemd-networkd.service");
+    if !link.exists() {
+        std::os::unix::fs::symlink(
+            "/lib/systemd/system/systemd-networkd.service",
+            &link,
+        )
+        .with_context(|| format!("failed to enable systemd-networkd at {}", link.display()))?;
+    }
+
+    Ok(())
+}
+
+/// Set the root password in /etc/shadow.
+fn set_root_password(mount: &Path, password: &str) -> Result<()> {
+    let shadow = mount.join("etc/shadow");
+    let content = fs::read_to_string(&shadow)
+        .with_context(|| format!("failed to read {}", shadow.display()))?;
+
+    let hash = if password.is_empty() {
+        String::new()
+    } else {
+        sha512_crypt(password)?
+    };
+
+    let mut found = false;
+    let new_content: String = content
+        .lines()
+        .map(|line| {
+            if line.starts_with("root:") {
+                let parts: Vec<&str> = line.splitn(3, ':').collect();
+                found = true;
+                if parts.len() >= 3 {
+                    format!("root:{hash}:{}", parts[2])
+                } else {
+                    format!("root:{hash}:")
+                }
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    if !found {
+        bail!("root entry not found in {}", shadow.display());
+    }
+
+    // Preserve trailing newline.
+    let new_content = if content.ends_with('\n') && !new_content.ends_with('\n') {
+        new_content + "\n"
+    } else {
+        new_content
+    };
+
+    fs::write(&shadow, new_content)
+        .with_context(|| format!("failed to write {}", shadow.display()))
+}
+
+/// Install an SSH public key for root.
+fn install_ssh_key(mount: &Path, key: &str) -> Result<()> {
+    let ssh_dir = mount.join("root/.ssh");
+    fs::create_dir_all(&ssh_dir)
+        .with_context(|| format!("failed to create {}", ssh_dir.display()))?;
+    fs::set_permissions(&ssh_dir, fs::Permissions::from_mode(0o700))?;
+
+    let auth_keys = ssh_dir.join("authorized_keys");
+    let content = if key.ends_with('\n') {
+        key.to_string()
+    } else {
+        format!("{key}\n")
+    };
+    fs::write(&auth_keys, content)
+        .with_context(|| format!("failed to write {}", auth_keys.display()))?;
+    fs::set_permissions(&auth_keys, fs::Permissions::from_mode(0o600))?;
+
+    Ok(())
+}
+
+// --- SHA-512 crypt implementation ($6$) ---
+
+/// Compute a SHA-512 crypt hash ($6$salt$hash) for the given password.
+fn sha512_crypt(password: &str) -> Result<String> {
+    let mut salt_bytes = [0u8; 16];
+    let mut f = File::open("/dev/urandom").context("failed to open /dev/urandom")?;
+    f.read_exact(&mut salt_bytes)?;
+
+    // Encode salt using the crypt base64 alphabet.
+    let salt: String = salt_bytes
+        .iter()
+        .map(|b| CRYPT_B64_CHARS[(*b as usize) % CRYPT_B64_CHARS.len()] as char)
+        .collect();
+
+    let hash = sha512_crypt_hash(password.as_bytes(), salt.as_bytes(), 5000);
+    Ok(format!("$6${salt}${hash}"))
+}
+
+const CRYPT_B64_CHARS: &[u8] = b"./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
+/// Core SHA-512 crypt algorithm (Drepper specification, 5000 default rounds).
+fn sha512_crypt_hash(password: &[u8], salt: &[u8], rounds: u32) -> String {
+    use sha2::{Digest, Sha512};
+
+    // Compute digest B: sha512(password + salt + password)
+    let mut ctx_b = Sha512::new();
+    ctx_b.update(password);
+    ctx_b.update(salt);
+    ctx_b.update(password);
+    let digest_b = ctx_b.finalize();
+
+    // Compute digest A: sha512(password + salt + <bytes from B based on password length>)
+    let mut ctx_a = Sha512::new();
+    ctx_a.update(password);
+    ctx_a.update(salt);
+
+    // Add bytes from digest B, password.len() bytes total.
+    let mut n = password.len();
+    while n >= 64 {
+        ctx_a.update(&digest_b[..]);
+        n -= 64;
+    }
+    if n > 0 {
+        ctx_a.update(&digest_b[..n]);
+    }
+
+    // Process password length bits.
+    let mut length = password.len();
+    while length > 0 {
+        if length & 1 != 0 {
+            ctx_a.update(&digest_b[..]);
+        } else {
+            ctx_a.update(password);
+        }
+        length >>= 1;
+    }
+
+    let mut digest_a = ctx_a.finalize();
+
+    // Compute digest P: sha512(password repeated password.len() times)
+    let mut ctx_p = Sha512::new();
+    for _ in 0..password.len() {
+        ctx_p.update(password);
+    }
+    let digest_p = ctx_p.finalize();
+
+    // Produce P-string: password.len() bytes from digest_p.
+    let mut p_bytes = Vec::with_capacity(password.len());
+    let mut remaining = password.len();
+    while remaining >= 64 {
+        p_bytes.extend_from_slice(&digest_p[..]);
+        remaining -= 64;
+    }
+    if remaining > 0 {
+        p_bytes.extend_from_slice(&digest_p[..remaining]);
+    }
+
+    // Compute digest S: sha512(salt repeated (16 + digest_a[0]) times)
+    let mut ctx_s = Sha512::new();
+    let repeat_count = 16 + (digest_a[0] as usize);
+    for _ in 0..repeat_count {
+        ctx_s.update(salt);
+    }
+    let digest_s = ctx_s.finalize();
+
+    // Produce S-string: salt.len() bytes from digest_s.
+    let mut s_bytes = Vec::with_capacity(salt.len());
+    let mut remaining = salt.len();
+    while remaining >= 64 {
+        s_bytes.extend_from_slice(&digest_s[..]);
+        remaining -= 64;
+    }
+    if remaining > 0 {
+        s_bytes.extend_from_slice(&digest_s[..remaining]);
+    }
+
+    // Rounds.
+    for i in 0..rounds {
+        let mut ctx = Sha512::new();
+        if i & 1 != 0 {
+            ctx.update(&p_bytes);
+        } else {
+            ctx.update(&digest_a[..]);
+        }
+        if i % 3 != 0 {
+            ctx.update(&s_bytes);
+        }
+        if i % 7 != 0 {
+            ctx.update(&p_bytes);
+        }
+        if i & 1 != 0 {
+            ctx.update(&digest_a[..]);
+        } else {
+            ctx.update(&p_bytes);
+        }
+        digest_a = ctx.finalize();
+    }
+
+    // Encode the final digest with crypt-specific base64 and SHA-512 byte reordering.
+    crypt_b64_encode(&digest_a)
+}
+
+/// Encode 64 bytes of SHA-512 digest using crypt-specific base64 with
+/// the SHA-512 byte reordering from the Drepper specification.
+fn crypt_b64_encode(hash: &[u8]) -> String {
+    let mut out = String::with_capacity(86);
+
+    // SHA-512 crypt byte reordering: groups of 3 bytes (with specific indices).
+    let groups: [(usize, usize, usize); 21] = [
+        (0, 21, 42),
+        (22, 43, 1),
+        (44, 2, 23),
+        (3, 24, 45),
+        (25, 46, 4),
+        (47, 5, 26),
+        (6, 27, 48),
+        (28, 49, 7),
+        (50, 8, 29),
+        (9, 30, 51),
+        (31, 52, 10),
+        (53, 11, 32),
+        (12, 33, 54),
+        (34, 55, 13),
+        (56, 14, 35),
+        (15, 36, 57),
+        (37, 58, 16),
+        (59, 17, 38),
+        (18, 39, 60),
+        (40, 61, 19),
+        (62, 20, 41),
+    ];
+
+    for (a, b, c) in groups {
+        let v = ((hash[a] as u32) << 16) | ((hash[b] as u32) << 8) | (hash[c] as u32);
+        for i in 0..4 {
+            out.push(CRYPT_B64_CHARS[((v >> (i * 6)) & 0x3f) as usize] as char);
+        }
+    }
+
+    // Final byte (index 63), only 2 characters.
+    let v = hash[63] as u32;
+    for i in 0..2 {
+        out.push(CRYPT_B64_CHARS[((v >> (i * 6)) & 0x3f) as usize] as char);
+    }
+
+    out
 }
 
 #[cfg(test)]
@@ -682,6 +1174,7 @@ mod tests {
             &output,
             &ExportFormat::Dir,
             None,
+            None,
             false,
         )
         .unwrap_err();
@@ -699,6 +1192,7 @@ mod tests {
             &output,
             &ExportFormat::Dir,
             None,
+            None,
             false,
         )
         .unwrap_err();
@@ -714,9 +1208,343 @@ mod tests {
         fs::write(rootfs_dir.join("hello"), "world").unwrap();
 
         let output = tmp.path().join("exported");
-        export_rootfs(tmp.path(), "myfs", &output, &ExportFormat::Dir, None, false).unwrap();
+        export_rootfs(
+            tmp.path(),
+            "myfs",
+            &output,
+            &ExportFormat::Dir,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
 
         assert!(output.join("hello").is_file());
         assert_eq!(fs::read_to_string(output.join("hello")).unwrap(), "world");
+    }
+
+    // --- sha512_crypt tests ---
+
+    #[test]
+    fn test_sha512_crypt_format() {
+        let result = sha512_crypt("test").unwrap();
+        assert!(result.starts_with("$6$"), "expected $6$ prefix, got: {result}");
+        let parts: Vec<&str> = result.split('$').collect();
+        // parts: ["", "6", salt, hash]
+        assert_eq!(parts.len(), 4, "expected 4 parts, got: {parts:?}");
+        assert_eq!(parts[1], "6");
+        assert_eq!(parts[2].len(), 16, "salt should be 16 chars");
+        assert_eq!(parts[3].len(), 86, "hash should be 86 chars");
+    }
+
+    #[test]
+    fn test_sha512_crypt_known_vector() {
+        // Known test vector from the Drepper spec.
+        let hash = sha512_crypt_hash(b"Hello world!", b"saltstring", 5000);
+        let expected = "svn8UoSVapNtMuq1ukKS4tPQd8iKwSMHWjl/O817G3uBnIFNjnQJu\
+                        esI68u4OTLiBFdcbYEdFCoEOfaS35inz1";
+        assert_eq!(hash, expected);
+    }
+
+    #[test]
+    fn test_sha512_crypt_known_vector_rounds() {
+        // Known vector from the Drepper spec with 10000 rounds.
+        // Salt truncated to 16 chars: "saltstringsaltst".
+        let hash = sha512_crypt_hash(b"Hello world!", b"saltstringsaltst", 10000);
+        let expected = "OW1/O6BYHV6BcXZu8QVeXbDWra3Oeqh0sbHbbMCVNSnCM/UrjmM0Dp\
+                        8vOuZeHBy/YTBmSK6H9qs/y3RnOaw5v.";
+        assert_eq!(hash, expected);
+    }
+
+    // --- align_disk_image tests ---
+
+    #[test]
+    fn test_align_disk_image_not_aligned() {
+        let tmp = crate::testutil::TempDataDir::new("export-align-unaligned");
+        let img = tmp.path().join("test.raw");
+        // Create a file with non-aligned size (1000 bytes).
+        let file = File::create(&img).unwrap();
+        file.set_len(1000).unwrap();
+        drop(file);
+
+        align_disk_image(&img).unwrap();
+        let size = fs::metadata(&img).unwrap().len();
+        assert_eq!(size, 1024); // Next 512-byte boundary.
+        assert_eq!(size % 512, 0);
+    }
+
+    #[test]
+    fn test_align_disk_image_already_aligned() {
+        let tmp = crate::testutil::TempDataDir::new("export-align-aligned");
+        let img = tmp.path().join("test.raw");
+        let file = File::create(&img).unwrap();
+        file.set_len(2048).unwrap();
+        drop(file);
+
+        align_disk_image(&img).unwrap();
+        let size = fs::metadata(&img).unwrap().len();
+        assert_eq!(size, 2048); // Unchanged.
+    }
+
+    // --- enable_serial_console tests ---
+
+    #[test]
+    fn test_enable_serial_console() {
+        let tmp = crate::testutil::TempDataDir::new("export-vm-serial");
+
+        enable_serial_console(tmp.path()).unwrap();
+
+        // Template drop-in should clear BindsTo= for all serial-getty instances.
+        let dropin = tmp
+            .path()
+            .join("etc/systemd/system/serial-getty@.service.d/vm-no-device-wait.conf");
+        assert!(dropin.is_file());
+        let content = fs::read_to_string(&dropin).unwrap();
+        assert!(content.contains("BindsTo=\n"), "got: {content}");
+    }
+
+    // --- ensure_init_symlink tests ---
+
+    #[test]
+    fn test_ensure_init_symlink_creates_missing() {
+        let tmp = crate::testutil::TempDataDir::new("export-vm-init-create");
+        // Set up merged-usr layout: /sbin -> usr/sbin, /lib/systemd/systemd exists.
+        let root = tmp.path();
+        fs::create_dir_all(root.join("usr/sbin")).unwrap();
+        std::os::unix::fs::symlink("usr/sbin", root.join("sbin")).unwrap();
+        fs::create_dir_all(root.join("lib/systemd")).unwrap();
+        fs::write(root.join("lib/systemd/systemd"), "fake-systemd").unwrap();
+
+        ensure_init_symlink(root).unwrap();
+
+        // The symlink should be at usr/sbin/init (since sbin -> usr/sbin).
+        let init = root.join("usr/sbin/init");
+        assert!(init.symlink_metadata().unwrap().file_type().is_symlink());
+        let target = fs::read_link(&init).unwrap();
+        assert_eq!(target.to_str().unwrap(), "../../lib/systemd/systemd");
+        // Following the chain: sbin/init -> usr/sbin/init -> ../../lib/systemd/systemd
+        assert!(root.join("sbin/init").exists());
+    }
+
+    #[test]
+    fn test_ensure_init_symlink_already_exists() {
+        let tmp = crate::testutil::TempDataDir::new("export-vm-init-exists");
+        let root = tmp.path();
+        fs::create_dir_all(root.join("usr/sbin")).unwrap();
+        std::os::unix::fs::symlink("usr/sbin", root.join("sbin")).unwrap();
+        fs::create_dir_all(root.join("lib/systemd")).unwrap();
+        fs::write(root.join("lib/systemd/systemd"), "fake-systemd").unwrap();
+        // Pre-create /usr/sbin/init.
+        fs::write(root.join("usr/sbin/init"), "existing-init").unwrap();
+
+        ensure_init_symlink(root).unwrap();
+
+        // Should not be overwritten — still a regular file with original content.
+        assert!(root.join("usr/sbin/init").is_file());
+        assert_eq!(
+            fs::read_to_string(root.join("usr/sbin/init")).unwrap(),
+            "existing-init"
+        );
+    }
+
+    #[test]
+    fn test_ensure_init_symlink_usr_lib_fallback() {
+        let tmp = crate::testutil::TempDataDir::new("export-vm-init-usrlib");
+        let root = tmp.path();
+        fs::create_dir_all(root.join("sbin")).unwrap();
+        // systemd only in /usr/lib/systemd/systemd (no /lib/systemd/systemd).
+        fs::create_dir_all(root.join("usr/lib/systemd")).unwrap();
+        fs::write(root.join("usr/lib/systemd/systemd"), "fake-systemd").unwrap();
+
+        ensure_init_symlink(root).unwrap();
+
+        let init = root.join("sbin/init");
+        assert!(init.symlink_metadata().unwrap().file_type().is_symlink());
+        let target = fs::read_link(&init).unwrap();
+        assert_eq!(target.to_str().unwrap(), "../lib/systemd/systemd");
+    }
+
+    #[test]
+    fn test_ensure_init_symlink_no_systemd() {
+        let tmp = crate::testutil::TempDataDir::new("export-vm-init-nosystemd");
+        let root = tmp.path();
+        fs::create_dir_all(root.join("sbin")).unwrap();
+
+        let err = ensure_init_symlink(root).unwrap_err();
+        assert!(
+            err.to_string().contains("systemd binary not found"),
+            "got: {err}"
+        );
+    }
+
+    // --- write_vm_fstab tests ---
+
+    #[test]
+    fn test_write_vm_fstab_ext4() {
+        let tmp = crate::testutil::TempDataDir::new("export-vm-fstab-ext4");
+        fs::create_dir_all(tmp.path().join("etc")).unwrap();
+
+        write_vm_fstab(tmp.path(), RawFs::Ext4).unwrap();
+
+        let content = fs::read_to_string(tmp.path().join("etc/fstab")).unwrap();
+        assert_eq!(content, "/dev/vda / ext4 defaults 0 1\n");
+    }
+
+    #[test]
+    fn test_write_vm_fstab_btrfs() {
+        let tmp = crate::testutil::TempDataDir::new("export-vm-fstab-btrfs");
+        fs::create_dir_all(tmp.path().join("etc")).unwrap();
+
+        write_vm_fstab(tmp.path(), RawFs::Btrfs).unwrap();
+
+        let content = fs::read_to_string(tmp.path().join("etc/fstab")).unwrap();
+        assert_eq!(content, "/dev/vda / btrfs defaults 0 1\n");
+    }
+
+    // --- unmask_resolved tests ---
+
+    #[test]
+    fn test_unmask_resolved_masked() {
+        let tmp = crate::testutil::TempDataDir::new("export-vm-unmask-resolved");
+        let unit_dir = tmp.path().join("etc/systemd/system");
+        fs::create_dir_all(&unit_dir).unwrap();
+        let resolved = unit_dir.join("systemd-resolved.service");
+        std::os::unix::fs::symlink("/dev/null", &resolved).unwrap();
+
+        unmask_resolved(tmp.path()).unwrap();
+        assert!(!resolved.exists());
+        assert!(resolved.symlink_metadata().is_err());
+    }
+
+    #[test]
+    fn test_unmask_resolved_not_masked() {
+        let tmp = crate::testutil::TempDataDir::new("export-vm-unmask-noop");
+        let unit_dir = tmp.path().join("etc/systemd/system");
+        fs::create_dir_all(&unit_dir).unwrap();
+        // No symlink present — should be a no-op.
+        unmask_resolved(tmp.path()).unwrap();
+    }
+
+    #[test]
+    fn test_unmask_resolved_not_devnull() {
+        let tmp = crate::testutil::TempDataDir::new("export-vm-unmask-other");
+        let unit_dir = tmp.path().join("etc/systemd/system");
+        fs::create_dir_all(&unit_dir).unwrap();
+        let resolved = unit_dir.join("systemd-resolved.service");
+        // Symlink to something other than /dev/null — should NOT be removed.
+        std::os::unix::fs::symlink("/lib/systemd/system/systemd-resolved.service", &resolved)
+            .unwrap();
+
+        unmask_resolved(tmp.path()).unwrap();
+        assert!(resolved.symlink_metadata().is_ok());
+    }
+
+    // --- write_resolv_conf tests ---
+
+    #[test]
+    fn test_write_resolv_conf() {
+        let tmp = crate::testutil::TempDataDir::new("export-vm-resolv");
+        fs::create_dir_all(tmp.path().join("etc")).unwrap();
+
+        write_resolv_conf(
+            tmp.path(),
+            &["1.1.1.1".to_string(), "8.8.8.8".to_string()],
+        )
+        .unwrap();
+
+        let content = fs::read_to_string(tmp.path().join("etc/resolv.conf")).unwrap();
+        assert_eq!(content, "nameserver 1.1.1.1\nnameserver 8.8.8.8\n");
+    }
+
+    #[test]
+    fn test_write_resolv_conf_replaces_symlink() {
+        let tmp = crate::testutil::TempDataDir::new("export-vm-resolv-symlink");
+        fs::create_dir_all(tmp.path().join("etc")).unwrap();
+        let resolv = tmp.path().join("etc/resolv.conf");
+        std::os::unix::fs::symlink("../run/systemd/resolve/stub-resolv.conf", &resolv).unwrap();
+
+        write_resolv_conf(tmp.path(), &["9.9.9.9".to_string()]).unwrap();
+
+        assert!(resolv.is_file());
+        assert!(!resolv.symlink_metadata().unwrap().file_type().is_symlink());
+        let content = fs::read_to_string(&resolv).unwrap();
+        assert_eq!(content, "nameserver 9.9.9.9\n");
+    }
+
+    // --- configure_networkd tests ---
+
+    #[test]
+    fn test_configure_networkd() {
+        let tmp = crate::testutil::TempDataDir::new("export-vm-networkd");
+        fs::create_dir_all(tmp.path().join("etc/systemd/system")).unwrap();
+
+        configure_networkd(tmp.path(), 1).unwrap();
+
+        let network = tmp.path().join("etc/systemd/network/80-vm-dhcp.network");
+        assert!(network.is_file());
+        let content = fs::read_to_string(&network).unwrap();
+        assert!(content.contains("[Match]"));
+        assert!(content.contains("Name=en* eth*"));
+        assert!(content.contains("DHCP=yes"));
+
+        let link = tmp
+            .path()
+            .join("etc/systemd/system/multi-user.target.wants/systemd-networkd.service");
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+    }
+
+    // --- set_root_password tests ---
+
+    #[test]
+    fn test_set_root_password_hash() {
+        let tmp = crate::testutil::TempDataDir::new("export-vm-shadow-hash");
+        fs::create_dir_all(tmp.path().join("etc")).unwrap();
+        fs::write(
+            tmp.path().join("etc/shadow"),
+            "root:!locked:19000:0:99999:7:::\nnobody:*:19000:0:99999:7:::\n",
+        )
+        .unwrap();
+
+        set_root_password(tmp.path(), "secret").unwrap();
+
+        let content = fs::read_to_string(tmp.path().join("etc/shadow")).unwrap();
+        assert!(content.starts_with("root:$6$"), "got: {content}");
+        assert!(content.contains("nobody:*:"));
+    }
+
+    #[test]
+    fn test_set_root_password_empty() {
+        let tmp = crate::testutil::TempDataDir::new("export-vm-shadow-empty");
+        fs::create_dir_all(tmp.path().join("etc")).unwrap();
+        fs::write(
+            tmp.path().join("etc/shadow"),
+            "root:!locked:19000:0:99999:7:::\n",
+        )
+        .unwrap();
+
+        set_root_password(tmp.path(), "").unwrap();
+
+        let content = fs::read_to_string(tmp.path().join("etc/shadow")).unwrap();
+        assert!(content.starts_with("root::19000"), "got: {content}");
+    }
+
+    // --- install_ssh_key tests ---
+
+    #[test]
+    fn test_install_ssh_key() {
+        let tmp = crate::testutil::TempDataDir::new("export-vm-ssh");
+
+        install_ssh_key(tmp.path(), "ssh-ed25519 AAAA... user@host").unwrap();
+
+        let ssh_dir = tmp.path().join("root/.ssh");
+        let mode = fs::metadata(&ssh_dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+
+        let auth_keys = ssh_dir.join("authorized_keys");
+        let content = fs::read_to_string(&auth_keys).unwrap();
+        assert_eq!(content, "ssh-ed25519 AAAA... user@host\n");
+
+        let mode = fs::metadata(&auth_keys).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 }

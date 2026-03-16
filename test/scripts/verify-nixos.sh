@@ -15,13 +15,9 @@ set -uo pipefail
 #   5. Create, boot, and test the OCI app container
 #   6. Cleanup
 #
-# Known limitation: Phase 5 (OCI app on NixOS) fails because NixOS
-# manages /etc entirely via its activation script, which tries to replace
-# /etc/systemd/system with a symlink to the Nix store. sdme's OCI app
-# setup writes unit files into /etc/systemd/system in the overlayfs
-# upper layer, causing the NixOS activation to fail with "could not
-# create symlink /etc/systemd/system". Without working targets, systemd
-# inside the container can't find default.target and crashes.
+# NixOS note: OCI app unit files are placed in /etc/systemd/system.control/
+# instead of /etc/systemd/system/ because NixOS activation replaces the
+# latter with an immutable symlink to the Nix store.
 
 source "$(dirname "$0")/lib.sh"
 
@@ -314,27 +310,11 @@ phase5_test_oci() {
 HTMLEOF
     log "  Wrote test content to $vol_dir/index.html"
 
-    # Enable systemd-networkd in the container for veth DHCP.
-    # NixOS uses /etc/systemd/system symlinks managed by NixOS activation,
-    # but our overlayfs upper layer takes precedence.
-    local upper="$DATADIR/containers/$CT_OCI/upper"
-    local wants_dir="$upper/etc/systemd/system/multi-user.target.wants"
-    mkdir -p "$wants_dir"
-
-    # NixOS stores unit files in the nix store. Find the networkd unit path.
-    local networkd_unit
-    networkd_unit=$(find "$DATADIR/fs/$APP_FS/nix/store" -path "*/lib/systemd/system/systemd-networkd.service" -print -quit 2>/dev/null || true)
-    if [[ -n "$networkd_unit" ]]; then
-        # Use the in-container path (strip the rootfs prefix).
-        local ct_unit_path="/${networkd_unit#"$DATADIR/fs/$APP_FS"/}"
-        ln -sf "$ct_unit_path" "$wants_dir/systemd-networkd.service"
-        local ct_socket_path="${ct_unit_path%.service}.socket"
-        ln -sf "$ct_socket_path" "$wants_dir/systemd-networkd.socket"
-    else
-        # Fallback: standard systemd paths.
-        ln -sf /usr/lib/systemd/system/systemd-networkd.service "$wants_dir/systemd-networkd.service"
-        ln -sf /usr/lib/systemd/system/systemd-networkd.socket "$wants_dir/systemd-networkd.socket"
-    fi
+    # NixOS already enables systemd-networkd via its configuration
+    # (networking.useNetworkd = true in container.nix), so no manual
+    # enablement in the overlayfs upper layer is needed.  Writing to
+    # upper/etc/systemd/system/ would conflict with NixOS activation,
+    # which replaces /etc/systemd/system with an immutable symlink.
 
     # Start container
     if ! output=$(timeout "$TIMEOUT_BOOT" sdme start "$CT_OCI" -t 120 2>&1); then
@@ -366,32 +346,30 @@ HTMLEOF
         record "oci/logs" FAIL "$output"
     fi
 
-    # Curl the nginx service via the container's IP.
-    local curl_ip=""
-    local leader nsout
+    # Curl the nginx service from inside the container's network namespace.
+    # NixOS containers with veth get a link-local IP (DHCP isn't served by
+    # the host networkd for the container subnet), so host-side curl can't
+    # route to the container.  Instead, nsenter into the network namespace
+    # and curl localhost, which reliably tests the OCI app service.
+    local leader
     leader=$(machinectl show "$CT_OCI" -p Leader --value 2>/dev/null) || true
-    if [[ -n "$leader" ]] && [[ -d "/proc/$leader" ]]; then
-        nsout=$(nsenter -t "$leader" -n ip -4 addr show host0 2>/dev/null) || true
-        curl_ip=$(echo "$nsout" | grep -oP 'inet \K[0-9.]+') || true
-    fi
-    if [[ -z "$curl_ip" ]]; then
-        record "oci/curl-port" FAIL "could not find container IP"
-        record "oci/curl-content" SKIP "no container IP"
+    if [[ -z "$leader" ]] || [[ ! -d "/proc/$leader" ]]; then
+        record "oci/curl-port" FAIL "could not find container leader PID"
+        record "oci/curl-content" SKIP "no leader PID"
         stop_container "$CT_OCI"
         sdme rm -f "$CT_OCI" 2>/dev/null || true
         return
     fi
-    log "  Using IP $curl_ip for curl"
 
     local http_code body
-    http_code=$(timeout 10 curl -s -o /dev/null -w '%{http_code}' "http://${curl_ip}:${APP_PORT}" 2>&1) || true
+    http_code=$(timeout 10 nsenter -t "$leader" -n curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${APP_PORT}" 2>&1) || true
     if [[ "$http_code" == "200" ]]; then
-        record "oci/curl-port" PASS "HTTP $http_code via $curl_ip"
+        record "oci/curl-port" PASS "HTTP $http_code via nsenter localhost"
     else
-        record "oci/curl-port" FAIL "HTTP $http_code via $curl_ip"
+        record "oci/curl-port" FAIL "HTTP $http_code via nsenter localhost"
     fi
 
-    body=$(timeout 10 curl -s "http://${curl_ip}:${APP_PORT}" 2>&1) || true
+    body=$(timeout 10 nsenter -t "$leader" -n curl -s "http://127.0.0.1:${APP_PORT}" 2>&1) || true
     if [[ "$body" == *"$TEST_MARKER"* ]]; then
         record "oci/curl-content" PASS
     else

@@ -376,9 +376,10 @@ fn do_create(
         } else {
             app_names
         };
+        let unit_rel = crate::oci::app::systemd_unit_dir(rootfs);
         for oci_app_name in &app_names {
             let dropin_dir = container_dir.join(format!(
-                "upper/etc/systemd/system/sdme-oci-{oci_app_name}.service.d"
+                "upper/{unit_rel}/sdme-oci-{oci_app_name}.service.d"
             ));
             fs::create_dir_all(&dropin_dir)
                 .with_context(|| format!("failed to create {}", dropin_dir.display()))?;
@@ -422,9 +423,10 @@ fn do_create(
             let dropin_content =
                 format!("[Service]\nCapabilityBoundingSet=\nCapabilityBoundingSet={caps_line}\n");
 
+            let unit_rel = crate::oci::app::systemd_unit_dir(rootfs);
             for oci_app_name in &app_names {
                 let dropin_dir = container_dir.join(format!(
-                    "upper/etc/systemd/system/sdme-oci-{oci_app_name}.service.d"
+                    "upper/{unit_rel}/sdme-oci-{oci_app_name}.service.d"
                 ));
                 fs::create_dir_all(&dropin_dir)
                     .with_context(|| format!("failed to create {}", dropin_dir.display()))?;

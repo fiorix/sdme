@@ -16,7 +16,7 @@ See [README.md](README.md) for how to run the tests and known limitations.
 | 4 | verify-pods.sh | PASS | 9 | 0 | 0 | 9 |
 | 5 | verify-export.sh | PASS | 12 | 0 | 0 | 12 |
 | 6 | verify-matrix.sh | FAIL | 225 | 3 | 3 | 231 |
-| 7 | verify-nixos.sh | FAIL | 9 | 1 | 4 | 14 |
+| 7 | verify-nixos.sh | PASS | 14 | 0 | 0 | 14 |
 | 8 | verify-kube-L1-basic.sh | PASS | 14 | 0 | 0 | 14 |
 | 9 | verify-kube-L2-spec.sh | PASS | 12 | 0 | 0 | 12 |
 | 10 | verify-kube-L2-probes.sh | PASS | 41 | 0 | 0 | 41 |
@@ -27,7 +27,7 @@ See [README.md](README.md) for how to run the tests and known limitations.
 | 15 | verify-kube-L5-redis-stack.sh | PASS | 6 | 0 | 0 | 6 |
 | 16 | verify-kube-L6-gitea-stack.sh | PASS | 15 | 0 | 0 | 15 |
 
-**Totals: 512 passed, 4 failed, 17 skipped (533 tests) — 14/16 suites pass**
+**Totals: 517 passed, 3 failed, 13 skipped (533 tests) — 15/16 suites pass**
 
 ## Remaining Failures
 
@@ -52,31 +52,18 @@ AlmaLinux, Arch Linux) pass hardened tests because they use setuid bits instead.
 
 **Fix:** strip `security.capability` xattrs during rootfs import.
 
-### verify-nixos.sh — OCI app boot failure (1 failure, 4 skips)
+### verify-nixos.sh — resolved (was: OCI app boot failure)
 
-NixOS OCI app container (nginx on NixOS base) fails to start. Plain NixOS
-containers boot fine.
-
-**Root cause:** NixOS manages `/etc` entirely via its activation script, which
-replaces `/etc/systemd/system` with a symlink to the Nix store. sdme's OCI app
-setup writes unit files (`sdme-oci-*.service`) into `/etc/systemd/system` in the
-overlayfs upper layer, causing the NixOS activation to fail:
-
-```
-/etc/systemd/system directory contains user files. Symlinking may fail.
-could not create symlink /etc/systemd/system
-Unit default.target not found.
-```
-
-Without working targets, systemd crashes the container. Supporting OCI apps on
-NixOS would require a NixOS-specific unit placement strategy.
+Previously, NixOS OCI app containers failed because NixOS activation replaced
+`/etc/systemd/system` with an immutable symlink to the Nix store, destroying
+sdme's unit files. Fixed by placing OCI app units in `/etc/systemd/system.control/`
+on NixOS (the highest-priority persistent unit search path, not managed by NixOS
+activation). See `oci::app::systemd_unit_dir()` for the detection logic.
 
 ## Skipped Tests
 
 - **verify-security.sh** (10 skips): AppArmor profile enforcement and multi-distro
   `--userns` boot tests skipped when the required rootfs or AppArmor profiles are
   not pre-installed.
-- **verify-nixos.sh** (4 skips): OCI app service, logs, curl-port, and curl-content
-  tests skipped because the OCI container fails to boot (see above).
 - **verify-matrix.sh** (3 skips): openSUSE hardened OCI app service checks skipped
   because the containers fail to boot (see above).

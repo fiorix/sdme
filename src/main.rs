@@ -515,6 +515,21 @@ EXAMPLE:
         /// Filesystem type for raw disk images (ext4 or btrfs; default: config default_export_fs)
         #[arg(long)]
         filesystem: Option<String>,
+        /// Prepare raw disk image for VM boot (serial console, fstab, DHCP, etc.)
+        #[arg(long)]
+        vm: bool,
+        /// DNS nameserver(s) for --vm (repeatable; default: 8.8.8.8, 8.8.4.4)
+        #[arg(long = "dns", requires = "vm")]
+        dns: Vec<String>,
+        /// Number of network interfaces to configure for DHCP (default: 1; 0 to skip)
+        #[arg(long, requires = "vm", default_value_t = 1)]
+        net_ifaces: u32,
+        /// Set root password (empty string for passwordless root)
+        #[arg(long, requires = "vm")]
+        root_password: Option<String>,
+        /// SSH public key or path to .pub file for root authorized_keys
+        #[arg(long, requires = "vm")]
+        ssh_key: Option<String>,
     },
     /// Manage the OCI blob cache
     #[command(subcommand)]
@@ -1160,19 +1175,28 @@ fn validate_oci_pod_args(
         None => bail!("--oci-pod requires an OCI app rootfs (use -r/--fs)"),
     };
     let rootfs_path = datadir.join("fs").join(rootfs_name);
-    // Check for any sdme-oci-*.service file.
-    let has_oci_service = rootfs_path
-        .join("etc/systemd/system")
-        .read_dir()
-        .ok()
-        .and_then(|entries| {
-            entries.filter_map(|e| e.ok()).find(|e| {
-                let name = e.file_name();
-                let name = name.to_string_lossy();
-                name.starts_with("sdme-oci-") && name.ends_with(".service")
-            })
-        })
-        .is_some();
+    // Check for any sdme-oci-*.service file.  On most distros the unit
+    // lives in etc/systemd/system, but on NixOS it is placed in
+    // etc/systemd/system.control because NixOS activation replaces
+    // /etc/systemd/system with an immutable symlink to the Nix store
+    // (see oci::app::systemd_unit_dir).  We check both directories so
+    // this validation works regardless of the base distro.
+    let has_oci_service = ["etc/systemd/system", "etc/systemd/system.control"]
+        .iter()
+        .any(|dir| {
+            rootfs_path
+                .join(dir)
+                .read_dir()
+                .ok()
+                .and_then(|entries| {
+                    entries.filter_map(|e| e.ok()).find(|e| {
+                        let name = e.file_name();
+                        let name = name.to_string_lossy();
+                        name.starts_with("sdme-oci-") && name.ends_with(".service")
+                    })
+                })
+                .is_some()
+        });
     if !has_oci_service {
         bail!(
             "--oci-pod requires an OCI app rootfs; \
@@ -2285,6 +2309,11 @@ fn main() -> Result<()> {
                 format,
                 size,
                 filesystem,
+                vm,
+                dns,
+                net_ifaces,
+                root_password,
+                ssh_key,
             } => {
                 let fmt = export::detect_format(&output, format.as_deref())?;
                 let fs_str = filesystem.as_deref().unwrap_or(&cfg.default_export_fs);
@@ -2304,6 +2333,42 @@ fn main() -> Result<()> {
                         fmt
                     }
                 };
+
+                // Build VM options if --vm is specified.
+                let vm_opts = if vm {
+                    if !matches!(fmt, export::ExportFormat::Raw(_)) {
+                        bail!("--vm only applies to raw disk image format");
+                    }
+                    let nameservers = if dns.is_empty() {
+                        vec!["8.8.8.8".to_string(), "8.8.4.4".to_string()]
+                    } else {
+                        dns
+                    };
+                    let ssh_key = match ssh_key {
+                        Some(key) => {
+                            let path = std::path::Path::new(&key);
+                            if path.is_file() {
+                                Some(
+                                    std::fs::read_to_string(path).with_context(|| {
+                                        format!("failed to read SSH key file: {}", path.display())
+                                    })?,
+                                )
+                            } else {
+                                Some(key)
+                            }
+                        }
+                        None => None,
+                    };
+                    Some(export::VmOptions {
+                        nameservers,
+                        net_ifaces,
+                        root_password,
+                        ssh_key,
+                    })
+                } else {
+                    None
+                };
+
                 let output_path = std::path::PathBuf::from(&output);
                 if container {
                     export::export_container(
@@ -2312,6 +2377,7 @@ fn main() -> Result<()> {
                         &output_path,
                         &fmt,
                         size.as_deref(),
+                        vm_opts.as_ref(),
                         cli.verbose,
                     )?;
                 } else {
@@ -2321,6 +2387,7 @@ fn main() -> Result<()> {
                         &output_path,
                         &fmt,
                         size.as_deref(),
+                        vm_opts.as_ref(),
                         cli.verbose,
                     )?;
                 }
