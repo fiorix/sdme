@@ -6,7 +6,7 @@ set -uo pipefail
 
 source "$(dirname "$0")/lib.sh"
 
-DISTROS=(debian ubuntu fedora centos almalinux archlinux)
+DISTROS=(debian ubuntu fedora centos almalinux archlinux opensuse)
 APPS=(nginx-unprivileged redis postgresql)
 
 declare -A DISTRO_IMAGES=(
@@ -16,6 +16,7 @@ declare -A DISTRO_IMAGES=(
     [centos]="quay.io/centos/centos:stream10"
     [almalinux]="quay.io/almalinuxorg/almalinux:9"
     [archlinux]="docker.io/lopsided/archlinux:latest"
+    [opensuse]="registry.opensuse.org/opensuse/tumbleweed:latest"
 )
 
 declare -A APP_IMAGES=(
@@ -32,6 +33,7 @@ declare -A DISTRO_OS_PATTERN=(
     [centos]="CentOS"
     [almalinux]="AlmaLinux"
     [archlinux]="Arch Linux"
+    [opensuse]="openSUSE Tumbleweed"
 )
 
 declare -A APP_READY_WAIT=(

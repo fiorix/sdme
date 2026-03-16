@@ -610,7 +610,7 @@ cleanup_container sec-pschk
 # ===========================================================================
 echo "=== Test 14: --userns multi-distro boot ==="
 
-USERNS_DISTROS=(debian ubuntu fedora centos almalinux archlinux)
+USERNS_DISTROS=(debian ubuntu fedora centos almalinux archlinux opensuse)
 userns_any=false
 
 for distro in "${USERNS_DISTROS[@]}"; do

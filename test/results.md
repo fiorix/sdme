@@ -16,6 +16,7 @@ See [README.md](README.md) for how to run the tests.
 | centos    | quay.io/centos/centos:stream10    | PASS   | PASS | PASS         | PASS         |
 | almalinux | quay.io/almalinuxorg/almalinux:9  | PASS   | PASS | PASS         | PASS         |
 | archlinux | docker.io/lopsided/archlinux      | PASS   | PASS | PASS         | PASS         |
+| opensuse  | registry.opensuse.org/opensuse/tumbleweed | PASS | PASS | PASS   | PASS         |
 
 Boot tests verify: container create, systemd reaching `running` state,
 journalctl access, and systemctl unit listing.
@@ -30,11 +31,11 @@ only publishes `linux/amd64` manifests.
 
 ## OCI App Matrix
 
-| App                | Image                              | deb  | ubu  | fed  | cen  | alma | arch |
-|--------------------|------------------------------------|------|------|------|------|------|------|
-| nginx-unprivileged | docker.io/nginxinc/nginx-unpriv... | PASS | PASS | PASS | PASS | PASS | PASS |
-| redis              | docker.io/redis                    | PASS | PASS | PASS | PASS | PASS | PASS |
-| postgresql         | docker.io/postgres                 | PASS | PASS | PASS | PASS | PASS | PASS |
+| App                | Image                              | deb  | ubu  | fed  | cen  | alma | arch | suse |
+|--------------------|------------------------------------|------|------|------|------|------|------|------|
+| nginx-unprivileged | docker.io/nginxinc/nginx-unpriv... | PASS | PASS | PASS | PASS | PASS | PASS | PASS |
+| redis              | docker.io/redis                    | PASS | PASS | PASS | PASS | PASS | PASS | PASS |
+| postgresql         | docker.io/postgres                 | PASS | PASS | PASS | PASS | PASS | PASS | PASS |
 
 Each cell verifies: app import with `--base-fs`, container boot,
 `sdme-oci-{name}.service` active, journal and status accessible, and
@@ -108,6 +109,7 @@ redis-cli ping, pg_isready).
 | centos boot with --userns              | PASS   |
 | almalinux boot with --userns           | PASS   |
 | archlinux boot with --userns           | PASS   |
+| opensuse boot with --userns            | PASS   |
 | nginx OCI app with --userns            | PASS   |
 
 - **CLI validation**: verifies that invalid capability names, syscall filter
@@ -142,6 +144,7 @@ redis-cli ping, pg_isready).
 | centos    | PASS   | PASS    |
 | almalinux | PASS   | PASS    |
 | archlinux | PASS   | PASS    |
+| opensuse  | PASS   | PASS    |
 
 Each distro is created with `--hardened` and verified to reach `running`
 or `degraded` state. Hardened enables user namespace isolation,
@@ -170,6 +173,9 @@ private network, no-new-privileges, and drops
 | postgresql         | centos    | PASS | PASS    |
 | postgresql         | almalinux | PASS | PASS    |
 | postgresql         | archlinux | PASS | PASS    |
+| nginx-unprivileged | opensuse  | PASS | PASS    |
+| redis              | opensuse  | PASS | PASS    |
+| postgresql         | opensuse  | PASS | PASS    |
 
 Each cell verifies: container created with `--hardened`, boots
 successfully, and `sdme-oci-{name}.service` is active. App-specific

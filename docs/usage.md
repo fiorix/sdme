@@ -294,21 +294,22 @@ sudo sdme new -r fedora
 After importing a rootfs, sdme detects the distribution, checks for
 systemd, and if systemd is missing, installs it via chroot. The
 `--install-packages` flag controls this behavior. Supported distro
-families: Debian (apt-get), Fedora (dnf), Arch (pacman).
+families: Debian (apt-get), Fedora (dnf), SUSE (zypper), Arch (pacman).
 NixOS is a special case: it must be pre-built with systemd, since there is
 no chroot-based package installation for Nix.
 
 The following matrix is verified in the release process:
 
 ```
-Base OS       Source                              Tested
------------   ----------------------------------  ------
-debian        docker.io/debian:stable             Yes
-ubuntu        docker.io/ubuntu:24.04              Yes
-fedora        quay.io/fedora/fedora:41            Yes
-centos        quay.io/centos/centos:stream10      Yes
-almalinux     quay.io/almalinuxorg/almalinux:9    Yes
-archlinux     docker.io/archlinux                 Yes
+Base OS       Source                                       Tested
+-----------   ------------------------------------------   ------
+debian        docker.io/debian:stable                      Yes
+ubuntu        docker.io/ubuntu:24.04                       Yes
+fedora        quay.io/fedora/fedora:41                     Yes
+centos        quay.io/centos/centos:stream10               Yes
+almalinux     quay.io/almalinuxorg/almalinux:9             Yes
+opensuse      registry.opensuse.org/opensuse/tumbleweed    Yes
+archlinux     docker.io/archlinux                          Yes
 ```
 
 The key point: once imported, you can spin up any number of containers from
