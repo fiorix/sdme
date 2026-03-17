@@ -19,21 +19,27 @@
 //! | [`oci`] | OCI registry, layout, app setup, blob cache |
 //! | [`kube`] | Kubernetes Pod YAML support |
 //! | [`export`] | Rootfs export (dir, tarball, raw image) |
+//! | [`rootfs`] | Rootfs listing, removal, os-release parsing |
+//! | [`build`] | Build config parsing and rootfs build execution |
+//! | [`config`] | Configuration file loading and saving |
+//! | [`mounts`] | Bind mount and environment variable config |
+//! | [`network`] | Network configuration and state serialization |
 //! | [`security`] | Capability, seccomp, AppArmor config |
+//! | [`system_check`] | Version and dependency checks |
 //! | [`pod`] | Shared network namespace management |
 
 pub mod build;
 pub mod config;
 pub mod containers;
-pub mod copy;
-pub mod devfd_shim;
-pub mod elf;
+pub(crate) mod copy;
+pub(crate) mod devfd_shim;
+pub(crate) mod elf;
 pub mod export;
 pub mod import;
-pub mod isolate;
+pub(crate) mod isolate;
 pub mod kube;
 pub mod mounts;
-pub mod names;
+pub(crate) mod names;
 pub mod network;
 pub mod oci;
 pub mod pod;
