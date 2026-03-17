@@ -35,28 +35,37 @@ fn chown_path(path: &Path, uid: u32, gid: u32) -> Result<()> {
     Ok(())
 }
 
+/// Options for creating a container from a Kubernetes Pod YAML.
+pub struct KubeCreateOptions<'a> {
+    /// Raw YAML content of the Pod or Deployment manifest.
+    pub yaml_content: &'a str,
+    /// Name of the base rootfs to use.
+    pub base_fs: &'a str,
+    /// Docker Hub credentials `(user, token)` for authenticated pulls.
+    pub docker_credentials: Option<(&'a str, &'a str)>,
+    /// OCI blob cache for registry downloads.
+    pub cache: &'a crate::oci::cache::BlobCache,
+    /// Pod to join (shared network namespace via nspawn flag).
+    pub pod: Option<&'a str>,
+    /// Pod to join (OCI app process only, via inner netns).
+    pub oci_pod: Option<&'a str>,
+    /// Enable verbose output.
+    pub verbose: bool,
+    /// HTTP configuration for downloads and OCI pulls.
+    pub http: &'a crate::config::HttpConfig,
+}
+
 /// Create a kube pod: parse YAML, pull images, build combined rootfs, create container.
 ///
 /// Returns the container name on success.
-#[allow(clippy::too_many_arguments)]
-pub fn kube_create(
-    datadir: &Path,
-    yaml_content: &str,
-    base_fs: &str,
-    docker_credentials: Option<(&str, &str)>,
-    cache: &crate::oci::cache::BlobCache,
-    pod: Option<&str>,
-    oci_pod: Option<&str>,
-    verbose: bool,
-    http: &crate::config::HttpConfig,
-) -> Result<String> {
-    validate_name(base_fs)?;
-    let base_dir = datadir.join("fs").join(base_fs);
+pub fn kube_create(datadir: &Path, opts: &KubeCreateOptions<'_>) -> Result<String> {
+    validate_name(opts.base_fs)?;
+    let base_dir = datadir.join("fs").join(opts.base_fs);
     if !base_dir.is_dir() {
-        bail!("base rootfs not found: {base_fs}");
+        bail!("base rootfs not found: {}", opts.base_fs);
     }
 
-    let (pod_name, spec) = parse_yaml(yaml_content)?;
+    let (pod_name, spec) = parse_yaml(opts.yaml_content)?;
     let mut plan = validate_and_plan(&pod_name, spec)?;
 
     let rootfs_name = format!("kube-{}", plan.pod_name);
@@ -72,7 +81,7 @@ pub fn kube_create(
             let state = State::read_from(&state_path)?;
             if state.is_yes("KUBE") {
                 eprintln!("replacing existing kube pod '{}'", plan.pod_name);
-                kube_delete(datadir, &plan.pod_name, false, verbose)?;
+                kube_delete(datadir, &plan.pod_name, false, opts.verbose)?;
             } else {
                 bail!(
                     "rootfs already exists: {rootfs_name}; \
@@ -96,10 +105,10 @@ pub fn kube_create(
     }
 
     // 1. Copy base rootfs to staging dir.
-    eprintln!("copying base rootfs '{base_fs}' to staging directory");
+    eprintln!("copying base rootfs '{}' to staging directory", opts.base_fs);
     fs::create_dir_all(&staging_dir)
         .with_context(|| format!("failed to create {}", staging_dir.display()))?;
-    crate::copy::copy_tree(&base_dir, &staging_dir, verbose)
+    crate::copy::copy_tree(&base_dir, &staging_dir, opts.verbose)
         .with_context(|| format!("failed to copy base rootfs from {}", base_dir.display()))?;
 
     // 2. Create /oci/apps/ and /oci/volumes/ directories.
@@ -254,10 +263,10 @@ pub fn kube_create(
             crate::oci::registry::import_registry_image(
                 &kc.image_ref,
                 &app_root,
-                docker_credentials,
-                cache,
-                verbose,
-                http,
+                opts.docker_credentials,
+                opts.cache,
+                opts.verbose,
+                opts.http,
             )
             .with_context(|| format!("failed to pull image for container '{}'", kc.name))?
         } else {
@@ -276,7 +285,7 @@ pub fn kube_create(
             &plan,
             *is_init,
             &init_container_names,
-            verbose,
+            opts.verbose,
         )
         .with_context(|| format!("failed to set up container '{}'", kc.name))?;
     }
@@ -307,7 +316,7 @@ pub fn kube_create(
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&probe_path, fs::Permissions::from_mode(0o755))
             .with_context(|| format!("failed to set permissions on {}", probe_path.display()))?;
-        if verbose {
+        if opts.verbose {
             eprintln!(
                 "deployed probe binary ({} bytes): {}",
                 PROBE_BINARY.len(),
@@ -379,7 +388,7 @@ WantedBy=multi-user.target
     let yaml_hash = {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
-        hasher.update(yaml_content.as_bytes());
+        hasher.update(opts.yaml_content.as_bytes());
         format!("{:x}", hasher.finalize())
     };
 
@@ -412,20 +421,20 @@ WantedBy=multi-user.target
     }
 
     // --oci-pod requires private network for CAP_NET_ADMIN.
-    if oci_pod.is_some() {
+    if opts.oci_pod.is_some() {
         network.private_network = true;
     }
 
-    let opts = crate::containers::CreateOptions {
+    let create_opts = crate::containers::CreateOptions {
         name: Some(plan.pod_name.clone()),
         rootfs: Some(rootfs_name.clone()),
         network,
         binds,
-        pod: pod.map(String::from),
-        oci_pod: oci_pod.map(String::from),
+        pod: opts.pod.map(String::from),
+        oci_pod: opts.oci_pod.map(String::from),
         ..Default::default()
     };
-    let name = crate::containers::create(datadir, &opts, verbose)?;
+    let name = crate::containers::create(datadir, &create_opts, opts.verbose)?;
 
     // Write kube-specific state fields.
     let state_path = datadir.join("state").join(&name);

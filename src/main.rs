@@ -2021,14 +2021,16 @@ fn main() -> Result<()> {
                 let docker_creds_ref = docker_creds.as_ref().map(|(u, t)| (u.as_str(), t.as_str()));
                 let name = kube::kube_create(
                     &cfg.datadir,
-                    &yaml_content,
-                    base_fs,
-                    docker_creds_ref,
-                    &blob_cache,
-                    pod.as_deref(),
-                    oci_pod.as_deref(),
-                    cli.verbose,
-                    &cfg.http_config()?,
+                    &kube::KubeCreateOptions {
+                        yaml_content: &yaml_content,
+                        base_fs,
+                        docker_credentials: docker_creds_ref,
+                        cache: &blob_cache,
+                        pod: pod.as_deref(),
+                        oci_pod: oci_pod.as_deref(),
+                        verbose: cli.verbose,
+                        http: &cfg.http_config()?,
+                    },
                 )?;
                 eprintln!("starting '{name}'");
                 let boot_result = (|| -> Result<()> {
@@ -2080,14 +2082,16 @@ fn main() -> Result<()> {
                 let docker_creds_ref = docker_creds.as_ref().map(|(u, t)| (u.as_str(), t.as_str()));
                 let name = kube::kube_create(
                     &cfg.datadir,
-                    &yaml_content,
-                    base_fs,
-                    docker_creds_ref,
-                    &blob_cache,
-                    pod.as_deref(),
-                    oci_pod.as_deref(),
-                    cli.verbose,
-                    &cfg.http_config()?,
+                    &kube::KubeCreateOptions {
+                        yaml_content: &yaml_content,
+                        base_fs,
+                        docker_credentials: docker_creds_ref,
+                        cache: &blob_cache,
+                        pod: pod.as_deref(),
+                        oci_pod: oci_pod.as_deref(),
+                        verbose: cli.verbose,
+                        http: &cfg.http_config()?,
+                    },
                 )?;
                 println!("{name}");
             }

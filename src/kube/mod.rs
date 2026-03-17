@@ -7,6 +7,6 @@ pub mod secret;
 mod store;
 mod types;
 
-pub use create::{kube_create, kube_delete};
+pub use create::{kube_create, kube_delete, KubeCreateOptions};
 pub(crate) use plan::KubeProbes;
 pub(crate) use plan::ProbeCheck;
