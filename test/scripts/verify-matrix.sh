@@ -9,17 +9,6 @@ source "$(dirname "$0")/lib.sh"
 DISTROS=(debian ubuntu fedora centos almalinux archlinux opensuse nixos)
 APPS=(nginx-unprivileged redis postgresql)
 
-declare -A DISTRO_IMAGES=(
-    [debian]="docker.io/debian:stable"
-    [ubuntu]="docker.io/ubuntu:24.04"
-    [fedora]="quay.io/fedora/fedora:41"
-    [centos]="quay.io/centos/centos:stream10"
-    [almalinux]="quay.io/almalinuxorg/almalinux:9"
-    [archlinux]="docker.io/lopsided/archlinux:latest"
-    [opensuse]="registry.opensuse.org/opensuse/tumbleweed:latest"
-    [nixos]="docker.io/nixos/nix"
-)
-
 declare -A APP_IMAGES=(
     [nginx-unprivileged]="docker.io/nginxinc/nginx-unprivileged"
     [redis]="docker.io/redis"
@@ -44,11 +33,8 @@ declare -A APP_READY_WAIT=(
     [postgresql]=10
 )
 
-# NixOS import needs --install-packages=yes (to trigger nix-build) and a
-# longer timeout because nix-build downloads nixpkgs + builds a closure.
-declare -A DISTRO_IMPORT_FLAGS=(
-    [nixos]="--install-packages=yes"
-)
+# NixOS needs a longer timeout because nix-build downloads nixpkgs + builds
+# a closure.
 TIMEOUT_IMPORT_NIXOS=900
 
 # NixOS puts binaries under /run/current-system/sw/bin instead of /usr/bin.
@@ -124,12 +110,6 @@ TIMEOUT_IMPORT=600
 TIMEOUT_BOOT=120
 TIMEOUT_TEST=300
 
-# Result tracking
-declare -A RESULTS
-PASS_COUNT=0
-FAIL_COUNT=0
-SKIP_COUNT=0
-
 usage() {
     cat <<EOF
 Usage: $(basename "$0") [OPTIONS]
@@ -199,28 +179,6 @@ parse_args() {
 # -- Logging -------------------------------------------------------------------
 
 log() { echo "==> $*"; }
-log_ok() { echo "  [PASS] $*"; }
-log_fail() { echo "  [FAIL] $*"; }
-log_skip() { echo "  [SKIP] $*"; }
-
-record() {
-    local key="$1" status="$2" msg="${3:-}"
-    RESULTS["$key"]="$status|$msg"
-    case "$status" in
-        PASS) PASS_COUNT=$((PASS_COUNT + 1)); log_ok "$key${msg:+: $msg}" ;;
-        FAIL) FAIL_COUNT=$((FAIL_COUNT + 1)); log_fail "$key${msg:+: $msg}" ;;
-        SKIP) SKIP_COUNT=$((SKIP_COUNT + 1)); log_skip "$key${msg:+: $msg}" ;;
-    esac
-}
-
-result_status() {
-    local val="${RESULTS[$1]}"
-    echo "${val%%|*}"
-}
-result_msg() {
-    local val="${RESULTS[$1]}"
-    echo "${val#*|}"
-}
 
 # -- Cleanup -------------------------------------------------------------------
 
@@ -241,12 +199,12 @@ phase1_import() {
             continue
         fi
         log "  Importing $fs_name from $image"
-        local output extra_flags="${DISTRO_IMPORT_FLAGS[$distro]:-}"
+        local output
         local import_timeout="$TIMEOUT_IMPORT"
         if [[ "$distro" == "nixos" ]]; then
             import_timeout="$TIMEOUT_IMPORT_NIXOS"
         fi
-        if output=$(timeout "$import_timeout" sdme fs import "$fs_name" "$image" -v $extra_flags -f 2>&1); then
+        if output=$(timeout "$import_timeout" sdme fs import "$fs_name" "$image" -v --install-packages=yes -f 2>&1); then
             record "import/$distro" PASS
         else
             record "import/$distro" FAIL "$output"
@@ -700,12 +658,12 @@ generate_report() {
 
         echo "## Summary"
         echo ""
-        local total=$((PASS_COUNT + FAIL_COUNT + SKIP_COUNT))
+        local total=$((_pass + _fail + _skip))
         echo "| Result | Count |"
         echo "|--------|-------|"
-        echo "| PASS | $PASS_COUNT |"
-        echo "| FAIL | $FAIL_COUNT |"
-        echo "| SKIP | $SKIP_COUNT |"
+        echo "| PASS | $_pass |"
+        echo "| FAIL | $_fail |"
+        echo "| SKIP | $_skip |"
         echo "| Total | $total |"
         echo ""
 
@@ -844,9 +802,9 @@ main() {
     generate_report
 
     echo ""
-    echo "Results: $PASS_COUNT passed, $FAIL_COUNT failed, $SKIP_COUNT skipped"
+    echo "Results: $_pass passed, $_fail failed, $_skip skipped"
 
-    if [[ $FAIL_COUNT -gt 0 ]]; then
+    if [[ $_fail -gt 0 ]]; then
         exit 1
     fi
 }

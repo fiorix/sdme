@@ -12,11 +12,6 @@ source "$(dirname "$0")/lib.sh"
 
 DISTROS=(ubuntu fedora)
 
-declare -A DISTRO_IMAGES=(
-    [ubuntu]="docker.io/ubuntu:24.04"
-    [fedora]="quay.io/fedora/fedora:41"
-)
-
 APP_IMAGE="quay.io/nginx/nginx-unprivileged"
 APP_PORT=8080
 VOLUME_PATH="/usr/share/nginx/html"
@@ -30,9 +25,6 @@ FILTER_DISTROS=()
 TIMEOUT_IMPORT=600
 TIMEOUT_BOOT=120
 TIMEOUT_TEST=300
-
-# Result tracking
-declare -A RESULTS
 
 usage() {
     cat <<EOF
@@ -89,25 +81,6 @@ parse_args() {
 # -- Logging -------------------------------------------------------------------
 
 log() { echo "==> $*"; }
-
-record() {
-    local key="$1" status="$2" msg="${3:-}"
-    RESULTS["$key"]="$status|$msg"
-    case "$status" in
-        PASS) ok "$key${msg:+: $msg}" ;;
-        FAIL) fail "$key${msg:+: $msg}" ;;
-        SKIP) skipped "$key${msg:+: $msg}" ;;
-    esac
-}
-
-result_status() {
-    local val="${RESULTS[$1]}"
-    echo "${val%%|*}"
-}
-result_msg() {
-    local val="${RESULTS[$1]}"
-    echo "${val#*|}"
-}
 
 # -- Cleanup -------------------------------------------------------------------
 

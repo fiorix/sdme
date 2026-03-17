@@ -54,7 +54,6 @@ set -uo pipefail
 
 source "$(dirname "$0")/lib.sh"
 
-SDME="${SDME:-sdme}"
 BASE_FS="${BASE_FS:-ubuntu}"
 DATADIR="/var/lib/sdme"
 REPORT_DIR="."
@@ -65,71 +64,9 @@ POD_NAME="vfy-kf-all"
 TIMEOUT_CREATE=600
 TIMEOUT_BOOT=120
 
-# Result tracking
-declare -A RESULTS
-
 # State flags
 POD_CREATED=0
 POD_RUNNING=0
-
-usage() {
-    cat <<EOF
-Usage: $(basename "$0") [OPTIONS]
-
-End-to-end verification of sdme kube pod spec features.
-Must be run as root.
-
-Options:
-  --base-fs NAME   Base rootfs to use (default: ubuntu)
-  --report-dir DIR Write report to DIR (default: .)
-  --help           Show help
-EOF
-}
-
-parse_args() {
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --base-fs)
-                shift
-                BASE_FS="$1"
-                ;;
-            --report-dir)
-                shift
-                REPORT_DIR="$1"
-                ;;
-            --help)
-                usage
-                exit 0
-                ;;
-            *)
-                echo "unknown option: $1" >&2
-                usage >&2
-                exit 1
-                ;;
-        esac
-        shift
-    done
-}
-
-record() {
-    local test_name="$1" result="$2" msg="${3:-}"
-    RESULTS["$test_name"]="$result|$msg"
-    case "$result" in
-        PASS) ((_pass++)) || true; echo "  [PASS] $test_name${msg:+: $msg}" ;;
-        FAIL) ((_fail++)) || true; echo "  [FAIL] $test_name${msg:+: $msg}" ;;
-        SKIP) ((_skip++)) || true; echo "  [SKIP] $test_name${msg:+: $msg}" ;;
-    esac
-}
-
-result_status() {
-    local val="${RESULTS[$1]}"
-    echo "${val%%|*}"
-}
-
-result_msg() {
-    local val="${RESULTS[$1]}"
-    echo "${val#*|}"
-}
 
 # Read a unit file from the kube rootfs.
 read_unit() {
@@ -445,100 +382,15 @@ test_runtime_memory_limit() {
     fi
 }
 
-# --- Report -------------------------------------------------------------------
-
-generate_report() {
-    local ts
-    ts=$(date +%Y%m%d-%H%M%S)
-    local report="$REPORT_DIR/verify-kube-features-$ts.md"
-
-    mkdir -p "$REPORT_DIR"
-
-    {
-        echo "# sdme Kube Features Verification Report"
-        echo ""
-        echo "## System Info"
-        echo ""
-        echo "| Field | Value |"
-        echo "|-------|-------|"
-        echo "| Date | $(date -Iseconds) |"
-        echo "| Hostname | $(hostname) |"
-        echo "| Kernel | $(uname -r) |"
-        echo "| systemd | $(systemctl --version | head -1) |"
-        local sdme_ver
-        sdme_ver=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml 2>/dev/null || echo unknown)
-        echo "| sdme | $sdme_ver |"
-        echo "| Base FS | $BASE_FS |"
-        echo ""
-
-        echo "## Summary"
-        echo ""
-        local total=$((_pass + _fail + _skip))
-        echo "| Result | Count |"
-        echo "|--------|-------|"
-        echo "| PASS | $_pass |"
-        echo "| FAIL | $_fail |"
-        echo "| SKIP | $_skip |"
-        echo "| Total | $total |"
-        echo ""
-
-        echo "## Results"
-        echo ""
-        echo "| Test | Result |"
-        echo "|------|--------|"
-        for test_name in create-pod \
-            unit-termination-grace-period unit-working-dir unit-resources \
-            unit-security-context unit-init-container unit-init-deps \
-            unit-readiness-probe \
-            start-pod runtime-init-service runtime-app-service \
-            runtime-memory-limit; do
-            if [[ -n "${RESULTS[$test_name]+x}" ]]; then
-                echo "| $test_name | $(result_status "$test_name") |"
-            fi
-        done
-        echo ""
-
-        # Detailed failures
-        local has_failures=0
-        for key in "${!RESULTS[@]}"; do
-            if [[ "$(result_status "$key")" == "FAIL" ]]; then
-                has_failures=1
-                break
-            fi
-        done
-
-        if [[ $has_failures -eq 1 ]]; then
-            echo "## Failures"
-            echo ""
-            for key in $(echo "${!RESULTS[@]}" | tr ' ' '\n' | sort); do
-                if [[ "$(result_status "$key")" == "FAIL" ]]; then
-                    local msg
-                    msg=$(result_msg "$key")
-                    echo "### $key"
-                    echo ""
-                    echo '```'
-                    echo "$msg"
-                    echo '```'
-                    echo ""
-                fi
-            done
-        fi
-    } > "$report"
-
-    echo "Report: $report"
-}
-
 # --- Main ---------------------------------------------------------------------
 
 main() {
-    parse_args "$@"
+    parse_standard_args "End-to-end verification of sdme Kubernetes pod spec support." "$@"
 
     ensure_root
     ensure_sdme
 
-    if [[ "$BASE_FS" == "ubuntu" ]]; then
-        ensure_base_fs ubuntu docker.io/ubuntu:24.04
-    fi
+    ensure_default_base_fs
 
     echo "=== sdme kube features verification ==="
     echo "base-fs: $BASE_FS"
@@ -567,7 +419,7 @@ main() {
     test_runtime_app_service
     test_runtime_memory_limit
 
-    generate_report
+    generate_standard_report "verify-kube-L2-spec" "sdme Kube Spec Verification Report"
 
     print_summary
 }

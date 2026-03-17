@@ -12,7 +12,6 @@ set -uo pipefail
 
 source "$(dirname "$0")/lib.sh"
 
-SDME="${SDME:-sdme}"
 BASE_FS="${BASE_FS:-ubuntu}"
 DATADIR="/var/lib/sdme"
 REPORT_DIR="."
@@ -20,59 +19,6 @@ REPORT_DIR="."
 # Timeouts (seconds)
 TIMEOUT_CREATE=600
 TIMEOUT_BOOT=120
-
-# Result tracking
-declare -A RESULTS
-
-usage() {
-    cat <<EOF
-Usage: $(basename "$0") [OPTIONS]
-
-End-to-end verification of sdme kube support.
-Must be run as root.
-
-Options:
-  --base-fs NAME   Base rootfs to use (default: ubuntu)
-  --report-dir DIR Write report to DIR (default: .)
-  --help           Show help
-EOF
-}
-
-parse_args() {
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --base-fs)
-                shift
-                BASE_FS="$1"
-                ;;
-            --report-dir)
-                shift
-                REPORT_DIR="$1"
-                ;;
-            --help)
-                usage
-                exit 0
-                ;;
-            *)
-                echo "unknown option: $1" >&2
-                usage >&2
-                exit 1
-                ;;
-        esac
-        shift
-    done
-}
-
-record() {
-    local test_name="$1" result="$2"
-    RESULTS["$test_name"]="$result"
-    case "$result" in
-        PASS) ((_pass++)) || true ;;
-        FAIL) ((_fail++)) || true ;;
-        SKIP) ((_skip++)) || true ;;
-    esac
-    echo "[$result] $test_name"
-}
 
 # --- Test 0: Validate YAML files with kubeconform ---
 test_validate_yaml() {
@@ -404,14 +350,12 @@ YAML
 
 # --- Main ---
 main() {
-    parse_args "$@"
+    parse_standard_args "End-to-end verification of sdme kube apply/create/delete." "$@"
 
     ensure_root
     ensure_sdme
 
-    if [[ "$BASE_FS" == "ubuntu" ]]; then
-        ensure_base_fs ubuntu docker.io/ubuntu:24.04
-    fi
+    ensure_default_base_fs
 
     echo "=== sdme kube verification ==="
     echo "base-fs: $BASE_FS"
@@ -424,23 +368,7 @@ main() {
     test_shared_volume
     test_ps_kube_column
 
-    # Write report.
-    local report="$REPORT_DIR/verify-kube-$(date +%Y%m%d-%H%M%S).md"
-    {
-        echo "# sdme kube verification"
-        echo ""
-        echo "Date: $(date -Iseconds)"
-        echo "Base FS: $BASE_FS"
-        echo ""
-        echo "| Test | Result |"
-        echo "|------|--------|"
-        for test_name in "${!RESULTS[@]}"; do
-            echo "| $test_name | ${RESULTS[$test_name]} |"
-        done
-        echo ""
-        echo "**$_pass passed, $_fail failed, $_skip skipped**"
-    } > "$report"
-    echo "Report: $report"
+    generate_standard_report "verify-kube" "sdme Kube Basic Verification Report"
 
     print_summary
 }

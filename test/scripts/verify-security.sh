@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # verify-security.sh - end-to-end security hardening verification
-# For multi-distro userns tests, also requires vfy-{debian,ubuntu,fedora,...}
-# rootfs (run verify-matrix.sh first).
+# Self-contained: imports all required rootfs on demand (OCI cache makes
+# re-imports cheap).
 #
 # Tests:
 #   1. CLI validation: bad capabilities, bad filters, contradictions
@@ -617,9 +617,8 @@ for distro in "${USERNS_DISTROS[@]}"; do
     fs_name="vfy-$distro"
     ct_name="usrns-$distro"
 
-    # Check rootfs exists; skip if not.
-    if ! "$SDME" fs ls 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "$fs_name"; then
-        skipped "$distro userns: rootfs $fs_name not found (run verify-matrix.sh first)"
+    if ! ensure_base_fs "$fs_name" "${DISTRO_IMAGES[$distro]}"; then
+        fail "$distro userns: failed to import rootfs $fs_name"
         continue
     fi
 
@@ -653,7 +652,7 @@ for distro in "${USERNS_DISTROS[@]}"; do
 done
 
 if ! $userns_any; then
-    skipped "no vfy-* rootfs found for multi-distro userns tests"
+    fail "no distro rootfs could be imported for multi-distro userns tests"
 fi
 
 # ===========================================================================
@@ -664,8 +663,8 @@ echo "=== Test 15: --userns OCI app (nginx on ubuntu) ==="
 fs_name="usrns-nginx-on-ubuntu"
 ct_name="usrns-oci-nginx"
 
-if ! "$SDME" fs ls 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "vfy-ubuntu"; then
-    skipped "nginx userns OCI: rootfs vfy-ubuntu not found (run verify-matrix.sh first)"
+if ! ensure_base_fs vfy-ubuntu "${DISTRO_IMAGES[ubuntu]}"; then
+    fail "nginx userns OCI: failed to import base rootfs vfy-ubuntu"
 else
     cleanup_container "$ct_name"
 

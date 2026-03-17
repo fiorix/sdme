@@ -28,9 +28,6 @@ TIMEOUT_IMPORT=600
 TIMEOUT_BOOT=120
 TIMEOUT_TEST=60
 
-# Result tracking
-declare -A RESULTS
-
 usage() {
     cat <<EOF
 Usage: $(basename "$0") [OPTIONS]
@@ -68,21 +65,6 @@ parse_args() {
 # -- Logging -------------------------------------------------------------------
 
 log() { echo "==> $*"; }
-
-record() {
-    local key="$1" status="$2" msg="${3:-}"
-    RESULTS["$key"]="$status|$msg"
-    case "$status" in
-        PASS) ok "$key${msg:+: $msg}" ;;
-        FAIL) fail "$key${msg:+: $msg}" ;;
-        SKIP) skipped "$key${msg:+: $msg}" ;;
-    esac
-}
-
-result_status() {
-    local val="${RESULTS[$1]:-}"
-    echo "${val%%|*}"
-}
 
 # -- Cleanup -------------------------------------------------------------------
 
