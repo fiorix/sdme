@@ -52,7 +52,7 @@ pub struct Config {
     #[serde(default = "default_export_fs")]
     pub default_export_fs: String,
 
-    /// Default extra free space for auto-calculated raw disk image size (e.g. "100M").
+    /// Default extra free space for auto-calculated raw disk image size (e.g. "256M").
     #[serde(default = "default_export_free_space")]
     pub default_export_free_space: String,
 
@@ -114,7 +114,7 @@ fn default_export_fs() -> String {
 }
 
 fn default_export_free_space() -> String {
-    "100M".to_string()
+    "256M".to_string()
 }
 
 fn default_tasks_max() -> u32 {

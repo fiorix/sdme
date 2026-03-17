@@ -504,13 +504,16 @@ EXAMPLE:
     Export {
         /// Name of the rootfs or container to export
         name: String,
-        /// Output path (format auto-detected from extension, or use --format)
+        /// Output path (format auto-detected from extension, or use --fmt)
         output: String,
         /// Export a container's merged rootfs instead of an imported rootfs
         #[arg(long)]
         container: bool,
+        /// Overwrite output path if it already exists
+        #[arg(short = 'f', long)]
+        force: bool,
         /// Output format: dir, tar, tar.gz, tar.bz2, tar.xz, tar.zst, raw
-        #[arg(short, long)]
+        #[arg(long = "fmt")]
         format: Option<String>,
         /// Override disk image size for raw format (e.g. "2G"); ignores --free-space
         #[arg(short, long)]
@@ -2322,6 +2325,7 @@ fn main() -> Result<()> {
                 name,
                 output,
                 container,
+                force,
                 format,
                 size,
                 free_space,
@@ -2408,13 +2412,14 @@ fn main() -> Result<()> {
                     free_space,
                     vm_opts: vm_opts.as_ref(),
                     verbose: cli.verbose,
+                    force,
                 };
-                if container {
-                    export::export_container(&cfg.datadir, &name, &output_path, &export_opts)?;
+                let result = if container {
+                    export::export_container(&cfg.datadir, &name, &output_path, &export_opts)?
                 } else {
-                    export::export_rootfs(&cfg.datadir, &name, &output_path, &export_opts)?;
-                }
-                println!("{}", output_path.display());
+                    export::export_rootfs(&cfg.datadir, &name, &output_path, &export_opts)?
+                };
+                println!("{} ({})", output_path.display(), result.summary());
             }
             RootfsCommand::Cache(cmd) => match cmd {
                 CacheCommand::Info => {

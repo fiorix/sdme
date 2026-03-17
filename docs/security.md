@@ -7,7 +7,7 @@ nspawn container isolation (Part 1), OCI workload isolation inside
 containers (Part 2), and Kubernetes compatibility security (Part 3).
 For sdme's security implementation details (capabilities, seccomp,
 AppArmor, `--hardened`, `--strict`), see
-[architecture.md, Section 15](architecture.md#15-security).
+[architecture.md, Section 14](architecture.md#14-security).
 
 ---
 
@@ -178,7 +178,7 @@ single-purpose application processes (requiring minimal capabilities).
 
 sdme (via nspawn) retains 26 capabilities by default, including
 `CAP_SYS_ADMIN`. See
-[architecture.md, Section 15](architecture.md#15-security) for the full
+[architecture.md, Section 14](architecture.md#14-security) for the full
 capability list and sdme's `--drop-capability`/`--capability` controls.
 
 ## 5. Seccomp Filtering
@@ -196,7 +196,7 @@ This means a compromised process inside sdme has access to more kernel
 surface than inside Docker. This is an inherent trade-off of running a
 full init system.
 
-See [architecture.md, Section 15](architecture.md#15-security) for
+See [architecture.md, Section 14](architecture.md#14-security) for
 nspawn's baseline filter details and sdme's `--system-call-filter` controls.
 
 ## 6. Mandatory Access Control (MAC)
@@ -221,7 +221,7 @@ meaningfully between filesystems and would cause label conflicts on
 the host. Docker and Podman provide MAC confinement out of the box on
 both AppArmor and SELinux systems.
 
-See [architecture.md, Section 15](architecture.md#15-security) for the
+See [architecture.md, Section 14](architecture.md#14-security) for the
 `sdme-default` profile details and installation instructions.
 
 ## 7. Privilege Escalation Prevention
@@ -237,7 +237,7 @@ or `--strict`.
 
 All three provide read-only rootfs as an opt-in flag (`--read-only`).
 
-See [architecture.md, Section 15](architecture.md#15-security) for
+See [architecture.md, Section 14](architecture.md#14-security) for
 sdme's `--no-new-privileges` and `--read-only` implementation details.
 
 ## 8. Network Isolation Deep Dive
@@ -373,7 +373,7 @@ by its own policy.
 
 sdme provides two convenience flags (`--hardened` and `--strict`) that
 bundle multiple security layers. See
-[architecture.md, Section 15](architecture.md#15-security) for full
+[architecture.md, Section 14](architecture.md#14-security) for full
 details on what each flag enables and its effects on host-rootfs
 containers.
 
@@ -522,8 +522,8 @@ time. It is used for ALL OCI apps, both root and non-root:
 - **Non-root apps**: additionally drops privileges via
   `setgroups`/`setgid`/`setuid`
 
-See [architecture.md, Section 8](architecture.md#8-oci-integration)
-and [architecture.md, Section 8](architecture.md#8-oci-integration) for
+See [architecture.md, Section 16](architecture.md#16-oci-integration)
+and [architecture.md, Section 16](architecture.md#16-oci-integration) for
 full details on the isolate binary.
 
 ## 14. Systemd Hardening Directives
@@ -715,7 +715,8 @@ Pod networking        Per-container    --pod / --oci-pod
 ## 21. Kube Limitations
 
 - No `securityContext.privileged` support
-- Seccomp `Localhost` profile type not supported (custom BPF profiles cannot be loaded via systemd's `SystemCallFilter`)
+- Seccomp `Localhost` profile type not supported (custom BPF
+  profiles cannot be loaded via systemd's `SystemCallFilter`)
 - No network policies
 - No service accounts or RBAC
 - Probe checks (exec, httpGet, tcpSocket, grpc) run inside the

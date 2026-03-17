@@ -362,8 +362,8 @@ sudo sdme fs export mybox /tmp/mybox.tar.xz --container
 ```
 
 Supported tarball formats: `.tar`, `.tar.gz`/`.tgz`, `.tar.bz2`/`.tbz2`,
-`.tar.xz`/`.txz`, `.tar.zst`/`.tzst`. Use `-f` to override auto-detection
-(e.g. `sdme fs export ubuntu /tmp/output -f tar.gz`).
+`.tar.xz`/`.txz`, `.tar.zst`/`.tzst`. Use `--fmt` to override auto-detection
+(e.g. `sdme fs export ubuntu /tmp/output --fmt tar.gz`).
 
 Raw disk images are bare ext4 (default) or btrfs filesystems (no partition
 table), selectable with `--filesystem`. The default can be changed with
@@ -371,9 +371,9 @@ table), selectable with `--filesystem`. The default can be changed with
 is auto-calculated as `max(256M, content * 1.5 + free_space)` unless
 overridden with `--size`. The `--free-space` flag controls how much extra
 space is guaranteed in the image (default from config
-`default_export_free_space`, initially `100M`). When `--size` is set,
+`default_export_free_space`, initially `256M`). When `--size` is set,
 `--free-space` is ignored. Change the default with
-`sdme config set default_export_free_space 256M`.
+`sdme config set default_export_free_space 512M`.
 Container exports: running containers are exported from the live
 filesystem (with a consistency warning); stopped containers have overlayfs
 temporarily mounted.
@@ -479,7 +479,7 @@ cloud-hypervisor with Ctrl-A x; exit QEMU with Ctrl-A x.
 | `--ssh-key ~/.ssh/id_ed25519.pub` | Add SSH public key to root's authorized_keys |
 | `--filesystem btrfs` | Use btrfs instead of ext4 |
 | `--size 4G` | Override auto-calculated image size |
-| `--free-space 256M` | Extra free space in the image (default: 100M) |
+| `--free-space 256M` | Extra free space in the image (default: 256M) |
 | `--hostname myvm` | Set the VM hostname (default: rootfs name) |
 | `--root-password ""` | Passwordless root (empty string) |
 
@@ -633,7 +633,7 @@ processes, and has an effective capability set comparable to Docker's
 defaults.
 
 For the full details, see [security.md, Part 2](security.md#part-2-oci-workload-security)
-and [architecture.md, Section 8](architecture.md#8-oci-integration).
+and [architecture.md, Section 16](architecture.md#16-oci-integration).
 
 ### 5.5 Tested OCI app matrix
 
@@ -910,7 +910,7 @@ Both kube containers now share localhost. The frontend can reach the
 backend's services directly, and vice versa.
 
 For the full kube specification reference, see
-[architecture.md, Section 11](architecture.md#11-kubernetes-pod-support).
+[architecture.md, Section 17](architecture.md#17-kubernetes-pod-support).
 
 ## 8. Security, networking, and resource limits
 
@@ -930,7 +930,7 @@ sudo sdme new -r ubuntu --strict
 ```
 
 See [security.md](security.md) for the full comparison with Docker and
-Podman, and [architecture.md, Section 15](architecture.md#15-security)
+Podman, and [architecture.md, Section 14](architecture.md#14-security)
 for implementation details.
 
 **Networking.** Containers share the host network by default. For
@@ -974,16 +974,16 @@ sudo sdme config set boot_timeout 120   # change a setting
 
 - [Architecture and design](architecture.md): internals, overlayfs
   layout, container lifecycle, the build engine
-- [OCI integration](architecture.md#8-oci-integration): the capsule
+- [OCI integration](architecture.md#16-oci-integration): the capsule
   model, privilege dropping, ports, volumes, known limitations
-- [Security implementation](architecture.md#15-security): capabilities,
+- [Security implementation](architecture.md#14-security): capabilities,
   seccomp, AppArmor, `--hardened`, `--strict`
 - [Security comparisons](security.md): isolation model vs Docker and
   Podman, OCI workload security, kube security
-- [Kubernetes Pod support](architecture.md#11-kubernetes-pod-support):
+- [Kubernetes Pod support](architecture.md#17-kubernetes-pod-support):
   full spec reference, supported fields, filesystem layout, service unit
   generation
-- [OCI-to-nspawn bridging](architecture.md#8-oci-integration): how sdme
+- [OCI-to-nspawn bridging](architecture.md#16-oci-integration): how sdme
   handles non-root OCI users and /dev/stdout compatibility
 - [macOS](macos.md): running sdme on macOS via lima-vm
 - [Tests](../test/README.md): test suite, how to run

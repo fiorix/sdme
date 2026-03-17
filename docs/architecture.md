@@ -39,6 +39,9 @@ Quay).
 The name stands for *Systemd Machine Editor*, and its pronunciation is
 left as an exercise for the reader.
 
+Sections 1-15 cover the core container functionality. Sections 16-17
+cover experimental features: OCI app support and Kubernetes Pod YAML.
+
 ## 2. Dev Mode: Cloning Your Host
 
 The foundational mode of sdme is what you get when you run `sdme new`
@@ -98,7 +101,7 @@ the container's systemd manages everything inside. Both talk to their
 own D-Bus, both write to their own journal, but the container's writes
 land on the overlayfs upper layer and never touch the host - well,
 except that they are stored on the host. This matters, and the details
-are explained in Section 15.
+are explained in Section 14.
 
 **User identity preservation.** When sdme is run via `sudo` and the
 container is a host-rootfs clone (no `-r` flag), it reads `$SUDO_USER`
@@ -432,7 +435,7 @@ After all operations complete, the engine mounts the overlayfs manually
 directory, and does an atomic rename to the final location. The staging
 container is cleaned up regardless of success or failure.
 
-## 7b. fs export: Exporting Root Filesystems
+## 8. fs export: Exporting Root Filesystems
 
 `sdme fs export` is the inverse of import: it takes an imported rootfs
 (or a container's merged overlayfs view) and writes it to a directory,
@@ -496,7 +499,597 @@ If stopped, it temporarily mounts overlayfs (lower=rootfs,
 upper=container upper, work=container work) for the duration of the
 export, then unmounts.
 
-## 8. OCI Integration
+## 9. Networking
+
+By default, containers share the host's network namespace: same
+interfaces, same addresses, same ports. This is the simplest mode and
+what you get with `sdme new` out of the box.
+
+For isolation, `--private-network` gives the container its own network
+namespace with no connectivity. The remaining network flags build on
+top of it and all imply `--private-network` automatically:
+
+- `--private-network`: isolated network namespace, no connectivity
+- `--network-veth`: creates a virtual ethernet link between host and
+  container
+- `--network-bridge <name>`: connects the container's veth to a host
+  bridge
+- `--network-zone <name>`: joins a named zone for inter-container
+  networking
+- `--port / -p <[PROTO:]HOST[:CONTAINER]>`: forwards a port (TCP by
+  default, repeatable)
+
+These flags are available on both `sdme create` and `sdme new`. They
+compose freely: you can combine `--network-zone` with `--port`, or use
+`--network-bridge` with `--network-veth`. Port forwarding requires a
+private network namespace because systemd-nspawn's `--port` flag only
+works when host and container have separate network stacks.
+
+Under the hood, each flag translates directly to a systemd-nspawn
+argument. The network configuration is persisted in the container's
+state file (`PRIVATE_NETWORK`, `NETWORK_VETH`, `NETWORK_BRIDGE`,
+`NETWORK_ZONE`, `PORTS`) and written into the per-container nspawn
+drop-in at start time.
+
+Bridge and zone names are validated (alphanumeric, hyphens,
+underscores). Port specs are validated for format
+(`[PROTO:]HOST[:CONTAINER]`) and range (1-65535).
+
+## 10. Pods
+
+Pods give multiple containers a shared network namespace so they can
+reach each other on localhost. The pattern is the same as Kubernetes
+pods: one network namespace, multiple containers.
+
+There are two mechanisms for joining a pod, serving different use cases:
+
+**`--pod` (whole-container):** The entire nspawn container runs in the
+pod's network namespace. All processes (init, services, everything)
+share the pod's network stack. This is the general-purpose option for
+any container type.
+
+**`--oci-pod` (OCI app only):** The pod's netns is bind-mounted into
+the container and only the OCI app service process enters it via a
+systemd `NetworkNamespacePath=` drop-in. The container's init and other
+services remain in their own network namespace. This is for OCI app
+containers that need pod networking for their application process but
+want systemd's own networking to remain independent. Requires an OCI
+app rootfs.
+
+Both flags can be combined on the same container (e.g.
+`--pod=X --oci-pod=Y` with different pods).
+
+```
+  --pod (whole container in pod netns):
+
+  +------------------------------------------------------+
+  |                     HOST SYSTEM                      |
+  |         kernel . systemd . D-Bus . machined          |
+  |                                                      |
+  |   /run/sdme/pods/my-pod/netns  (netns bind-mount)    |
+  |          |                                           |
+  |          |  +-- loopback only (127.0.0.1) --+        |
+  |          |  |                               |        |
+  |    +-----+----------+   +------------------+--+      |
+  |    | container A     |   | container B        |      |
+  |    | (db :5432)      |   | (app :8080)        |      |
+  |    | nspawn --network|   | nspawn --network   |      |
+  |    |  -namespace-    |   |  -namespace-       |      |
+  |    |  path=pod-netns |   |  path=pod-netns    |      |
+  |    +-----------------+   +--------------------+      |
+  +------------------------------------------------------+
+
+  Both containers see 127.0.0.1:5432 (db) and
+  127.0.0.1:8080 (app) because they share the netns.
+```
+
+### Lifecycle
+
+`sdme pod new <name>` creates the pod:
+
+1. Validates the name (same rules as container names).
+2. Calls `unshare(CLONE_NEWNET)` to create a new network namespace.
+3. Brings up the loopback interface (`ioctl SIOCSIFFLAGS IFF_UP`).
+4. Bind-mounts `/proc/self/ns/net` to
+   `/run/sdme/pods/<name>/netns`.
+5. Restores the original network namespace via `setns()`.
+6. Writes a persistent state file at
+   `{datadir}/pods/<name>/state`.
+
+The runtime bind-mount under `/run` is volatile and disappears on
+reboot. When a container referencing a pod is started,
+`ensure_runtime()` checks whether the bind-mount still exists and
+recreates the netns if needed.
+
+`sdme pod ls` lists all pods with their active/inactive status.
+
+`sdme pod rm <name>` unmounts the netns, removes the runtime directory,
+and deletes the persistent state directory. Removal is refused if any
+container still references the pod via `POD` or `OCI_POD` keys
+(override with `--force`).
+
+### Container integration
+
+**`--pod=<name>`** on `sdme create` or `sdme new`:
+
+- Works with any container type (host-rootfs or imported rootfs).
+- Incompatible with `--userns` and `--hardened`: the kernel blocks
+  `setns(CLONE_NEWNET)` from a child user namespace into the pod's
+  netns (owned by the init userns). Use `--oci-pod` for hardened pods.
+- Compatible with `--private-network` (without userns): the pod's
+  netns already provides equivalent isolation (loopback only), so
+  `--private-network` is automatically omitted from the nspawn
+  invocation when a pod is used.
+- Stores `POD=<name>` in the container's state file.
+- At start time, the nspawn drop-in includes
+  `--network-namespace-path=/run/sdme/pods/<name>/netns`, which makes
+  the entire container (including init and all services) run inside
+  the pod's network namespace.
+
+**`--oci-pod=<name>`** on `sdme create` or `sdme new`:
+
+- Requires an OCI app rootfs (an `sdme-oci-{name}.service` unit must exist in the
+  rootfs).
+- Stores `OCI_POD=<name>` in the container's state file.
+- At create time, writes a systemd drop-in inside the overlayfs upper
+  layer at
+  `upper/etc/systemd/system/sdme-oci-{name}.service.d/oci-pod-netns.conf`
+  with `NetworkNamespacePath=/run/sdme/oci-pod-netns`.
+- At start time, the nspawn drop-in includes
+  `--bind-ro=/run/sdme/pods/<name>/netns:/run/sdme/oci-pod-netns`,
+  which makes the pod's netns available inside the container. The
+  inner drop-in makes only the OCI app service process enter the
+  pod's netns.
+
+`sdme ps` shows a POD column when any container has a `--pod`
+assignment, an OCI-POD column when any container has an `--oci-pod`
+assignment, a USERNS column when any container has `--userns` enabled,
+and a BINDS column when any container has bind mounts configured.
+
+### Isolation properties
+
+The pod netns contains only a loopback interface with no routes.
+Containers in the pod can communicate via localhost but have no external
+connectivity unless a veth or bridge is added to the netns externally.
+
+Inside the container, systemd-nspawn's default capability set drops
+`CAP_NET_ADMIN`, so the container's root cannot add interfaces or
+change routes in the shared netns. `CAP_SYS_ADMIN` is present
+(required by systemd inside nspawn) but the container's PID namespace
+prevents access to host process netns references. The OCI app process
+itself (running as a non-root UID) has zero effective capabilities.
+
+## 11. Bind Mounts and Environment Variables
+
+Custom bind mounts and environment variables are set at creation time
+with `-b`/`--bind` and `-e`/`--env`, available on both `sdme create`
+and `sdme new`.
+
+**Bind mounts** use the format `HOST:CONTAINER[:ro]`. Read-write is the
+default; append `:ro` for read-only. Both paths must be absolute with
+no `..` components, and the host path must exist at creation time. At
+start time, each bind becomes a `--bind=` or `--bind-ro=` argument to
+systemd-nspawn.
+
+**Environment variables** use the format `KEY=VALUE`. Keys must be
+alphanumeric or underscore (no leading digit). At start time, each
+variable becomes a `--setenv=KEY=VALUE` argument to systemd-nspawn.
+
+Both are stored in the container's state file (`BINDS=` and `ENVS=`,
+pipe-separated) and reconstituted into nspawn arguments on every start.
+
+## 12. Resource Limits
+
+sdme exposes three cgroup-based resource controls:
+
+| Flag                     | systemd property | Example             |
+|--------------------------|------------------|---------------------|
+| `--memory <size>`        | `MemoryMax=`     | `--memory 2G`       |
+| `--cpus <count>`         | `CPUQuota=`      | `--cpus 0.5` (50%) |
+| `--cpu-weight <1-10000>` | `CPUWeight=`     | `--cpu-weight 100`  |
+
+These flags are available on `sdme create`, `sdme new`, and `sdme set`.
+They are applied via a systemd drop-in file (`limits.conf`) installed
+alongside the container's service unit. A `daemon-reload` is triggered
+when the drop-in changes.
+
+`sdme set` replaces all limits at once: flags not specified are removed.
+If the container is running, sdme prints a note that a restart is needed
+for the new limits to take effect.
+
+Memory values accept K/M/G/T suffixes. CPU count is a positive float
+where `1` means one full core and `0.5` means half a core (converted to
+systemd's `CPUQuota=` percentage internally). CPU weight is an integer
+from 1 to 10000, controlling relative scheduling priority when CPUs are
+contended.
+
+## 13. Configuration
+
+sdme stores its settings in a TOML file at `/etc/sdme.conf`:
+
+| Setting                   | Default                          |
+|---------------------------|----------------------------------|
+| `interactive`             | `true`                           |
+| `datadir`                 | `/var/lib/sdme`                  |
+| `boot_timeout`            | `60`                             |
+| `join_as_sudo_user`       | `true`                           |
+| `host_rootfs_opaque_dirs` | `/etc/systemd/system,/var/log`   |
+| `hardened_drop_caps`      | `CAP_SYS_PTRACE,CAP_NET_RAW,...` |
+| `default_base_fs`         | (empty)                          |
+| `default_export_fs`       | `ext4`                           |
+| `tasks_max`               | `16384`                          |
+| `docker_user`             | (empty)                          |
+| `docker_token`            | (empty)                          |
+| `oci_cache_dir`           | (empty = `{datadir}/cache/oci`)  |
+| `oci_cache_max_size`      | `10G`                            |
+| `http_timeout`            | `30`                             |
+| `http_body_timeout`       | `300`                            |
+| `max_download_size`       | `50G`                            |
+
+- `interactive`: enable interactive prompts.
+- `datadir`: root directory for all container and rootfs data.
+- `boot_timeout`: seconds to wait for container boot.
+- `join_as_sudo_user`: join host-rootfs containers as
+  `$SUDO_USER` instead of root.
+- `host_rootfs_opaque_dirs`: default opaque dirs for host-rootfs
+  containers (empty string disables).
+- `hardened_drop_caps`: capabilities dropped by `--hardened`.
+- `default_base_fs`: default base rootfs for OCI app images.
+- `default_export_fs`: filesystem type for raw disk image export
+  (`ext4` or `btrfs`).
+- `tasks_max`: maximum tasks (processes/threads) per container
+  in the systemd template unit.
+- `docker_user`: Docker Hub username for authenticated pulls.
+- `docker_token`: Docker Hub personal access token.
+- `oci_cache_dir`: OCI blob cache directory.
+- `oci_cache_max_size`: max cache size (`0` disables).
+- `http_timeout`: HTTP connect/resolve timeout in seconds for
+  downloads and OCI registry pulls.
+- `http_body_timeout`: HTTP body receive timeout in seconds.
+- `max_download_size`: maximum download size for imports and
+  OCI pulls (e.g. `50G`; `0` = unlimited).
+
+Settings are read with `sdme config get` and written with
+`sdme config set <key> <value>`.
+
+Config files are written with mode `0600`.
+
+## 14. Security
+
+This section documents sdme's security implementation: capabilities,
+seccomp, AppArmor, the `--hardened` and `--strict` flags, and input
+sanitization. For comparisons with Docker and Podman, see
+[docs/security.md](security.md).
+
+### Capability bounding set
+
+systemd-nspawn retains 26 capabilities by default:
+
+```
+CAP_AUDIT_CONTROL       CAP_AUDIT_WRITE         CAP_CHOWN
+CAP_DAC_OVERRIDE        CAP_DAC_READ_SEARCH     CAP_FOWNER
+CAP_FSETID              CAP_IPC_OWNER           CAP_KILL
+CAP_LEASE               CAP_LINUX_IMMUTABLE     CAP_MKNOD
+CAP_NET_BIND_SERVICE    CAP_NET_BROADCAST       CAP_NET_RAW
+CAP_SETFCAP             CAP_SETGID              CAP_SETPCAP
+CAP_SETUID              CAP_SYS_ADMIN           CAP_SYS_BOOT
+CAP_SYS_CHROOT          CAP_SYS_NICE            CAP_SYS_PTRACE
+CAP_SYS_RESOURCE        CAP_SYS_TTY_CONFIG
+```
+
+`CAP_NET_ADMIN` is added only when `--private-network` is active, since
+it is safe to grant when the container has its own network namespace
+(changes only affect the isolated namespace, not the host).
+
+`CAP_SYS_ADMIN` is the most significant capability in this set. It is
+required for systemd to function inside the container: mounting
+filesystems, configuring cgroups, managing namespaces for its own
+services. This cannot be dropped without breaking the
+systemd-inside-nspawn model.
+
+Notable exclusions: `CAP_SYS_MODULE` (no kernel module loading),
+`CAP_SYS_RAWIO` (no raw I/O port access), `CAP_SYS_TIME` (no system
+clock modification), `CAP_BPF` (no BPF program loading),
+`CAP_SYSLOG`, and `CAP_IPC_LOCK`.
+
+sdme provides fine-grained capability management:
+
+- `--drop-capability CAP_X`: drop individual capabilities from nspawn's
+  default set. Accepts names with or without the `CAP_` prefix.
+- `--capability CAP_X`: add capabilities not in the default set (e.g.
+  `CAP_NET_ADMIN` for containers with `--private-network`).
+
+Both flags are repeatable and validated against a known set of Linux
+capabilities. Specifying the same capability in both is rejected as
+contradictory.
+
+### Seccomp filtering
+
+nspawn applies a built-in allowlist-based seccomp filter. Syscalls not
+on the allowlist are blocked with `EPERM` (for known syscalls) or
+`ENOSYS` (for unknown ones).
+
+Allowed by default: `@basic-io`, `@file-system`, `@io-event`, `@ipc`,
+`@mount`, `@network-io`, `@process`, `@resources`, `@setuid`, `@signal`,
+`@sync`, `@timer`, and about 50 individual syscalls.
+
+Blocked unconditionally: `kexec_load`, `kexec_file_load`,
+`perf_event_open`, `fanotify_init`, `open_by_handle_at`, `quotactl`,
+the `@swap` group, and the `@cpu-emulation` group.
+
+Capability-gated: `@clock` requires `CAP_SYS_TIME`, `@module` requires
+`CAP_SYS_MODULE`, `@raw-io` requires `CAP_SYS_RAWIO`. Since none of
+these capabilities are in the default bounding set, these syscall groups
+are effectively blocked.
+
+`--system-call-filter` layers additional seccomp filters on top of
+nspawn's baseline. It uses systemd's group syntax:
+
+- `@group`: allow a syscall group
+- `~@group`: deny a syscall group
+
+```
+sdme create mybox --system-call-filter ~@raw-io
+sdme create mybox --system-call-filter ~@cpu-emulation
+```
+
+The flag is repeatable. Note that `~@mount` breaks systemd inside the
+container, the same reason nspawn allows it in the first place.
+
+### Mandatory access control
+
+sdme ships a default AppArmor profile (`sdme-default`) designed for
+systemd-nspawn system containers. The profile allows the operations
+required for systemd boot (mount, pivot_root, signal, unix sockets)
+while denying dangerous host-level access (raw device I/O, `/proc`
+sysctl writes, kernel module paths). It is applied via
+`AppArmorProfile=` in the systemd service unit drop-in.
+
+The profile is automatically applied by `--strict`. It can also be used
+standalone:
+
+```
+sdme create mybox --apparmor-profile sdme-default
+```
+
+To install the profile:
+
+```
+sdme config apparmor-profile > /etc/apparmor.d/sdme-default
+apparmor_parser -r /etc/apparmor.d/sdme-default
+```
+
+The deb and rpm packages install and load the profile automatically.
+
+**SELinux is not supported.** sdme has no SELinux integration. During
+rootfs import (`sdme fs import`), `security.selinux` extended
+attributes are explicitly skipped because they do not transfer
+meaningfully between filesystems.
+
+### Privilege escalation prevention
+
+**`--no-new-privileges`** passes `--no-new-privileges=yes` to nspawn.
+Off by default because interactive containers typically want `sudo`/`su`
+to work; `no_new_privs` blocks privilege escalation via setuid binaries
+and file capabilities. Enabled by `--hardened` and `--strict`.
+
+**`--read-only`** makes the overlayfs merged view read-only.
+Applications needing writable areas use bind mounts (`-b`).
+
+### The `--hardened` flag
+
+`--hardened` is sdme's one-flag defense-in-depth bundle. It enables
+multiple security layers at once:
+
+- **User namespace isolation** (`--private-users=pick
+  --private-users-ownership=auto`): container root maps to a high
+  unprivileged UID on the host.
+- **Private network namespace** (`--private-network`): the container
+  gets its own network namespace with loopback only.
+- **`--no-new-privileges=yes`**: blocks privilege escalation via setuid
+  binaries and file capabilities.
+- **Drops capabilities**: `CAP_SYS_PTRACE`, `CAP_NET_RAW`,
+  `CAP_SYS_RAWIO`, `CAP_SYS_BOOT`, dropping 4 capabilities (3 from
+  the active set; `CAP_SYS_RAWIO` is preventive since nspawn does not
+  grant it by default), leaving 23 retained capabilities.
+
+```
+sdme create mybox --hardened
+sdme new mybox --hardened
+```
+
+**When cloning the host rootfs** (no `-r` flag), `--hardened` has
+several visible effects because the container inherits the host's
+installed binaries and enabled services:
+
+- **No internet.** `--private-network` gives the container only a
+  loopback interface. Host services that assume network access (sshd,
+  NTP, avahi, etc.) will fail or retry indefinitely.
+- **`sudo`/`su` silently fail.** `--no-new-privileges` prevents setuid
+  escalation. The binaries exist and appear normal, but the kernel
+  blocks the privilege transition.
+- **`ping` and raw-socket tools fail.** `CAP_NET_RAW` is dropped.
+- **`strace`/`gdb` fail.** `CAP_SYS_PTRACE` is dropped.
+
+`sdme new` prints notes about `--private-network` and
+`--no-new-privileges` when cloning the host rootfs. For imported rootfs
+(e.g. `-r ubuntu`), these effects are less surprising because the rootfs
+was built for container use.
+
+For a host-rootfs container where these side effects matter, apply
+individual flags instead:
+
+```
+sdme create mybox --userns --drop-capability CAP_SYS_RAWIO
+```
+
+**Composable with fine-grained flags.** `--hardened` sets a baseline
+that individual flags can override or extend:
+
+```
+sdme create mybox --hardened --capability CAP_NET_RAW       # re-enable a dropped cap
+sdme create mybox --hardened --system-call-filter ~@raw-io  # add seccomp filter
+sdme create mybox --hardened --apparmor-profile myprofile   # add MAC confinement
+sdme create mybox --hardened --read-only                    # read-only rootfs
+```
+
+**Configurable.** The capabilities dropped by `--hardened` are
+controlled by the `hardened_drop_caps` config key:
+
+```
+sdme config set hardened_drop_caps CAP_SYS_PTRACE,CAP_NET_RAW
+```
+
+### The `--strict` flag
+
+`--strict` closes the gaps between `--hardened` and Docker/Podman
+defaults. It implies `--hardened` and adds:
+
+- **Aggressive capability drops**: retains only the ~14 capabilities
+  Docker grants (AUDIT_WRITE, CHOWN, DAC_OVERRIDE, FOWNER, FSETID,
+  KILL, MKNOD, NET_BIND_SERVICE, SETFCAP, SETGID, SETPCAP, SETUID,
+  SYS_CHROOT) plus `CAP_SYS_ADMIN` (required for systemd init). Also
+  drops `CAP_NET_RAW` (carried over from `--hardened`, stricter than
+  Docker). Drops 27 capabilities total.
+- **Seccomp filters**: denies `@cpu-emulation`, `@debug`, `@obsolete`,
+  and `@raw-io` syscall groups on top of nspawn's baseline filter.
+- **AppArmor profile**: applies the `sdme-default` profile, which
+  confines `/proc`/`/sys` writes and raw device access at the MAC level.
+
+```
+sdme create mybox --strict
+sdme new mybox --strict
+```
+
+**When cloning the host rootfs**, `--strict` compounds the effects of
+`--hardened` with additional restrictions:
+
+- **`systemd-networkd` and `NetworkManager` fail.**
+  `CAP_NET_ADMIN` is dropped.
+- **`systemd-timesyncd` cannot set the clock.** `CAP_SYS_TIME` is
+  dropped.
+- **Logging to `/dev/kmsg` is denied.** `CAP_SYSLOG` is dropped.
+- **Nice/priority adjustments fail.** `CAP_SYS_NICE` is dropped.
+- **AppArmor profile must be installed first.** The `sdme-default`
+  profile is checked at `start` time; if it is not loaded, the
+  container fails to start with instructions for installation.
+
+For host-rootfs use, `--hardened` with selective additions is often
+more practical than `--strict`:
+
+```
+sdme create mybox --hardened --system-call-filter ~@raw-io
+```
+
+`--strict` is best suited for imported rootfs images where the service
+set is known and controlled.
+
+**Why `CAP_SYS_ADMIN` is retained.** `CAP_SYS_ADMIN` is required for
+systemd to function inside the container. It needs to mount filesystems,
+configure cgroups, and manage namespaces for its own services. With user
+namespace isolation (enabled by `--strict`), `CAP_SYS_ADMIN` is scoped
+to the user namespace. It does not grant host-level SYS_ADMIN. A process
+that escapes the container lands in an unprivileged context on the host.
+
+**Composable with fine-grained flags.** Like `--hardened`, `--strict`
+sets a baseline that individual flags can override:
+
+```
+sdme create mybox --strict --capability CAP_NET_RAW   # re-enable a dropped cap
+sdme create mybox --strict --read-only                # add read-only rootfs
+sdme create mybox --strict --apparmor-profile custom  # use a custom profile
+```
+
+### Input sanitization
+
+sdme runs as root and handles untrusted input: tarballs from the
+internet, OCI images from public registries, QCOW2 disk images from
+unknown sources. Several hardening measures are in place:
+
+**Path traversal prevention.** OCI layer tar paths are sanitised before
+extraction: `..` components are rejected and leading `/` is stripped.
+Whiteout marker handling verifies (via `canonicalize()`) that the target
+path stays within the destination directory before deleting anything.
+
+**Digest validation.** OCI blob digests (`sha256:abc123...`) are
+validated for safe characters (alphanumeric and hex only) and correct
+length (64 chars for SHA-256, 128 for SHA-512) before being used to
+construct filesystem paths. A malicious manifest cannot use the digest
+field for directory traversal.
+
+**Download size cap.** URL downloads are capped at 50 GiB
+(`MAX_DOWNLOAD_SIZE`), checked during streaming. A malicious or
+misbehaving server cannot fill the disk by sending an unbounded
+response.
+
+**Rootfs name validation.** The `-r`/`--fs` parameter (on `create` and
+`new`) is validated with `validate_name()` (alphanumeric, hyphens, no
+leading/trailing hyphens, no `..`) before being used to construct
+filesystem paths.
+
+**Opaque directory validation.** Paths must be absolute, contain no
+`..` components, no empty strings, no duplicates. Normalised before
+storage.
+
+**Permission hardening.** Config files are written with mode `0o600`,
+config directories with `0o700`. Overlayfs work directories get mode
+`0o700`.
+
+**Umask enforcement.** Container creation refuses to proceed if the
+process umask strips read or execute from "other"
+(`umask & 005 != 0`). A restrictive umask would make overlayfs
+upper-layer files inaccessible to non-root services like dbus-daemon,
+preventing container boot. This actually happened during development
+when setting umask to 007 before the `sdme create` command, would
+result in `sdme start` mysteriously misbehaving.
+
+If you find a way to escape a container, traverse a path, or corrupt
+the host filesystem through sdme, please open an issue.
+
+## 15. Reliability
+
+Multi-step operations in sdme are designed to fail cleanly rather than
+leave broken state behind.
+
+**Transactional imports** use a staging directory
+(`.{name}.importing`) that is atomically renamed on success. Partial
+imports are either cleaned up immediately or detected and reported on
+the next run.
+
+**Cooperative interrupt handling** uses a global `AtomicBool` flag set
+by a POSIX `SIGINT` handler. The handler is installed without
+`SA_RESTART`, so blocking system calls (file reads, network I/O) return
+`EINTR` immediately. Import loops, boot-wait loops, and build
+operations check the flag between steps, allowing Ctrl+C to cancel
+cleanly at any point. The handler also restores the default `SIGINT`
+disposition after the first press, so a second Ctrl+C force-kills the
+process. This covers cases where Rust's stdlib retries
+`poll()`/`connect()` on EINTR, preventing cooperative cancellation
+during blocked DNS resolution or TCP connection attempts.
+
+**Boot failure cleanup** differs by intent: `sdme new` removes the
+container on boot or join failure (the user wanted a running container,
+not a broken one), while `sdme start` (from previous `sdme create`)
+preserves it for debugging.
+
+**Health checks** in `sdme ps` detect containers with missing
+directories or missing rootfs and report them as `broken` rather than
+crashing or silently hiding them.
+
+**Build failure cleanup** removes the staging container and any partial
+rootfs on error, regardless of which build step failed.
+
+If you find a way to leave sdme's state inconsistent (a container that
+can't be listed, removed, or recovered), please open an issue.
+
+---
+
+# Experimental Features
+
+Everything below this line is experimental. These features work and
+are actively developed, but their interfaces may change.
+
+## 16. OCI Integration
 
 > *The goal isn't to replace Docker or Podman. It's to give systemd-nspawn users
 > a way to tap into the OCI ecosystem without leaving the systemd operational
@@ -998,7 +1591,7 @@ the container's cgroup differently:
 
 Within each root, three inner path candidates are searched:
 `init.scope/system.slice`, `payload/system.slice`, and
-`system.slice`. The function retries for up to 3 seconds (30 × 100 ms)
+`system.slice`. The function retries for up to 3 seconds (30 * 100 ms)
 because the cgroup directory may not appear on the filesystem
 immediately after systemd reports the unit as active.
 
@@ -1023,167 +1616,7 @@ does not have).
 
 At this point this is all very exploratory. This journey is 1% complete.
 
-## 9. Networking
-
-By default, containers share the host's network namespace: same
-interfaces, same addresses, same ports. This is the simplest mode and
-what you get with `sdme new` out of the box.
-
-For isolation, `--private-network` gives the container its own network
-namespace with no connectivity. The remaining network flags build on
-top of it and all imply `--private-network` automatically:
-
-- `--private-network`: isolated network namespace, no connectivity
-- `--network-veth`: creates a virtual ethernet link between host and
-  container
-- `--network-bridge <name>`: connects the container's veth to a host
-  bridge
-- `--network-zone <name>`: joins a named zone for inter-container
-  networking
-- `--port / -p <[PROTO:]HOST[:CONTAINER]>`: forwards a port (TCP by
-  default, repeatable)
-
-These flags are available on both `sdme create` and `sdme new`. They
-compose freely: you can combine `--network-zone` with `--port`, or use
-`--network-bridge` with `--network-veth`. Port forwarding requires a
-private network namespace because systemd-nspawn's `--port` flag only
-works when host and container have separate network stacks.
-
-Under the hood, each flag translates directly to a systemd-nspawn
-argument. The network configuration is persisted in the container's
-state file (`PRIVATE_NETWORK`, `NETWORK_VETH`, `NETWORK_BRIDGE`,
-`NETWORK_ZONE`, `PORTS`) and written into the per-container nspawn
-drop-in at start time.
-
-Bridge and zone names are validated (alphanumeric, hyphens,
-underscores). Port specs are validated for format
-(`[PROTO:]HOST[:CONTAINER]`) and range (1-65535).
-
-## 10. Pods
-
-Pods give multiple containers a shared network namespace so they can
-reach each other on localhost. The pattern is the same as Kubernetes
-pods: one network namespace, multiple containers.
-
-There are two mechanisms for joining a pod, serving different use cases:
-
-**`--pod` (whole-container):** The entire nspawn container runs in the
-pod's network namespace. All processes (init, services, everything)
-share the pod's network stack. This is the general-purpose option for
-any container type.
-
-**`--oci-pod` (OCI app only):** The pod's netns is bind-mounted into
-the container and only the OCI app service process enters it via a
-systemd `NetworkNamespacePath=` drop-in. The container's init and other
-services remain in their own network namespace. This is for OCI app
-containers that need pod networking for their application process but
-want systemd's own networking to remain independent. Requires an OCI
-app rootfs.
-
-Both flags can be combined on the same container (e.g.
-`--pod=X --oci-pod=Y` with different pods).
-
-```
-  --pod (whole container in pod netns):
-
-  +------------------------------------------------------+
-  |                     HOST SYSTEM                      |
-  |         kernel . systemd . D-Bus . machined          |
-  |                                                      |
-  |   /run/sdme/pods/my-pod/netns  (netns bind-mount)    |
-  |          |                                           |
-  |          |  +-- loopback only (127.0.0.1) --+        |
-  |          |  |                               |        |
-  |    +-----+----------+   +------------------+--+      |
-  |    | container A     |   | container B        |      |
-  |    | (db :5432)      |   | (app :8080)        |      |
-  |    | nspawn --network|   | nspawn --network   |      |
-  |    |  -namespace-    |   |  -namespace-       |      |
-  |    |  path=pod-netns |   |  path=pod-netns    |      |
-  |    +-----------------+   +--------------------+      |
-  +------------------------------------------------------+
-
-  Both containers see 127.0.0.1:5432 (db) and
-  127.0.0.1:8080 (app) because they share the netns.
-```
-
-### Lifecycle
-
-`sdme pod new <name>` creates the pod:
-
-1. Validates the name (same rules as container names).
-2. Calls `unshare(CLONE_NEWNET)` to create a new network namespace.
-3. Brings up the loopback interface (`ioctl SIOCSIFFLAGS IFF_UP`).
-4. Bind-mounts `/proc/self/ns/net` to
-   `/run/sdme/pods/<name>/netns`.
-5. Restores the original network namespace via `setns()`.
-6. Writes a persistent state file at
-   `{datadir}/pods/<name>/state`.
-
-The runtime bind-mount under `/run` is volatile and disappears on
-reboot. When a container referencing a pod is started,
-`ensure_runtime()` checks whether the bind-mount still exists and
-recreates the netns if needed.
-
-`sdme pod ls` lists all pods with their active/inactive status.
-
-`sdme pod rm <name>` unmounts the netns, removes the runtime directory,
-and deletes the persistent state directory. Removal is refused if any
-container still references the pod via `POD` or `OCI_POD` keys
-(override with `--force`).
-
-### Container integration
-
-**`--pod=<name>`** on `sdme create` or `sdme new`:
-
-- Works with any container type (host-rootfs or imported rootfs).
-- Incompatible with `--userns` and `--hardened`: the kernel blocks
-  `setns(CLONE_NEWNET)` from a child user namespace into the pod's
-  netns (owned by the init userns). Use `--oci-pod` for hardened pods.
-- Compatible with `--private-network` (without userns): the pod's
-  netns already provides equivalent isolation (loopback only), so
-  `--private-network` is automatically omitted from the nspawn
-  invocation when a pod is used.
-- Stores `POD=<name>` in the container's state file.
-- At start time, the nspawn drop-in includes
-  `--network-namespace-path=/run/sdme/pods/<name>/netns`, which makes
-  the entire container (including init and all services) run inside
-  the pod's network namespace.
-
-**`--oci-pod=<name>`** on `sdme create` or `sdme new`:
-
-- Requires an OCI app rootfs (an `sdme-oci-{name}.service` unit must exist in the
-  rootfs).
-- Stores `OCI_POD=<name>` in the container's state file.
-- At create time, writes a systemd drop-in inside the overlayfs upper
-  layer at
-  `upper/etc/systemd/system/sdme-oci-{name}.service.d/oci-pod-netns.conf`
-  with `NetworkNamespacePath=/run/sdme/oci-pod-netns`.
-- At start time, the nspawn drop-in includes
-  `--bind-ro=/run/sdme/pods/<name>/netns:/run/sdme/oci-pod-netns`,
-  which makes the pod's netns available inside the container. The
-  inner drop-in makes only the OCI app service process enter the
-  pod's netns.
-
-`sdme ps` shows a POD column when any container has a `--pod`
-assignment, an OCI-POD column when any container has an `--oci-pod`
-assignment, a USERNS column when any container has `--userns` enabled,
-and a BINDS column when any container has bind mounts configured.
-
-### Isolation properties
-
-The pod netns contains only a loopback interface with no routes.
-Containers in the pod can communicate via localhost but have no external
-connectivity unless a veth or bridge is added to the netns externally.
-
-Inside the container, systemd-nspawn's default capability set drops
-`CAP_NET_ADMIN`, so the container's root cannot add interfaces or
-change routes in the shared netns. `CAP_SYS_ADMIN` is present
-(required by systemd inside nspawn) but the container's PID namespace
-prevents access to host process netns references. The OCI app process
-itself (running as a non-root UID) has zero effective capabilities.
-
-## 11. Kubernetes Pod Support
+## 17. Kubernetes Pod Support
 
 sdme can run Kubernetes Pod YAML files as nspawn containers. Each pod maps
 to a single container where each workload runs as a separate systemd
@@ -1406,426 +1839,3 @@ Kube pods are tracked with additional state fields:
 - No idempotent re-apply: `kube apply` on an existing pod fails; delete
   first, then re-apply
 - No per-container securityContext (only pod-level `runAsUser`/`runAsGroup`)
-
-## 12. Resource Limits
-
-sdme exposes three cgroup-based resource controls:
-
-| Flag                     | systemd property | Example             |
-|--------------------------|------------------|---------------------|
-| `--memory <size>`        | `MemoryMax=`     | `--memory 2G`       |
-| `--cpus <count>`         | `CPUQuota=`      | `--cpus 0.5` (50%) |
-| `--cpu-weight <1-10000>` | `CPUWeight=`     | `--cpu-weight 100`  |
-
-These flags are available on `sdme create`, `sdme new`, and `sdme set`.
-They are applied via a systemd drop-in file (`limits.conf`) installed
-alongside the container's service unit. A `daemon-reload` is triggered
-when the drop-in changes.
-
-`sdme set` replaces all limits at once: flags not specified are removed.
-If the container is running, sdme prints a note that a restart is needed
-for the new limits to take effect.
-
-Memory values accept K/M/G/T suffixes. CPU count is a positive float
-where `1` means one full core and `0.5` means half a core (converted to
-systemd's `CPUQuota=` percentage internally). CPU weight is an integer
-from 1 to 10000, controlling relative scheduling priority when CPUs are
-contended.
-
-## 13. Bind Mounts and Environment Variables
-
-Custom bind mounts and environment variables are set at creation time
-with `-b`/`--bind` and `-e`/`--env`, available on both `sdme create`
-and `sdme new`.
-
-**Bind mounts** use the format `HOST:CONTAINER[:ro]`. Read-write is the
-default; append `:ro` for read-only. Both paths must be absolute with
-no `..` components, and the host path must exist at creation time. At
-start time, each bind becomes a `--bind=` or `--bind-ro=` argument to
-systemd-nspawn.
-
-**Environment variables** use the format `KEY=VALUE`. Keys must be
-alphanumeric or underscore (no leading digit). At start time, each
-variable becomes a `--setenv=KEY=VALUE` argument to systemd-nspawn.
-
-Both are stored in the container's state file (`BINDS=` and `ENVS=`,
-pipe-separated) and reconstituted into nspawn arguments on every start.
-
-## 14. Configuration
-
-sdme stores its settings in a TOML file at `/etc/sdme.conf`:
-
-| Setting                   | Default                          |
-|---------------------------|----------------------------------|
-| `interactive`             | `true`                           |
-| `datadir`                 | `/var/lib/sdme`                  |
-| `boot_timeout`            | `60`                             |
-| `join_as_sudo_user`       | `true`                           |
-| `host_rootfs_opaque_dirs` | `/etc/systemd/system,/var/log`   |
-| `hardened_drop_caps`      | `CAP_SYS_PTRACE,CAP_NET_RAW,...` |
-| `default_base_fs`         | (empty)                          |
-| `default_export_fs`       | `ext4`                           |
-| `tasks_max`               | `16384`                          |
-| `docker_user`             | (empty)                          |
-| `docker_token`            | (empty)                          |
-| `oci_cache_dir`           | (empty = `{datadir}/cache/oci`)  |
-| `oci_cache_max_size`      | `10G`                            |
-| `http_timeout`            | `30`                             |
-| `http_body_timeout`       | `300`                            |
-| `max_download_size`       | `50G`                            |
-
-- `interactive`: enable interactive prompts.
-- `datadir`: root directory for all container and rootfs data.
-- `boot_timeout`: seconds to wait for container boot.
-- `join_as_sudo_user`: join host-rootfs containers as
-  `$SUDO_USER` instead of root.
-- `host_rootfs_opaque_dirs`: default opaque dirs for host-rootfs
-  containers (empty string disables).
-- `hardened_drop_caps`: capabilities dropped by `--hardened`.
-- `default_base_fs`: default base rootfs for OCI app images.
-- `default_export_fs`: filesystem type for raw disk image export
-  (`ext4` or `btrfs`).
-- `tasks_max`: maximum tasks (processes/threads) per container
-  in the systemd template unit.
-- `docker_user`: Docker Hub username for authenticated pulls.
-- `docker_token`: Docker Hub personal access token.
-- `oci_cache_dir`: OCI blob cache directory.
-- `oci_cache_max_size`: max cache size (`0` disables).
-- `http_timeout`: HTTP connect/resolve timeout in seconds for
-  downloads and OCI registry pulls.
-- `http_body_timeout`: HTTP body receive timeout in seconds.
-- `max_download_size`: maximum download size for imports and
-  OCI pulls (e.g. `50G`; `0` = unlimited).
-
-Settings are read with `sdme config get` and written with
-`sdme config set <key> <value>`.
-
-Config files are written with mode `0600`.
-
-## 15. Security
-
-This section documents sdme's security implementation: capabilities,
-seccomp, AppArmor, the `--hardened` and `--strict` flags, and input
-sanitization. For comparisons with Docker and Podman, see
-[docs/security.md](security.md).
-
-### Capability bounding set
-
-systemd-nspawn retains 26 capabilities by default:
-
-```
-CAP_AUDIT_CONTROL       CAP_AUDIT_WRITE         CAP_CHOWN
-CAP_DAC_OVERRIDE        CAP_DAC_READ_SEARCH     CAP_FOWNER
-CAP_FSETID              CAP_IPC_OWNER           CAP_KILL
-CAP_LEASE               CAP_LINUX_IMMUTABLE     CAP_MKNOD
-CAP_NET_BIND_SERVICE    CAP_NET_BROADCAST       CAP_NET_RAW
-CAP_SETFCAP             CAP_SETGID              CAP_SETPCAP
-CAP_SETUID              CAP_SYS_ADMIN           CAP_SYS_BOOT
-CAP_SYS_CHROOT          CAP_SYS_NICE            CAP_SYS_PTRACE
-CAP_SYS_RESOURCE        CAP_SYS_TTY_CONFIG
-```
-
-`CAP_NET_ADMIN` is added only when `--private-network` is active, since
-it is safe to grant when the container has its own network namespace
-(changes only affect the isolated namespace, not the host).
-
-`CAP_SYS_ADMIN` is the most significant capability in this set. It is
-required for systemd to function inside the container: mounting
-filesystems, configuring cgroups, managing namespaces for its own
-services. This cannot be dropped without breaking the
-systemd-inside-nspawn model.
-
-Notable exclusions: `CAP_SYS_MODULE` (no kernel module loading),
-`CAP_SYS_RAWIO` (no raw I/O port access), `CAP_SYS_TIME` (no system
-clock modification), `CAP_BPF` (no BPF program loading),
-`CAP_SYSLOG`, and `CAP_IPC_LOCK`.
-
-sdme provides fine-grained capability management:
-
-- `--drop-capability CAP_X`: drop individual capabilities from nspawn's
-  default set. Accepts names with or without the `CAP_` prefix.
-- `--capability CAP_X`: add capabilities not in the default set (e.g.
-  `CAP_NET_ADMIN` for containers with `--private-network`).
-
-Both flags are repeatable and validated against a known set of Linux
-capabilities. Specifying the same capability in both is rejected as
-contradictory.
-
-### Seccomp filtering
-
-nspawn applies a built-in allowlist-based seccomp filter. Syscalls not
-on the allowlist are blocked with `EPERM` (for known syscalls) or
-`ENOSYS` (for unknown ones).
-
-Allowed by default: `@basic-io`, `@file-system`, `@io-event`, `@ipc`,
-`@mount`, `@network-io`, `@process`, `@resources`, `@setuid`, `@signal`,
-`@sync`, `@timer`, and about 50 individual syscalls.
-
-Blocked unconditionally: `kexec_load`, `kexec_file_load`,
-`perf_event_open`, `fanotify_init`, `open_by_handle_at`, `quotactl`,
-the `@swap` group, and the `@cpu-emulation` group.
-
-Capability-gated: `@clock` requires `CAP_SYS_TIME`, `@module` requires
-`CAP_SYS_MODULE`, `@raw-io` requires `CAP_SYS_RAWIO`. Since none of
-these capabilities are in the default bounding set, these syscall groups
-are effectively blocked.
-
-`--system-call-filter` layers additional seccomp filters on top of
-nspawn's baseline. It uses systemd's group syntax:
-
-- `@group`: allow a syscall group
-- `~@group`: deny a syscall group
-
-```
-sdme create mybox --system-call-filter ~@raw-io
-sdme create mybox --system-call-filter ~@cpu-emulation
-```
-
-The flag is repeatable. Note that `~@mount` breaks systemd inside the
-container, the same reason nspawn allows it in the first place.
-
-### Mandatory access control
-
-sdme ships a default AppArmor profile (`sdme-default`) designed for
-systemd-nspawn system containers. The profile allows the operations
-required for systemd boot (mount, pivot_root, signal, unix sockets)
-while denying dangerous host-level access (raw device I/O, `/proc`
-sysctl writes, kernel module paths). It is applied via
-`AppArmorProfile=` in the systemd service unit drop-in.
-
-The profile is automatically applied by `--strict`. It can also be used
-standalone:
-
-```
-sdme create mybox --apparmor-profile sdme-default
-```
-
-To install the profile:
-
-```
-sdme config apparmor-profile > /etc/apparmor.d/sdme-default
-apparmor_parser -r /etc/apparmor.d/sdme-default
-```
-
-The deb and rpm packages install and load the profile automatically.
-
-**SELinux is not supported.** sdme has no SELinux integration. During
-rootfs import (`sdme fs import`), `security.selinux` extended
-attributes are explicitly skipped because they do not transfer
-meaningfully between filesystems.
-
-### Privilege escalation prevention
-
-**`--no-new-privileges`** passes `--no-new-privileges=yes` to nspawn.
-Off by default because interactive containers typically want `sudo`/`su`
-to work; `no_new_privs` blocks privilege escalation via setuid binaries
-and file capabilities. Enabled by `--hardened` and `--strict`.
-
-**`--read-only`** makes the overlayfs merged view read-only.
-Applications needing writable areas use bind mounts (`-b`).
-
-### The `--hardened` flag
-
-`--hardened` is sdme's one-flag defense-in-depth bundle. It enables
-multiple security layers at once:
-
-- **User namespace isolation** (`--private-users=pick
-  --private-users-ownership=auto`): container root maps to a high
-  unprivileged UID on the host.
-- **Private network namespace** (`--private-network`): the container
-  gets its own network namespace with loopback only.
-- **`--no-new-privileges=yes`**: blocks privilege escalation via setuid
-  binaries and file capabilities.
-- **Drops capabilities**: `CAP_SYS_PTRACE`, `CAP_NET_RAW`,
-  `CAP_SYS_RAWIO`, `CAP_SYS_BOOT`, dropping 4 capabilities (3 from
-  the active set; `CAP_SYS_RAWIO` is preventive since nspawn does not
-  grant it by default), leaving 23 retained capabilities.
-
-```
-sdme create mybox --hardened
-sdme new mybox --hardened
-```
-
-**When cloning the host rootfs** (no `-r` flag), `--hardened` has
-several visible effects because the container inherits the host's
-installed binaries and enabled services:
-
-- **No internet.** `--private-network` gives the container only a
-  loopback interface. Host services that assume network access (sshd,
-  NTP, avahi, etc.) will fail or retry indefinitely.
-- **`sudo`/`su` silently fail.** `--no-new-privileges` prevents setuid
-  escalation. The binaries exist and appear normal, but the kernel
-  blocks the privilege transition.
-- **`ping` and raw-socket tools fail.** `CAP_NET_RAW` is dropped.
-- **`strace`/`gdb` fail.** `CAP_SYS_PTRACE` is dropped.
-
-`sdme new` prints notes about `--private-network` and
-`--no-new-privileges` when cloning the host rootfs. For imported rootfs
-(e.g. `-r ubuntu`), these effects are less surprising because the rootfs
-was built for container use.
-
-For a host-rootfs container where these side effects matter, apply
-individual flags instead:
-
-```
-sdme create mybox --userns --drop-capability CAP_SYS_RAWIO
-```
-
-**Composable with fine-grained flags.** `--hardened` sets a baseline
-that individual flags can override or extend:
-
-```
-sdme create mybox --hardened --capability CAP_NET_RAW       # re-enable a dropped cap
-sdme create mybox --hardened --system-call-filter ~@raw-io  # add seccomp filter
-sdme create mybox --hardened --apparmor-profile myprofile   # add MAC confinement
-sdme create mybox --hardened --read-only                    # read-only rootfs
-```
-
-**Configurable.** The capabilities dropped by `--hardened` are
-controlled by the `hardened_drop_caps` config key:
-
-```
-sdme config set hardened_drop_caps CAP_SYS_PTRACE,CAP_NET_RAW
-```
-
-### The `--strict` flag
-
-`--strict` closes the gaps between `--hardened` and Docker/Podman
-defaults. It implies `--hardened` and adds:
-
-- **Aggressive capability drops**: retains only the ~14 capabilities
-  Docker grants (AUDIT_WRITE, CHOWN, DAC_OVERRIDE, FOWNER, FSETID,
-  KILL, MKNOD, NET_BIND_SERVICE, SETFCAP, SETGID, SETPCAP, SETUID,
-  SYS_CHROOT) plus `CAP_SYS_ADMIN` (required for systemd init). Also
-  drops `CAP_NET_RAW` (carried over from `--hardened`, stricter than
-  Docker). Drops 27 capabilities total.
-- **Seccomp filters**: denies `@cpu-emulation`, `@debug`, `@obsolete`,
-  and `@raw-io` syscall groups on top of nspawn's baseline filter.
-- **AppArmor profile**: applies the `sdme-default` profile, which
-  confines `/proc`/`/sys` writes and raw device access at the MAC level.
-
-```
-sdme create mybox --strict
-sdme new mybox --strict
-```
-
-**When cloning the host rootfs**, `--strict` compounds the effects of
-`--hardened` with additional restrictions:
-
-- **`systemd-networkd` and `NetworkManager` fail.**
-  `CAP_NET_ADMIN` is dropped.
-- **`systemd-timesyncd` cannot set the clock.** `CAP_SYS_TIME` is
-  dropped.
-- **Logging to `/dev/kmsg` is denied.** `CAP_SYSLOG` is dropped.
-- **Nice/priority adjustments fail.** `CAP_SYS_NICE` is dropped.
-- **AppArmor profile must be installed first.** The `sdme-default`
-  profile is checked at `start` time; if it is not loaded, the
-  container fails to start with instructions for installation.
-
-For host-rootfs use, `--hardened` with selective additions is often
-more practical than `--strict`:
-
-```
-sdme create mybox --hardened --system-call-filter ~@raw-io
-```
-
-`--strict` is best suited for imported rootfs images where the service
-set is known and controlled.
-
-**Why `CAP_SYS_ADMIN` is retained.** `CAP_SYS_ADMIN` is required for
-systemd to function inside the container. It needs to mount filesystems,
-configure cgroups, and manage namespaces for its own services. With user
-namespace isolation (enabled by `--strict`), `CAP_SYS_ADMIN` is scoped
-to the user namespace. It does not grant host-level SYS_ADMIN. A process
-that escapes the container lands in an unprivileged context on the host.
-
-**Composable with fine-grained flags.** Like `--hardened`, `--strict`
-sets a baseline that individual flags can override:
-
-```
-sdme create mybox --strict --capability CAP_NET_RAW   # re-enable a dropped cap
-sdme create mybox --strict --read-only                # add read-only rootfs
-sdme create mybox --strict --apparmor-profile custom  # use a custom profile
-```
-
-### Input sanitization
-
-sdme runs as root and handles untrusted input: tarballs from the
-internet, OCI images from public registries, QCOW2 disk images from
-unknown sources. Several hardening measures are in place:
-
-**Path traversal prevention.** OCI layer tar paths are sanitised before
-extraction: `..` components are rejected and leading `/` is stripped.
-Whiteout marker handling verifies (via `canonicalize()`) that the target
-path stays within the destination directory before deleting anything.
-
-**Digest validation.** OCI blob digests (`sha256:abc123...`) are
-validated for safe characters (alphanumeric and hex only) and correct
-length (64 chars for SHA-256, 128 for SHA-512) before being used to
-construct filesystem paths. A malicious manifest cannot use the digest
-field for directory traversal.
-
-**Download size cap.** URL downloads are capped at 50 GiB
-(`MAX_DOWNLOAD_SIZE`), checked during streaming. A malicious or
-misbehaving server cannot fill the disk by sending an unbounded
-response.
-
-**Rootfs name validation.** The `-r`/`--fs` parameter (on `create` and
-`new`) is validated with `validate_name()` (alphanumeric, hyphens, no
-leading/trailing hyphens, no `..`) before being used to construct
-filesystem paths.
-
-**Opaque directory validation.** Paths must be absolute, contain no
-`..` components, no empty strings, no duplicates. Normalised before
-storage.
-
-**Permission hardening.** Config files are written with mode `0o600`,
-config directories with `0o700`. Overlayfs work directories get mode
-`0o700`.
-
-**Umask enforcement.** Container creation refuses to proceed if the
-process umask strips read or execute from "other"
-(`umask & 005 != 0`). A restrictive umask would make overlayfs
-upper-layer files inaccessible to non-root services like dbus-daemon,
-preventing container boot. This actually happened during development
-when setting umask to 007 before the `sdme create` command, would
-result in `sdme start` mysteriously misbehaving.
-
-If you find a way to escape a container, traverse a path, or corrupt
-the host filesystem through sdme, please open an issue.
-
-## 16. Reliability
-
-Multi-step operations in sdme are designed to fail cleanly rather than
-leave broken state behind.
-
-**Transactional imports** use a staging directory
-(`.{name}.importing`) that is atomically renamed on success. Partial
-imports are either cleaned up immediately or detected and reported on
-the next run.
-
-**Cooperative interrupt handling** uses a global `AtomicBool` flag set
-by a POSIX `SIGINT` handler. The handler is installed without
-`SA_RESTART`, so blocking system calls (file reads, network I/O) return
-`EINTR` immediately. Import loops, boot-wait loops, and build
-operations check the flag between steps, allowing Ctrl+C to cancel
-cleanly at any point. The handler also restores the default `SIGINT`
-disposition after the first press, so a second Ctrl+C force-kills the
-process. This covers cases where Rust's stdlib retries
-`poll()`/`connect()` on EINTR, preventing cooperative cancellation
-during blocked DNS resolution or TCP connection attempts.
-
-**Boot failure cleanup** differs by intent: `sdme new` removes the
-container on boot or join failure (the user wanted a running container,
-not a broken one), while `sdme start` (from previous `sdme create`)
-preserves it for debugging.
-
-**Health checks** in `sdme ps` detect containers with missing
-directories or missing rootfs and report them as `broken` rather than
-crashing or silently hiding them.
-
-**Build failure cleanup** removes the staging container and any partial
-rootfs on error, regardless of which build step failed.
-
-If you find a way to leave sdme's state inconsistent (a container that
-can't be listed, removed, or recovered), please open an issue.

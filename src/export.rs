@@ -49,6 +49,51 @@ pub struct ExportOptions<'a> {
     pub free_space: u64,
     pub vm_opts: Option<&'a VmOptions>,
     pub verbose: bool,
+    pub force: bool,
+}
+
+/// Summary returned after a successful export.
+#[derive(Debug)]
+pub struct ExportResult {
+    /// Total size of the output file or directory in bytes.
+    pub output_size: u64,
+    /// Free space in the image (raw exports only).
+    pub free_space: Option<u64>,
+    /// Number of partitions (raw exports only; 0 = bare, 1 = GPT with root).
+    pub partitions: Option<u32>,
+}
+
+impl ExportResult {
+    /// Format the result as a human-readable summary line (without the path).
+    pub fn summary(&self) -> String {
+        let size = format_human_size(self.output_size);
+        match (self.free_space, self.partitions) {
+            (Some(free), Some(parts)) => {
+                let free = format_human_size(free);
+                let label = if parts == 1 { "partition" } else { "partitions" };
+                format!("{size}, {free} free, {parts} {label}")
+            }
+            _ => size,
+        }
+    }
+}
+
+fn format_human_size(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = 1024 * KIB;
+    const GIB: u64 = 1024 * MIB;
+    const TIB: u64 = 1024 * GIB;
+    if bytes >= TIB {
+        format!("{:.1}T", bytes as f64 / TIB as f64)
+    } else if bytes >= GIB {
+        format!("{:.1}G", bytes as f64 / GIB as f64)
+    } else if bytes >= MIB {
+        format!("{:.1}M", bytes as f64 / MIB as f64)
+    } else if bytes >= KIB {
+        format!("{:.1}K", bytes as f64 / KIB as f64)
+    } else {
+        format!("{bytes}B")
+    }
 }
 
 /// Output format for rootfs export.
@@ -110,7 +155,7 @@ pub fn export_rootfs(
     name: &str,
     output: &Path,
     opts: &ExportOptions,
-) -> Result<()> {
+) -> Result<ExportResult> {
     validate_name(name).context("invalid rootfs name")?;
     let rootfs_dir = datadir.join("fs").join(name);
     if !rootfs_dir.is_dir() {
@@ -129,7 +174,7 @@ pub fn export_container(
     name: &str,
     output: &Path,
     opts: &ExportOptions,
-) -> Result<()> {
+) -> Result<ExportResult> {
     validate_name(name)?;
     containers::ensure_exists(datadir, name)?;
 
@@ -166,14 +211,32 @@ pub fn export_container(
 
 /// Core dispatcher: export from a source directory to the output in the
 /// requested format.
-fn export_from_dir(src: &Path, output: &Path, opts: &ExportOptions) -> Result<()> {
+fn export_from_dir(src: &Path, output: &Path, opts: &ExportOptions) -> Result<ExportResult> {
     match opts.format {
-        ExportFormat::Dir => export_to_dir(src, output, opts.verbose),
+        ExportFormat::Dir => {
+            export_to_dir(src, output, opts.verbose, opts.force)?;
+            let output_size = dir_size(output)?;
+            Ok(ExportResult {
+                output_size,
+                free_space: None,
+                partitions: None,
+            })
+        }
         ExportFormat::Tar
         | ExportFormat::TarGz
         | ExportFormat::TarBz2
         | ExportFormat::TarXz
-        | ExportFormat::TarZst => export_to_tar(src, output, opts.format, opts.verbose),
+        | ExportFormat::TarZst => {
+            export_to_tar(src, output, opts.format, opts.verbose, opts.force)?;
+            let output_size = fs::metadata(output)
+                .with_context(|| format!("failed to stat {}", output.display()))?
+                .len();
+            Ok(ExportResult {
+                output_size,
+                free_space: None,
+                partitions: None,
+            })
+        }
         ExportFormat::Raw(fs_type) => export_to_raw(
             src,
             output,
@@ -182,14 +245,20 @@ fn export_from_dir(src: &Path, output: &Path, opts: &ExportOptions) -> Result<()
             opts.free_space,
             opts.vm_opts,
             opts.verbose,
+            opts.force,
         ),
     }
 }
 
 /// Export by copying the source directory tree to the destination.
-fn export_to_dir(src: &Path, dst: &Path, verbose: bool) -> Result<()> {
+fn export_to_dir(src: &Path, dst: &Path, verbose: bool, force: bool) -> Result<()> {
     if dst.exists() {
-        bail!("destination already exists: {}", dst.display());
+        if force {
+            fs::remove_dir_all(dst)
+                .with_context(|| format!("failed to remove {}", dst.display()))?;
+        } else {
+            bail!("destination already exists: {}", dst.display());
+        }
     }
     fs::create_dir_all(dst).with_context(|| format!("failed to create {}", dst.display()))?;
     copy::copy_metadata(src, dst)?;
@@ -208,9 +277,20 @@ fn write_tar<W: std::io::Write>(writer: W, src: &Path, verbose: bool) -> Result<
 }
 
 /// Export by creating a tar archive, optionally compressed.
-fn export_to_tar(src: &Path, output: &Path, format: &ExportFormat, verbose: bool) -> Result<()> {
+fn export_to_tar(
+    src: &Path,
+    output: &Path,
+    format: &ExportFormat,
+    verbose: bool,
+    force: bool,
+) -> Result<()> {
     if output.exists() {
-        bail!("destination already exists: {}", output.display());
+        if force {
+            fs::remove_file(output)
+                .with_context(|| format!("failed to remove {}", output.display()))?;
+        } else {
+            bail!("destination already exists: {}", output.display());
+        }
     }
     if verbose {
         eprintln!("creating tarball: {}", output.display());
@@ -315,6 +395,11 @@ fn meta_gid(meta: &fs::Metadata) -> u64 {
 }
 
 /// Export by creating a raw disk image with the specified filesystem.
+///
+// TODO: add --swap <size> flag to create a swap partition in VM exports.
+// This requires a second GPT partition (type=swap), mkswap on the partition
+// device, and a swap entry in /etc/fstab during prep_vm_rootfs.
+#[allow(clippy::too_many_arguments)]
 fn export_to_raw(
     src: &Path,
     output: &Path,
@@ -323,9 +408,15 @@ fn export_to_raw(
     free_space: u64,
     vm_opts: Option<&VmOptions>,
     verbose: bool,
-) -> Result<()> {
+    force: bool,
+) -> Result<ExportResult> {
     if output.exists() {
-        bail!("destination already exists: {}", output.display());
+        if force {
+            fs::remove_file(output)
+                .with_context(|| format!("failed to remove {}", output.display()))?;
+        } else {
+            bail!("destination already exists: {}", output.display());
+        }
     }
 
     let (mkfs_bin, mkfs_pkg) = match fs_type {
@@ -353,7 +444,8 @@ fn export_to_raw(
 
     // VM exports use a GPT partition table; add 2 MiB for the protective MBR,
     // primary GPT header, partition alignment gap, and backup GPT header.
-    if vm_opts.is_some() {
+    let is_vm = vm_opts.is_some();
+    if is_vm {
         image_size += 2 * 1024 * 1024;
     }
 
@@ -376,7 +468,7 @@ fn export_to_raw(
 
     // VM exports: GPT partition table via sfdisk, then losetup --partscan.
     // Non-VM exports: bare filesystem on the whole image file.
-    let copy_result = if vm_opts.is_some() {
+    let copy_result = if is_vm {
         export_raw_gpt(output, &mount_dir, mkfs_bin, fs_type, src, vm_opts, verbose)
     } else {
         export_raw_bare(output, &mount_dir, mkfs_bin, fs_type, src, verbose)
@@ -390,7 +482,16 @@ fn export_to_raw(
     // Align to 512-byte sector boundary (benefits all raw exports).
     align_disk_image(output)?;
 
-    Ok(())
+    // Re-read actual file size after alignment.
+    let output_size = fs::metadata(output)
+        .with_context(|| format!("failed to stat {}", output.display()))?
+        .len();
+
+    Ok(ExportResult {
+        output_size,
+        free_space: Some(free_space),
+        partitions: Some(if is_vm { 1 } else { 0 }),
+    })
 }
 
 /// RAII guard for a loop device. Detaches on drop.
@@ -649,7 +750,10 @@ fn dir_size(path: &Path) -> Result<u64> {
         if meta.is_dir() {
             total += dir_size(&entry.path())?;
         } else {
-            total += meta.len();
+            // Round up to 4K block boundary to match ext4/btrfs allocation.
+            // Without this, rootfs with many small files (e.g. NixOS /nix/store)
+            // produce undersized images.
+            total += (meta.len() + 4095) & !4095;
         }
     }
     Ok(total)
@@ -1502,10 +1606,10 @@ mod tests {
     fn test_dir_size_with_files() {
         let _guard = lock_and_clear_interrupted();
         let tmp = crate::testutil::TempDataDir::new("export-dirsize-files");
-        fs::write(tmp.path().join("a"), "hello").unwrap(); // 5 bytes
+        fs::write(tmp.path().join("a"), "hello").unwrap(); // 5 bytes -> 4096
         fs::create_dir(tmp.path().join("sub")).unwrap();
-        fs::write(tmp.path().join("sub/b"), "world!").unwrap(); // 6 bytes
-        assert_eq!(dir_size(tmp.path()).unwrap(), 11);
+        fs::write(tmp.path().join("sub/b"), "world!").unwrap(); // 6 bytes -> 4096
+        assert_eq!(dir_size(tmp.path()).unwrap(), 8192);
     }
 
     // --- export_to_dir tests ---
@@ -1521,7 +1625,7 @@ mod tests {
         let dst_parent = crate::testutil::TempDataDir::new("export-dir-dst");
         let dst = dst_parent.path().join("output");
 
-        export_to_dir(src.path(), &dst, false).unwrap();
+        export_to_dir(src.path(), &dst, false, false).unwrap();
 
         assert!(dst.join("hello.txt").is_file());
         assert_eq!(fs::read_to_string(dst.join("hello.txt")).unwrap(), "hi");
@@ -1533,7 +1637,7 @@ mod tests {
         let src = crate::testutil::TempDataDir::new("export-dir-exist-src");
         let dst = crate::testutil::TempDataDir::new("export-dir-exist-dst");
 
-        let err = export_to_dir(src.path(), dst.path(), false).unwrap_err();
+        let err = export_to_dir(src.path(), dst.path(), false, false).unwrap_err();
         assert!(err.to_string().contains("already exists"), "got: {err}");
     }
 
@@ -1548,7 +1652,7 @@ mod tests {
         let dst = crate::testutil::TempDataDir::new("export-tar-dst");
         let tarball = dst.path().join("out.tar");
 
-        export_to_tar(src.path(), &tarball, &ExportFormat::Tar, false).unwrap();
+        export_to_tar(src.path(), &tarball, &ExportFormat::Tar, false, false).unwrap();
         assert!(tarball.exists());
         assert!(fs::metadata(&tarball).unwrap().len() > 0);
 
@@ -1573,7 +1677,7 @@ mod tests {
         let dst = crate::testutil::TempDataDir::new("export-targz-dst");
         let tarball = dst.path().join("out.tar.gz");
 
-        export_to_tar(src.path(), &tarball, &ExportFormat::TarGz, false).unwrap();
+        export_to_tar(src.path(), &tarball, &ExportFormat::TarGz, false, false).unwrap();
         assert!(tarball.exists());
 
         // Verify by decompressing and reading.
@@ -1596,7 +1700,7 @@ mod tests {
         let tarball = dst.path().join("out.tar");
         fs::write(&tarball, "existing").unwrap();
 
-        let err = export_to_tar(src.path(), &tarball, &ExportFormat::Tar, false).unwrap_err();
+        let err = export_to_tar(src.path(), &tarball, &ExportFormat::Tar, false, false).unwrap_err();
         assert!(err.to_string().contains("already exists"), "got: {err}");
     }
 
@@ -1614,6 +1718,7 @@ mod tests {
             free_space: 0,
             vm_opts: None,
             verbose: false,
+            force: false,
         };
         let err = export_rootfs(tmp.path(), "nonexistent", &output, &opts).unwrap_err();
         assert!(err.to_string().contains("rootfs not found"), "got: {err}");
@@ -1630,6 +1735,7 @@ mod tests {
             free_space: 0,
             vm_opts: None,
             verbose: false,
+            force: false,
         };
         let err = export_rootfs(tmp.path(), "../escape", &output, &opts).unwrap_err();
         assert!(err.to_string().contains("name"), "got: {err}");
@@ -1650,6 +1756,7 @@ mod tests {
             free_space: 0,
             vm_opts: None,
             verbose: false,
+            force: false,
         };
         export_rootfs(tmp.path(), "myfs", &output, &opts).unwrap();
 

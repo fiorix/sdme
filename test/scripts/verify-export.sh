@@ -8,7 +8,7 @@ set -euo pipefail
 #   2. Tarball export (uncompressed, gzip, bzip2, xz, zstd)
 #   3. Raw disk image export (ext4 auto-size, explicit --size)
 #   4. Btrfs raw disk image export (auto-size, explicit --size)
-#   5. Format override (-f)
+#   5. Format override (--fmt)
 #   6. Nonexistent rootfs (error case)
 
 source "$(dirname "$0")/lib.sh"
@@ -223,14 +223,14 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Test 9: Format override (-f)
+# Test 9: Format override (--fmt)
 # ---------------------------------------------------------------------------
 echo "=== Test 9: format override ==="
 
 noext="$TMPDIR/noext"
-if $SDME fs export ubuntu "$noext" -f tar.gz $VFLAG; then
+if $SDME fs export ubuntu "$noext" --fmt tar.gz $VFLAG; then
     if [[ -f "$noext" ]] && tar_contains "$noext" "etc/os-release" -z; then
-        ok "format override (-f tar.gz)"
+        ok "format override (--fmt tar.gz)"
     else
         fail "format override: file not a valid tar.gz"
     fi

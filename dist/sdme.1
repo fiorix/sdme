@@ -521,7 +521,7 @@ Use a different path (e.g.\&
 Lines starting with
 .B #
 and blank lines are ignored.
-.SS sdme fs export \fIname\fR \fIoutput\fR [\-\-container] [\-f \fIformat\fR] [\-s \fIsize\fR] [\-\-free\-space \fIsize\fR] [\-\-filesystem \fItype\fR] [\-\-vm] [\-\-dns \fIip\fR]... [\-\-net\-ifaces \fIn\fR] [\-\-root\-password \fIpass\fR] [\-\-ssh\-key \fIpath\fR] [\-\-install\-packages \fImode\fR]
+.SS sdme fs export \fIname\fR \fIoutput\fR [\-\-container] [\-f] [\-\-fmt \fIformat\fR] [\-s \fIsize\fR] [\-\-free\-space \fIsize\fR] [\-\-filesystem \fItype\fR] [\-\-vm] [\-\-dns \fIip\fR]... [\-\-net\-ifaces \fIn\fR] [\-\-root\-password \fIpass\fR] [\-\-ssh\-key \fIpath\fR] [\-\-install\-packages \fImode\fR]
 Export a root filesystem or container to a directory, tarball, or disk image.
 The output format is auto\-detected from the file extension:
 .RS
@@ -550,6 +550,12 @@ directory copy
 .PP
 Use
 .B \-f
+/
+.B \-\-force
+to overwrite the output path if it already exists.
+.PP
+Use
+.B \-\-fmt
 to override the auto\-detected format
 .RI ( dir ", " tar ", " tar.gz ", " tar.bz2 ", " tar.xz ", " tar.zst ", " raw ).
 .PP
@@ -579,7 +585,7 @@ to set the amount of extra free space added to the auto\-calculated disk
 image size (default: config
 .BR default_export_free_space ,
 initially
-.BR 100M ).
+.BR 256M ).
 Accepts size suffixes (e.g.\&
 .IR 256M ", " 1G ).
 Only effective when
@@ -1122,13 +1128,13 @@ Default:
 String.
 Extra free space added to the auto\-calculated raw disk image size.
 Accepts size suffixes (e.g.\&
-.IR 100M ", " 1G ).
+.IR 256M ", " 1G ).
 Used when
 .B \-s
 is not specified on
 .BR "sdme fs export" .
 Default:
-.BR 100M .
+.BR 256M .
 .TP
 .B docker_user
 String.

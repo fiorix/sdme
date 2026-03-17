@@ -64,7 +64,7 @@ The result is that you can run pretty much any systemd-capable distro as a
 container on any Linux machine.
 
 See [security, networking, and resource limits](docs/usage.md#8-security-networking-and-resource-limits)
-and the [security architecture](docs/architecture.md#15-security) for details.
+and the [security architecture](docs/architecture.md#14-security) for details.
 
 ---
 
@@ -100,7 +100,7 @@ sudo sdme logs --oci <name>
 sudo sdme exec --oci <name> redis-cli ping
 ```
 
-See [OCI integration](docs/architecture.md#8-oci-integration) for the full
+See [OCI integration](docs/architecture.md#16-oci-integration) for the full
 story.
 
 ### Dual security model and pods
@@ -152,7 +152,7 @@ spec:
 sudo sdme kube apply -f pod.yaml --base-fs ubuntu
 ```
 
-See [Kubernetes pod support](docs/architecture.md#11-kubernetes-pod-support)
+See [Kubernetes pod support](docs/architecture.md#17-kubernetes-pod-support)
 for the full spec.
 
 ### Exporting rootfs and containers
@@ -164,7 +164,7 @@ produce bootable VM images for hypervisors like Cloud Hypervisor and QEMU.
 ```
 sudo sdme fs export ubuntu ubuntu.tar.zst
 sudo sdme fs export --container <name> container.tar.gz
-sudo sdme fs export ubuntu ubuntu.raw --format raw
+sudo sdme fs export ubuntu ubuntu.raw --fmt raw
 ```
 
 ## Further reading
