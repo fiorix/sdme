@@ -294,7 +294,7 @@ fn append_dir_recursive<W: std::io::Write>(
                 File::open(&path).with_context(|| format!("failed to open {}", path.display()))?;
             builder.append_data(&mut header, rel, file)?;
         } else {
-            // Block/char devices, fifos, sockets — append header only.
+            // Block/char devices, fifos, sockets: append header only.
             header.set_size(0);
             builder.append_data(&mut header, rel, &[] as &[u8])?;
         }
@@ -565,7 +565,7 @@ fn export_raw_gpt(
         eprintln!("partition device: {}", part_dev.display());
     }
 
-    // Format the partition (standard mkfs flags — no 1K block hack needed).
+    // Format the partition (standard mkfs flags; no 1K block hack needed).
     let (mkfs_args, mkfs_err): (&[&str], &str) = match fs_type {
         RawFs::Ext4 => (&["-q", "-F"], "mkfs.ext4 failed"),
         RawFs::Btrfs => (&["-q", "-f"], "mkfs.btrfs failed"),
@@ -725,7 +725,7 @@ fn ensure_init_symlink(mount: &Path) -> Result<()> {
     } else {
         bail!(
             "systemd binary not found in rootfs (checked lib/systemd/systemd \
-             and usr/lib/systemd/systemd) — image cannot boot as a VM"
+             and usr/lib/systemd/systemd): image cannot boot as a VM"
         );
     };
 
@@ -783,7 +783,7 @@ fn ensure_init_symlink(mount: &Path) -> Result<()> {
 /// | init symlink | `/usr/sbin/init` → `../../lib/systemd/systemd` | Kernel needs `/sbin/init`; nspawn finds systemd directly |
 /// | serial-getty template | `/etc/systemd/system/serial-getty@.service` | Copy of distro template with `BindsTo=dev-%i.device` removed (no udev) |
 /// | serial-getty enable | `/etc/systemd/system/getty.target.wants/serial-getty@ttyS0.service` | Explicit enable for ttyS0 |
-/// | multi-user drop-in | `/etc/systemd/system/multi-user.target.d/wants-getty.conf` | `Wants=serial-getty@ttyS0.service` — container images omit getty.target |
+/// | multi-user drop-in | `/etc/systemd/system/multi-user.target.d/wants-getty.conf` | `Wants=serial-getty@ttyS0.service`; container images omit getty.target |
 /// | fstab | `/etc/fstab` | `/dev/vda1 / {ext4,btrfs} defaults 0 1` |
 /// | resolved unmask | `/etc/systemd/system/systemd-resolved.service` | Remove mask symlink (nspawn import masks it) |
 /// | resolv.conf | `/etc/resolv.conf` | Nameserver entries (VM has no host resolver) |
@@ -833,7 +833,7 @@ fn ensure_init_symlink(mount: &Path) -> Result<()> {
 /// isolate binary, volume mounts) should be its own package so it can be
 /// cleanly removed or inspected inside a running container.
 fn prep_vm_rootfs(mount: &Path, fs_type: RawFs, opts: &VmOptions, verbose: bool) -> Result<()> {
-    // Install udev first — ChrootGuard copies host resolv.conf for DNS,
+    // Install udev first. ChrootGuard copies host resolv.conf for DNS,
     // and cleanup restores the original. The later write_resolv_conf()
     // writes the final VM nameservers.
     install_udev_if_needed(mount, opts, verbose)?;
@@ -1849,7 +1849,7 @@ WantedBy=getty.target
     fn test_enable_serial_console_fallback_template() {
         let tmp = crate::testutil::TempDataDir::new("export-vm-serial-fallback");
 
-        // No distro template — should write the fallback.
+        // No distro template: should write the fallback.
         enable_serial_console(tmp.path()).unwrap();
 
         let template = tmp.path().join("etc/systemd/system/serial-getty@.service");
@@ -1895,7 +1895,7 @@ WantedBy=getty.target
 
         ensure_init_symlink(root).unwrap();
 
-        // Should not be overwritten — still a regular file with original content.
+        // Should not be overwritten, still a regular file with original content.
         assert!(root.join("usr/sbin/init").is_file());
         assert_eq!(
             fs::read_to_string(root.join("usr/sbin/init")).unwrap(),
@@ -1977,7 +1977,7 @@ WantedBy=getty.target
         let tmp = crate::testutil::TempDataDir::new("export-vm-unmask-noop");
         let unit_dir = tmp.path().join("etc/systemd/system");
         fs::create_dir_all(&unit_dir).unwrap();
-        // No symlink present — should be a no-op.
+        // No symlink present: should be a no-op.
         unmask_resolved(tmp.path()).unwrap();
     }
 
@@ -1987,7 +1987,7 @@ WantedBy=getty.target
         let unit_dir = tmp.path().join("etc/systemd/system");
         fs::create_dir_all(&unit_dir).unwrap();
         let resolved = unit_dir.join("systemd-resolved.service");
-        // Symlink to something other than /dev/null — should NOT be removed.
+        // Symlink to something other than /dev/null: should NOT be removed.
         std::os::unix::fs::symlink("/lib/systemd/system/systemd-resolved.service", &resolved)
             .unwrap();
 

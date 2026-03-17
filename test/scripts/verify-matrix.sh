@@ -89,7 +89,7 @@ check_os() {
     local pattern="${DISTRO_OS_PATTERN[$distro]}"
     local os_col
     os_col=$($SDME ps 2>/dev/null | awk -v name="$ct_name" '$1 == name {
-        # OS is the 4th column — but it may contain spaces (e.g. "Arch Linux").
+        # OS is the 4th column, but it may contain spaces (e.g. "Arch Linux").
         # Columns 1-3 are single-word (NAME, STATUS, HEALTH). Print from field 4
         # to the end, then strip trailing columns that start with known suffixes.
         for (i=4; i<=NF; i++) printf "%s ", $i

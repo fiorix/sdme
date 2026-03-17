@@ -304,7 +304,7 @@ ProcSubset=pid
 ///
 /// NixOS manages `/etc/systemd/system` as an immutable symlink to the Nix
 /// store, so units written there are destroyed by the activation script at
-/// boot. For NixOS, we use `/etc/systemd/system.control` instead — it is
+/// boot. For NixOS, we use `/etc/systemd/system.control` instead: it is
 /// the highest-priority persistent unit path in systemd's search order and
 /// is not managed by NixOS activation.
 pub(crate) fn systemd_unit_dir(staging_dir: &Path) -> &'static str {

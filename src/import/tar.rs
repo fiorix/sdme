@@ -59,7 +59,10 @@ pub(super) fn import_tarball(tarball: &Path, staging_dir: &Path, verbose: bool) 
         if verbose {
             eprintln!("detected OCI image layout");
         }
-        let mut oci_name = staging_dir.file_name().unwrap().to_os_string();
+        let mut oci_name = staging_dir
+            .file_name()
+            .context("staging dir has no file name")?
+            .to_os_string();
         oci_name.push(".oci");
         let oci_dir = staging_dir.with_file_name(oci_name);
         fs::rename(staging_dir, &oci_dir)?;

@@ -27,11 +27,11 @@ See [README.md](README.md) for how to run the tests and known limitations.
 | 15 | verify-kube-L5-redis-stack.sh | PASS | 6 | 0 | 0 | 6 |
 | 16 | verify-kube-L6-gitea-stack.sh | PASS | 15 | 0 | 0 | 15 |
 
-**Totals: 522 passed, 3 failed, 13 skipped (538 tests) — 15/16 suites pass**
+**Totals: 522 passed, 3 failed, 13 skipped (538 tests), 15/16 suites pass**
 
 ## Remaining Failures
 
-### verify-matrix.sh — openSUSE hardened OCI apps (3 failures, 3 skips)
+### verify-matrix.sh: openSUSE hardened OCI apps (3 failures, 3 skips)
 
 Hardened OCI apps (nginx, redis, postgresql) on openSUSE Tumbleweed fail with:
 
@@ -52,7 +52,7 @@ AlmaLinux, Arch Linux) pass hardened tests because they use setuid bits instead.
 
 **Fix:** strip `security.capability` xattrs during rootfs import.
 
-### verify-nixos.sh — resolved (was: OCI app boot failure)
+### verify-nixos.sh: resolved (was: OCI app boot failure)
 
 Previously, NixOS OCI app containers failed because NixOS activation replaced
 `/etc/systemd/system` with an immutable symlink to the Nix store, destroying

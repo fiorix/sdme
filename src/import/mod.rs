@@ -633,7 +633,7 @@ fn detect_systemd_nixos(rootfs: &Path) -> bool {
     if rootfs.join("run/current-system/sw/bin/systemd").exists() {
         return true;
     }
-    // /sbin/init created by nix-build — follows symlink into nix store.
+    // /sbin/init created by nix-build; follows symlink into nix store.
     for init in &["sbin/init", "usr/sbin/init"] {
         let p = rootfs.join(init);
         if p.exists() || p.is_symlink() {

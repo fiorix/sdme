@@ -1985,7 +1985,7 @@ mod tests {
     #[test]
     fn test_list_os_host_rootfs_fallback() {
         // Stopped host-rootfs container with no os-release in merged/ or upper/.
-        // Cascade falls to detect_distro(Path::new("/")) — the host's os-release.
+        // Cascade falls to detect_distro(Path::new("/")), the host's os-release.
         // On hosts without os-release (rare but possible), falls back to "unknown".
         let tmp = tmp();
         create_dummy_container(&tmp, "hostbox");
@@ -1996,7 +1996,7 @@ mod tests {
 
     #[test]
     fn test_list_os_unknown_when_no_os_release() {
-        // Imported rootfs container with no os-release anywhere — should show "unknown".
+        // Imported rootfs container with no os-release anywhere: should show "unknown".
         let tmp = tmp();
         create_dummy_container_with_rootfs(&tmp, "bare", "emptyfs");
         // Create the rootfs dir but don't write os-release.
@@ -2077,13 +2077,13 @@ mod tests {
         let info = infos.iter().find(|i| i.name == "cascade").unwrap();
         assert_eq!(info.os, "Merged OS");
 
-        // Remove merged os-release — upper/ wins
+        // Remove merged os-release, upper/ wins
         fs::remove_file(merged.join("etc/os-release")).unwrap();
         let infos = list(tmp.path()).unwrap();
         let info = infos.iter().find(|i| i.name == "cascade").unwrap();
         assert_eq!(info.os, "Upper OS");
 
-        // Remove upper os-release — rootfs wins
+        // Remove upper os-release, rootfs wins
         fs::remove_file(upper.join("etc/os-release")).unwrap();
         let infos = list(tmp.path()).unwrap();
         let info = infos.iter().find(|i| i.name == "cascade").unwrap();

@@ -189,17 +189,17 @@ present. A container whose rootfs has been removed shows as `broken`.
 OS detection uses a 5-step cascade to resolve the distro name shown
 in the listing:
 
-1. **merged/** — the overlayfs merged view (available when the
+1. **merged/**: the overlayfs merged view (available when the
    container is running; reflects both the base rootfs and any
    upper-layer changes such as a distro upgrade).
-2. **upper/** — the overlayfs upper layer alone (works when the
+2. **upper/**: the overlayfs upper layer alone (works when the
    container is stopped, since merged is not mounted).
-3. **{datadir}/fs/{rootfs}/** — the imported rootfs on disk (for
+3. **{datadir}/fs/{rootfs}/**: the imported rootfs on disk (for
    containers created with `-r`; useful when upper has no
    os-release of its own).
-4. **/** — the host root filesystem (for host-rootfs containers
+4. **/**: the host root filesystem (for host-rootfs containers
    that have no imported rootfs).
-5. **"unknown"** — returned when none of the above paths contain
+5. **"unknown"**: returned when none of the above paths contain
    an os-release file.
 
 This cascade ensures that `sdme ps` always shows a meaningful OS
@@ -989,11 +989,11 @@ from the app's cgroup: `find_oci_service_cgroup()` searches for the
 Three cgroup root patterns are tried, because systemd versions lay out
 the container's cgroup differently:
 
-1. **`{name}.scope`** — systemd 259+ registers the machine scope
+1. **`{name}.scope`**: systemd 259+ registers the machine scope
    directly under the container name.
-2. **`sdme@{name}.service`** — older systemd versions (< 257) use
+2. **`sdme@{name}.service`**: older systemd versions (< 257) use
    the template unit name as the cgroup path.
-3. **`machine-{escaped}.scope`** — systemd 257–258 use a
+3. **`machine-{escaped}.scope`**: systemd 257-258 use a
    `machine-` prefix with hyphens escaped as `\x2d`.
 
 Within each root, three inner path candidates are searched:
