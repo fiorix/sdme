@@ -86,7 +86,11 @@ impl ExportResult {
         match (self.free_space, self.partitions) {
             (Some(free), Some(parts)) => {
                 let free = format_human_size(free);
-                let label = if parts == 1 { "partition" } else { "partitions" };
+                let label = if parts == 1 {
+                    "partition"
+                } else {
+                    "partitions"
+                };
                 format!("{size}, {free} free, {parts} {label}")
             }
             _ => size,
@@ -1755,7 +1759,8 @@ mod tests {
         let tarball = dst.path().join("out.tar");
         fs::write(&tarball, "existing").unwrap();
 
-        let err = export_to_tar(src.path(), &tarball, &ExportFormat::Tar, false, false).unwrap_err();
+        let err =
+            export_to_tar(src.path(), &tarball, &ExportFormat::Tar, false, false).unwrap_err();
         assert!(err.to_string().contains("already exists"), "got: {err}");
     }
 

@@ -255,7 +255,10 @@ fn validate_env(spec: &str) -> Result<()> {
     }
 
     // Key must be valid: alphanumeric + underscore, not starting with digit
-    let first = key.chars().next().expect("key is non-empty (checked above)");
+    let first = key
+        .chars()
+        .next()
+        .expect("key is non-empty (checked above)");
     if first.is_ascii_digit() {
         bail!("invalid environment variable key '{key}': cannot start with a digit");
     }

@@ -105,7 +105,10 @@ pub fn kube_create(datadir: &Path, opts: &KubeCreateOptions<'_>) -> Result<Strin
     }
 
     // 1. Copy base rootfs to staging dir.
-    eprintln!("copying base rootfs '{}' to staging directory", opts.base_fs);
+    eprintln!(
+        "copying base rootfs '{}' to staging directory",
+        opts.base_fs
+    );
     fs::create_dir_all(&staging_dir)
         .with_context(|| format!("failed to create {}", staging_dir.display()))?;
     crate::copy::copy_tree(&base_dir, &staging_dir, opts.verbose)
