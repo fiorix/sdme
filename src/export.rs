@@ -632,7 +632,7 @@ fn export_raw_gpt(
         sfdisk
             .stdin
             .take()
-            .unwrap()
+            .context("sfdisk stdin unavailable")?
             .write_all(sfdisk_input.as_bytes())
             .context("failed to write to sfdisk stdin")?;
     }
@@ -1131,7 +1131,9 @@ fn enable_serial_console(mount: &Path) -> Result<()> {
             .map(|line| {
                 // Strip dev-*.device tokens from After= lines, keep the rest.
                 if line.trim().starts_with("After=") && line.contains("dev-") {
-                    let (key, vals) = line.split_once('=').unwrap();
+                    let Some((key, vals)) = line.split_once('=') else {
+                        return line.to_string();
+                    };
                     let filtered: Vec<&str> = vals
                         .split_whitespace()
                         .filter(|v| !v.starts_with("dev-"))

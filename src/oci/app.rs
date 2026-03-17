@@ -649,7 +649,11 @@ WantedBy=multi-user.target
                 .with_context(|| format!("failed to write {}", full_path.display()))?;
             // Enable timer units via symlink.
             if rel_path.ends_with(".timer") {
-                let timer_filename = full_path.file_name().unwrap().to_str().unwrap();
+                let timer_filename = full_path
+                    .file_name()
+                    .expect("probe unit path has a filename")
+                    .to_str()
+                    .expect("probe unit filename is valid UTF-8");
                 let symlink_path = wants_dir.join(timer_filename);
                 std::os::unix::fs::symlink(format!("../{timer_filename}"), &symlink_path)
                     .with_context(|| {
