@@ -1612,10 +1612,6 @@ capability restrictions and cause boot failures (systemd refuses to
 start a service whose bounding set includes capabilities the container
 does not have).
 
-### Future direction
-
-At this point this is all very exploratory. This journey is 1% complete.
-
 ## 17. Kubernetes Pod Support
 
 sdme can run Kubernetes Pod YAML files as nspawn containers. Each pod maps

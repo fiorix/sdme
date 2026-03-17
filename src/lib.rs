@@ -254,6 +254,15 @@ impl State {
     }
 
     /// Parse KEY=VALUE lines into a new state.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use sdme::State;
+    /// let state = State::parse("NAME=test\nROOTFS=ubuntu\n").unwrap();
+    /// assert_eq!(state.get("NAME"), Some("test"));
+    /// assert_eq!(state.get("ROOTFS"), Some("ubuntu"));
+    /// ```
     pub fn parse(content: &str) -> Result<Self> {
         let mut entries = BTreeMap::new();
         for line in content.lines() {
@@ -270,6 +279,18 @@ impl State {
     }
 
     /// Serialize all entries to KEY=VALUE text.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use sdme::State;
+    /// let mut state = State::new();
+    /// state.set("NAME", "test");
+    /// state.set("ROOTFS", "ubuntu");
+    /// let text = state.serialize();
+    /// let restored = State::parse(&text).unwrap();
+    /// assert_eq!(restored.get("NAME"), Some("test"));
+    /// ```
     pub fn serialize(&self) -> String {
         let mut out = String::new();
         for (key, value) in &self.entries {
@@ -481,6 +502,16 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
 /// - `T` → tebibytes (1024⁴)
 ///
 /// Returns 0 for the input `"0"`.
+///
+/// # Examples
+///
+/// ```
+/// # use sdme::parse_size;
+/// assert_eq!(parse_size("512M").unwrap(), 512 * 1024 * 1024);
+/// assert_eq!(parse_size("1G").unwrap(), 1024 * 1024 * 1024);
+/// assert_eq!(parse_size("0").unwrap(), 0);
+/// assert!(parse_size("10X").is_err());
+/// ```
 pub fn parse_size(s: &str) -> Result<u64> {
     if s.is_empty() {
         bail!("size value cannot be empty");
@@ -510,6 +541,17 @@ pub fn parse_size(s: &str) -> Result<u64> {
 ///
 /// Names must start with a lowercase letter, contain only lowercase
 /// letters, digits, and hyphens, and be at most 64 characters.
+///
+/// # Examples
+///
+/// ```
+/// # use sdme::validate_name;
+/// assert!(validate_name("my-container").is_ok());
+/// assert!(validate_name("test123").is_ok());
+/// assert!(validate_name("").is_err());
+/// assert!(validate_name("UPPER").is_err());
+/// assert!(validate_name("1starts-with-digit").is_err());
+/// ```
 pub fn validate_name(name: &str) -> Result<()> {
     if name.is_empty() {
         bail!("container name cannot be empty");

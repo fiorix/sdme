@@ -59,6 +59,19 @@ const KNOWN_CAPS: &[&str] = &[
 /// Security configuration for containers.
 ///
 /// All fields are optional; unset fields mean "use nspawn defaults".
+///
+/// # Examples
+///
+/// ```
+/// # use sdme::SecurityConfig;
+/// let sec = SecurityConfig {
+///     drop_caps: vec!["CAP_SYS_PTRACE".into()],
+///     no_new_privileges: true,
+///     ..Default::default()
+/// };
+/// assert!(!sec.is_empty());
+/// assert!(SecurityConfig::default().is_empty());
+/// ```
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct SecurityConfig {
     /// Enable user namespace isolation (`--private-users=pick`).

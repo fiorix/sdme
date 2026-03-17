@@ -132,6 +132,15 @@ pub enum ExportFormat {
 
 /// Detect the export format from the output path extension, with an
 /// optional override string.
+///
+/// # Examples
+///
+/// ```
+/// # use sdme::export::{detect_format, ExportFormat, RawFs};
+/// assert_eq!(detect_format("out.tar.gz", None).unwrap(), ExportFormat::TarGz);
+/// assert_eq!(detect_format("out.img", None).unwrap(), ExportFormat::Raw(RawFs::Ext4));
+/// assert_eq!(detect_format("anything", Some("tar")).unwrap(), ExportFormat::Tar);
+/// ```
 pub fn detect_format(output: &str, format_override: Option<&str>) -> Result<ExportFormat> {
     if let Some(fmt) = format_override {
         return match fmt {

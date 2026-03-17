@@ -357,7 +357,7 @@ This runs journalctl inside the container via
 For multi\-container kube pods, pass the app name:
 .BR "\-\-oci redis" .
 Single\-container pods auto\-select the only app.
-.SS sdme fs import \fIname\fR \fIsource\fR [\-f] [\-\-install\-packages \fImode\fR] [\-\-oci\-mode \fImode\fR] [\-\-base\-fs \fIrootfs\fR]
+.SS sdme fs import \fIname\fR \fIsource\fR [\-f] [\-\-install\-packages \fImode\fR] [\-\-oci\-mode \fImode\fR] [\-\-base\-fs \fIrootfs\fR] [\-\-nix\-config \fIpath\fR]
 Import a root filesystem.
 After import, systemd is detected in the rootfs; if missing, distro\-specific
 packages can be installed via chroot.
@@ -414,6 +414,13 @@ OCI metadata (environment, ports, volumes) is saved under
 See Section 6 (OCI Integration) in
 .I docs/architecture.md
 for details.
+.PP
+The
+.B \-\-nix\-config
+flag specifies a path to a NixOS configuration file to merge with the default
+container configuration during nix\-build imports.
+The file is copied into the rootfs and imported via the NixOS module system,
+so list options (e.g.\& packages, services) merge automatically.
 .PP
 The source type is auto\-detected:
 .RS
@@ -521,7 +528,7 @@ Use a different path (e.g.\&
 Lines starting with
 .B #
 and blank lines are ignored.
-.SS sdme fs export \fIname\fR \fIoutput\fR [\-\-container] [\-f] [\-\-fmt \fIformat\fR] [\-s \fIsize\fR] [\-\-free\-space \fIsize\fR] [\-\-filesystem \fItype\fR] [\-\-vm] [\-\-dns \fIip\fR]... [\-\-net\-ifaces \fIn\fR] [\-\-root\-password \fIpass\fR] [\-\-ssh\-key \fIpath\fR] [\-\-install\-packages \fImode\fR]
+.SS sdme fs export \fIname\fR \fIoutput\fR [\-\-container] [\-f] [\-\-fmt \fIformat\fR] [\-s \fIsize\fR] [\-\-free\-space \fIsize\fR] [\-\-filesystem \fItype\fR] [\-\-vm] [\-\-dns \fIip\fR]... [\-\-net\-ifaces \fIn\fR] [\-\-root\-password \fIpass\fR] [\-\-ssh\-key \fIpath\fR] [\-\-hostname \fIname\fR] [\-\-install\-packages \fImode\fR]
 Export a root filesystem or container to a directory, tarball, or disk image.
 The output format is auto\-detected from the file extension:
 .RS
@@ -629,7 +636,7 @@ VM\-specific options (only valid with
 Nameserver IP address for
 .IR /etc/resolv.conf .
 Repeatable; defaults to
-.BR 1.1.1.1 .
+.BR "8.8.8.8, 8.8.4.4" .
 .TP
 .BR \-\-net\-ifaces " " \fIn\fR
 Number of network interfaces to configure with DHCP via
@@ -644,6 +651,10 @@ Set the root password in
 .BR \-\-ssh\-key " " \fIpath\fR
 Install an SSH authorized key for root from the given file path
 (or literal key string if not a file).
+.TP
+.BR \-\-hostname " " \fIname\fR
+Set the VM hostname.
+Default: the rootfs or container name.
 .TP
 .BR \-\-install\-packages " " \fImode\fR
 Control package installation (e.g.\&
@@ -1030,6 +1041,48 @@ Set to
 for unlimited.
 Default:
 .BR 50G .
+.TP
+.B default_export_fs
+Default filesystem type for raw disk image exports.
+Values:
+.BR ext4 " or " btrfs .
+Default:
+.BR ext4 .
+.TP
+.B default_export_free_space
+Extra free space added to the auto\-calculated disk image size (e.g.\&
+.IR 256M ", " 1G ).
+Default:
+.BR 256M .
+.TP
+.B docker_user
+Docker Hub username for authenticated image pulls.
+Default: empty (anonymous pulls).
+.TP
+.B docker_token
+Docker Hub personal access token for authenticated image pulls.
+Used together with
+.BR docker_user .
+Default: empty.
+.TP
+.B oci_cache_dir
+Directory for the OCI blob cache.
+Default: empty (uses
+.IR {datadir}/cache/oci ).
+.TP
+.B oci_cache_max_size
+Maximum size of the OCI blob cache (e.g.\&
+.IR 10G ", " 5G ).
+Set to
+.B 0
+to disable caching.
+Default:
+.BR 10G .
+.TP
+.B nixpkgs_channel
+Nixpkgs channel used for NixOS rootfs builds via nix\-build.
+Default:
+.BR nixos\-unstable .
 .RE
 .SH CONFIGURATION
 The configuration file is in TOML format, located at
@@ -1200,6 +1253,12 @@ Set to
 for unlimited.
 Default:
 .BR 50G .
+.TP
+.B nixpkgs_channel
+String.
+Nixpkgs channel used for NixOS rootfs builds via nix\-build.
+Default:
+.BR nixos\-unstable .
 .SH FILES
 .TP
 .I /var/lib/sdme/
@@ -1987,7 +2046,7 @@ is stripped.
 OCI digest fields in manifests are validated to contain only alphanumeric
 and hex characters before being used to resolve blob paths.
 The
-.B \-\-rootfs
+.BR \-r " / " \-\-fs
 parameter is validated against the same naming rules as container names,
 preventing directory traversal via crafted values like
 .IR ../state .
