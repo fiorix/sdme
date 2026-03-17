@@ -72,13 +72,21 @@ pub enum OciMode {
 
 /// Options for rootfs import.
 pub struct ImportOptions<'a> {
+    /// Import source (path, URL, or OCI registry reference).
     pub source: &'a str,
+    /// Name for the imported rootfs.
     pub name: &'a str,
+    /// Enable verbose output.
     pub verbose: bool,
+    /// Overwrite an existing rootfs with the same name.
     pub force: bool,
+    /// Allow interactive prompts (e.g. package installation confirmation).
     pub interactive: bool,
+    /// Whether to install systemd packages if missing.
     pub install_packages: InstallPackages,
+    /// How to classify OCI registry images (auto, base, or app).
     pub oci_mode: OciMode,
+    /// Base rootfs name for OCI app imports.
     pub base_fs: Option<&'a str>,
     /// Docker Hub credentials `(user, token)` for authenticated pulls.
     pub docker_credentials: Option<(&'a str, &'a str)>,

@@ -23,8 +23,11 @@ pub(super) struct StoreConfig {
 
 /// Information about a listed store entry (secret or configmap).
 pub struct StoreInfo {
+    /// Entry name.
     pub name: String,
+    /// Number of data keys in the entry.
     pub keys: usize,
+    /// Human-readable creation timestamp.
     pub created: String,
 }
 

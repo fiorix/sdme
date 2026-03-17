@@ -31,16 +31,23 @@ pub struct BlobCache {
 
 /// Information about the cache.
 pub struct CacheInfo {
+    /// Absolute path to the cache directory.
     pub dir: PathBuf,
+    /// Number of blobs currently stored.
     pub blob_count: usize,
+    /// Total size of all cached blobs in bytes.
     pub total_size: u64,
+    /// Maximum allowed cache size in bytes.
     pub max_size: u64,
 }
 
 /// A single cache entry.
 pub struct CacheEntry {
+    /// Content-addressable digest (e.g. `sha256:abcdef...`).
     pub digest: String,
+    /// Blob size in bytes.
     pub size: u64,
+    /// Last access time as Unix epoch seconds.
     pub last_access: u64,
 }
 

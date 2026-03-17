@@ -16,20 +16,29 @@ use crate::{check_interrupted, containers, copy, system_check, systemd, validate
 
 /// Options for preparing a raw disk image for VM boot.
 pub struct VmOptions {
+    /// Hostname written to `/etc/hostname` inside the image.
     pub hostname: String,
+    /// DNS nameservers written to `/etc/resolv.conf`.
     pub nameservers: Vec<String>,
+    /// Number of network interfaces to configure via `systemd-networkd`.
     pub net_ifaces: u32,
+    /// SHA-512 crypt hash for the root password in `/etc/shadow`.
     pub root_password: Option<String>,
+    /// SSH public key installed as root's `authorized_keys`.
     pub ssh_key: Option<String>,
+    /// Whether to install packages (e.g. udev) via chroot.
     pub install_packages: InstallPackages,
+    /// Allow interactive prompts during package installation.
     pub interactive: bool,
 }
 
 /// Filesystem type for raw disk image export.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum RawFs {
+    /// ext4 filesystem (default).
     #[default]
     Ext4,
+    /// Btrfs filesystem.
     Btrfs,
 }
 
@@ -44,11 +53,17 @@ impl std::fmt::Display for RawFs {
 
 /// Grouped options for rootfs/container export.
 pub struct ExportOptions<'a> {
+    /// Output format (directory, tarball, or raw disk image).
     pub format: &'a ExportFormat,
+    /// Explicit image size (overrides auto-calculation when set).
     pub size: Option<&'a str>,
+    /// Extra free space added to auto-calculated image size, in bytes.
     pub free_space: u64,
+    /// VM-specific options; `None` for non-VM exports.
     pub vm_opts: Option<&'a VmOptions>,
+    /// Enable verbose output.
     pub verbose: bool,
+    /// Overwrite the output path if it already exists.
     pub force: bool,
 }
 

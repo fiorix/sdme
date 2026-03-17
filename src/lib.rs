@@ -1,3 +1,5 @@
+#![warn(missing_docs)]
+
 //! Lightweight systemd-nspawn container manager with overlayfs.
 //!
 //! sdme manages containers backed by explicit root filesystems, keeping
@@ -171,9 +173,13 @@ pub fn confirm_default_yes(msg: &str) -> Result<bool> {
 
 /// Information about the real user behind `sudo`.
 pub struct SudoUser {
+    /// Login name from `SUDO_USER`.
     pub name: String,
+    /// Numeric user ID.
     pub uid: u32,
+    /// Numeric group ID.
     pub gid: u32,
+    /// Home directory path.
     pub home: PathBuf,
 }
 

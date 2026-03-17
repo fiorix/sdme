@@ -25,8 +25,11 @@ const RUNTIME_DIR: &str = "/run/sdme/pods";
 
 /// Information about a listed pod.
 pub struct PodInfo {
+    /// Pod name.
     pub name: String,
+    /// Human-readable creation timestamp.
     pub created: String,
+    /// Whether the pod's network namespace is currently active.
     pub active: bool,
 }
 

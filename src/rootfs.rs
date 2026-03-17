@@ -17,7 +17,9 @@ use crate::{validate_name, State};
 
 /// An entry returned by [`list`].
 pub struct RootfsEntry {
+    /// Rootfs directory name.
     pub name: String,
+    /// Detected distribution (from os-release), or empty if unknown.
     pub distro: String,
 }
 

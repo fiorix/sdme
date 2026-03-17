@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+/// Global sdme configuration loaded from `/etc/sdme.conf`.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
     /// Prompt for confirmation on destructive operations.

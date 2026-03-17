@@ -11,7 +11,9 @@
 /// Target architecture for generated binaries.
 #[derive(Clone, Copy)]
 pub enum Arch {
+    /// x86-64 (AMD64).
     X86_64,
+    /// 64-bit ARM (AArch64).
     Aarch64,
 }
 
