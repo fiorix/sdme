@@ -3,98 +3,164 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>sdme — lightweight systemd containers with overlayfs</title>
+<title>sdme — the systemd machine editor</title>
 <style>
+  :root {
+    --bg: #0d1117;
+    --bg-card: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text-secondary: #8b949e;
+    --text-heading: #c9d1d9;
+    --link: #58a6ff;
+    --badge-bg: #1f6feb;
+    --code-bg: #161b22;
+    --btn-bg: #21262d;
+    --btn-border: #30363d;
+    --btn-hover: #8b949e;
+    --accent: #3fb950;
+  }
+  [data-theme="light"] {
+    --bg: #ffffff;
+    --bg-card: #f6f8fa;
+    --border: #d0d7de;
+    --text: #1f2328;
+    --text-secondary: #656d76;
+    --text-heading: #1f2328;
+    --link: #0969da;
+    --badge-bg: #0969da;
+    --code-bg: #f6f8fa;
+    --btn-bg: #f3f4f6;
+    --btn-border: #d0d7de;
+    --btn-hover: #656d76;
+    --accent: #1a7f37;
+  }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
-    color: #e6edf3;
-    background: #0d1117;
+    color: var(--text);
+    background: var(--bg);
     line-height: 1.6;
-    padding: 3rem 1.5rem;
+    padding: 2rem 1.5rem 3rem;
     max-width: 720px;
     margin: 0 auto;
+    transition: background 0.2s, color 0.2s;
   }
-  h1 { font-size: 2rem; margin-bottom: 0.25rem; }
-  .tagline { color: #8b949e; margin-bottom: 0.5rem; }
-  .header-links { margin-bottom: 2rem; display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }
+
+  /* Logo header */
+  .logo-header {
+    display: flex;
+    align-items: center;
+    gap: 2rem;
+    margin: -2rem -1.5rem 1.5rem;
+    padding: 1.5rem;
+    background: var(--bg);
+    transition: background 0.2s;
+  }
+  .logo-icon { height: 200px; width: auto; }
+  :root:not([data-theme="light"]) .logo-icon { filter: invert(1); }
+  .header-right {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    margin-left: auto;
+    text-align: right;
+  }
+  .header-right .header-links { justify-content: flex-end; }
+
+  .tagline { color: var(--text-secondary); margin-bottom: 0.5rem; }
+  .header-links {
+    margin-bottom: 2rem;
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    flex-wrap: wrap;
+  }
   .version-badge {
     display: none;
     font-size: 0.75rem;
-    background: #1f6feb;
+    background: var(--badge-bg);
     color: #fff;
     padding: 0.15rem 0.5rem;
     border-radius: 10px;
     font-weight: 600;
   }
-  a { color: #58a6ff; text-decoration: none; }
+  a { color: var(--link); text-decoration: none; }
   a:hover { text-decoration: underline; }
-  h2 { font-size: 1.1rem; margin-bottom: 0.5rem; color: #c9d1d9; }
+  h2 { font-size: 1.1rem; margin-bottom: 0.5rem; color: var(--text-heading); }
+  p { margin-bottom: 0.75rem; }
   pre {
-    background: #161b22;
-    border: 1px solid #30363d;
+    background: var(--code-bg);
+    border: 1px solid var(--border);
     border-radius: 6px;
     padding: 0.75rem 1rem;
     overflow-x: auto;
     font-size: 0.875rem;
     margin-bottom: 1rem;
+    transition: background 0.2s, border-color 0.2s;
   }
+  code {
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    color: var(--text);
+  }
+  section { margin-bottom: 2rem; }
+  .note { color: var(--text-secondary); font-size: 0.8rem; margin-top: 0.25rem; }
+
+  /* Theme toggle */
+  .theme-toggle {
+    background: var(--btn-bg);
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    padding: 0.3rem 0.5rem;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.8rem;
+    line-height: 1;
+    transition: color 0.15s, border-color 0.15s, background 0.2s;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+  }
+  .theme-toggle:hover { color: var(--text); border-color: var(--btn-hover); }
+  .theme-toggle svg { width: 14px; height: 14px; fill: currentColor; }
+
+  /* Copy button */
   .code-row {
     display: flex;
     align-items: stretch;
     gap: 0.5rem;
     margin-bottom: 1rem;
   }
-  .code-row pre {
-    flex: 1;
-    min-width: 0;
-    margin-bottom: 0;
-  }
-  code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; }
-  section { margin-bottom: 2rem; }
-  .note { color: #8b949e; font-size: 0.8rem; margin-top: 0.25rem; }
-
-  /* Copy button */
+  .code-row pre { flex: 1; min-width: 0; margin-bottom: 0; }
   .copy-btn {
     flex-shrink: 0;
     align-self: stretch;
-    background: #21262d;
-    border: 1px solid #30363d;
-    color: #8b949e;
+    background: var(--btn-bg);
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
     padding: 0 0.4rem;
     border-radius: 4px;
     cursor: pointer;
     line-height: 0;
-    transition: color 0.15s, border-color 0.15s;
+    transition: color 0.15s, border-color 0.15s, background 0.2s;
   }
-  .copy-btn:hover { color: #e6edf3; border-color: #8b949e; }
-  .copy-btn.copied { color: #3fb950; border-color: #3fb950; }
+  .copy-btn:hover { color: var(--text); border-color: var(--btn-hover); }
+  .copy-btn.copied { color: var(--accent); border-color: var(--accent); }
   .copy-btn svg { width: 16px; height: 16px; fill: currentColor; }
 
   /* Download cards */
   .card {
-    background: #161b22;
-    border: 1px solid #30363d;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
     border-radius: 8px;
     padding: 1rem 1.25rem;
     margin-bottom: 1rem;
+    transition: background 0.2s, border-color 0.2s;
   }
-  .card h3 {
-    font-size: 1rem;
-    color: #e6edf3;
-    margin-bottom: 0.15rem;
-  }
-  .card .distros {
-    color: #8b949e;
-    font-size: 0.8rem;
-    margin-bottom: 0.75rem;
-  }
-  .card .deps {
-    color: #8b949e;
-    font-size: 0.8rem;
-    margin-bottom: 0.75rem;
-  }
-  .card .deps strong { color: #c9d1d9; font-weight: 600; }
+  .card h3 { font-size: 1rem; color: var(--text); margin-bottom: 0.15rem; }
+  .card .distros { color: var(--text-secondary); font-size: 0.8rem; margin-bottom: 0.75rem; }
+  .card .deps { color: var(--text-secondary); font-size: 0.8rem; margin-bottom: 0.75rem; }
+  .card .deps strong { color: var(--text-heading); font-weight: 600; }
   .asset-row {
     display: flex;
     align-items: baseline;
@@ -102,32 +168,48 @@
     margin-bottom: 0.35rem;
     font-size: 0.875rem;
   }
-  .asset-row .size {
-    color: #8b949e;
-    font-size: 0.8rem;
-    white-space: nowrap;
-  }
-  .card .code-row {
-    margin-top: 0.75rem;
-    margin-bottom: 0;
-  }
+  .asset-row .size { color: var(--text-secondary); font-size: 0.8rem; white-space: nowrap; }
+  .card .code-row { margin-top: 0.75rem; margin-bottom: 0; }
   .card .code-row pre { margin-bottom: 0; }
-  .checksum-link {
-    text-align: center;
-    margin-top: 0.5rem;
-    font-size: 0.85rem;
-  }
+  .checksum-link { text-align: center; margin-top: 0.5rem; font-size: 0.85rem; }
   #downloads { display: none; }
-  #fallback a { color: #58a6ff; }
+  #fallback a { color: var(--link); }
+
+  /* Divider */
+  hr {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 2rem 0;
+    transition: border-color 0.2s;
+  }
+
+  /* Doc links */
+  .doc-links { list-style: none; margin-left: 0; }
+  .doc-links li { margin-bottom: 0.5rem; }
+  .doc-links .desc { color: var(--text-secondary); }
+
+  footer { margin-top: 2rem; }
 </style>
 </head>
 <body>
-  <h1>sdme</h1>
-  <p class="tagline">Lightweight systemd containers with overlayfs</p>
-  <div class="header-links">
-    <a href="https://github.com/fiorix/sdme">github.com/fiorix/sdme</a>
-    <span id="version-badge" class="version-badge"></span>
+  <div class="logo-header">
+    <img src="logo.svg" alt="sdme" class="logo-icon">
+    <div class="header-right">
+      <div class="header-links">
+        <a href="https://github.com/fiorix/sdme">github.com/fiorix/sdme</a>
+        <span id="version-badge" class="version-badge"></span>
+        <button class="theme-toggle" id="theme-toggle" title="Toggle theme">
+          <svg id="icon-sun" viewBox="0 0 16 16" style="display:none"><path d="M8 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm0 1.5a5.5 5.5 0 1 1 0-11 5.5 5.5 0 0 1 0 11ZM8 0a.75.75 0 0 1 .75.75v1.5a.75.75 0 0 1-1.5 0V.75A.75.75 0 0 1 8 0Zm0 13a.75.75 0 0 1 .75.75v1.5a.75.75 0 0 1-1.5 0v-1.5A.75.75 0 0 1 8 13ZM2.343 2.343a.75.75 0 0 1 1.061 0l1.06 1.06a.75.75 0 0 1-1.06 1.061l-1.06-1.06a.75.75 0 0 1 0-1.06Zm9.193 9.193a.75.75 0 0 1 1.06 0l1.061 1.06a.75.75 0 0 1-1.06 1.061l-1.061-1.06a.75.75 0 0 1 0-1.061ZM0 8a.75.75 0 0 1 .75-.75h1.5a.75.75 0 0 1 0 1.5H.75A.75.75 0 0 1 0 8Zm13 0a.75.75 0 0 1 .75-.75h1.5a.75.75 0 0 1 0 1.5h-1.5A.75.75 0 0 1 13 8ZM2.343 13.657a.75.75 0 0 1 0-1.06l1.06-1.061a.75.75 0 0 1 1.061 1.06l-1.06 1.061a.75.75 0 0 1-1.06 0Zm9.193-9.193a.75.75 0 0 1 0-1.06l1.061-1.061a.75.75 0 0 1 1.06 1.06l-1.06 1.061a.75.75 0 0 1-1.06 0Z"/></svg>
+          <svg id="icon-moon" viewBox="0 0 16 16"><path d="M9.598 1.591a.749.749 0 0 1 .785-.175 7.001 7.001 0 1 1-8.967 8.967.75.75 0 0 1 .961-.96 5.5 5.5 0 0 0 7.221-7.832Z"/></svg>
+        </button>
+      </div>
+    </div>
   </div>
+
+  <section>
+    <p>The systemd machine editor: a command line tool for managing
+    systemd-nspawn booted containers on Linux.</p>
+  </section>
 
   <section>
     <h2>Quick install</h2>
@@ -163,11 +245,50 @@
 (function() {
   'use strict';
 
-  // --- SVG icons (GitHub Octicons) ---
+  // --- Theme management ---
+  var THEME_KEY = 'sdme-theme';
+
+  function getPreferredTheme() {
+    var stored = null;
+    try { stored = localStorage.getItem(THEME_KEY); } catch(e) {}
+    if (stored === 'light' || stored === 'dark') return stored;
+    if (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) return 'light';
+    return 'dark';
+  }
+
+  function applyTheme(theme) {
+    document.documentElement.setAttribute('data-theme', theme);
+    document.getElementById('icon-sun').style.display = theme === 'dark' ? 'none' : 'inline';
+    document.getElementById('icon-moon').style.display = theme === 'dark' ? 'inline' : 'none';
+    try { localStorage.setItem(THEME_KEY, theme); } catch(e) {}
+  }
+
+  applyTheme(getPreferredTheme());
+
+  document.getElementById('theme-toggle').addEventListener('click', function() {
+    var current = document.documentElement.getAttribute('data-theme') || 'dark';
+    applyTheme(current === 'dark' ? 'light' : 'dark');
+  });
+
+  // Follow OS theme changes when user hasn't manually toggled
+  if (window.matchMedia) {
+    try {
+      var mq = window.matchMedia('(prefers-color-scheme: light)');
+      var handler = function(e) {
+        var stored = null;
+        try { stored = localStorage.getItem(THEME_KEY); } catch(ex) {}
+        if (!stored) applyTheme(e.matches ? 'light' : 'dark');
+      };
+      if (mq.addEventListener) mq.addEventListener('change', handler);
+      else if (mq.addListener) mq.addListener(handler);
+    } catch(e) {}
+  }
+
+  // --- SVG icons ---
   var ICON_COPY = '<svg viewBox="0 0 16 16"><path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 0 1 0 1.5h-1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-1.5a.75.75 0 0 1 1.5 0v1.5A1.75 1.75 0 0 1 9.25 16h-7.5A1.75 1.75 0 0 1 0 14.25Z"></path><path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0 1 14.25 11h-7.5A1.75 1.75 0 0 1 5 9.25Zm1.75-.25a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z"></path></svg>';
   var ICON_CHECK = '<svg viewBox="0 0 16 16"><path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.75.75 0 0 1 1.06-1.06L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0Z"></path></svg>';
 
-  // --- Copy-to-clipboard buttons ---
+  // --- Copy-to-clipboard ---
   function addCopyButtons() {
     document.querySelectorAll('pre[data-copy]').forEach(function(pre) {
       if (pre.parentNode.classList.contains('code-row')) return;
@@ -209,7 +330,7 @@
     document.body.appendChild(ta);
     ta.select();
     try { document.execCommand('copy'); showCopied(btn); }
-    catch(e) { /* silently fail */ }
+    catch(e) {}
     document.body.removeChild(ta);
   }
 
@@ -226,7 +347,7 @@
 
   // --- GitHub release fetch ---
   var CACHE_KEY = 'sdme_release';
-  var CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+  var CACHE_TTL = 5 * 60 * 1000;
 
   function getCached() {
     try {
@@ -244,7 +365,7 @@
   function setCache(data) {
     try {
       sessionStorage.setItem(CACHE_KEY, JSON.stringify({ ts: Date.now(), data: data }));
-    } catch(e) { /* quota exceeded, ignore */ }
+    } catch(e) {}
   }
 
   function formatSize(bytes) {
@@ -308,12 +429,10 @@
   ];
 
   function renderDownloads(release) {
-    // Set version badge
     var badge = document.getElementById('version-badge');
     badge.textContent = release.tag_name;
     badge.style.display = 'inline-block';
 
-    // Classify assets
     var groups = {};
     var checksumUrl = null;
     release.assets.forEach(function(a) {
@@ -324,7 +443,6 @@
       groups[type].push(a);
     });
 
-    // Sort each group by architecture (x86_64 first)
     Object.keys(groups).forEach(function(k) {
       groups[k].sort(function(a, b) {
         var aa = archLabel(a.name), bb = archLabel(b.name);
@@ -353,9 +471,7 @@
         html += '</div>';
       });
 
-      // Install command — show one per architecture
       assets.forEach(function(a) {
-        var arch = archLabel(a.name);
         var cmd = cat.cmdTemplate(a.browser_download_url, a.name);
         html += '<pre data-copy><code>' + escapeHtml(cmd) + '</code></pre>';
       });
@@ -371,11 +487,9 @@
     section.innerHTML = html;
     section.style.display = 'block';
 
-    // Hide fallback
     var fb = document.getElementById('fallback');
     if (fb) fb.style.display = 'none';
 
-    // Add copy buttons to new pre elements
     addCopyButtons();
   }
 
@@ -404,19 +518,10 @@
           var data = JSON.parse(xhr.responseText);
           setCache(data);
           renderDownloads(data);
-        } catch(e) {
-          console.error('sdme: failed to parse release data', e);
-          showFallback();
-        }
-      } else {
-        console.error('sdme: GitHub API returned', xhr.status);
-        showFallback();
-      }
+        } catch(e) { showFallback(); }
+      } else { showFallback(); }
     };
-    xhr.onerror = function() {
-      console.error('sdme: GitHub API request failed');
-      showFallback();
-    };
+    xhr.onerror = function() { showFallback(); };
     xhr.send();
   }
 
