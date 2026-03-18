@@ -785,13 +785,14 @@ fn start_and_await_boot(
     name: &str,
     tasks_max: u32,
     boot_timeout: std::time::Duration,
+    config_boot_timeout: u64,
     verbose: bool,
 ) -> Result<()> {
-    systemd::start(datadir, name, tasks_max, verbose)?;
+    systemd::start(datadir, name, tasks_max, config_boot_timeout, verbose)?;
     if let Err(e) = systemd::await_boot(name, boot_timeout, verbose) {
         sdme::reset_interrupt();
         eprintln!("boot failed, stopping '{name}'");
-        let _ = containers::stop(name, containers::StopMode::Terminate, verbose);
+        let _ = containers::stop(name, containers::StopMode::Terminate, 30, verbose);
         return Err(e);
     }
     Ok(())
@@ -1437,6 +1438,16 @@ fn main() -> Result<()> {
                         toml_key = key.clone();
                         toml_val = Some(V::Integer(v as i64));
                     }
+                    "stop_timeout_graceful" | "stop_timeout_terminate" | "stop_timeout_kill" => {
+                        let secs: u64 = value.parse().map_err(|_| {
+                            anyhow::anyhow!("{key} must be a positive integer (seconds)")
+                        })?;
+                        if secs == 0 {
+                            bail!("{key} must be greater than 0");
+                        }
+                        toml_key = key.clone();
+                        toml_val = Some(V::Integer(secs as i64));
+                    }
                     "docker_user" => {
                         toml_key = key.clone();
                         toml_val = Some(V::String(value));
@@ -1596,7 +1607,13 @@ fn main() -> Result<()> {
 
             eprintln!("creating '{name}'");
             if enable {
-                systemd::enable(&cfg.datadir, &name, cfg.tasks_max, cli.verbose)?;
+                systemd::enable(
+                    &cfg.datadir,
+                    &name,
+                    cfg.tasks_max,
+                    cfg.boot_timeout,
+                    cli.verbose,
+                )?;
                 eprintln!("enabled '{name}' for auto-start on boot");
             }
             println!("{name}");
@@ -1654,9 +1671,17 @@ fn main() -> Result<()> {
             let boot_timeout = std::time::Duration::from_secs(timeout.unwrap_or(cfg.boot_timeout));
             let datadir = &cfg.datadir;
             let verbose = cli.verbose;
+            let config_boot_timeout = cfg.boot_timeout;
             for_each_container(datadir, &targets, "starting", "started", |name| {
                 containers::ensure_exists(datadir, name)?;
-                start_and_await_boot(datadir, name, cfg.tasks_max, boot_timeout, verbose)
+                start_and_await_boot(
+                    datadir,
+                    name,
+                    cfg.tasks_max,
+                    boot_timeout,
+                    config_boot_timeout,
+                    verbose,
+                )
             })?;
         }
         Command::Enable { names } => {
@@ -1664,7 +1689,7 @@ fn main() -> Result<()> {
             let verbose = cli.verbose;
             for_each_container(datadir, &names, "enabling", "enabled", |name| {
                 containers::ensure_exists(datadir, name)?;
-                systemd::enable(datadir, name, cfg.tasks_max, verbose)
+                systemd::enable(datadir, name, cfg.tasks_max, cfg.boot_timeout, verbose)
             })?;
         }
         Command::Disable { names } => {
@@ -1708,6 +1733,7 @@ fn main() -> Result<()> {
                     &name,
                     cfg.tasks_max,
                     boot_timeout,
+                    cfg.boot_timeout,
                     cli.verbose,
                 )?;
             }
@@ -1868,7 +1894,13 @@ fn main() -> Result<()> {
             eprintln!("creating '{name}'");
 
             if enable {
-                systemd::enable(&cfg.datadir, &name, cfg.tasks_max, cli.verbose)?;
+                systemd::enable(
+                    &cfg.datadir,
+                    &name,
+                    cfg.tasks_max,
+                    cfg.boot_timeout,
+                    cli.verbose,
+                )?;
                 eprintln!("enabled '{name}' for auto-start on boot");
             }
 
@@ -1880,7 +1912,13 @@ fn main() -> Result<()> {
 
             eprintln!("starting '{name}'");
             let boot_result = (|| -> Result<()> {
-                systemd::start(&cfg.datadir, &name, cfg.tasks_max, cli.verbose)?;
+                systemd::start(
+                    &cfg.datadir,
+                    &name,
+                    cfg.tasks_max,
+                    cfg.boot_timeout,
+                    cli.verbose,
+                )?;
                 let boot_timeout =
                     std::time::Duration::from_secs(timeout.unwrap_or(cfg.boot_timeout));
                 systemd::await_boot(&name, boot_timeout, cli.verbose)?;
@@ -1890,7 +1928,12 @@ fn main() -> Result<()> {
             if let Err(e) = boot_result {
                 sdme::reset_interrupt();
                 eprintln!("boot failed, stopping '{name}'");
-                let _ = containers::stop(&name, containers::StopMode::Terminate, cli.verbose);
+                let _ = containers::stop(
+                    &name,
+                    containers::StopMode::Terminate,
+                    cfg.stop_timeout_terminate,
+                    cli.verbose,
+                );
                 return Err(e);
             }
 
@@ -2041,12 +2084,12 @@ fn main() -> Result<()> {
             term,
             kill,
         } => {
-            let mode = if kill {
-                containers::StopMode::Kill
+            let (mode, timeout_secs) = if kill {
+                (containers::StopMode::Kill, cfg.stop_timeout_kill)
             } else if term {
-                containers::StopMode::Terminate
+                (containers::StopMode::Terminate, cfg.stop_timeout_terminate)
             } else {
-                containers::StopMode::Graceful
+                (containers::StopMode::Graceful, cfg.stop_timeout_graceful)
             };
             let targets: Vec<String> = if all {
                 containers::list(&cfg.datadir)?
@@ -2065,7 +2108,7 @@ fn main() -> Result<()> {
             let verbose = cli.verbose;
             for_each_container(datadir, &targets, "stopping", "stopped", |name| {
                 containers::ensure_exists(datadir, name)?;
-                containers::stop(name, mode, verbose)
+                containers::stop(name, mode, timeout_secs, verbose)
             })?;
         }
         Command::Pod(cmd) => match cmd {
@@ -2147,7 +2190,13 @@ fn main() -> Result<()> {
                 )?;
                 eprintln!("starting '{name}'");
                 let boot_result = (|| -> Result<()> {
-                    systemd::start(&cfg.datadir, &name, cfg.tasks_max, cli.verbose)?;
+                    systemd::start(
+                        &cfg.datadir,
+                        &name,
+                        cfg.tasks_max,
+                        cfg.boot_timeout,
+                        cli.verbose,
+                    )?;
                     let boot_timeout =
                         std::time::Duration::from_secs(timeout.unwrap_or(cfg.boot_timeout));
                     systemd::await_boot(&name, boot_timeout, cli.verbose)?;
@@ -2156,7 +2205,12 @@ fn main() -> Result<()> {
                 if let Err(e) = boot_result {
                     sdme::reset_interrupt();
                     eprintln!("boot failed, stopping '{name}'");
-                    let _ = containers::stop(&name, containers::StopMode::Terminate, cli.verbose);
+                    let _ = containers::stop(
+                        &name,
+                        containers::StopMode::Terminate,
+                        cfg.stop_timeout_terminate,
+                        cli.verbose,
+                    );
                     return Err(e);
                 }
                 eprintln!("joining '{name}'");

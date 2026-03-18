@@ -90,7 +90,6 @@ pub(crate) struct ProbeSpec {
     pub(crate) period_seconds: u32,
     pub(crate) timeout_seconds: u32,
     pub(crate) failure_threshold: u32,
-    #[allow(dead_code)]
     pub(crate) success_threshold: u32,
 }
 

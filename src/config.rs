@@ -106,6 +106,18 @@ pub struct Config {
     #[serde(default)]
     pub nix_config_template: String,
 
+    /// Graceful stop timeout in seconds (SIGRTMIN+4 to leader).
+    #[serde(default = "default_stop_timeout_graceful")]
+    pub stop_timeout_graceful: u64,
+
+    /// Terminate stop timeout in seconds (SIGTERM to nspawn leader).
+    #[serde(default = "default_stop_timeout_terminate")]
+    pub stop_timeout_terminate: u64,
+
+    /// Force-kill stop timeout in seconds (SIGKILL to all).
+    #[serde(default = "default_stop_timeout_kill")]
+    pub stop_timeout_kill: u64,
+
     /// Automatically clean up stale transactions before mutating operations.
     ///
     /// When `true` (default), operations like `import`, `build`, and `export`
@@ -176,6 +188,18 @@ fn default_nixpkgs_channel() -> String {
     "nixos-unstable".to_string()
 }
 
+fn default_stop_timeout_graceful() -> u64 {
+    90
+}
+
+fn default_stop_timeout_terminate() -> u64 {
+    30
+}
+
+fn default_stop_timeout_kill() -> u64 {
+    15
+}
+
 fn default_auto_fs_gc() -> bool {
     true
 }
@@ -202,6 +226,9 @@ impl Default for Config {
             max_download_size: default_max_download_size(),
             nixpkgs_channel: default_nixpkgs_channel(),
             nix_config_template: String::new(),
+            stop_timeout_graceful: default_stop_timeout_graceful(),
+            stop_timeout_terminate: default_stop_timeout_terminate(),
+            stop_timeout_kill: default_stop_timeout_kill(),
             auto_fs_gc: default_auto_fs_gc(),
             distros: HashMap::new(),
         }
@@ -269,6 +296,9 @@ impl Config {
         println!("max_download_size = {}", self.max_download_size);
         println!("nixpkgs_channel = {}", self.nixpkgs_channel);
         println!("nix_config_template = {}", self.nix_config_template);
+        println!("stop_timeout_graceful = {}", self.stop_timeout_graceful);
+        println!("stop_timeout_terminate = {}", self.stop_timeout_terminate);
+        println!("stop_timeout_kill = {}", self.stop_timeout_kill);
         let auto_fs_gc = if self.auto_fs_gc { "yes" } else { "no" };
         println!("auto_fs_gc = {auto_fs_gc}");
     }

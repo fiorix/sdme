@@ -43,6 +43,9 @@ struct RunArgs {
     /// Failure threshold before action.
     #[arg(long)]
     threshold: u32,
+    /// Success threshold before transitioning to success state.
+    #[arg(long, default_value_t = 1)]
+    success_threshold: u32,
     /// Systemd service to restart on threshold (startup/liveness).
     #[arg(long)]
     service: String,
@@ -201,6 +204,7 @@ fn main() -> ExitCode {
                 &args.name,
                 &args.service,
                 args.threshold,
+                args.success_threshold,
                 success,
                 verbose,
             )

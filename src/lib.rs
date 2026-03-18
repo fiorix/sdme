@@ -323,10 +323,10 @@ impl State {
         out
     }
 
-    /// Write the state to a file atomically.
+    /// Write the state to a file atomically with 0o600 permissions.
     pub fn write_to(&self, path: &Path) -> Result<()> {
         let content = self.serialize();
-        atomic_write(path, content.as_bytes())
+        atomic_write_mode(path, content.as_bytes(), 0o600)
             .with_context(|| format!("failed to write {}", path.display()))
     }
 
@@ -510,6 +510,17 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
             path.display()
         )
     })?;
+    Ok(())
+}
+
+/// Write data to a file atomically with explicit permissions.
+///
+/// Like [`atomic_write`], but sets the file permissions after rename.
+pub fn atomic_write_mode(path: &Path, data: &[u8], mode: u32) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    atomic_write(path, data)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))
+        .with_context(|| format!("failed to set permissions on {}", path.display()))?;
     Ok(())
 }
 

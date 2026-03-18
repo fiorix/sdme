@@ -285,7 +285,7 @@ fn execute_build(
             BuildOp::Run { command, lineno } => {
                 if !container_running {
                     eprintln!("starting build container '{container_name}'");
-                    systemd::start(datadir, container_name, tasks_max, verbose)?;
+                    systemd::start(datadir, container_name, tasks_max, boot_timeout, verbose)?;
                     systemd::await_boot(container_name, timeout, verbose)?;
                     container_running = true;
                 }
@@ -295,7 +295,7 @@ fn execute_build(
             BuildOp::Copy { src, dst, lineno } => {
                 if container_running {
                     eprintln!("stopping build container '{container_name}'");
-                    containers::stop(container_name, containers::StopMode::Terminate, verbose)?;
+                    containers::stop(container_name, containers::StopMode::Terminate, 30, verbose)?;
                     container_running = false;
                 }
                 let upper_dir = datadir
@@ -312,7 +312,7 @@ fn execute_build(
     // Ensure container is stopped; overlayfs must be unmounted for merged layer copy.
     if container_running {
         eprintln!("stopping build container '{container_name}'");
-        containers::stop(container_name, containers::StopMode::Terminate, verbose)?;
+        containers::stop(container_name, containers::StopMode::Terminate, 30, verbose)?;
     }
 
     Ok(())
@@ -376,7 +376,7 @@ pub fn build(
     ) {
         crate::reset_interrupt();
         eprintln!("build failed, stopping '{staging_name}'");
-        let _ = containers::stop(&staging_name, containers::StopMode::Terminate, verbose);
+        let _ = containers::stop(&staging_name, containers::StopMode::Terminate, 30, verbose);
         return Err(e);
     }
 

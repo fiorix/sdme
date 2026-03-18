@@ -754,6 +754,9 @@ sdme stores its settings in a TOML file at `/etc/sdme.conf`:
 | `max_download_size`       | `50G`                            |
 | `nixpkgs_channel`         | `nixos-unstable`                 |
 | `nix_config_template`     | (empty)                          |
+| `stop_timeout_graceful`   | `90`                             |
+| `stop_timeout_terminate`  | `30`                             |
+| `stop_timeout_kill`       | `15`                             |
 | `auto_fs_gc`              | `true`                           |
 | `default_export_free_space` | `256M`                         |
 
@@ -782,6 +785,9 @@ sdme stores its settings in a TOML file at `/etc/sdme.conf`:
 - `nixpkgs_channel`: nixpkgs channel for NixOS rootfs builds.
 - `nix_config_template`: path to a custom `.nix` file replacing
   the built-in NixOS config template for nix-build rootfs builds.
+- `stop_timeout_graceful`: seconds to wait during graceful stop.
+- `stop_timeout_terminate`: seconds to wait during terminate stop.
+- `stop_timeout_kill`: seconds to wait during force-kill stop.
 - `auto_fs_gc`: automatically clean stale transaction directories
   before mutating operations.
 - `default_export_free_space`: extra free space for auto-calculated

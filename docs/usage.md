@@ -114,8 +114,8 @@ sudo sdme join mybox             # enter a running container's shell
 sudo sdme join --start mybox     # start it first if stopped, then enter
 sudo sdme exec mybox -- ls /     # run a one-off command inside
 sudo sdme logs mybox             # view the container's journal
-sudo sdme stop mybox             # graceful shutdown (SIGRTMIN+4)
-sudo sdme stop --term mybox     # terminate (SIGTERM, 30s timeout)
+sudo sdme stop mybox             # graceful shutdown (SIGRTMIN+4, 90s)
+sudo sdme stop --term mybox     # terminate (SIGTERM, 30s)
 sudo sdme stop --kill mybox     # force-kill all processes (SIGKILL, 15s)
 sudo sdme stop --all             # stop all running containers
 sudo sdme start mybox            # start a stopped container

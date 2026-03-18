@@ -713,8 +713,14 @@ pub fn is_active(name: &str) -> Result<bool> {
 }
 
 /// Enable a container to auto-start on boot.
-pub fn enable(datadir: &Path, name: &str, tasks_max: u32, verbose: bool) -> Result<()> {
-    ensure_template_unit(tasks_max, verbose)?;
+pub fn enable(
+    datadir: &Path,
+    name: &str,
+    tasks_max: u32,
+    boot_timeout: u64,
+    verbose: bool,
+) -> Result<()> {
+    ensure_template_unit(tasks_max, boot_timeout, verbose)?;
     let unit = service_name(name);
     if verbose {
         eprintln!("enabling unit: {unit}");
@@ -829,7 +835,12 @@ pub fn resolve_paths() -> Result<UnitPaths> {
 /// Contains only the Unit section and Service metadata. The actual
 /// ExecStartPre/ExecStart/ExecStopPost commands are written per-container
 /// in a drop-in file by [`write_nspawn_dropin`].
-pub fn unit_template(tasks_max: u32) -> String {
+///
+/// `boot_timeout` is the Rust-side wait duration in seconds. The systemd
+/// `TimeoutStartSec` is set to `boot_timeout + 30` so that the Rust wait
+/// loop always expires before systemd kills the container.
+pub fn unit_template(tasks_max: u32, boot_timeout: u64) -> String {
+    let systemd_timeout = boot_timeout + 30;
     format!(
         r#"[Unit]
 Description=sdme container %i
@@ -846,7 +857,7 @@ TasksMax={tasks_max}
 DevicePolicy=closed
 DeviceAllow=/dev/net/tun rwm
 DeviceAllow=char-pts rw
-TimeoutStartSec=2min
+TimeoutStartSec={systemd_timeout}s
 
 [Install]
 WantedBy=multi-user.target
@@ -936,9 +947,9 @@ fn write_unit_if_changed(unit_path: &Path, content: &str, verbose: bool) -> Resu
     Ok(true)
 }
 
-fn ensure_template_unit(tasks_max: u32, verbose: bool) -> Result<()> {
+fn ensure_template_unit(tasks_max: u32, boot_timeout: u64, verbose: bool) -> Result<()> {
     let unit_path = Path::new("/etc/systemd/system/sdme@.service");
-    let content = unit_template(tasks_max);
+    let content = unit_template(tasks_max, boot_timeout);
     if write_unit_if_changed(unit_path, &content, verbose)? {
         dbus::daemon_reload()?;
     }
@@ -1118,8 +1129,14 @@ pub fn remove_limits_dropin(name: &str, verbose: bool) -> Result<()> {
 }
 
 /// Install the template unit, write the drop-in, and start a container via D-Bus.
-pub fn start(datadir: &Path, name: &str, tasks_max: u32, verbose: bool) -> Result<()> {
-    ensure_template_unit(tasks_max, verbose)?;
+pub fn start(
+    datadir: &Path,
+    name: &str,
+    tasks_max: u32,
+    boot_timeout: u64,
+    verbose: bool,
+) -> Result<()> {
+    ensure_template_unit(tasks_max, boot_timeout, verbose)?;
 
     crate::containers::ensure_permissions(datadir, name)?;
 
@@ -1168,13 +1185,13 @@ mod tests {
 
     #[test]
     fn test_unit_template() {
-        let template = unit_template(16384);
+        let template = unit_template(16384, 60);
         assert!(template.contains("Description=sdme container %i"));
         assert!(template.contains("Type=notify"));
         assert!(!template.contains("Type=simple"));
         assert!(template.contains("RestartForceExitStatus=133"));
         assert!(template.contains("SuccessExitStatus=133"));
-        assert!(template.contains("TimeoutStartSec=2min"));
+        assert!(template.contains("TimeoutStartSec=90s"));
         assert!(template.contains("ExecStart=/bin/false"));
         assert!(template.contains("KillMode=mixed"));
         assert!(template.contains("Delegate=yes"));
@@ -1186,6 +1203,13 @@ mod tests {
         assert!(!template.contains("EnvironmentFile"));
         assert!(!template.contains("systemd-nspawn"));
         assert!(!template.contains("overlay"));
+    }
+
+    #[test]
+    fn test_unit_template_custom_boot_timeout() {
+        let template = unit_template(16384, 300);
+        // 300 + 30 = 330
+        assert!(template.contains("TimeoutStartSec=330s"));
     }
 
     #[test]

@@ -459,29 +459,38 @@ pub(crate) fn setup_oci_app(opts: &OciAppSetup) -> Result<()> {
         );
     }
 
-    // 4. Write env file.
+    // 4. Write env file (0o600: may contain secrets).
     if !opts.env_lines.is_empty() {
         let env_path = opts.app_dir.join("env");
         let content = opts.env_lines.join("\n") + "\n";
         fs::write(&env_path, &content)
             .with_context(|| format!("failed to write {}", env_path.display()))?;
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(&env_path, fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("failed to set permissions on {}", env_path.display()))?;
     }
 
     // 5. Write ports file.
     if let Some(ref ports) = opts.config.exposed_ports {
         if !ports.is_empty() {
+            let ports_path = opts.app_dir.join("ports");
             let content = super::sorted_keys_joined(ports, "\n") + "\n";
-            fs::write(opts.app_dir.join("ports"), &content)
-                .context("failed to write ports file")?;
+            fs::write(&ports_path, &content).context("failed to write ports file")?;
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(&ports_path, fs::Permissions::from_mode(0o644))
+                .context("failed to set permissions on ports file")?;
         }
     }
 
     // 6. Write volumes file.
     if let Some(ref vols) = opts.config.volumes {
         if !vols.is_empty() {
+            let volumes_path = opts.app_dir.join("volumes");
             let content = super::sorted_keys_joined(vols, "\n") + "\n";
-            fs::write(opts.app_dir.join("volumes"), &content)
-                .context("failed to write volumes file")?;
+            fs::write(&volumes_path, &content).context("failed to write volumes file")?;
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(&volumes_path, fs::Permissions::from_mode(0o644))
+                .context("failed to set permissions on volumes file")?;
         }
     }
 
@@ -767,10 +776,11 @@ Description=Startup probe for {name}
 [Service]
 Type=oneshot
 ExecStart=/oci/.sdme-kube-probe run --type startup --name {name} \
-  --threshold {threshold} --service {service_name} \
+  --threshold {threshold} --success-threshold {success_threshold} --service {service_name} \
   {check_args}
 ",
                 threshold = p.failure_threshold,
+                success_threshold = p.success_threshold,
             ),
         ));
     }
@@ -824,10 +834,11 @@ Description=Liveness probe for {name}
 [Service]
 Type=oneshot
 ExecStart=/oci/.sdme-kube-probe run --type liveness --name {name} \
-  --threshold {threshold} --service {service_name} \
+  --threshold {threshold} --success-threshold {success_threshold} --service {service_name} \
   {check_args}
 ",
                 threshold = p.failure_threshold,
+                success_threshold = p.success_threshold,
             ),
         ));
     }
@@ -879,10 +890,11 @@ Description=Readiness probe for {name}
 [Service]
 Type=oneshot
 ExecStart=/oci/.sdme-kube-probe run --type readiness --name {name} \
-  --threshold {threshold} --service {service_name} \
+  --threshold {threshold} --success-threshold {success_threshold} --service {service_name} \
   {check_args}
 ",
                 threshold = p.failure_threshold,
+                success_threshold = p.success_threshold,
             ),
         ));
     }
