@@ -19,16 +19,11 @@ use anyhow::{Context, Result};
 
 /// The kind of transactional operation, encoded in the staging directory name.
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
 pub(crate) enum TxnKind {
     /// Rootfs or OCI image import.
     Import,
     /// Rootfs removal (rename-to-staging then delete).
     Remove,
-    /// File download (URL, OCI layer).
-    Download,
-    /// Rootfs or container export.
-    Export,
     /// Rootfs build from config.
     Build,
 }
@@ -38,8 +33,6 @@ impl TxnKind {
         match self {
             Self::Import => "import",
             Self::Remove => "remove",
-            Self::Download => "download",
-            Self::Export => "export",
             Self::Build => "build",
         }
     }

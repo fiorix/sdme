@@ -141,6 +141,15 @@ sudo sdme start mybox
 sudo sdme join mybox
 ```
 
+The `-t`/`--timeout` flag overrides the configured `boot_timeout` (default
+60 seconds) for a single invocation. It applies to `new`, `start`, and
+`join --start`:
+
+```bash
+sudo sdme new -t 120 -r ubuntu          # allow 120s for boot
+sudo sdme start -t 30 mybox             # tighter timeout for a fast image
+```
+
 To create a container and enable auto-start on boot in one step:
 
 ```bash
@@ -987,6 +996,7 @@ Then apply it:
 
 ```bash
 sudo sdme kube apply -f nginx-pod.yaml --base-fs ubuntu
+sudo sdme kube apply -f nginx-pod.yaml --base-fs ubuntu -t 120   # custom boot timeout
 ```
 
 This pulls the image, builds a combined rootfs (base OS plus the app
@@ -1144,8 +1154,9 @@ sudo sdme set mybox --memory 4G --cpus 2
 ```
 
 **Building rootfs.** `sdme fs build` takes a Dockerfile-like config to
-produce custom rootfs images. See
-[architecture.md, Section 7](architecture.md#7-fs-build-building-root-filesystems).
+produce custom rootfs images. Use `-t` to override the boot timeout for
+build steps that start the container (e.g. `sdme fs build -t 180 ...`).
+See [architecture.md, Section 7](architecture.md#7-fs-build-building-root-filesystems).
 
 **Configuration.** Settings are stored in `/etc/sdme.conf` (TOML).
 
@@ -1153,6 +1164,11 @@ produce custom rootfs images. See
 sudo sdme config get                    # show all settings
 sudo sdme config set boot_timeout 120   # change a setting
 ```
+
+The `boot_timeout` config key (default 60 seconds) controls how long sdme
+waits for a container to reach the running state. The `-t`/`--timeout`
+flag on `new`, `start`, `join --start`, `fs build`, and `kube apply`
+overrides this value for a single invocation.
 
 ## 9. Further reading
 
