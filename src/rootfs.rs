@@ -333,6 +333,7 @@ mod tests {
                     max_download_size: 0,
                 },
                 nix_config: None,
+                nix_config_template: "",
                 nixpkgs_channel: "",
                 auto_gc: true,
                 distros: &std::collections::HashMap::new(),

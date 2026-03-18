@@ -1900,7 +1900,11 @@ mod tests {
 
         let cmds = builtin_export_prehook(&DistroFamily::Debian);
         assert!(cmds.len() >= 2);
-        assert!(cmds[0].contains("apt-get") && cmds[0].contains("update"), "got: {}", cmds[0]);
+        assert!(
+            cmds[0].contains("apt-get") && cmds[0].contains("update"),
+            "got: {}",
+            cmds[0]
+        );
         assert!(cmds[1].contains("udev"), "got: {}", cmds[1]);
         assert!(cmds.iter().any(|c| c.contains("clean")), "missing cleanup");
 

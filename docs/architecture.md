@@ -523,7 +523,7 @@ modified for standalone VM boot: serial console login (patched
 DHCP networking via `systemd-networkd`, and a hostname. Optional
 additions include DNS configuration, a root password, and an SSH public
 key. If the rootfs lacks udev, it can be installed via chroot. See the
-[usage guide, Section 4.5](usage.md#45-exporting-for-vm-boot) for the
+[usage guide, Section 4.6](usage.md#46-exporting-for-vm-boot) for the
 full set of options and hypervisor examples.
 
 ## 9. Networking

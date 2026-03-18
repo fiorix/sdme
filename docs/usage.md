@@ -321,7 +321,181 @@ The key point: once imported, you can spin up any number of containers from
 the same rootfs. Each gets its own overlayfs layer, so they are completely
 independent.
 
-### 4.3 Managing root filesystems
+### 4.3 NixOS root filesystems
+
+When sdme imports an image that has the nix package manager (e.g.
+`docker.io/nixos/nix`), it builds a complete NixOS system from scratch
+inside the image. No local nix installation is required. The result is a
+bootable NixOS rootfs that works as an sdme container or can be exported
+as a VM image.
+
+**How the build pipeline works.** The import runs in three phases:
+
+1. **Template**: sdme writes a NixOS configuration file to
+   `{rootfs}/tmp/sdme-nixos.nix`. By default this is an embedded
+   template ([`DEFAULT_NIXOS_CONFIG` in
+   src/import/mod.rs](https://github.com/fiorix/sdme/blob/main/src/import/mod.rs#L891)).
+   If the `--nix-config` flag is given, the user's file is copied
+   alongside it and merged via NixOS module imports.
+
+2. **nix-build**: sdme enters a chroot and runs `nix-build` against the
+   template. This downloads nixpkgs (controlled by the `nixpkgs_channel`
+   config key, default `nixos-unstable`), evaluates the NixOS
+   configuration, and produces a system closure in `/nix/store`. The
+   `nix-build` flags (`--option sandbox false --option filter-syscalls
+   false`) are required because the build runs inside a chroot where the
+   nix sandbox cannot function.
+
+3. **Rebuild**: `rebuild_nix_rootfs()` replaces the entire rootfs with a
+   clean directory containing only the NixOS closure store paths and
+   skeleton directories. Leftover files from the OCI base image (which
+   is typically Alpine-based) are discarded because they interfere with
+   NixOS activation.
+
+**What the default template produces.** The embedded configuration
+builds a minimal bootable NixOS with:
+
+- systemd, dbus, systemd-networkd
+- Common tools: bash, coreutils, util-linux, iproute2, less, procps,
+  findutils, grep, sed, curl
+- Root autologin on the console
+- Empty root password (for `machinectl shell`)
+- `systemd-resolved` disabled (the host handles DNS)
+- `pam_lastlog2` disabled for `login` and `container-shell` PAM
+  services (works around a linkage issue in nspawn containers)
+- `nix.nixPath` configured so `nix-env -f '<nixpkgs>' -iA foo` works
+  inside the container
+
+You can read the full template in
+[src/import/mod.rs (`DEFAULT_NIXOS_CONFIG`)](https://github.com/fiorix/sdme/blob/main/src/import/mod.rs#L891).
+
+**Adding packages or services with `--nix-config`.** The `--nix-config`
+flag on `sdme fs import` provides a NixOS module that merges on top of
+the base template. This is the simplest way to add packages, enable
+services, or tweak settings without replacing the entire template.
+
+For example, to add htop and enable the OpenSSH server, create a file
+`extra.nix`:
+
+```nix
+{ pkgs, ... }:
+{
+  environment.systemPackages = [ pkgs.htop ];
+  services.openssh.enable = true;
+  services.openssh.settings.PermitRootLogin = "yes";
+}
+```
+
+Then import with:
+
+```bash
+sudo sdme fs import mynixos docker.io/nixos/nix \
+    --install-packages=yes --nix-config extra.nix
+```
+
+The NixOS module system handles merging: lists (like
+`environment.systemPackages`) are concatenated, and scalar options use
+standard NixOS priority rules.
+
+**Replacing the template entirely with `nix_config_template`.** If you
+need full control over the NixOS configuration (different base options,
+a flake-based setup, or a radically different package set), set the
+`nix_config_template` config key to point to your own `.nix` file:
+
+```bash
+sudo sdme config set nix_config_template /etc/sdme/my-container.nix
+```
+
+This file replaces the embedded `DEFAULT_NIXOS_CONFIG` entirely. The
+build pipeline (nix-build command, closure rebuild) stays the same;
+only the NixOS derivation changes.
+
+Your template must follow the same contract as the embedded default:
+
+- It must be a Nix expression that evaluates to a NixOS system toplevel
+  derivation (i.e. the result must be
+  `nixos.config.system.build.toplevel`).
+- The nix-build step creates `/sbin/init` as a symlink to
+  `$TOPLEVEL/init` and writes the closure list via
+  `nix-store -qR "$TOPLEVEL"`. These paths are consumed by the rebuild
+  phase.
+- To support `--nix-config` merging, the template must check for
+  `/tmp/sdme-nixos-extra.nix` and import it conditionally (see the
+  `hasUserConfig` / `imports` pattern in the embedded default).
+
+A minimal custom template:
+
+```nix
+{ pkgs ? import <nixpkgs> {} }:
+let
+  userConfig = /tmp/sdme-nixos-extra.nix;
+  hasUserConfig = builtins.pathExists userConfig;
+  nixos = import "${pkgs.path}/nixos" {
+    configuration = { config, lib, pkgs, ... }: {
+      imports = lib.optionals hasUserConfig [ userConfig ];
+      boot.isContainer = true;
+      services.dbus.enable = true;
+      users.users.root.initialHashedPassword = "";
+      environment.systemPackages = with pkgs; [
+        bashInteractive coreutils
+        # your packages here
+      ];
+      fileSystems."/" = { device = "none"; fsType = "tmpfs"; };
+      boot.loader.grub.enable = false;
+      system.stateVersion = lib.trivial.release;
+
+      # your options here
+    };
+  };
+in nixos.config.system.build.toplevel
+```
+
+To clear a custom template and revert to the embedded default:
+
+```bash
+sudo sdme config set nix_config_template ""
+```
+
+**Composing template and `--nix-config`.** The two mechanisms are
+complementary. Use `nix_config_template` to set the baseline (the
+options that should apply to every NixOS rootfs you build), and
+`--nix-config` for per-import additions. For example:
+
+```bash
+# Set a custom baseline once
+sudo sdme config set nix_config_template /etc/sdme/my-base.nix
+
+# Import with per-rootfs additions
+sudo sdme fs import dev-box docker.io/nixos/nix \
+    --install-packages=yes --nix-config dev-tools.nix
+
+sudo sdme fs import prod-box docker.io/nixos/nix \
+    --install-packages=yes --nix-config prod-services.nix
+```
+
+**Changing the nixpkgs channel.** By default, sdme uses `nixos-unstable`
+for nix-build. To pin to a stable release:
+
+```bash
+sudo sdme config set nixpkgs_channel nixos-24.11
+```
+
+**Exporting NixOS as a VM image.** A NixOS rootfs can be exported as a
+VM image with `sdme fs export --vm`, the same as any other distro:
+
+```bash
+sudo sdme fs export mynixos /tmp/nixos-vm.raw \
+    --vm --hostname nixos --root-password test --dns
+```
+
+Note: NixOS activation replaces `/etc/systemd/system` with an immutable
+symlink to the Nix store on first boot. VM preparation files that sdme
+writes there (serial console getty, networkd config) may be overwritten.
+For production NixOS VMs, configure serial console and networking in
+your NixOS configuration (via `--nix-config` or `nix_config_template`)
+rather than relying on the export-time patches.
+
+### 4.4 Managing root filesystems
 
 Listing and removing imported rootfs is straightforward:
 
@@ -343,7 +517,7 @@ sudo sdme fs cache clean --all     # remove all cached blobs
 The cache directory and maximum size are configurable via `oci_cache_dir`
 and `oci_cache_max_size` (default: 10G).
 
-### 4.4 Exporting root filesystems
+### 4.5 Exporting root filesystems
 
 `sdme fs export` exports an imported rootfs or a container's merged
 overlayfs view to a directory, tarball, or raw disk image. The output
@@ -381,7 +555,7 @@ temporarily mounted.
 For more on how the fs subsystem works internally, see
 [architecture.md, Section 6](architecture.md#6-the-fs-subsystem-managing-root-filesystems).
 
-### 4.5 Exporting for VM boot
+### 4.6 Exporting for VM boot
 
 The `--vm` flag on `sdme fs export` prepares a raw disk image that boots
 as a virtual machine. It configures the exported rootfs with a serial

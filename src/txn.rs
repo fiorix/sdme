@@ -1,15 +1,15 @@
 //! Enumerated transaction staging for filesystem operations.
 //!
-//! Provides [`Txn`] for staging filesystem changes in named directories
+//! Provides `Txn` for staging filesystem changes in named directories
 //! that encode the operation type and creator PID. On commit, the staging
 //! directory is atomically renamed to its final location. On drop without
 //! commit, the staging directory is left behind for cleanup by a future
-//! operation (when [`auto_gc`](crate::config::Config::auto_gc) is enabled)
-//! or by [`sdme gc`](find_all_stale_txns).
+//! operation (when [`auto_fs_gc`](crate::config::Config::auto_fs_gc) is enabled)
+//! or by `sdme fs gc`.
 //!
 //! Transaction names follow the pattern `.{name}.{kind}-txn-{pid}`,
 //! e.g. `.ubuntu.import-txn-42195`. The PID component allows
-//! [`cleanup_stale_txns`] to detect whether the creator is still running
+//! `cleanup_stale_txns` to detect whether the creator is still running
 //! by probing `/proc/{pid}`.
 
 use std::fs;

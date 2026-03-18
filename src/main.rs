@@ -1351,7 +1351,9 @@ fn main() -> Result<()> {
                         toml_val = Some(V::Boolean(match value.as_str() {
                             "yes" => true,
                             "no" => false,
-                            _ => bail!("invalid value for interactive: {value} (expected yes or no)"),
+                            _ => {
+                                bail!("invalid value for interactive: {value} (expected yes or no)")
+                            }
                         }));
                     }
                     "datadir" => {
@@ -2353,6 +2355,7 @@ fn main() -> Result<()> {
                         cache: &blob_cache,
                         http: cfg.http_config()?,
                         nix_config: nix_config_path,
+                        nix_config_template: &cfg.nix_config_template,
                         nixpkgs_channel: &cfg.nixpkgs_channel,
                         auto_gc: cfg.auto_fs_gc,
                         distros: &cfg.distros,

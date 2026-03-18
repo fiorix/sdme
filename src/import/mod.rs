@@ -99,6 +99,9 @@ pub struct ImportOptions<'a> {
     pub http: crate::config::HttpConfig,
     /// Optional path to a user NixOS configuration file for nix-build imports.
     pub nix_config: Option<&'a Path>,
+    /// Optional path to a custom NixOS configuration template that replaces
+    /// the embedded DEFAULT_NIXOS_CONFIG. `nix_config` still merges on top.
+    pub nix_config_template: &'a str,
     /// Nixpkgs channel for NixOS rootfs builds (e.g. "nixos-unstable").
     pub nixpkgs_channel: &'a str,
     /// Automatically clean up stale transactions before importing.
@@ -990,6 +993,7 @@ fn install_systemd_packages(
     family: &DistroFamily,
     nixpkgs_channel: &str,
     nix_config: Option<&Path>,
+    nix_config_template: &str,
     distros: &HashMap<String, DistroCommands>,
     verbose: bool,
 ) -> Result<()> {
@@ -1001,22 +1005,36 @@ fn install_systemd_packages(
         );
     }
 
-    // For Nix family: write embedded container.nix and optional user config
+    // For Nix family: write NixOS configuration and optional user config
     // into the rootfs before entering the chroot.
     if *family == DistroFamily::Nix {
         let tmp_dir = rootfs.join("tmp");
         fs::create_dir_all(&tmp_dir)
             .with_context(|| format!("failed to create {}", tmp_dir.display()))?;
-        fs::write(tmp_dir.join("sdme-nixos.nix"), DEFAULT_NIXOS_CONFIG)
-            .context("failed to write embedded container.nix")?;
+        if nix_config_template.is_empty() {
+            fs::write(tmp_dir.join("sdme-nixos.nix"), DEFAULT_NIXOS_CONFIG)
+                .context("failed to write embedded sdme-nixos.nix")?;
+        } else {
+            fs::copy(nix_config_template, tmp_dir.join("sdme-nixos.nix")).with_context(|| {
+                format!(
+                    "failed to copy nix config template from {}",
+                    nix_config_template
+                )
+            })?;
+        }
         if let Some(config_path) = nix_config {
             fs::copy(config_path, tmp_dir.join("sdme-nixos-extra.nix")).with_context(|| {
                 format!("failed to copy nix config from {}", config_path.display())
             })?;
         }
         if verbose {
+            let source = if nix_config_template.is_empty() {
+                "embedded"
+            } else {
+                nix_config_template
+            };
             eprintln!(
-                "wrote nix build config to {}/tmp/sdme-nixos.nix",
+                "wrote nix build config ({source}) to {}/tmp/sdme-nixos.nix",
                 rootfs.display()
             );
         }
@@ -1281,6 +1299,7 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
         cache,
         ref http,
         nix_config,
+        nix_config_template,
         nixpkgs_channel,
         auto_gc,
         distros,
@@ -1481,6 +1500,7 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
                         &family,
                         nixpkgs_channel,
                         nix_config,
+                        nix_config_template,
                         distros,
                         verbose,
                     )?;
@@ -1514,6 +1534,7 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
                                 &family,
                                 nixpkgs_channel,
                                 nix_config,
+                                nix_config_template,
                                 distros,
                                 verbose,
                             )?;
@@ -1687,6 +1708,7 @@ pub(crate) mod tests {
                     max_download_size: 0,
                 },
                 nix_config: None,
+                nix_config_template: "",
                 nixpkgs_channel: "",
                 auto_gc: true,
                 distros: &HashMap::new(),
@@ -2619,6 +2641,7 @@ pub(crate) mod tests {
                     max_download_size: 0,
                 },
                 nix_config: None,
+                nix_config_template: "",
                 nixpkgs_channel: "",
                 auto_gc: true,
                 distros: &HashMap::new(),

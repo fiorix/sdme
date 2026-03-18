@@ -100,6 +100,12 @@ pub struct Config {
     #[serde(default = "default_nixpkgs_channel")]
     pub nixpkgs_channel: String,
 
+    /// Path to a custom NixOS configuration template for nix-build imports.
+    /// When set, this file replaces the embedded DEFAULT_NIXOS_CONFIG entirely.
+    /// The `--nix-config` CLI flag still merges on top via NixOS module imports.
+    #[serde(default)]
+    pub nix_config_template: String,
+
     /// Automatically clean up stale transactions before mutating operations.
     ///
     /// When `true` (default), operations like `import`, `build`, and `export`
@@ -195,6 +201,7 @@ impl Default for Config {
             http_body_timeout: default_http_body_timeout(),
             max_download_size: default_max_download_size(),
             nixpkgs_channel: default_nixpkgs_channel(),
+            nix_config_template: String::new(),
             auto_fs_gc: default_auto_fs_gc(),
             distros: HashMap::new(),
         }
@@ -261,6 +268,7 @@ impl Config {
         println!("http_body_timeout = {}", self.http_body_timeout);
         println!("max_download_size = {}", self.max_download_size);
         println!("nixpkgs_channel = {}", self.nixpkgs_channel);
+        println!("nix_config_template = {}", self.nix_config_template);
         let auto_fs_gc = if self.auto_fs_gc { "yes" } else { "no" };
         println!("auto_fs_gc = {auto_fs_gc}");
     }
@@ -607,7 +615,12 @@ export_prehook = ["dnf install -y custom-udev"]
         fs::write(&path, "boot_timeout = 30\n").unwrap();
 
         // Set a different key; boot_timeout should remain untouched.
-        save_key(Some(&path), "interactive", Some(toml::Value::Boolean(false))).unwrap();
+        save_key(
+            Some(&path),
+            "interactive",
+            Some(toml::Value::Boolean(false)),
+        )
+        .unwrap();
 
         let contents = fs::read_to_string(&path).unwrap();
         assert!(contents.contains("boot_timeout = 30"), "got: {contents}");
