@@ -1,7 +1,5 @@
 # sdme: Architecture and Design
 
-**Alexandre Fiori, February 2026**
-
 ## 1. Introduction
 
 sdme is a container manager for Linux. It runs on top of systemd-nspawn
@@ -11,7 +9,7 @@ distribution.
 No daemon, no runtime dependency beyond systemd itself. A single static
 binary that manages overlayfs layering and drives systemd over D-Bus.
 
-The project started as an experiment inspired by virtme-ng: what if you
+The project started as an experiment inspired by [virtme-ng](https://github.com/arighi/virtme-ng): what if you
 could clone your running host system into an isolated container with a
 single command? Overlayfs makes this nearly free: mount the host rootfs
 as a read-only lower layer, give the container its own upper layer for
@@ -24,13 +22,11 @@ container lifecycle through D-Bus. Each piece turned out to be
 surprisingly tractable when you let claude (and systemd) do the heavy
 lifting.
 
-sdme is not an attempt to replace Podman, Docker, or any other container
-runtime. Podman in particular has excellent systemd integration through
-Quadlet (podman-systemd). It is today's mature, full-featured approach
-to systemd-native container management. sdme is a different thing
-entirely. It boots full systemd inside nspawn containers, manages
-overlayfs layering directly, and bridges the OCI ecosystem, all without
-a daemon and without pulling in a container runtime.
+sdme is not similar to Podman, Docker, or any other container runtime.
+It is a different thing entirely. It boots full systemd inside nspawn
+containers, manages overlayfs layering directly, and bridges the OCI
+ecosystem, all without a daemon and without pulling in a container
+runtime.
 
 You get the operational model of systemd (journalctl, systemctl,
 resource limits) with the packaging model of OCI (Docker Hub, GHCR,
@@ -472,7 +468,7 @@ instead of magic bytes (since we are creating, not reading):
 | `.img`, `.raw`            | raw disk image      |
 | anything else              | directory copy      |
 
-The `-f` flag overrides detection. Format names match the extension
+The `--fmt` flag overrides detection. Format names match the extension
 without the dot: `dir`, `tar`, `tar.gz`, `tar.bz2`, `tar.xz`,
 `tar.zst`, `raw`.
 
@@ -500,9 +496,12 @@ the copy fails, the image file is cleaned up. For ext4, the `lost+found`
 directory created by mkfs is removed before copying; btrfs does not
 create one.
 
-Size auto-calculation: `max(256 MiB, content_size * 1.5)`. The 1.5x
-multiplier accounts for filesystem metadata overhead. The `--size` flag
-overrides this with a human-readable value (e.g. `2G`, `500M`).
+Size auto-calculation: `max(256 MiB, content_size * 1.5 + free_space)`.
+The 1.5x multiplier accounts for filesystem metadata overhead, and
+`free_space` guarantees extra room in the image (default 256 MiB, from
+the `default_export_free_space` config key). The `--size` flag overrides
+the calculation entirely with a fixed value (e.g. `2G`, `500M`); when
+set, `--free-space` is ignored.
 
 ### Container export
 
@@ -512,6 +511,20 @@ running, it reads directly from `merged/` with a consistency warning.
 If stopped, it temporarily mounts overlayfs (lower=rootfs,
 upper=container upper, work=container work) for the duration of the
 export, then unmounts.
+
+### VM export
+
+When `--vm` is passed, the raw disk image is GPT-partitioned instead of
+a bare filesystem. A single Linux partition is created at 1 MiB offset
+(standard GPT alignment) via `sfdisk`, and the filesystem is formatted
+on the partition device (`/dev/loopNp1`). The exported rootfs is then
+modified for standalone VM boot: serial console login (patched
+`serial-getty@.service`), `/etc/fstab` with a `/dev/vda1` root entry,
+DHCP networking via `systemd-networkd`, and a hostname. Optional
+additions include DNS configuration, a root password, and an SSH public
+key. If the rootfs lacks udev, it can be installed via chroot. See the
+[usage guide, Section 4.5](usage.md#45-exporting-for-vm-boot) for the
+full set of options and hypervisor examples.
 
 ## 9. Networking
 

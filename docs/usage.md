@@ -258,16 +258,16 @@ The OCI registry path is what most people want. sdme speaks the OCI
 Distribution Spec natively, so no Docker or Podman is required:
 
 ```bash
-sudo sdme fs import ubuntu docker.io/ubuntu:24.04 -v --install-packages=yes
-sudo sdme fs import fedora quay.io/fedora/fedora:41 -v --install-packages=yes
-sudo sdme fs import mynixos docker.io/nixos/nix -v --install-packages=yes
+sudo sdme fs import ubuntu docker.io/ubuntu:24.04
+sudo sdme fs import fedora quay.io/fedora/fedora:41
+sudo sdme fs import mynixos docker.io/nixos/nix
 ```
 
-The `-v` flag shows progress. The `--install-packages=yes` flag tells sdme
-to install any missing packages needed for `machinectl shell` to work
-(things like `util-linux` and `pam` on RHEL-family distros). For NixOS,
-the flag triggers `nix-build` inside the chroot to produce a full NixOS
-system closure; no local nix installation is required.
+If systemd is missing from the imported image, sdme will prompt to install
+it (along with packages needed for `machinectl shell`, like `util-linux`
+and `pam` on RHEL-family distros). For NixOS, the install step runs
+`nix-build` inside the chroot to produce a full NixOS system closure; no
+local nix installation is required.
 
 For a directory-based import (useful with debootstrap on Debian/Ubuntu):
 
@@ -388,7 +388,7 @@ as a virtual machine. It configures the exported rootfs with a serial
 console, fstab entry for the root filesystem, systemd-networkd with DHCP,
 DNS resolvers, a hostname, and optionally a root password and SSH public
 key. If the rootfs is missing udev (common with container images),
-`--install-packages=yes` installs it.
+sdme will prompt to install it.
 
 The result is a GPT-partitioned raw disk image with a single Linux
 partition (no bootloader). You supply your own kernel at boot time via
@@ -406,33 +406,33 @@ ls /boot/vmlinuz-*                  # Debian, Ubuntu
 
 ```bash
 # Import (if not already done)
-sudo sdme fs import debian docker.io/debian:stable -v --install-packages=yes
+sudo sdme fs import debian docker.io/debian:stable
 
 # Export as a VM image
 sudo sdme fs export debian /tmp/debian-vm.raw \
-    --vm --hostname debian --root-password test --install-packages=yes -v
+    --vm --hostname debian --root-password test
 ```
 
-Debian container images don't include udev, so `--install-packages=yes`
-installs it during export. Fedora and Arch container images already have
+Debian container images don't include udev, so sdme will prompt to install
+it during export. Fedora and Arch container images already have
 udev.
 
 **Example: Fedora**
 
 ```bash
-sudo sdme fs import fedora quay.io/fedora/fedora:41 -v --install-packages=yes
+sudo sdme fs import fedora quay.io/fedora/fedora:41
 
 sudo sdme fs export fedora /tmp/fedora-vm.raw \
-    --vm --hostname fedora --root-password test -v
+    --vm --hostname fedora --root-password test
 ```
 
 **Example: Arch Linux**
 
 ```bash
-sudo sdme fs import archlinux docker.io/archlinux -v --install-packages=yes
+sudo sdme fs import archlinux docker.io/archlinux
 
 sudo sdme fs export archlinux /tmp/archlinux-vm.raw \
-    --vm --hostname archlinux --root-password test -v
+    --vm --hostname archlinux --root-password test
 ```
 
 Arch Linux runs `systemd-firstboot` on first boot, prompting for timezone
@@ -523,10 +523,10 @@ Here is the full workflow, from importing a base OS to running an OCI app:
 
 ```bash
 # Step 1: import a base OS (only needed once)
-sudo sdme fs import ubuntu docker.io/ubuntu:24.04 -v --install-packages=yes
+sudo sdme fs import ubuntu docker.io/ubuntu:24.04
 
 # Step 2: import an OCI app on top of that base OS
-sudo sdme fs import redis docker.io/redis --base-fs=ubuntu -v
+sudo sdme fs import redis docker.io/redis --base-fs=ubuntu
 
 # Step 3: create and enter the container
 sudo sdme new -r redis
@@ -575,7 +575,7 @@ app import:
 sudo sdme config set default_base_fs ubuntu
 ```
 
-Now `sudo sdme fs import redis docker.io/redis -v` will automatically use
+Now `sudo sdme fs import redis docker.io/redis` will automatically use
 ubuntu as the base.
 
 **OCI environment variables.** Use `--oci-env` on `create` or `new` to
@@ -781,7 +781,7 @@ You need a base rootfs with systemd. If you followed section 4, you
 already have one. If not:
 
 ```bash
-sudo sdme fs import ubuntu docker.io/ubuntu:24.04 -v --install-packages=yes
+sudo sdme fs import ubuntu docker.io/ubuntu:24.04
 ```
 
 To avoid passing `--base-fs` on every kube command:
