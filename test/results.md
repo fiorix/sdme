@@ -31,6 +31,15 @@ See [README.md](README.md) for how to run the tests and known limitations.
 
 \* Known platform issue only (no code regression); see below.
 
+### Pending verification
+
+The following test changes have not yet been included in a full test pass:
+
+- **verify-export.sh**: 4 new timezone tests added (Tests 13-16); total
+  expected to rise from 12 to ~17 (Test 13 has 2 sub-assertions).
+- **verify-network.sh**: new 9-test suite for private networking (service
+  masking state, zone connectivity, bridge connectivity).
+
 ## Failures
 
 ### verify-usage.sh: opaque/verify (1 failure)
