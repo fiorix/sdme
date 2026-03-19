@@ -286,14 +286,16 @@ pub fn kube_create(datadir: &Path, opts: &KubeCreateOptions<'_>) -> Result<Strin
             datadir,
             &staging_dir,
             &app_dir,
-            kc,
-            oci_config.as_ref(),
-            &plan.restart_policy,
-            &plan.volumes,
-            &plan,
-            *is_init,
-            &init_container_names,
-            opts.verbose,
+            &KubeContainerOptions {
+                kc,
+                oci_config: oci_config.as_ref(),
+                restart_policy: &plan.restart_policy,
+                volumes: &plan.volumes,
+                plan: &plan,
+                is_init: *is_init,
+                init_container_names: &init_container_names,
+                verbose: opts.verbose,
+            },
         )
         .with_context(|| format!("failed to set up container '{}'", kc.name))?;
     }
@@ -493,27 +495,36 @@ pub fn kube_delete(datadir: &Path, name: &str, force: bool, verbose: bool) -> Re
 
 // --- Per-container setup ---
 
+/// Options for setting up a single container inside a kube pod rootfs.
+pub(crate) struct KubeContainerOptions<'a> {
+    pub kc: &'a KubeContainer,
+    pub oci_config: Option<&'a OciContainerConfig>,
+    pub restart_policy: &'a str,
+    #[allow(dead_code)]
+    pub volumes: &'a [KubeVolume],
+    pub plan: &'a KubePlan,
+    pub is_init: bool,
+    pub init_container_names: &'a [String],
+    pub verbose: bool,
+}
+
 /// Set up a single container app inside the combined rootfs.
 ///
 /// Builds the K8s command/args overrides, merges env vars, constructs volume
 /// bind paths, then delegates to `setup_oci_app()` for the common logic.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn setup_kube_container(
     datadir: &Path,
     staging_dir: &Path,
     app_dir: &Path,
-    kc: &KubeContainer,
-    oci_config: Option<&OciContainerConfig>,
-    restart_policy: &str,
-    _volumes: &[KubeVolume],
-    plan: &KubePlan,
-    is_init: bool,
-    init_container_names: &[String],
-    verbose: bool,
+    opts: &KubeContainerOptions<'_>,
 ) -> Result<()> {
+    let kc = opts.kc;
+    let plan = opts.plan;
+    let verbose = opts.verbose;
+    let is_init = opts.is_init;
     let app_root = app_dir.join("root");
     let default_config = OciContainerConfig::default();
-    let config = oci_config.unwrap_or(&default_config);
+    let config = opts.oci_config.unwrap_or(&default_config);
 
     // Build ExecStart from command/args overrides per K8s semantics:
     // - K8s `command` replaces Docker ENTRYPOINT
@@ -661,8 +672,9 @@ pub(crate) fn setup_kube_container(
 
     // Build unit ordering dependencies for regular containers:
     // they depend on all init containers.
-    let (after_units, requires_units) = if !is_init && !init_container_names.is_empty() {
-        let after: Vec<String> = init_container_names
+    let (after_units, requires_units) = if !is_init && !opts.init_container_names.is_empty() {
+        let after: Vec<String> = opts
+            .init_container_names
             .iter()
             .map(|n| format!("sdme-oci-{n}.service"))
             .collect();
@@ -731,7 +743,7 @@ pub(crate) fn setup_kube_container(
         env_lines,
         config,
         image_ref: &kc.image,
-        restart_policy: Some(restart_policy),
+        restart_policy: Some(opts.restart_policy),
         bind_paths: vec![],
         extra_after,
         verbose,

@@ -938,22 +938,33 @@ fn systemd_quote_arg(s: &str) -> String {
 
 /// Set up an application image by combining a base rootfs with the OCI rootfs.
 ///
+/// Options for setting up an OCI app image inside a base rootfs.
+pub(crate) struct AppImageOptions<'a> {
+    pub rootfs_dir: &'a Path,
+    pub name: &'a str,
+    pub base_name: &'a str,
+    pub app_name: &'a str,
+    pub config: &'a OciContainerConfig,
+    pub image_ref: &'a str,
+    pub verbose: bool,
+}
+
 /// The OCI rootfs (already extracted in staging_dir) is moved to
 /// `/oci/apps/{app_name}/root` inside a copy of the base rootfs. A systemd
 /// unit is generated to chroot into the OCI rootfs and run the application's
 /// entrypoint/cmd.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn setup_app_image(
     datadir: &Path,
     staging_dir: &Path,
-    rootfs_dir: &Path,
-    name: &str,
-    base_name: &str,
-    app_name: &str,
-    config: &OciContainerConfig,
-    image_ref: &str,
-    verbose: bool,
+    opts: &AppImageOptions<'_>,
 ) -> Result<()> {
+    let name = opts.name;
+    let base_name = opts.base_name;
+    let app_name = opts.app_name;
+    let config = opts.config;
+    let image_ref = opts.image_ref;
+    let verbose = opts.verbose;
+    let rootfs_dir = opts.rootfs_dir;
     validate_name(base_name)?;
 
     let base_dir = datadir.join("fs").join(base_name);

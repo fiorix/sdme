@@ -1398,13 +1398,15 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
                     let setup_result = crate::oci::app::setup_app_image(
                         datadir,
                         &staging_dir,
-                        &rootfs_dir,
-                        name,
-                        base_name,
-                        &app_name,
-                        cc,
-                        source,
-                        verbose,
+                        &crate::oci::app::AppImageOptions {
+                            rootfs_dir: &rootfs_dir,
+                            name,
+                            base_name,
+                            app_name: &app_name,
+                            config: cc,
+                            image_ref: source,
+                            verbose,
+                        },
                     );
                     setup_result?;
                     true // skip systemd detection; base already has it

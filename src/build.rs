@@ -264,55 +264,77 @@ fn do_copy(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn execute_build(
-    datadir: &Path,
-    container_name: &str,
-    rootfs: &str,
-    config: &BuildConfig,
-    opaque_dirs: &[String],
+struct ExecuteBuildContext<'a> {
+    container_name: &'a str,
+    config: &'a BuildConfig,
+    opaque_dirs: &'a [String],
     boot_timeout: u64,
     tasks_max: u32,
     verbose: bool,
-) -> Result<()> {
-    let mut container_running = false;
-    let timeout = std::time::Duration::from_secs(boot_timeout);
+}
 
-    for op in &config.ops {
+fn execute_build(datadir: &Path, ctx: &ExecuteBuildContext<'_>) -> Result<()> {
+    let mut container_running = false;
+    let timeout = std::time::Duration::from_secs(ctx.boot_timeout);
+
+    for op in &ctx.config.ops {
         check_interrupted()?;
 
         match op {
             BuildOp::Run { command, lineno } => {
                 if !container_running {
-                    eprintln!("starting build container '{container_name}'");
-                    systemd::start(datadir, container_name, tasks_max, boot_timeout, verbose)?;
-                    systemd::await_boot(container_name, timeout, verbose)?;
+                    eprintln!("starting build container '{}'", ctx.container_name);
+                    systemd::start(
+                        datadir,
+                        ctx.container_name,
+                        ctx.tasks_max,
+                        ctx.boot_timeout,
+                        ctx.verbose,
+                    )?;
+                    systemd::await_boot(ctx.container_name, timeout, ctx.verbose)?;
                     container_running = true;
                 }
-                run_in_container(container_name, command, verbose)
-                    .with_context(|| format!("{}:{}", config.path.display(), lineno))?;
+                run_in_container(ctx.container_name, command, ctx.verbose)
+                    .with_context(|| format!("{}:{}", ctx.config.path.display(), lineno))?;
             }
             BuildOp::Copy { src, dst, lineno } => {
                 if container_running {
-                    eprintln!("stopping build container '{container_name}'");
-                    containers::stop(container_name, containers::StopMode::Terminate, 30, verbose)?;
+                    eprintln!("stopping build container '{}'", ctx.container_name);
+                    containers::stop(
+                        ctx.container_name,
+                        containers::StopMode::Terminate,
+                        30,
+                        ctx.verbose,
+                    )?;
                     container_running = false;
                 }
                 let upper_dir = datadir
                     .join("containers")
-                    .join(container_name)
+                    .join(ctx.container_name)
                     .join("upper");
-                let lower_dir = datadir.join("fs").join(rootfs);
-                do_copy(&upper_dir, &lower_dir, src, dst, opaque_dirs, verbose)
-                    .with_context(|| format!("{}:{}", config.path.display(), lineno))?;
+                let lower_dir = datadir.join("fs").join(&ctx.config.rootfs);
+                do_copy(
+                    &upper_dir,
+                    &lower_dir,
+                    src,
+                    dst,
+                    ctx.opaque_dirs,
+                    ctx.verbose,
+                )
+                .with_context(|| format!("{}:{}", ctx.config.path.display(), lineno))?;
             }
         }
     }
 
     // Ensure container is stopped; overlayfs must be unmounted for merged layer copy.
     if container_running {
-        eprintln!("stopping build container '{container_name}'");
-        containers::stop(container_name, containers::StopMode::Terminate, 30, verbose)?;
+        eprintln!("stopping build container '{}'", ctx.container_name);
+        containers::stop(
+            ctx.container_name,
+            containers::StopMode::Terminate,
+            30,
+            ctx.verbose,
+        )?;
     }
 
     Ok(())
@@ -320,31 +342,41 @@ fn execute_build(
 
 // --- Main entry point ---
 
+/// Options for building a root filesystem from a configuration file.
+pub struct BuildOptions<'a> {
+    /// Name for the output rootfs.
+    pub name: &'a str,
+    /// Path to the build configuration file.
+    pub config_path: &'a Path,
+    /// Timeout in seconds for container boot during RUN steps.
+    pub boot_timeout: u64,
+    /// Maximum number of tasks for the build container.
+    pub tasks_max: u32,
+    /// Overwrite existing rootfs if it already exists.
+    pub force: bool,
+    /// Automatically clean up stale transactions before building.
+    pub auto_gc: bool,
+    /// Enable verbose output.
+    pub verbose: bool,
+}
+
 /// Build a root filesystem from a Dockerfile-like configuration file.
-#[allow(clippy::too_many_arguments)]
-pub fn build(
-    datadir: &Path,
-    name: &str,
-    config_path: &Path,
-    boot_timeout: u64,
-    tasks_max: u32,
-    force: bool,
-    auto_gc: bool,
-    verbose: bool,
-) -> Result<()> {
+pub fn build(datadir: &Path, opts: &BuildOptions<'_>) -> Result<()> {
+    let name = opts.name;
+    let verbose = opts.verbose;
     validate_name(name)?;
 
     let fs_dir = datadir.join("fs");
     let final_dir = fs_dir.join(name);
     if final_dir.exists() {
-        if !force {
+        if !opts.force {
             bail!("fs already exists: {name}");
         }
         eprintln!("removing existing fs '{name}'");
-        rootfs::remove(datadir, name, auto_gc, verbose)?;
+        rootfs::remove(datadir, name, opts.auto_gc, verbose)?;
     }
 
-    let config = parse_build_config(config_path)?;
+    let config = parse_build_config(opts.config_path)?;
 
     // Verify the FROM rootfs exists.
     let rootfs_dir = fs_dir.join(&config.rootfs);
@@ -366,13 +398,14 @@ pub fn build(
     // Execute all build operations; clean up on failure.
     if let Err(e) = execute_build(
         datadir,
-        &staging_name,
-        &config.rootfs,
-        &config,
-        &create_opts.opaque_dirs,
-        boot_timeout,
-        tasks_max,
-        verbose,
+        &ExecuteBuildContext {
+            container_name: &staging_name,
+            config: &config,
+            opaque_dirs: &create_opts.opaque_dirs,
+            boot_timeout: opts.boot_timeout,
+            tasks_max: opts.tasks_max,
+            verbose,
+        },
     ) {
         crate::reset_interrupt();
         eprintln!("build failed, stopping '{staging_name}'");
@@ -411,7 +444,13 @@ pub fn build(
     }
 
     // Copy merged to staging rootfs, then atomic rename.
-    let mut txn = crate::txn::Txn::new(&fs_dir, name, crate::txn::TxnKind::Build, auto_gc, verbose);
+    let mut txn = crate::txn::Txn::new(
+        &fs_dir,
+        name,
+        crate::txn::TxnKind::Build,
+        opts.auto_gc,
+        verbose,
+    );
     txn.prepare()?;
     let staging_rootfs = txn.path().to_path_buf();
 

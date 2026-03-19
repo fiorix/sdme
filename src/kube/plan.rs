@@ -2081,14 +2081,16 @@ spec:
             tmp.path(),
             &staging,
             &app_dir,
-            kc,
-            None,
-            &plan.restart_policy,
-            &plan.volumes,
-            plan,
-            is_init,
-            init_container_names,
-            false,
+            &super::super::create::KubeContainerOptions {
+                kc,
+                oci_config: None,
+                restart_policy: &plan.restart_policy,
+                volumes: &plan.volumes,
+                plan,
+                is_init,
+                init_container_names,
+                verbose: false,
+            },
         )
         .unwrap();
 
@@ -2272,14 +2274,16 @@ spec:
             tmp.path(),
             &staging,
             &app_dir,
-            &kc,
-            None,
-            &plan.restart_policy,
-            &plan.volumes,
-            &plan,
-            false,
-            &[],
-            false,
+            &super::super::create::KubeContainerOptions {
+                kc: &kc,
+                oci_config: None,
+                restart_policy: &plan.restart_policy,
+                volumes: &plan.volumes,
+                plan: &plan,
+                is_init: false,
+                init_container_names: &[],
+                verbose: false,
+            },
         )
         .unwrap();
 
@@ -2343,14 +2347,16 @@ spec:
             tmp.path(),
             &staging,
             &app_dir,
-            &kc,
-            None,
-            &plan.restart_policy,
-            &plan.volumes,
-            &plan,
-            false,
-            &[],
-            false,
+            &super::super::create::KubeContainerOptions {
+                kc: &kc,
+                oci_config: None,
+                restart_policy: &plan.restart_policy,
+                volumes: &plan.volumes,
+                plan: &plan,
+                is_init: false,
+                init_container_names: &[],
+                verbose: false,
+            },
         )
         .unwrap();
 
@@ -2427,14 +2433,16 @@ spec:
             tmp.path(),
             &staging,
             &app_dir,
-            &kc,
-            None,
-            &plan.restart_policy,
-            &plan.volumes,
-            &plan,
-            false,
-            &[],
-            false,
+            &super::super::create::KubeContainerOptions {
+                kc: &kc,
+                oci_config: None,
+                restart_policy: &plan.restart_policy,
+                volumes: &plan.volumes,
+                plan: &plan,
+                is_init: false,
+                init_container_names: &[],
+                verbose: false,
+            },
         )
         .unwrap();
 
@@ -2517,14 +2525,16 @@ spec:
             tmp.path(),
             &staging,
             &app_dir,
-            &kc,
-            None,
-            &plan.restart_policy,
-            &plan.volumes,
-            &plan,
-            false,
-            &[],
-            false,
+            &super::super::create::KubeContainerOptions {
+                kc: &kc,
+                oci_config: None,
+                restart_policy: &plan.restart_policy,
+                volumes: &plan.volumes,
+                plan: &plan,
+                is_init: false,
+                init_container_names: &[],
+                verbose: false,
+            },
         )
         .unwrap();
 
@@ -3803,14 +3813,16 @@ spec:
             tmp.path(),
             &staging,
             &app_dir,
-            &kc,
-            None,
-            &plan.restart_policy,
-            &plan.volumes,
-            &plan,
-            false,
-            &[],
-            false,
+            &super::super::create::KubeContainerOptions {
+                kc: &kc,
+                oci_config: None,
+                restart_policy: &plan.restart_policy,
+                volumes: &plan.volumes,
+                plan: &plan,
+                is_init: false,
+                init_container_names: &[],
+                verbose: false,
+            },
         )
         .unwrap();
 
@@ -3871,14 +3883,16 @@ spec:
             tmp.path(),
             &staging,
             &app_dir,
-            &kc,
-            None,
-            &plan.restart_policy,
-            &plan.volumes,
-            &plan,
-            false,
-            &[],
-            false,
+            &super::super::create::KubeContainerOptions {
+                kc: &kc,
+                oci_config: None,
+                restart_policy: &plan.restart_policy,
+                volumes: &plan.volumes,
+                plan: &plan,
+                is_init: false,
+                init_container_names: &[],
+                verbose: false,
+            },
         )
         .unwrap();
 

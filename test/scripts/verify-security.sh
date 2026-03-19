@@ -408,71 +408,67 @@ fi
 cleanup_container sec-hard-ovr
 
 # ===========================================================================
-# Test 10: --apparmor-profile state persistence
+# Tests 10-11: AppArmor profile persistence and enforcement
 # ===========================================================================
-echo "=== Test 10: --apparmor-profile persistence ==="
 
-cleanup_container sec-apparmor
-
-"$SDME" create -r ubuntu --apparmor-profile=sdme-container sec-apparmor "${VFLAG[@]}" 2>&1
-
-state_file="$DATADIR/state/sec-apparmor"
-if [[ ! -f "$state_file" ]]; then
-    fail "apparmor: state file not found"
-else
-    if grep -q "^APPARMOR_PROFILE=sdme-container$" "$state_file"; then
-        ok "AppArmor profile persisted in state file"
-    else
-        fail "apparmor: APPARMOR_PROFILE not found in state"
-    fi
-fi
-
-# Also verify the nspawn drop-in contains AppArmorProfile= when started.
-# We cannot actually enforce AppArmor without a loaded profile, but we can
-# check the unit file generation.
-if timeout "$TIMEOUT_BOOT" "$SDME" start sec-apparmor -t "$TIMEOUT_BOOT" "${VFLAG[@]}" 2>&1; then
-    dropin="/etc/systemd/system/sdme@sec-apparmor.service.d/nspawn.conf"
-    if [[ -f "$dropin" ]] && grep -q "AppArmorProfile=sdme-container" "$dropin"; then
-        ok "AppArmorProfile= directive in systemd drop-in"
-    else
-        fail "apparmor: AppArmorProfile= not found in drop-in ($dropin)"
-    fi
-else
-    # Start may fail if AppArmor profile doesn't exist. That's fine;
-    # we still check the drop-in if it was written before the failure.
-    dropin="/etc/systemd/system/sdme@sec-apparmor.service.d/nspawn.conf"
-    if [[ -f "$dropin" ]] && grep -q "AppArmorProfile=sdme-container" "$dropin"; then
-        ok "AppArmorProfile= directive in systemd drop-in (start failed, expected without profile loaded)"
-    else
-        skipped "AppArmor drop-in not generated (start failed before writing drop-in)"
-    fi
-fi
-
-cleanup_container sec-apparmor
-
-# ===========================================================================
-# Test 11: --apparmor-profile enforcement (boot with sdme-default)
-# ===========================================================================
-echo "=== Test 11: --apparmor-profile enforcement ==="
-
-# Skip if AppArmor is not available on this system.
+# Skip both AppArmor tests if AppArmor is not available on this system.
 if [[ ! -f /sys/kernel/security/apparmor/profiles ]]; then
+    echo "=== Test 10: --apparmor-profile persistence ==="
+    skipped "AppArmor not available on this system"
+    echo "=== Test 11: --apparmor-profile enforcement ==="
     skipped "AppArmor not available on this system"
 else
-    # Install the sdme-default profile on the host.
-    apparmor_installed=false
+    # Install the sdme-default profile on the host (needed by both tests).
     profile_file="/etc/apparmor.d/sdme-default"
-
-    if "$SDME" config apparmor-profile > "$profile_file" 2>/dev/null; then
-        if apparmor_parser -r "$profile_file" 2>/dev/null; then
-            apparmor_installed=true
-            ok "sdme-default AppArmor profile installed and loaded"
-        else
-            fail "apparmor enforcement: apparmor_parser failed to load profile"
-        fi
+    if "$SDME" config apparmor-profile > "$profile_file" 2>/dev/null &&
+       apparmor_parser -r "$profile_file" 2>/dev/null; then
+        apparmor_installed=true
+        ok "sdme-default AppArmor profile installed and loaded"
     else
-        fail "apparmor enforcement: could not generate profile"
+        apparmor_installed=false
+        fail "apparmor: could not install sdme-default profile"
     fi
+
+    # -----------------------------------------------------------------------
+    # Test 10: --apparmor-profile state persistence
+    # -----------------------------------------------------------------------
+    echo "=== Test 10: --apparmor-profile persistence ==="
+
+    if $apparmor_installed; then
+        cleanup_container sec-apparmor
+
+        "$SDME" create -r ubuntu --apparmor-profile=sdme-default sec-apparmor "${VFLAG[@]}" 2>&1
+
+        state_file="$DATADIR/state/sec-apparmor"
+        if [[ ! -f "$state_file" ]]; then
+            fail "apparmor: state file not found"
+        else
+            if grep -q "^APPARMOR_PROFILE=sdme-default$" "$state_file"; then
+                ok "AppArmor profile persisted in state file"
+            else
+                fail "apparmor: APPARMOR_PROFILE not found in state"
+            fi
+        fi
+
+        # Verify the nspawn drop-in contains AppArmorProfile= when started.
+        if timeout "$TIMEOUT_BOOT" "$SDME" start sec-apparmor -t "$TIMEOUT_BOOT" "${VFLAG[@]}" 2>&1; then
+            dropin="/etc/systemd/system/sdme@sec-apparmor.service.d/nspawn.conf"
+            if [[ -f "$dropin" ]] && grep -q "AppArmorProfile=sdme-default" "$dropin"; then
+                ok "AppArmorProfile= directive in systemd drop-in"
+            else
+                fail "apparmor: AppArmorProfile= not found in drop-in ($dropin)"
+            fi
+        else
+            fail "apparmor persistence: start failed unexpectedly"
+        fi
+
+        cleanup_container sec-apparmor
+    fi
+
+    # -----------------------------------------------------------------------
+    # Test 11: --apparmor-profile enforcement (boot with sdme-default)
+    # -----------------------------------------------------------------------
+    echo "=== Test 11: --apparmor-profile enforcement ==="
 
     if $apparmor_installed; then
         cleanup_container sec-aa-enforce
@@ -524,7 +520,7 @@ else
             cleanup_container sec-aa-enforce
         fi
     fi
-fi
+fi # AppArmor available
 
 # ===========================================================================
 # Test 12: --hardened container boots and reaches running/degraded

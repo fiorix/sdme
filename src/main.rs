@@ -2507,13 +2507,15 @@ fn main() -> Result<()> {
                 let boot_timeout = timeout.unwrap_or(cfg.boot_timeout);
                 sdme::build::build(
                     &cfg.datadir,
-                    &name,
-                    &config,
-                    boot_timeout,
-                    cfg.tasks_max,
-                    force,
-                    cfg.auto_fs_gc,
-                    cli.verbose,
+                    &sdme::build::BuildOptions {
+                        name: &name,
+                        config_path: &config,
+                        boot_timeout,
+                        tasks_max: cfg.tasks_max,
+                        force,
+                        auto_gc: cfg.auto_fs_gc,
+                        verbose: cli.verbose,
+                    },
                 )?;
                 println!("{name}");
             }

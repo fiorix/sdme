@@ -596,33 +596,39 @@ fn resolve_manifest(
 
 // --- Layer download + extraction ---
 
-/// Download a blob to a file while verifying its SHA-256 digest.
-/// If a cache is provided and the blob is already cached, copies from cache instead.
-#[allow(clippy::too_many_arguments)]
-fn download_blob(
-    agent: &ureq::Agent,
-    registry: &str,
-    repository: &str,
-    digest: &str,
-    dest: &Path,
-    token: Option<&str>,
-    cache: &crate::oci::cache::BlobCache,
+/// Options for downloading a blob from an OCI registry.
+struct DownloadBlobOptions<'a> {
+    agent: &'a ureq::Agent,
+    registry: &'a str,
+    repository: &'a str,
+    digest: &'a str,
+    dest: &'a Path,
+    token: Option<&'a str>,
+    cache: &'a crate::oci::cache::BlobCache,
     verbose: bool,
     max_download_size: u64,
-) -> Result<()> {
+}
+
+/// Download a blob to a file while verifying its SHA-256 digest.
+/// If a cache is provided and the blob is already cached, copies from cache instead.
+fn download_blob(opts: &DownloadBlobOptions<'_>) -> Result<()> {
+    let digest = opts.digest;
+    let dest = opts.dest;
+    let verbose = opts.verbose;
+    let registry = opts.registry;
     // Check cache first.
-    if let Some(cached_path) = cache.get(digest, verbose) {
+    if let Some(cached_path) = opts.cache.get(digest, verbose) {
         fs::copy(&cached_path, dest)
             .with_context(|| format!("failed to copy cached blob to {}", dest.display()))?;
         return Ok(());
     }
-    let url = format!("https://{registry}/v2/{repository}/blobs/{digest}");
+    let url = format!("https://{registry}/v2/{}/blobs/{digest}", opts.repository);
     if verbose {
         eprintln!("downloading blob: {digest}");
     }
 
-    let mut request = agent.get(&url);
-    if let Some(token) = token {
+    let mut request = opts.agent.get(&url);
+    if let Some(token) = opts.token {
         request = request.header("Authorization", &format!("Bearer {token}"));
     }
 
@@ -668,10 +674,10 @@ fn download_blob(
             .with_context(|| format!("failed to write blob to {}", dest.display()))?;
         hasher.update(&buf[..n]);
         total += n as u64;
-        if max_download_size > 0 && total > max_download_size {
+        if opts.max_download_size > 0 && total > opts.max_download_size {
             bail!(
                 "blob {digest} exceeds maximum download size of {} bytes",
-                max_download_size
+                opts.max_download_size
             );
         }
     }
@@ -687,7 +693,7 @@ fn download_blob(
     }
 
     // Store in cache (best-effort).
-    if let Err(e) = cache.put(digest, dest, verbose) {
+    if let Err(e) = opts.cache.put(digest, dest, verbose) {
         if verbose {
             eprintln!("cache: failed to store {digest}: {e:#}");
         }
@@ -808,17 +814,17 @@ pub(crate) fn import_registry_image(
                 layer.digest
             );
 
-            download_blob(
-                &agent,
-                &image.registry,
-                &image.repository,
-                &layer.digest,
-                &temp_path,
-                token_ref,
+            download_blob(&DownloadBlobOptions {
+                agent: &agent,
+                registry: &image.registry,
+                repository: &image.repository,
+                digest: &layer.digest,
+                dest: &temp_path,
+                token: token_ref,
                 cache,
                 verbose,
-                http.max_download_size,
-            )?;
+                max_download_size: http.max_download_size,
+            })?;
 
             let decoder = open_decoder(&temp_path)?;
             unpack_oci_layer(decoder, staging_dir)?;

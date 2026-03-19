@@ -11,7 +11,7 @@ See [README.md](README.md) for how to run the tests and known limitations.
 | # | Test Suite | Status | Passed | Failed | Skipped | Total |
 |---|-----------|--------|--------|--------|---------|-------|
 | 1 | verify-usage.sh | PASS* | 48 | 1 | 0 | 49 |
-| 2 | verify-security.sh | PASS | 30 | 0 | 1 | 31 |
+| 2 | verify-security.sh | PASS | 31 | 0 | 0 | 31 |
 | 3 | verify-oci.sh | PASS | 20 | 0 | 0 | 20 |
 | 4 | verify-pods.sh | PASS | 9 | 0 | 0 | 9 |
 | 5 | verify-export.sh | PASS | 12 | 0 | 0 | 12 |
@@ -27,14 +27,9 @@ See [README.md](README.md) for how to run the tests and known limitations.
 | 15 | verify-kube-L5-redis-stack.sh | PASS | 6 | 0 | 0 | 6 |
 | 16 | verify-kube-L6-gitea-stack.sh | PASS | 15 | 0 | 0 | 15 |
 
-**Totals: 576 passed, 1 failed, 1 skipped (578 tests), 16/16 suites pass**
+**Totals: 577 passed, 1 failed, 0 skipped (578 tests), 16/16 suites pass**
 
 \* Known platform issue only (no code regression); see below.
-
-## Skipped Tests
-
-- **verify-security.sh** (1 skip): AppArmor profile enforcement test skipped when
-  the `sdme-container` AppArmor profile is not loaded on the host.
 
 ## Failures
 

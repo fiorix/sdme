@@ -273,16 +273,7 @@ fn export_from_dir(src: &Path, output: &Path, opts: &ExportOptions) -> Result<Ex
                 partitions: None,
             })
         }
-        ExportFormat::Raw(fs_type) => export_to_raw(
-            src,
-            output,
-            *fs_type,
-            opts.size,
-            opts.free_space,
-            opts.vm_opts,
-            opts.verbose,
-            opts.force,
-        ),
+        ExportFormat::Raw(fs_type) => export_to_raw(src, output, *fs_type, opts),
     }
 }
 
@@ -431,19 +422,17 @@ fn meta_gid(meta: &fs::Metadata) -> u64 {
 }
 
 /// Export by creating a raw disk image with the specified filesystem.
-#[allow(clippy::too_many_arguments)]
 fn export_to_raw(
     src: &Path,
     output: &Path,
     fs_type: RawFs,
-    size: Option<&str>,
-    free_space: u64,
-    vm_opts: Option<&VmOptions>,
-    verbose: bool,
-    force: bool,
+    opts: &ExportOptions<'_>,
 ) -> Result<ExportResult> {
+    let verbose = opts.verbose;
+    let free_space = opts.free_space;
+    let vm_opts = opts.vm_opts;
     if output.exists() {
-        if force {
+        if opts.force {
             fs::remove_file(output)
                 .with_context(|| format!("failed to remove {}", output.display()))?;
         } else {
@@ -466,7 +455,7 @@ fn export_to_raw(
     system_check::check_dependencies(&deps, verbose)?;
 
     // Calculate or parse image size.
-    let mut image_size = match size {
+    let mut image_size = match opts.size {
         Some(s) => crate::parse_size(s)?,
         None => {
             let total = dir_size(src)?;
