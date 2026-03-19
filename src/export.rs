@@ -32,7 +32,7 @@ pub struct VmOptions {
     pub ssh_key: Option<String>,
     /// Swap partition size in bytes (`0` = no swap).
     pub swap_size: u64,
-    /// Whether to install packages (e.g. udev) via chroot.
+    /// Whether to run the VM prehook (distro-specific preparation) via chroot.
     pub install_packages: InstallPackages,
     /// Allow interactive prompts during package installation.
     pub interactive: bool,
@@ -1067,7 +1067,7 @@ fn ensure_init_symlink(mount: &Path) -> Result<()> {
 ///
 /// | What | Path(s) | Why |
 /// |------|---------|-----|
-/// | udev install | (via chroot) | Container rootfs images lack udev; installed if `--install-packages` allows |
+/// | VM prehook | (via chroot) | Distro-specific VM prep (udev, nix-build, etc.); runs if `--install-packages` allows |
 /// | init symlink | `/usr/sbin/init` → `../../lib/systemd/systemd` | Kernel needs `/sbin/init`; nspawn finds systemd directly |
 /// | serial-getty template | `/etc/systemd/system/serial-getty@.service` | Copy of distro template with `BindsTo=dev-%i.device` removed (no udev) |
 /// | serial-getty enable | `/etc/systemd/system/getty.target.wants/serial-getty@ttyS0.service` | Explicit enable for ttyS0 |
@@ -1101,11 +1101,10 @@ fn ensure_init_symlink(mount: &Path) -> Result<()> {
 ///   `BindsTo=dev-%i.device` dependency regardless, so the serial console
 ///   works even without udev.
 ///
-/// - **NixOS**: VM export works with NixOS rootfs built via
-///   `sdme fs import --install-packages=yes` from the `nixos/nix` OCI image,
-///   but NixOS support is more limited than other distros. The NixOS
-///   activation system manages `/etc/systemd/system` as an immutable symlink,
-///   so VM prep files written there may be overwritten on first boot.
+/// - **NixOS**: VM export runs a nix-build that produces a VM-ready NixOS
+///   closure with udev, serial console, networkd, resolved, and fstab baked
+///   into the Nix store. The inline config uses ext4; users needing btrfs or
+///   swap can override via `[distros.nixos] export_vm_prehook` in the config.
 ///
 /// # TODO: package these modifications
 ///
@@ -1121,10 +1120,10 @@ fn ensure_init_symlink(mount: &Path) -> Result<()> {
 /// isolate binary, volume mounts) should be its own package so it can be
 /// cleanly removed or inspected inside a running container.
 fn prep_vm_rootfs(mount: &Path, fs_type: RawFs, opts: &VmOptions, verbose: bool) -> Result<()> {
-    // Install udev first. ChrootGuard copies host resolv.conf for DNS,
-    // and cleanup restores the original. The later write_resolv_conf()
-    // writes the final VM nameservers.
-    install_udev_if_needed(mount, opts, verbose)?;
+    // Run the distro prehook first. ChrootGuard copies host resolv.conf
+    // for DNS, and cleanup restores the original. The later
+    // write_resolv_conf() writes the final VM nameservers.
+    run_vm_prehook(mount, opts, verbose)?;
 
     ensure_init_symlink(mount)?;
 
@@ -1209,13 +1208,6 @@ fn write_hostname(mount: &Path, hostname: &str) -> Result<()> {
         .with_context(|| format!("failed to write {}", path.display()))
 }
 
-/// Check whether udev (systemd-udevd) is present in the rootfs.
-fn detect_udev_presence(mount: &Path) -> bool {
-    mount.join("usr/lib/systemd/systemd-udevd").exists()
-        || mount.join("lib/systemd/systemd-udevd").exists()
-        || mount.join("usr/bin/udevd").exists()
-}
-
 /// Built-in export prehook commands for each distro family.
 ///
 /// Container/rootfs exports (non-VM). Restores file capabilities
@@ -1289,12 +1281,17 @@ fn resolve_export_vm_prehook(
     builtin_export_vm_prehook(family)
 }
 
-/// Install udev into the rootfs if it is missing, respecting the
+/// Run the distro-specific VM export prehook, respecting the
 /// `--install-packages` policy (Auto/Yes/No).
-fn install_udev_if_needed(mount: &Path, opts: &VmOptions, verbose: bool) -> Result<()> {
-    if detect_udev_presence(mount) {
+///
+/// The prehook handles all distro-specific VM preparation (e.g. installing
+/// udev on Debian/Fedora, running nix-build for NixOS).
+fn run_vm_prehook(mount: &Path, opts: &VmOptions, verbose: bool) -> Result<()> {
+    let family = crate::rootfs::detect_distro_family(mount);
+    let commands = resolve_export_vm_prehook(&family, &opts.distros);
+    if commands.is_empty() {
         if verbose {
-            eprintln!("udev already present, skipping install");
+            eprintln!("no VM prehook commands for distro family {:?}", family);
         }
         return Ok(());
     }
@@ -1302,43 +1299,35 @@ fn install_udev_if_needed(mount: &Path, opts: &VmOptions, verbose: bool) -> Resu
     match opts.install_packages {
         InstallPackages::No => {
             if verbose {
-                eprintln!("udev not found; skipping install (--install-packages=no)");
+                eprintln!("skipping VM prehook (--install-packages=no)");
             }
             return Ok(());
         }
         InstallPackages::Auto => {
             if opts.interactive {
-                let proceed = crate::confirm_default_yes(
-                    "udev not found in rootfs; install it for VM boot? [Y/n] ",
-                )?;
+                let proceed =
+                    crate::confirm_default_yes("run VM export prehook for this rootfs? [Y/n] ")?;
                 if !proceed {
-                    eprintln!("skipping udev install");
+                    eprintln!("skipping VM prehook");
                     return Ok(());
                 }
             } else {
                 bail!(
-                    "udev not found in rootfs and cannot prompt in non-interactive mode; \
-                     use --install-packages=yes to install or --install-packages=no to skip"
+                    "VM prehook available for {:?} but cannot prompt in non-interactive mode; \
+                     use --install-packages=yes to run or --install-packages=no to skip",
+                    family
                 );
             }
         }
         InstallPackages::Yes => {}
     }
 
-    let family = crate::rootfs::detect_distro_family(mount);
-    let commands = resolve_export_vm_prehook(&family, &opts.distros);
-    if commands.is_empty() {
-        eprintln!(
-            "warning: udev not found but no install commands for distro family {:?}; skipping",
-            family
-        );
-        return Ok(());
-    }
-
-    eprintln!("installing udev into rootfs...");
-    let _guard = crate::import::ChrootGuard::setup(mount, verbose)?;
-    crate::import::run_chroot_commands(mount, &commands, verbose)?;
-    eprintln!("udev installed successfully");
+    eprintln!("running VM prehook for {:?}...", family);
+    let mut chroot_guard = crate::import::ChrootGuard::setup(mount, verbose)?;
+    let result = crate::import::run_chroot_commands(mount, &commands, verbose);
+    chroot_guard.cleanup();
+    result?;
+    eprintln!("VM prehook completed");
 
     Ok(())
 }
@@ -2089,23 +2078,6 @@ mod tests {
         assert_eq!(content, "myvm\n");
     }
 
-    // --- detect_udev_presence tests ---
-
-    #[test]
-    fn test_detect_udev_presence_found() {
-        let tmp = crate::testutil::TempDataDir::new("export-vm-udev-found");
-        fs::create_dir_all(tmp.path().join("usr/lib/systemd")).unwrap();
-        fs::write(tmp.path().join("usr/lib/systemd/systemd-udevd"), "fake").unwrap();
-
-        assert!(detect_udev_presence(tmp.path()));
-    }
-
-    #[test]
-    fn test_detect_udev_presence_not_found() {
-        let tmp = crate::testutil::TempDataDir::new("export-vm-udev-missing");
-        assert!(!detect_udev_presence(tmp.path()));
-    }
-
     // --- builtin_export_prehook tests ---
 
     #[test]
@@ -2122,7 +2094,6 @@ mod tests {
         assert!(cmds[1].contains("newgidmap"), "got: {}", cmds[1]);
 
         assert!(builtin_export_prehook(&DistroFamily::NixOS).is_empty());
-        assert!(builtin_export_prehook(&DistroFamily::Nix).is_empty());
         assert!(builtin_export_prehook(&DistroFamily::Unknown).is_empty());
     }
 
@@ -2159,7 +2130,6 @@ mod tests {
         assert!(cmds.iter().any(|c| c.contains("clean")), "missing cleanup");
 
         assert!(builtin_export_vm_prehook(&DistroFamily::NixOS).is_empty());
-        assert!(builtin_export_vm_prehook(&DistroFamily::Nix).is_empty());
         assert!(builtin_export_vm_prehook(&DistroFamily::Unknown).is_empty());
     }
 

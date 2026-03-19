@@ -100,16 +100,6 @@ pub struct Config {
     #[serde(default = "default_max_download_size")]
     pub max_download_size: String,
 
-    /// Nixpkgs channel for NixOS rootfs builds (e.g. "nixos-unstable").
-    #[serde(default = "default_nixpkgs_channel")]
-    pub nixpkgs_channel: String,
-
-    /// Path to a custom NixOS configuration template for nix-build imports.
-    /// When set, this file replaces the embedded DEFAULT_NIXOS_CONFIG entirely.
-    /// The `--nix-config` CLI flag still merges on top via NixOS module imports.
-    #[serde(default)]
-    pub nix_config_template: String,
-
     /// Graceful stop timeout in seconds (SIGRTMIN+4 to leader).
     #[serde(default = "default_stop_timeout_graceful")]
     pub stop_timeout_graceful: u64,
@@ -134,7 +124,7 @@ pub struct Config {
     ///
     /// Each service gets a `/dev/null` symlink in the overlayfs upper layer's
     /// `etc/systemd/system/`. Default: `"systemd-resolved.service"`.
-    /// Empty string masks nothing. Skipped for NixOS/Nix rootfs.
+    /// Empty string masks nothing. Skipped for NixOS rootfs.
     #[serde(default = "default_create_masked_services")]
     pub default_create_masked_services: String,
 
@@ -196,10 +186,6 @@ fn default_max_download_size() -> String {
     "50G".to_string()
 }
 
-fn default_nixpkgs_channel() -> String {
-    "nixos-unstable".to_string()
-}
-
 fn default_stop_timeout_graceful() -> u64 {
     90
 }
@@ -240,8 +226,6 @@ impl Default for Config {
             http_timeout: default_http_timeout(),
             http_body_timeout: default_http_body_timeout(),
             max_download_size: default_max_download_size(),
-            nixpkgs_channel: default_nixpkgs_channel(),
-            nix_config_template: String::new(),
             stop_timeout_graceful: default_stop_timeout_graceful(),
             stop_timeout_terminate: default_stop_timeout_terminate(),
             stop_timeout_kill: default_stop_timeout_kill(),
@@ -311,8 +295,6 @@ impl Config {
         println!("http_timeout = {}", self.http_timeout);
         println!("http_body_timeout = {}", self.http_body_timeout);
         println!("max_download_size = {}", self.max_download_size);
-        println!("nixpkgs_channel = {}", self.nixpkgs_channel);
-        println!("nix_config_template = {}", self.nix_config_template);
         println!("stop_timeout_graceful = {}", self.stop_timeout_graceful);
         println!("stop_timeout_terminate = {}", self.stop_timeout_terminate);
         println!("stop_timeout_kill = {}", self.stop_timeout_kill);

@@ -4,7 +4,7 @@
 //! appropriate library function.
 
 use std::os::unix::process::CommandExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
@@ -440,9 +440,6 @@ OCI REGISTRY IMAGES:
         /// Base rootfs for OCI application images (must have systemd; OCI rootfs goes under /oci/apps/{name}/root)
         #[arg(long)]
         base_fs: Option<String>,
-        /// Path to a NixOS configuration file to merge with the default container config (for nix-build imports)
-        #[arg(long)]
-        nix_config: Option<String>,
     },
     /// List imported root filesystems
     Ls,
@@ -2460,7 +2457,6 @@ fn main() -> Result<()> {
                 install_packages,
                 oci_mode,
                 base_fs,
-                nix_config,
             } => {
                 system_check::check_systemd_version(252)?;
                 // Fall back to config default_base_fs when --base-fs is not given.
@@ -2476,7 +2472,6 @@ fn main() -> Result<()> {
                 }
                 let docker_creds = docker_credentials(&cfg);
                 let docker_creds_ref = docker_creds.as_ref().map(|(u, t)| (u.as_str(), t.as_str()));
-                let nix_config_path = nix_config.as_deref().map(Path::new);
                 rootfs::import(
                     &cfg.datadir,
                     &ImportOptions {
@@ -2491,9 +2486,6 @@ fn main() -> Result<()> {
                         docker_credentials: docker_creds_ref,
                         cache: &blob_cache,
                         http: cfg.http_config()?,
-                        nix_config: nix_config_path,
-                        nix_config_template: &cfg.nix_config_template,
-                        nixpkgs_channel: &cfg.nixpkgs_channel,
                         auto_gc: cfg.auto_fs_gc,
                         distros: &cfg.distros,
                     },

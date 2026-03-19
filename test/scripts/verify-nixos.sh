@@ -4,11 +4,11 @@ set -uo pipefail
 # verify-nixos.sh - end-to-end verification of NixOS rootfs import, container boot,
 # OCI nginx-unprivileged on a NixOS base, and Kubernetes Pod YAML.
 #
-# Run as root. Imports NixOS rootfs via docker.io/nixos/nix (no local nix required).
-# Uses vfy-nix- prefix for all artifacts.
+# Run as root. Builds NixOS rootfs externally via build-nixos-rootfs.sh
+# (no local nix required). Uses vfy-nix- prefix for all artifacts.
 #
 # Phases:
-#   1. Import NixOS rootfs via docker.io/nixos/nix --install-packages=yes
+#   1. Build and import NixOS rootfs via build-nixos-rootfs.sh
 #   2. Boot a plain NixOS container and verify it's running
 #   3. Import nginx-unprivileged OCI app on the NixOS base
 #   4. Create, boot, and test the OCI app container
@@ -112,7 +112,7 @@ trap cleanup EXIT INT TERM
 # -- Phase 1: Import NixOS rootfs ----------------------------------------------
 
 phase1_import() {
-    log "Phase 1: Import NixOS rootfs via docker.io/nixos/nix"
+    log "Phase 1: Build and import NixOS rootfs via build-nixos-rootfs.sh"
 
     if fs_exists "$FS_NAME"; then
         log "  $FS_NAME already exists, skipping import"
@@ -120,9 +120,11 @@ phase1_import() {
         return
     fi
 
+    local build_script
+    build_script="$(dirname "$0")/build-nixos-rootfs.sh"
+
     local output
-    if output=$(timeout "$TIMEOUT_IMPORT" sdme fs import "$FS_NAME" docker.io/nixos/nix \
-            -v --install-packages=yes -f 2>&1); then
+    if output=$(timeout "$TIMEOUT_IMPORT" "$build_script" "$FS_NAME" -v 2>&1); then
         record "import" PASS
     else
         record "import" FAIL "$output"

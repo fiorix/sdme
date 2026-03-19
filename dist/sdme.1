@@ -438,13 +438,6 @@ See Section 6 (OCI Integration) in
 .I docs/architecture.md
 for details.
 .PP
-The
-.B \-\-nix\-config
-flag specifies a path to a NixOS configuration file to merge with the default
-container configuration during nix\-build imports.
-The file is copied into the rootfs and imported via the NixOS module system,
-so list options (e.g.\& packages, services) merge automatically.
-.PP
 The source type is auto\-detected:
 .RS
 .IP \(bu 2
@@ -1168,18 +1161,6 @@ to disable caching.
 Default:
 .BR 10G .
 .TP
-.B nixpkgs_channel
-Nixpkgs channel used for NixOS rootfs builds via nix\-build.
-Default:
-.BR nixos\-unstable .
-.TP
-.B nix_config_template
-Path to a custom NixOS configuration file that replaces the built\-in
-default NixOS config template for nix\-build rootfs builds.
-When set, the build pipeline (nix\-build command, rootfs rebuild) stays
-the same; only the NixOS derivation changes.
-Default: empty (uses built\-in template).
-.TP
 .B auto_fs_gc
 Automatically clean up stale transaction staging directories before
 mutating filesystem operations.
@@ -1418,22 +1399,6 @@ for unlimited.
 Default:
 .BR 50G .
 .TP
-.B nixpkgs_channel
-String.
-Nixpkgs channel used for NixOS rootfs builds via nix\-build.
-Default:
-.BR nixos\-unstable .
-.TP
-.B nix_config_template
-String.
-Path to a custom NixOS configuration file
-.RI ( .nix )
-that replaces the built\-in default NixOS config template used during
-nix\-build rootfs builds.
-The build pipeline (nix\-build command, rootfs rebuild) stays the same;
-only the NixOS derivation changes.
-Default: empty (uses built\-in template).
-.TP
 .B auto_fs_gc
 Boolean.
 Automatically clean up stale transaction staging directories from
@@ -1454,7 +1419,7 @@ Each service gets a
 .I /dev/null
 symlink in the upper layer's
 .IR etc/systemd/system/ .
-Skipped for NixOS and Nix rootfs (NixOS activation replaces the directory).
+Skipped for NixOS rootfs (NixOS activation replaces the directory).
 When
 .B \-\-network\-zone
 is set and
@@ -1477,7 +1442,6 @@ Family names match
 Absent means use built\-in defaults; an empty array
 .RB ( "[]" )
 means explicitly do nothing.
-Nix and NixOS distros are hardcoded (nix\-build flow) and cannot be overridden.
 .TP
 .B distros.<family>.export_prehook
 Array of strings (TOML array).
@@ -2097,8 +2061,8 @@ and overrides any stale
 masks from the rootfs lower layer so that LLMNR/mDNS enables
 container\-to\-container name resolution within the zone.
 .PP
-.B NixOS/Nix rootfs:
-Service masking is skipped entirely for NixOS and Nix rootfs because
+.B NixOS rootfs:
+Service masking is skipped entirely for NixOS rootfs because
 NixOS activation replaces
 .I /etc/systemd/system
 with an immutable symlink to the Nix store.

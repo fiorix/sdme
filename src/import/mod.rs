@@ -97,13 +97,6 @@ pub struct ImportOptions<'a> {
     pub cache: &'a crate::oci::cache::BlobCache,
     /// HTTP configuration for downloads and OCI pulls.
     pub http: crate::config::HttpConfig,
-    /// Optional path to a user NixOS configuration file for nix-build imports.
-    pub nix_config: Option<&'a Path>,
-    /// Optional path to a custom NixOS configuration template that replaces
-    /// the embedded DEFAULT_NIXOS_CONFIG. `nix_config` still merges on top.
-    pub nix_config_template: &'a str,
-    /// Nixpkgs channel for NixOS rootfs builds (e.g. "nixos-unstable").
-    pub nixpkgs_channel: &'a str,
     /// Automatically clean up stale transactions before importing.
     pub auto_gc: bool,
     /// Per-distro chroot command overrides from config.
@@ -886,46 +879,6 @@ pub(crate) fn run_chroot_commands(rootfs: &Path, commands: &[String], verbose: b
 /// already running as root in a throwaway chroot, disabling the sandbox is safe.
 pub(crate) const APT_NO_SANDBOX: &str = r#"-o APT::Sandbox::User="""#;
 
-/// Embedded NixOS container configuration for nix-build imports.
-///
-/// Produces a bootable NixOS system closure with systemd, dbus, and a minimal
-/// set of tools. Supports an optional user config via NixOS `imports`.
-///
-/// **Limitation**: `networkd` is enabled but `resolved` is disabled by default.
-/// Containers using `--network-veth` or `--network-bridge` get DHCP via networkd
-/// and work out of the box. However, `--network-zone` also needs resolved for
-/// LLMNR/mDNS inter-container name resolution. To enable it, pass a
-/// `--nix-config` file containing `{ services.resolved.enable = true; }`.
-const DEFAULT_NIXOS_CONFIG: &str = r#"{ pkgs ? import <nixpkgs> {} }:
-let
-  userConfig = /tmp/sdme-nixos-extra.nix;
-  hasUserConfig = builtins.pathExists userConfig;
-  nixos = import "${pkgs.path}/nixos" {
-    configuration = { config, lib, pkgs, ... }: {
-      imports = lib.optionals hasUserConfig [ userConfig ];
-      boot.isContainer = true;
-      services.dbus.enable = true;
-      users.users.root.initialHashedPassword = "";
-      networking.useNetworkd = true;
-      environment.systemPackages = with pkgs; [
-        bashInteractive coreutils util-linux iproute2
-        less procps findutils gnugrep gnused curl
-      ];
-      fileSystems."/" = { device = "none"; fsType = "tmpfs"; };
-      boot.loader.grub.enable = false;
-      services.resolved.enable = false;
-      services.getty.autologinUser = "root";
-      # Disable pam_lastlog2 for machinectl shell (container-shell PAM service)
-      # and login: the module has linkage issues in nspawn containers.
-      security.pam.services.login.rules.session.lastlog.enable = lib.mkForce false;
-      security.pam.services.container-shell.rules.session.lastlog.enable = lib.mkForce false;
-      system.stateVersion = lib.trivial.release;
-      nix.nixPath = [ "nixpkgs=${pkgs.path}" ];
-    };
-  };
-in nixos.config.system.build.toplevel
-"#;
-
 /// Built-in import prehook commands for each distro family.
 ///
 /// These install systemd, dbus, pam/login, set timezone, and clean cache.
@@ -960,35 +913,11 @@ pub fn builtin_import_prehook(family: &DistroFamily) -> Vec<String> {
     }
 }
 
-/// Built-in Nix import commands (not configurable via hooks).
-fn builtin_nix_commands(nixpkgs_channel: &str) -> Vec<String> {
-    let channel = if nixpkgs_channel.is_empty() {
-        "nixos-unstable"
-    } else {
-        nixpkgs_channel
-    };
-    vec![format!(
-        "export PATH=/root/.nix-profile/bin:/nix/var/nix/profiles/default/bin:$PATH && \
-         export NIX_REMOTE= && \
-         export NIX_PATH='nixpkgs=https://github.com/NixOS/nixpkgs/archive/refs/heads/{channel}.tar.gz' && \
-         TOPLEVEL=$(nix-build /tmp/sdme-nixos.nix --no-out-link --option sandbox false --option filter-syscalls false) && \
-         mkdir -p /sbin && \
-         ln -sf \"$TOPLEVEL/init\" /sbin/init && \
-         nix-store -qR \"$TOPLEVEL\" > /tmp/sdme-nix-closure.txt"
-    )]
-}
-
 /// Resolve import prehook commands: config override → built-in default.
-///
-/// Nix stays hardcoded (nix-build flow, not configurable via hooks).
 fn resolve_import_prehook(
     family: &DistroFamily,
     distros: &HashMap<String, DistroCommands>,
-    nixpkgs_channel: &str,
 ) -> Vec<String> {
-    if *family == DistroFamily::Nix {
-        return builtin_nix_commands(nixpkgs_channel);
-    }
     if let Some(cfg) = distros.get(family.config_key()) {
         if let Some(cmds) = &cfg.import_prehook {
             return cmds.clone();
@@ -1001,53 +930,15 @@ fn resolve_import_prehook(
 fn install_systemd_packages(
     rootfs: &Path,
     family: &DistroFamily,
-    nixpkgs_channel: &str,
-    nix_config: Option<&Path>,
-    nix_config_template: &str,
     distros: &HashMap<String, DistroCommands>,
     verbose: bool,
 ) -> Result<()> {
-    let commands = resolve_import_prehook(family, distros, nixpkgs_channel);
+    let commands = resolve_import_prehook(family, distros);
     if commands.is_empty() {
         bail!(
             "no package installation commands available for distro family {:?}",
             family
         );
-    }
-
-    // For Nix family: write NixOS configuration and optional user config
-    // into the rootfs before entering the chroot.
-    if *family == DistroFamily::Nix {
-        let tmp_dir = rootfs.join("tmp");
-        fs::create_dir_all(&tmp_dir)
-            .with_context(|| format!("failed to create {}", tmp_dir.display()))?;
-        if nix_config_template.is_empty() {
-            fs::write(tmp_dir.join("sdme-nixos.nix"), DEFAULT_NIXOS_CONFIG)
-                .context("failed to write embedded sdme-nixos.nix")?;
-        } else {
-            fs::copy(nix_config_template, tmp_dir.join("sdme-nixos.nix")).with_context(|| {
-                format!(
-                    "failed to copy nix config template from {}",
-                    nix_config_template
-                )
-            })?;
-        }
-        if let Some(config_path) = nix_config {
-            fs::copy(config_path, tmp_dir.join("sdme-nixos-extra.nix")).with_context(|| {
-                format!("failed to copy nix config from {}", config_path.display())
-            })?;
-        }
-        if verbose {
-            let source = if nix_config_template.is_empty() {
-                "embedded"
-            } else {
-                nix_config_template
-            };
-            eprintln!(
-                "wrote nix build config ({source}) to {}/tmp/sdme-nixos.nix",
-                rootfs.display()
-            );
-        }
     }
 
     if verbose {
@@ -1058,127 +949,6 @@ fn install_systemd_packages(
     let result = run_chroot_commands(rootfs, &commands, verbose);
     chroot_guard.cleanup();
     result?;
-
-    // For Nix family: rebuild rootfs from the NixOS closure only,
-    // discarding leftover non-NixOS files from the OCI base image.
-    if *family == DistroFamily::Nix {
-        rebuild_nix_rootfs(rootfs, verbose)?;
-    }
-
-    Ok(())
-}
-
-/// Rebuild a rootfs from the NixOS closure, discarding everything else.
-///
-/// After `nix-build` produces a NixOS system closure inside the OCI base image
-/// (e.g. `docker.io/nixos/nix` which is Alpine-based), the rootfs contains both
-/// the NixOS closure in `/nix/store` and the leftover base image files. The
-/// leftover files interfere with NixOS boot/activation.
-///
-/// This function reads the closure list written by the chroot step, creates a
-/// clean rootfs with only the NixOS store paths and skeleton directories, then
-/// atomically replaces the old rootfs.
-fn rebuild_nix_rootfs(rootfs: &Path, verbose: bool) -> Result<()> {
-    if verbose {
-        eprintln!("rebuilding rootfs from NixOS closure");
-    }
-
-    // Read the closure list written by the chroot nix-build step.
-    let closure_file = rootfs.join("tmp/sdme-nix-closure.txt");
-    let closure_text = fs::read_to_string(&closure_file)
-        .with_context(|| format!("failed to read {}", closure_file.display()))?;
-    let store_paths: Vec<&str> = closure_text.lines().filter(|l| !l.is_empty()).collect();
-    if store_paths.is_empty() {
-        bail!("nix closure list is empty");
-    }
-
-    // Read the /sbin/init symlink to get the TOPLEVEL path.
-    let init_link = rootfs.join("sbin/init");
-    let toplevel_init = fs::read_link(&init_link)
-        .with_context(|| format!("failed to read symlink {}", init_link.display()))?;
-
-    if verbose {
-        eprintln!(
-            "  {} store paths, toplevel init: {}",
-            store_paths.len(),
-            toplevel_init.display()
-        );
-    }
-
-    // Create a clean rootfs directory alongside the current one.
-    let clean_dir = rootfs.with_extension("rebuilding");
-    if clean_dir.exists() {
-        crate::copy::safe_remove_dir(&clean_dir)?;
-    }
-
-    // Create skeleton directories.
-    for dir in &[
-        "nix/store",
-        "bin",
-        "sbin",
-        "etc",
-        "root",
-        "run",
-        "tmp",
-        "var/log",
-        "var/lib",
-        "proc",
-        "sys",
-        "dev",
-    ] {
-        fs::create_dir_all(clean_dir.join(dir))
-            .with_context(|| format!("failed to create skeleton dir {}", dir))?;
-    }
-
-    // Move each closure store path from old rootfs to clean rootfs.
-    for store_path in &store_paths {
-        // store_path is absolute, e.g. "/nix/store/abc-foo"
-        let rel = store_path.strip_prefix('/').unwrap_or(store_path);
-        let src = rootfs.join(rel);
-        let dst = clean_dir.join(rel);
-        if src.exists() {
-            fs::rename(&src, &dst).with_context(|| {
-                format!("failed to move {} to {}", src.display(), dst.display())
-            })?;
-        } else if verbose {
-            eprintln!("  warning: store path not found: {}", src.display());
-        }
-    }
-
-    // Create /sbin/init symlink.
-    std::os::unix::fs::symlink(&toplevel_init, clean_dir.join("sbin/init"))
-        .context("failed to create /sbin/init symlink")?;
-
-    // Set /tmp permissions.
-    fs::set_permissions(
-        clean_dir.join("tmp"),
-        std::os::unix::fs::PermissionsExt::from_mode(0o1777),
-    )
-    .context("failed to chmod /tmp")?;
-
-    // Write os-release so sdme detects the rootfs as NixOS.
-    fs::write(
-        clean_dir.join("etc/os-release"),
-        "NAME=\"NixOS\"\nID=nixos\nPRETTY_NAME=\"NixOS (sdme)\"\n",
-    )
-    .context("failed to write os-release")?;
-
-    // Replace old rootfs with clean one.
-    if verbose {
-        eprintln!("replacing old rootfs with clean NixOS rootfs");
-    }
-    crate::copy::safe_remove_dir(rootfs)?;
-    fs::rename(&clean_dir, rootfs).with_context(|| {
-        format!(
-            "failed to rename {} to {}",
-            clean_dir.display(),
-            rootfs.display()
-        )
-    })?;
-
-    if verbose {
-        eprintln!("NixOS rootfs rebuild complete");
-    }
 
     Ok(())
 }
@@ -1242,7 +1012,7 @@ fn patch_rootfs_services(
     // Package managers are idempotent so re-installing is safe.
     let pam_login = rootfs.join("etc/pam.d/login");
     if !pam_login.exists() {
-        let commands = resolve_import_prehook(family, distros, "");
+        let commands = resolve_import_prehook(family, distros);
         if !commands.is_empty() {
             eprintln!("installing packages for machinectl shell support");
             let mut chroot_guard = ChrootGuard::setup(rootfs, verbose)?;
@@ -1268,10 +1038,9 @@ fn prompt_install_systemd(
     presence: &SystemdPresence,
     family: &DistroFamily,
     distro_name: &str,
-    nixpkgs_channel: &str,
     distros: &HashMap<String, DistroCommands>,
 ) -> Result<bool> {
-    let commands = resolve_import_prehook(family, distros, nixpkgs_channel);
+    let commands = resolve_import_prehook(family, distros);
     let missing = presence.missing();
     eprintln!("warning: {missing} not found in rootfs (detected: {distro_name})");
     eprintln!("Install packages via chroot? The following commands will run:");
@@ -1315,9 +1084,6 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
         docker_credentials,
         cache,
         ref http,
-        nix_config,
-        nix_config_template,
-        nixpkgs_channel,
         auto_gc,
         distros,
     } = *opts;
@@ -1514,15 +1280,7 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
                             family
                         );
                     }
-                    install_systemd_packages(
-                        &staging_dir,
-                        &family,
-                        nixpkgs_channel,
-                        nix_config,
-                        nix_config_template,
-                        distros,
-                        verbose,
-                    )?;
+                    install_systemd_packages(&staging_dir, &family, distros, verbose)?;
                 }
                 InstallPackages::Auto => {
                     if family == DistroFamily::Unknown {
@@ -1541,22 +1299,8 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
                         );
                     }
                     if interactive {
-                        if prompt_install_systemd(
-                            &presence,
-                            &family,
-                            &distro_name,
-                            nixpkgs_channel,
-                            distros,
-                        )? {
-                            install_systemd_packages(
-                                &staging_dir,
-                                &family,
-                                nixpkgs_channel,
-                                nix_config,
-                                nix_config_template,
-                                distros,
-                                verbose,
-                            )?;
+                        if prompt_install_systemd(&presence, &family, &distro_name, distros)? {
+                            install_systemd_packages(&staging_dir, &family, distros, verbose)?;
                         } else {
                             bail!("{missing} not found in rootfs; import aborted by user");
                         }
@@ -1605,7 +1349,7 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
     // unmask logind, install missing machinectl shell dependencies).
     // Skip for NixOS (Nix-built) rootfs: NixOS manages /etc via activation
     // and the config already disables resolved.
-    if !skip_systemd_check && presence.has_systemd && family != DistroFamily::Nix {
+    if !skip_systemd_check && presence.has_systemd && family != DistroFamily::NixOS {
         if let Err(e) = patch_rootfs_services(&staging_dir, &family, distros, verbose) {
             eprintln!("warning: rootfs service patching failed: {e}");
         }
@@ -1726,9 +1470,6 @@ pub(crate) mod tests {
                     body_timeout: cfg.http_body_timeout,
                     max_download_size: 0,
                 },
-                nix_config: None,
-                nix_config_template: "",
-                nixpkgs_channel: "",
                 auto_gc: true,
                 distros: &HashMap::new(),
             },
@@ -2655,9 +2396,6 @@ pub(crate) mod tests {
                     body_timeout: cfg.http_body_timeout,
                     max_download_size: 0,
                 },
-                nix_config: None,
-                nix_config_template: "",
-                nixpkgs_channel: "",
                 auto_gc: true,
                 distros: &HashMap::new(),
             },

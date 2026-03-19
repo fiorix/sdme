@@ -209,7 +209,7 @@ fn do_create(
     // Skipped for NixOS/Nix rootfs because NixOS activation replaces
     // /etc/systemd/system with an immutable symlink to the Nix store.
     let family = rootfs::detect_distro_family(rootfs);
-    if family != rootfs::DistroFamily::NixOS && family != rootfs::DistroFamily::Nix {
+    if family != rootfs::DistroFamily::NixOS {
         for svc in &opts.masked_services {
             let mask_path = systemd_unit_dir.join(svc);
             if !mask_path.exists() {
@@ -222,7 +222,7 @@ fn do_create(
             }
         }
     } else if verbose && !opts.masked_services.is_empty() {
-        eprintln!("skipping service masking for NixOS/Nix rootfs");
+        eprintln!("skipping service masking for NixOS rootfs");
     }
 
     // When /etc/systemd/system is opaque, the dbus.service alias from the
