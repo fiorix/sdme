@@ -403,24 +403,29 @@ pub(crate) fn proxy_from_env() -> Option<String> {
     None
 }
 
-/// Build a ureq agent, configuring proxy from environment if available.
+/// Build a ureq agent with shared config: user-agent, timeouts, and proxy from environment.
 ///
 /// Note on interrupt handling: the SIGINT handler does NOT set `SA_RESTART`, so
 /// blocked `read()` syscalls return `EINTR` immediately on Ctrl+C. The download
 /// loops in `download_file()` and `download_blob()` call `check_interrupted()` on
 /// each iteration, which will catch the flag set by the signal handler.
-pub(crate) fn build_http_agent(
+fn build_agent(
     verbose: bool,
     connect_timeout: u64,
     body_timeout: u64,
+    http_status_as_error: bool,
+    redirect_auth_same_host: bool,
 ) -> Result<ureq::Agent> {
     let mut config = ureq::Agent::config_builder()
+        .http_status_as_error(http_status_as_error)
         .user_agent("sdme/0.1")
-        .redirect_auth_headers(ureq::config::RedirectAuthHeaders::SameHost)
         .timeout_connect(Some(Duration::from_secs(connect_timeout)))
         .timeout_resolve(Some(Duration::from_secs(connect_timeout)))
         .timeout_recv_response(Some(Duration::from_secs(connect_timeout * 2)))
         .timeout_recv_body(Some(Duration::from_secs(body_timeout)));
+    if redirect_auth_same_host {
+        config = config.redirect_auth_headers(ureq::config::RedirectAuthHeaders::SameHost);
+    }
     if let Some(proxy_uri) = proxy_from_env() {
         let redacted = redact_proxy_credentials(&proxy_uri);
         if verbose {
@@ -435,6 +440,15 @@ pub(crate) fn build_http_agent(
     Ok(config.build().into())
 }
 
+/// Build a ureq agent, configuring proxy from environment if available.
+pub(crate) fn build_http_agent(
+    verbose: bool,
+    connect_timeout: u64,
+    body_timeout: u64,
+) -> Result<ureq::Agent> {
+    build_agent(verbose, connect_timeout, body_timeout, true, true)
+}
+
 /// Build a ureq agent that does not convert non-2xx status codes to errors.
 ///
 /// Same proxy/timeout configuration as [`build_http_agent`], but with
@@ -443,19 +457,7 @@ pub(crate) fn build_http_agent_no_error(
     connect_timeout: u64,
     body_timeout: u64,
 ) -> Result<ureq::Agent> {
-    let mut config = ureq::Agent::config_builder()
-        .http_status_as_error(false)
-        .user_agent("sdme/0.1")
-        .timeout_connect(Some(Duration::from_secs(connect_timeout)))
-        .timeout_resolve(Some(Duration::from_secs(connect_timeout)))
-        .timeout_recv_response(Some(Duration::from_secs(connect_timeout * 2)))
-        .timeout_recv_body(Some(Duration::from_secs(body_timeout)));
-    if let Some(proxy_uri) = proxy_from_env() {
-        let proxy = ureq::Proxy::new(&proxy_uri)
-            .with_context(|| format!("invalid proxy URI: {proxy_uri}"))?;
-        config = config.proxy(Some(proxy));
-    }
-    Ok(config.build().into())
+    build_agent(false, connect_timeout, body_timeout, false, false)
 }
 
 /// Download a URL to a local file, streaming to constant memory.

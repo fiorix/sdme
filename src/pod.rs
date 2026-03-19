@@ -234,10 +234,7 @@ fn create_netns(name: &str, verbose: bool) -> Result<()> {
 
     // Steps 4-6: bind-mount the new netns, then restore original netns.
     // We must restore even on failure.
-    let mount_result = match lo_result {
-        Ok(()) => bind_mount_netns(name, verbose),
-        Err(e) => Err(e),
-    };
+    let mount_result = lo_result.and_then(|()| bind_mount_netns(name, verbose));
 
     // 7. Restore original netns.
     let ret = unsafe { libc::setns(saved_fd, libc::CLONE_NEWNET) };
