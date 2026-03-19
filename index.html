@@ -62,19 +62,33 @@
   .header-right {
     display: flex;
     flex-direction: column;
-    gap: 0.75rem;
+    gap: 0.35rem;
     margin-left: auto;
     text-align: right;
   }
-  .header-right .header-links { justify-content: flex-end; }
-
-  .tagline { color: var(--text-secondary); margin-bottom: 0.5rem; }
-  .header-links {
-    margin-bottom: 2rem;
+  .header-right a { font-size: 0.875rem; }
+  .header-meta {
     display: flex;
     align-items: center;
-    gap: 1rem;
-    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 0.5rem;
+  }
+
+  /* Mobile: stack header vertically */
+  @media (max-width: 480px) {
+    .logo-header {
+      flex-direction: column;
+      align-items: flex-start;
+      margin: -2rem -1.5rem 1.5rem;
+      padding: 1.5rem;
+    }
+    .header-right {
+      text-align: left;
+      margin-left: 0;
+    }
+    .header-meta {
+      justify-content: flex-start;
+    }
   }
   .version-badge {
     display: none;
@@ -195,8 +209,8 @@
   <div class="logo-header">
     <img src="logo.svg" alt="sdme" class="logo-icon">
     <div class="header-right">
-      <div class="header-links">
-        <a href="https://github.com/fiorix/sdme">github.com/fiorix/sdme</a>
+      <a href="https://github.com/fiorix/sdme">github.com/fiorix/sdme</a>
+      <div class="header-meta">
         <span id="version-badge" class="version-badge"></span>
         <button class="theme-toggle" id="theme-toggle" title="Toggle theme">
           <svg id="icon-sun" viewBox="0 0 16 16" style="display:none"><path d="M8 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm0 1.5a5.5 5.5 0 1 1 0-11 5.5 5.5 0 0 1 0 11ZM8 0a.75.75 0 0 1 .75.75v1.5a.75.75 0 0 1-1.5 0V.75A.75.75 0 0 1 8 0Zm0 13a.75.75 0 0 1 .75.75v1.5a.75.75 0 0 1-1.5 0v-1.5A.75.75 0 0 1 8 13ZM2.343 2.343a.75.75 0 0 1 1.061 0l1.06 1.06a.75.75 0 0 1-1.06 1.061l-1.06-1.06a.75.75 0 0 1 0-1.06Zm9.193 9.193a.75.75 0 0 1 1.06 0l1.061 1.06a.75.75 0 0 1-1.06 1.061l-1.061-1.06a.75.75 0 0 1 0-1.061ZM0 8a.75.75 0 0 1 .75-.75h1.5a.75.75 0 0 1 0 1.5H.75A.75.75 0 0 1 0 8Zm13 0a.75.75 0 0 1 .75-.75h1.5a.75.75 0 0 1 0 1.5h-1.5A.75.75 0 0 1 13 8ZM2.343 13.657a.75.75 0 0 1 0-1.06l1.06-1.061a.75.75 0 0 1 1.061 1.06l-1.06 1.061a.75.75 0 0 1-1.06 0Zm9.193-9.193a.75.75 0 0 1 0-1.06l1.061-1.061a.75.75 0 0 1 1.06 1.06l-1.06 1.061a.75.75 0 0 1-1.06 0Z"/></svg>
