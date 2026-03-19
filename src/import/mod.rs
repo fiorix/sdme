@@ -890,6 +890,12 @@ pub(crate) const APT_NO_SANDBOX: &str = r#"-o APT::Sandbox::User="""#;
 ///
 /// Produces a bootable NixOS system closure with systemd, dbus, and a minimal
 /// set of tools. Supports an optional user config via NixOS `imports`.
+///
+/// **Limitation**: `networkd` is enabled but `resolved` is disabled by default.
+/// Containers using `--network-veth` or `--network-bridge` get DHCP via networkd
+/// and work out of the box. However, `--network-zone` also needs resolved for
+/// LLMNR/mDNS inter-container name resolution. To enable it, pass a
+/// `--nix-config` file containing `{ services.resolved.enable = true; }`.
 const DEFAULT_NIXOS_CONFIG: &str = r#"{ pkgs ? import <nixpkgs> {} }:
 let
   userConfig = /tmp/sdme-nixos-extra.nix;
@@ -931,7 +937,7 @@ pub fn builtin_import_prehook(family: &DistroFamily) -> Vec<String> {
         DistroFamily::Debian => vec![
             format!("apt-get {s} update"),
             format!("DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC apt-get {s} -y install tzdata"),
-            format!("apt-get {s} install -y dbus systemd login"),
+            format!("apt-get {s} install -y dbus systemd systemd-resolved login"),
             "apt-get autoremove -y -f".into(),
             "apt-get clean".into(),
             "rm -rf /var/lib/apt/lists/*".into(),
@@ -1201,9 +1207,23 @@ fn patch_rootfs_services(
     fs::create_dir_all(&unit_dir)
         .with_context(|| format!("failed to create {}", unit_dir.display()))?;
 
-    // Note: systemd-resolved masking is handled at container create time
+    // Masking of systemd-resolved is handled at container create time
     // (see containers.rs) rather than at import time. This allows per-container
     // control via --masked-services and automatic unmasking for --network-zone.
+    // Remove any pre-existing mask (e.g. from package postinst scripts during
+    // chroot installation) so it doesn't leak through overlayfs and interfere
+    // with zone containers that need resolved for inter-container DNS.
+    let resolved = unit_dir.join("systemd-resolved.service");
+    if let Ok(target) = fs::read_link(&resolved) {
+        if target == Path::new("/dev/null") {
+            fs::remove_file(&resolved).with_context(|| {
+                format!("failed to remove resolved mask at {}", resolved.display())
+            })?;
+            if verbose {
+                eprintln!("removed pre-existing systemd-resolved mask from rootfs");
+            }
+        }
+    }
 
     // Unmask systemd-logind if it points to /dev/null.
     let logind = unit_dir.join("systemd-logind.service");

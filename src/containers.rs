@@ -247,18 +247,51 @@ fn do_create(
         }
     }
 
-    // Write a placeholder /etc/resolv.conf as a regular file so that
+    // Set up /etc/resolv.conf in the overlayfs upper layer:
+    //
+    // For zone containers (--network-zone): symlink to the systemd-resolved
+    // stub so resolved manages DNS and enables LLMNR/mDNS for inter-container
+    // name resolution. nspawn's --resolv-conf=auto detects this symlink and
+    // leaves resolved in control.
+    //
+    // For all other containers: write a placeholder regular file so
     // systemd-nspawn's --resolv-conf=auto can overwrite it with the host's
     // DNS configuration. Many rootfs images (e.g. Debian) ship resolv.conf as
     // a symlink to ../run/systemd/resolve/stub-resolv.conf; the auto mode's
     // copy variant won't overwrite a symlink, leaving DNS broken. A regular
     // file in the overlayfs upper layer shadows the lower layer's symlink.
     let resolv_path = etc_dir.join("resolv.conf");
-    fs::write(
-        &resolv_path,
-        "# placeholder, replaced by systemd-nspawn at boot\n",
-    )
+    let is_zone_with_resolved = opts.network.network_zone.is_some()
+        && !opts
+            .masked_services
+            .iter()
+            .any(|s| s == "systemd-resolved.service");
+    if is_zone_with_resolved {
+        // Remove any existing regular file before creating the symlink.
+        let _ = fs::remove_file(&resolv_path);
+        symlink("../run/systemd/resolve/stub-resolv.conf", &resolv_path)
+    } else {
+        fs::write(
+            &resolv_path,
+            "# placeholder, replaced by systemd-nspawn at boot\n",
+        )
+    }
     .with_context(|| format!("failed to write {}", resolv_path.display()))?;
+
+    // Enable LLMNR in systemd-resolved for zone containers so containers
+    // on the same zone bridge can discover each other by hostname. Some
+    // distros (Ubuntu) compile resolved with LLMNR=no by default.
+    if is_zone_with_resolved {
+        let dropin_dir = etc_dir.join("systemd/resolved.conf.d");
+        fs::create_dir_all(&dropin_dir)
+            .with_context(|| format!("failed to create {}", dropin_dir.display()))?;
+        let dropin = dropin_dir.join("zone-llmnr.conf");
+        fs::write(&dropin, "[Resolve]\nLLMNR=yes\nMulticastDNS=yes\n")
+            .with_context(|| format!("failed to write {}", dropin.display()))?;
+        if verbose {
+            eprintln!("enabled LLMNR/mDNS for zone networking");
+        }
+    }
 
     // Write an empty /etc/machine-id so the container gets a unique
     // transient machine ID at boot instead of inheriting the host's.
@@ -283,10 +316,13 @@ fn do_create(
     )
     .with_context(|| format!("failed to write {}", fstab_path.display()))?;
 
-    // When --network-veth is used, enable systemd-networkd inside the
-    // container so the container-side veth interface (host0) gets an IP
-    // via DHCP from the host's networkd DHCP server.
-    if opts.network.network_veth {
+    // When --network-veth, --network-zone, or --network-bridge is used,
+    // enable systemd-networkd inside the container so the container-side
+    // veth interface (host0) gets an IP via DHCP.
+    if opts.network.network_veth
+        || opts.network.network_zone.is_some()
+        || opts.network.network_bridge.is_some()
+    {
         let networkd_unit = rootfs.join("usr/lib/systemd/system/systemd-networkd.service");
         if networkd_unit.exists() {
             let wants_dir = systemd_unit_dir.join("multi-user.target.wants");
@@ -298,7 +334,7 @@ fn do_create(
                     || format!("failed to enable systemd-networkd at {}", link.display()),
                 )?;
                 if verbose {
-                    eprintln!("enabled systemd-networkd for --network-veth");
+                    eprintln!("enabled systemd-networkd for private networking");
                 }
             }
         }
