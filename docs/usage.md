@@ -706,16 +706,21 @@ isolation, use `--private-network`, optionally combined with
 sudo sdme create mybox --private-network --network-veth --port 8080:80
 ```
 
+When `--network-veth`, `--network-zone`, or `--network-bridge` is
+used, sdme auto-enables `systemd-networkd` in the container so the
+container-side interface (`host0`) gets an IP via DHCP.
+
 Network zones let containers in the same zone reach each other.
 When using `--network-zone`, sdme automatically leaves
-`systemd-resolved` unmasked so that LLMNR/mDNS enables
-container-to-container name resolution within the zone. For other
-private-network modes, resolved is masked by default because the
-container cannot bind 127.0.0.53 (already owned by the host):
+`systemd-resolved` unmasked and configures it with LLMNR/mDNS so
+containers can discover each other by hostname within the zone.
+For other private-network modes, resolved is masked by default
+because the container cannot bind 127.0.0.53 (already owned by the
+host):
 
 ```bash
-sudo sdme create -r nginx --private-network --network-zone=myzone -p 8080:80 web
-sudo sdme create -r ubuntu --private-network --network-zone=myzone client
+sudo sdme create -r nginx --network-zone=myzone -p 8080:80 web
+sudo sdme create -r ubuntu --network-zone=myzone client
 sudo sdme start web client
 ```
 

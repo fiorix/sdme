@@ -117,15 +117,26 @@ starts clean.
 
 **DNS** requires special treatment because containers share the host's
 network namespace by default. The host's `systemd-resolved` already
-owns `127.0.0.53`, so the container's copy would fail to bind. For
-imported rootfs, sdme masks `systemd-resolved` directly in the rootfs
-during `sdme fs import`. For host-rootfs containers (no `-r`), the mask
-goes in the overlayfs upper layer during `create`. Either way, the mask
-is a symlink to `/dev/null` in `/etc/systemd/system/`. This causes the
+owns `127.0.0.53`, so the container's copy would fail to bind. Service
+masking is handled at container create time (not import time) via the
+configurable `--masked-services` / `default_create_masked_services`
+mechanism. Import removes any pre-existing `systemd-resolved.service`
+masks from the rootfs so they don't leak through overlayfs.
+
+For host-network and non-zone private-network containers, resolved is
+masked (symlink to `/dev/null` in `/etc/systemd/system/`), causing the
 container's NSS `resolve` module to return UNAVAIL, falling through to
-the `dns` module which reads `/etc/resolv.conf`. A placeholder regular
-file is written there so `systemd-nspawn --resolv-conf=auto` can
-populate it at boot.
+the `dns` module. A placeholder `/etc/resolv.conf` regular file is
+written so `systemd-nspawn --resolv-conf=auto` can populate it at boot.
+
+For `--network-zone` containers (with config defaults), resolved is
+left unmasked and sdme configures it for inter-container discovery:
+`/etc/resolv.conf` is symlinked to the resolved stub
+(`../run/systemd/resolve/stub-resolv.conf`), an LLMNR/mDNS drop-in
+(`resolved.conf.d/zone-llmnr.conf`) is written, and any stale
+`systemd-resolved.service -> /dev/null` masks in the rootfs lower
+layer are actively overridden in the upper layer with a symlink to
+the real unit file.
 
 ## 3. The Catalogue
 
@@ -227,8 +238,10 @@ machines on the system.
     |     wait for boot
     |
     +-- mkdir upper/ work/ merged/
-    +-- mask systemd-resolved (host-rootfs only; imported rootfs patched at import)
-    +-- write /etc/resolv.conf placeholder
+    +-- mask services (conditional; resolved masked for non-zone, unmasked for zone)
+    +-- write /etc/resolv.conf (placeholder for non-zone; resolved stub symlink for zone)
+    +-- write LLMNR/mDNS drop-in (zone only)
+    +-- enable systemd-networkd (veth/zone/bridge only)
     +-- set opaque dirs (xattr)
     +-- write state file
 ```
@@ -560,6 +573,18 @@ argument. The network configuration is persisted in the container's
 state file (`PRIVATE_NETWORK`, `NETWORK_VETH`, `NETWORK_BRIDGE`,
 `NETWORK_ZONE`, `PORTS`) and written into the per-container nspawn
 drop-in at start time.
+
+When `--network-veth`, `--network-zone`, or `--network-bridge` is
+used, sdme auto-enables `systemd-networkd` in the overlayfs upper
+layer (symlink into `multi-user.target.wants`) so the container-side
+interface (`host0`) gets an IP via DHCP. No manual enablement is
+needed.
+
+`--network-zone` additionally configures `systemd-resolved` for
+inter-container name resolution: resolved is left unmasked,
+`/etc/resolv.conf` is symlinked to the resolved stub, and an
+LLMNR/mDNS drop-in is written so containers on the same zone bridge
+can discover each other by hostname.
 
 Bridge and zone names are validated (alphanumeric, hyphens,
 underscores). Port specs are validated for format

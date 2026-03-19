@@ -1859,9 +1859,14 @@ combine with
 .BR \-\-network\-bridge ,
 or
 .BR \-\-network\-zone .
-The container must run
+sdme auto\-enables
 .BR systemd\-networkd (8)
-to configure the container\-side interface via DHCP.
+for
+.BR \-\-network\-veth ,
+.BR \-\-network\-zone ,
+and
+.B \-\-network\-bridge
+so the container\-side interface is configured via DHCP.
 Example:
 .BR 8080:80 ,
 .BR tcp:8080:80 ,
@@ -1983,11 +1988,11 @@ with
 or
 .B \-\-network\-zone
 for ports to be reachable.
-The container must have
+sdme auto\-enables
 .BR systemd\-networkd (8)
-enabled so the container\-side interface
+so the container\-side interface
 .RI ( host0 )
-gets configured via DHCP.
+is configured via DHCP.
 .PP
 User\-supplied
 .B \-\-port
@@ -2064,8 +2069,15 @@ and the container has
 .B systemd\-resolved.service
 is automatically removed from the mask list.
 Zones create a virtual bridge where containers get their own network
-namespace, so resolved can bind 127.0.0.53 without conflict and
-LLMNR/mDNS enables container\-to\-container name resolution within the zone.
+namespace, so resolved can bind 127.0.0.53 without conflict.
+Additionally, sdme symlinks
+.I /etc/resolv.conf
+to the resolved stub, writes an LLMNR/mDNS drop\-in
+.RI ( resolved.conf.d/zone\-llmnr.conf ),
+and overrides any stale
+.B systemd\-resolved.service
+masks from the rootfs lower layer so that LLMNR/mDNS enables
+container\-to\-container name resolution within the zone.
 .PP
 .B NixOS/Nix rootfs:
 Service masking is skipped entirely for NixOS and Nix rootfs because
