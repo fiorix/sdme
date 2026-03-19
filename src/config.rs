@@ -19,10 +19,14 @@ pub struct DistroCommands {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub import_prehook: Option<Vec<String>>,
 
-    /// Chroot commands to prepare a rootfs for VM export.
-    /// Installs udev and any other VM boot dependencies.
+    /// Chroot commands to prepare a rootfs for container/rootfs export.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub export_prehook: Option<Vec<String>>,
+
+    /// Chroot commands to prepare a rootfs for VM export (`fs export --vm`).
+    /// Installs udev and restores file capabilities stripped during import.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub export_vm_prehook: Option<Vec<String>>,
 }
 
 /// Global sdme configuration loaded from `/etc/sdme.conf`.
@@ -563,6 +567,7 @@ mod tests {
             DistroCommands {
                 import_prehook: Some(vec!["echo hello".to_string()]),
                 export_prehook: None,
+                export_vm_prehook: None,
             },
         );
         let config = Config {
@@ -574,6 +579,7 @@ mod tests {
         let debian = loaded.distros.get("debian").unwrap();
         assert_eq!(debian.import_prehook, Some(vec!["echo hello".to_string()]));
         assert_eq!(debian.export_prehook, None);
+        assert_eq!(debian.export_vm_prehook, None);
         let _ = fs::remove_file(&path);
     }
 
@@ -599,6 +605,7 @@ mod tests {
 [distros.fedora]
 import_prehook = ["dnf install -y custom-pkg"]
 export_prehook = ["dnf install -y custom-udev"]
+export_vm_prehook = ["dnf install -y udev-vm"]
 "#,
         )
         .unwrap();
@@ -612,6 +619,10 @@ export_prehook = ["dnf install -y custom-udev"]
             fedora.export_prehook,
             Some(vec!["dnf install -y custom-udev".to_string()])
         );
+        assert_eq!(
+            fedora.export_vm_prehook,
+            Some(vec!["dnf install -y udev-vm".to_string()])
+        );
         let _ = fs::remove_file(&path);
     }
 
@@ -624,6 +635,7 @@ export_prehook = ["dnf install -y custom-udev"]
             DistroCommands {
                 import_prehook: Some(vec![]),
                 export_prehook: None,
+                export_vm_prehook: None,
             },
         );
         let config = Config {
@@ -635,6 +647,7 @@ export_prehook = ["dnf install -y custom-udev"]
         let arch = loaded.distros.get("arch").unwrap();
         assert_eq!(arch.import_prehook, Some(vec![]));
         assert_eq!(arch.export_prehook, None);
+        assert_eq!(arch.export_vm_prehook, None);
         let _ = fs::remove_file(&path);
     }
 

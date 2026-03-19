@@ -1,6 +1,5 @@
 # sdme: Container Isolation and Security
 
-**Alexandre Fiori, March 2026**
 
 This document covers sdme's security model across three layers:
 nspawn container isolation (Part 1), OCI workload isolation inside
@@ -154,6 +153,19 @@ on first boot.
 
 Podman rootless gets user namespace remapping by default; the entire
 container runtime runs as an unprivileged user.
+
+#### openSUSE file capabilities
+
+On openSUSE Tumbleweed, `/usr/bin/newuidmap` and `/usr/bin/newgidmap`
+ship with `security.capability` xattrs (file capabilities) instead of
+setuid bits. The kernel refuses to create idmapped mounts when these
+xattrs are present. The built-in Suse import prehook strips them
+automatically so `--userns` and `--hardened` work. This means
+`newuidmap` and `newgidmap` are non-functional inside nspawn containers
+until the rootfs is exported (both `export_prehook` and
+`export_vm_prehook` restore the capabilities). Since nspawn manages
+user namespace mapping itself, the stripped binaries are not needed
+for container operation.
 
 ### Cgroup namespace
 

@@ -943,8 +943,10 @@ pub fn builtin_import_prehook(family: &DistroFamily) -> Vec<String> {
             "pacman -Scc --noconfirm".into(),
         ],
         DistroFamily::Suse => vec![
-            "zypper --non-interactive install systemd dbus-1 util-linux pam".into(),
+            "zypper --non-interactive install systemd dbus-1 util-linux pam libcap-progs".into(),
             "zypper clean --all".into(),
+            "setcap -r /usr/bin/newuidmap 2>/dev/null || true".into(),
+            "setcap -r /usr/bin/newgidmap 2>/dev/null || true".into(),
         ],
         _ => vec![],
     }

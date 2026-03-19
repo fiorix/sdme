@@ -1167,8 +1167,13 @@ Example:
 Clear with an empty string.
 .TP
 .B distros.<family>.export_prehook
+JSON array of chroot commands run before container or rootfs export.
+Same family names and semantics as
+.BR import_prehook .
+.TP
+.B distros.<family>.export_vm_prehook
 JSON array of chroot commands to prepare a rootfs for VM export
-during export (e.g. install udev).
+(e.g. install udev, restore file capabilities).
 Same family names and semantics as
 .BR import_prehook .
 .RE
@@ -1410,7 +1415,14 @@ Nix and NixOS distros are hardcoded (nix\-build flow) and cannot be overridden.
 .TP
 .B distros.<family>.export_prehook
 Array of strings (TOML array).
-Chroot commands to prepare a rootfs for VM export (e.g.\& install udev).
+Chroot commands run before container or rootfs export.
+Same family names and semantics as
+.BR import_prehook .
+.TP
+.B distros.<family>.export_vm_prehook
+Array of strings (TOML array).
+Chroot commands to prepare a rootfs for VM export
+(e.g.\& install udev, restore file capabilities).
 Same family names and semantics as
 .BR import_prehook .
 .SH FILES

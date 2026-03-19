@@ -799,8 +799,10 @@ sdme stores its settings in a TOML file at `/etc/sdme.conf`:
   rootfs bootable (install systemd, dbus, etc.). Family names:
   `debian`, `fedora`, `arch`, `suse`, `unknown`. Absent = built-in
   defaults; empty array = do nothing. Nix/NixOS stays hardcoded.
-- `distros.<family>.export_prehook`: chroot commands to prepare a
-  rootfs for VM export (install udev, etc.). Same semantics.
+- `distros.<family>.export_prehook`: chroot commands run before
+  container or rootfs export. Same semantics.
+- `distros.<family>.export_vm_prehook`: chroot commands to prepare
+  a rootfs for VM export (install udev, restore caps). Same semantics.
 
 Settings are read with `sdme config get` and written with
 `sdme config set <key> <value>`.

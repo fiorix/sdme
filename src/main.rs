@@ -945,7 +945,7 @@ fn parse_security(args: SecurityArgs, cfg: &config::Config) -> Result<(SecurityC
 /// Display distro prehook configuration, showing effective commands
 /// (overrides or built-in defaults) for all configurable families.
 fn display_distro_hooks(cfg: &config::Config) {
-    use sdme::export::builtin_export_prehook;
+    use sdme::export::{builtin_export_prehook, builtin_export_vm_prehook};
     use sdme::import::builtin_import_prehook;
     use sdme::rootfs::DistroFamily;
 
@@ -968,6 +968,11 @@ fn display_distro_hooks(cfg: &config::Config) {
             Some(cmds) => (cmds.clone(), true),
             None => (builtin_export_prehook(family), false),
         };
+        let (export_vm_cmds, export_vm_custom) =
+            match overrides.and_then(|d| d.export_vm_prehook.as_ref()) {
+                Some(cmds) => (cmds.clone(), true),
+                None => (builtin_export_vm_prehook(family), false),
+            };
 
         println!("\n[distros.{key}]");
         let tag = if import_custom { " (custom)" } else { "" };
@@ -976,6 +981,9 @@ fn display_distro_hooks(cfg: &config::Config) {
         let tag = if export_custom { " (custom)" } else { "" };
         print!("export_prehook{tag} = ");
         print_hook_commands(&export_cmds);
+        let tag = if export_vm_custom { " (custom)" } else { "" };
+        print!("export_vm_prehook{tag} = ");
+        print_hook_commands(&export_vm_cmds);
     }
 }
 
@@ -1507,9 +1515,12 @@ fn main() -> Result<()> {
                             );
                         }
                         let hook = parts[2];
-                        if hook != "import_prehook" && hook != "export_prehook" {
+                        if hook != "import_prehook"
+                            && hook != "export_prehook"
+                            && hook != "export_vm_prehook"
+                        {
                             bail!(
-                                "unknown hook '{hook}': expected import_prehook or export_prehook"
+                                "unknown hook '{hook}': expected import_prehook, export_prehook, or export_vm_prehook"
                             );
                         }
                         toml_key = key.to_string();

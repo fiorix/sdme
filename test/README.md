@@ -73,16 +73,15 @@ additionally cross-compile musl binaries for x86_64 and aarch64.
 
 ## Known limitations
 
-### openSUSE + user namespaces (--hardened, --userns)
+### openSUSE + user namespaces (resolved)
 
-`--private-users-ownership=auto` uses kernel idmapped mounts, which fail when
-the rootfs contains files with `security.capability` xattrs. openSUSE
-Tumbleweed ships `/usr/bin/newuidmap` and `/usr/bin/newgidmap` with file
-capabilities (`CAP_SETUID`, `CAP_SETGID`) instead of the setuid bit used by
-other distros. The kernel refuses to create an idmapped mount because
-`security.capability` xattrs cannot be safely remapped across user namespace
-boundaries. Error: `Failed to adjust UID/GID shift of OS tree: Operation not
-permitted`. Fix: strip `security.capability` xattrs during rootfs import.
+openSUSE Tumbleweed ships `/usr/bin/newuidmap` and `/usr/bin/newgidmap`
+with `security.capability` xattrs (file capabilities) instead of setuid
+bits. The kernel refuses idmapped mounts when these xattrs are present,
+which broke `--userns` and `--hardened`. The built-in Suse import prehook
+now strips these xattrs automatically. Both export prehooks restore them
+so exported rootfs are intact. The stripped binaries are not needed inside
+nspawn containers since nspawn manages user namespace mapping itself.
 
 ### NixOS + OCI apps (resolved)
 

@@ -1122,8 +1122,22 @@ fn detect_udev_presence(mount: &Path) -> bool {
 
 /// Built-in export prehook commands for each distro family.
 ///
-/// These install udev and any other VM boot dependencies.
+/// Container/rootfs exports (non-VM). Restores file capabilities
+/// stripped during import so exported rootfs are intact.
 pub fn builtin_export_prehook(family: &DistroFamily) -> Vec<String> {
+    match *family {
+        DistroFamily::Suse => vec![
+            "setcap cap_setuid=ep /usr/bin/newuidmap 2>/dev/null || true".into(),
+            "setcap cap_setgid=ep /usr/bin/newgidmap 2>/dev/null || true".into(),
+        ],
+        _ => vec![],
+    }
+}
+
+/// Built-in VM export prehook commands for each distro family.
+///
+/// Installs udev and any other VM boot dependencies.
+pub fn builtin_export_vm_prehook(family: &DistroFamily) -> Vec<String> {
     use crate::import::APT_NO_SANDBOX;
     match *family {
         DistroFamily::Debian => vec![
@@ -1143,12 +1157,17 @@ pub fn builtin_export_prehook(family: &DistroFamily) -> Vec<String> {
         DistroFamily::Suse => vec![
             "zypper --non-interactive install udev".into(),
             "zypper clean --all".into(),
+            "setcap cap_setuid=ep /usr/bin/newuidmap 2>/dev/null || true".into(),
+            "setcap cap_setgid=ep /usr/bin/newgidmap 2>/dev/null || true".into(),
         ],
         _ => vec![],
     }
 }
 
 /// Resolve export prehook commands: config override → built-in default.
+///
+/// Not wired yet (container/rootfs export hooks are empty today).
+#[allow(dead_code)]
 fn resolve_export_prehook(
     family: &DistroFamily,
     distros: &HashMap<String, DistroCommands>,
@@ -1159,6 +1178,19 @@ fn resolve_export_prehook(
         }
     }
     builtin_export_prehook(family)
+}
+
+/// Resolve VM export prehook commands: config override → built-in default.
+fn resolve_export_vm_prehook(
+    family: &DistroFamily,
+    distros: &HashMap<String, DistroCommands>,
+) -> Vec<String> {
+    if let Some(cfg) = distros.get(family.config_key()) {
+        if let Some(cmds) = &cfg.export_vm_prehook {
+            return cmds.clone();
+        }
+    }
+    builtin_export_vm_prehook(family)
 }
 
 /// Install udev into the rootfs if it is missing, respecting the
@@ -1198,7 +1230,7 @@ fn install_udev_if_needed(mount: &Path, opts: &VmOptions, verbose: bool) -> Resu
     }
 
     let family = crate::rootfs::detect_distro_family(mount);
-    let commands = resolve_export_prehook(&family, &opts.distros);
+    let commands = resolve_export_vm_prehook(&family, &opts.distros);
     if commands.is_empty() {
         eprintln!(
             "warning: udev not found but no install commands for distro family {:?}; skipping",
@@ -1955,7 +1987,27 @@ mod tests {
     fn test_builtin_export_prehook_per_distro() {
         use crate::rootfs::DistroFamily;
 
-        let cmds = builtin_export_prehook(&DistroFamily::Debian);
+        assert!(builtin_export_prehook(&DistroFamily::Debian).is_empty());
+        assert!(builtin_export_prehook(&DistroFamily::Fedora).is_empty());
+        assert!(builtin_export_prehook(&DistroFamily::Arch).is_empty());
+
+        let cmds = builtin_export_prehook(&DistroFamily::Suse);
+        assert_eq!(cmds.len(), 2);
+        assert!(cmds[0].contains("newuidmap"), "got: {}", cmds[0]);
+        assert!(cmds[1].contains("newgidmap"), "got: {}", cmds[1]);
+
+        assert!(builtin_export_prehook(&DistroFamily::NixOS).is_empty());
+        assert!(builtin_export_prehook(&DistroFamily::Nix).is_empty());
+        assert!(builtin_export_prehook(&DistroFamily::Unknown).is_empty());
+    }
+
+    // --- builtin_export_vm_prehook tests ---
+
+    #[test]
+    fn test_builtin_export_vm_prehook_per_distro() {
+        use crate::rootfs::DistroFamily;
+
+        let cmds = builtin_export_vm_prehook(&DistroFamily::Debian);
         assert!(cmds.len() >= 2);
         assert!(
             cmds[0].contains("apt-get") && cmds[0].contains("update"),
@@ -1965,25 +2017,25 @@ mod tests {
         assert!(cmds[1].contains("udev"), "got: {}", cmds[1]);
         assert!(cmds.iter().any(|c| c.contains("clean")), "missing cleanup");
 
-        let cmds = builtin_export_prehook(&DistroFamily::Fedora);
+        let cmds = builtin_export_vm_prehook(&DistroFamily::Fedora);
         assert!(cmds.len() >= 2);
         assert!(cmds[0].contains("dnf"), "got: {}", cmds[0]);
         assert!(cmds[0].contains("systemd-udevd"), "got: {}", cmds[0]);
         assert!(cmds.iter().any(|c| c.contains("clean")), "missing cleanup");
 
-        let cmds = builtin_export_prehook(&DistroFamily::Arch);
+        let cmds = builtin_export_vm_prehook(&DistroFamily::Arch);
         assert!(cmds.len() >= 2);
         assert!(cmds[0].contains("pacman"), "got: {}", cmds[0]);
         assert!(cmds.iter().any(|c| c.contains("-Scc")), "missing cleanup");
 
-        let cmds = builtin_export_prehook(&DistroFamily::Suse);
+        let cmds = builtin_export_vm_prehook(&DistroFamily::Suse);
         assert!(cmds.len() >= 2);
         assert!(cmds[0].contains("zypper"), "got: {}", cmds[0]);
         assert!(cmds.iter().any(|c| c.contains("clean")), "missing cleanup");
 
-        assert!(builtin_export_prehook(&DistroFamily::NixOS).is_empty());
-        assert!(builtin_export_prehook(&DistroFamily::Nix).is_empty());
-        assert!(builtin_export_prehook(&DistroFamily::Unknown).is_empty());
+        assert!(builtin_export_vm_prehook(&DistroFamily::NixOS).is_empty());
+        assert!(builtin_export_vm_prehook(&DistroFamily::Nix).is_empty());
+        assert!(builtin_export_vm_prehook(&DistroFamily::Unknown).is_empty());
     }
 
     // --- sha512_crypt tests ---
