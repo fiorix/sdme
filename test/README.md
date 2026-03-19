@@ -167,6 +167,17 @@ and `--userns` with OCI apps.
 sudo ./test/scripts/verify-security.sh
 ```
 
+### verify-network.sh
+
+Private networking end-to-end validation. Tests service masking state file
+assertions (zone auto-unmask, defaults, explicit overrides, empty clears
+all), zone connectivity (HTTP via IP, resolved running, LLMNR name
+resolution), and bridge connectivity (HTTP via IP, networkd enabled).
+
+```bash
+sudo ./test/scripts/verify-network.sh
+```
+
 ### verify-export.sh
 
 Rootfs export end-to-end validation. Tests all output formats: directory
@@ -290,6 +301,7 @@ sudo ./test/scripts/verify-matrix.sh
 sudo ./test/scripts/verify-pods.sh
 sudo ./test/scripts/verify-oci.sh
 sudo ./test/scripts/verify-security.sh
+sudo ./test/scripts/verify-network.sh
 sudo ./test/scripts/verify-export.sh
 sudo ./test/scripts/verify-usage.sh
 sudo ./test/scripts/verify-nixos.sh   # builds NixOS rootfs externally
