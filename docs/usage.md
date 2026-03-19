@@ -539,6 +539,7 @@ sudo sdme fs export ubuntu /tmp/ubuntu.tar.gz             # gzip tarball
 sudo sdme fs export ubuntu /tmp/ubuntu.raw                # ext4 disk image
 sudo sdme fs export ubuntu /tmp/ubuntu.raw --size 2G      # explicit size
 sudo sdme fs export ubuntu /tmp/ubuntu.raw --filesystem btrfs  # btrfs disk image
+sudo sdme fs export ubuntu /tmp/ubuntu.raw --timezone America/New_York  # set timezone
 
 # Export a container's merged view
 sudo sdme fs export mybox /tmp/mybox.tar.xz --container
@@ -560,6 +561,12 @@ space is guaranteed in the image (default from config
 Container exports: running containers are exported from the live
 filesystem (with a consistency warning); stopped containers have overlayfs
 temporarily mounted.
+
+Use `--timezone` to set the timezone in the exported rootfs (e.g.
+`--timezone America/New_York`). This symlinks `/etc/localtime` to the
+zoneinfo file and writes `/etc/timezone`, validated against the rootfs
+before export begins. Works with all output formats. Not needed for
+containers since `systemd-nspawn` copies the host timezone at boot.
 
 For more on how the fs subsystem works internally, see
 [architecture.md, Section 6](architecture.md#6-the-fs-subsystem-managing-root-filesystems).

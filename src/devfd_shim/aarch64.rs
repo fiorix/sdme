@@ -47,9 +47,9 @@ use super::elf;
 struct Label(usize);
 
 enum FixupKind {
-    /// b.cond / cbz / cbnz: 19-bit signed offset (in 4-byte units) at bits [23:5]
+    /// b.cond / cbz / cbnz: 19-bit signed offset (in 4-byte units) at bits \[23:5\]
     BCond,
-    /// b / bl: 26-bit signed offset (in 4-byte units) at bits [25:0]
+    /// b / bl: 26-bit signed offset (in 4-byte units) at bits \[25:0\]
     Branch26,
 }
 
@@ -95,7 +95,7 @@ impl Asm {
 
     // ---- AArch64 instruction emitters ----
 
-    /// LDR Xt, [Xn, #imm] -- 64-bit load, unsigned offset (imm must be multiple of 8).
+    /// `LDR Xt, [Xn, #imm]` -- 64-bit load, unsigned offset (imm must be multiple of 8).
     fn ldr_x(&mut self, rt: u8, rn: u8, imm: u16) {
         assert!(imm.is_multiple_of(8) && imm <= 32760);
         let imm12 = (imm / 8) as u32;
@@ -103,7 +103,7 @@ impl Asm {
         self.emit32(insn);
     }
 
-    /// LDR Wt, [Xn, #imm] -- 32-bit load, unsigned offset (imm must be multiple of 4).
+    /// `LDR Wt, [Xn, #imm]` -- 32-bit load, unsigned offset (imm must be multiple of 4).
     fn ldr_w(&mut self, rt: u8, rn: u8, imm: u16) {
         assert!(imm.is_multiple_of(4) && imm <= 16380);
         let imm12 = (imm / 4) as u32;
@@ -111,7 +111,7 @@ impl Asm {
         self.emit32(insn);
     }
 
-    /// LDRH Wt, [Xn, #imm] -- 16-bit load, unsigned offset (imm must be multiple of 2).
+    /// `LDRH Wt, [Xn, #imm]` -- 16-bit load, unsigned offset (imm must be multiple of 2).
     fn ldrh_w(&mut self, rt: u8, rn: u8, imm: u16) {
         assert!(imm.is_multiple_of(2) && imm <= 8190);
         let imm12 = (imm / 2) as u32;
@@ -126,7 +126,7 @@ impl Asm {
         self.emit32(insn);
     }
 
-    /// STR Wt, [Xn, #imm] -- 32-bit store, unsigned offset (imm must be multiple of 4).
+    /// `STR Wt, [Xn, #imm]` -- 32-bit store, unsigned offset (imm must be multiple of 4).
     fn str_w(&mut self, rt: u8, rn: u8, imm: u16) {
         assert!(imm.is_multiple_of(4) && imm <= 16380);
         let imm12 = (imm / 4) as u32;
@@ -214,7 +214,7 @@ impl Asm {
         self.emit32(insn);
     }
 
-    /// STP Xt1, Xt2, [SP, #-imm]! -- store pair, pre-index (push to stack).
+    /// `STP Xt1, Xt2, [SP, #-imm]!` -- store pair, pre-index (push to stack).
     fn stp_pre(&mut self, rt1: u8, rt2: u8, imm: i16) {
         assert!(imm % 8 == 0 && (-512..=504).contains(&imm));
         let imm7 = ((imm / 8) as u32) & 0x7F;
@@ -222,7 +222,7 @@ impl Asm {
         self.emit32(insn);
     }
 
-    /// LDP Xt1, Xt2, [SP], #imm -- load pair, post-index (pop from stack).
+    /// `LDP Xt1, Xt2, [SP], #imm` -- load pair, post-index (pop from stack).
     fn ldp_post(&mut self, rt1: u8, rt2: u8, imm: i16) {
         assert!(imm % 8 == 0 && (-512..=504).contains(&imm));
         let imm7 = ((imm / 8) as u32) & 0x7F;
@@ -256,7 +256,7 @@ impl Asm {
         pos
     }
 
-    /// LDR Xt, [Xn, #0] -- placeholder for GOT load, offset patched by ELF builder.
+    /// `LDR Xt, [Xn, #0]` -- placeholder for GOT load, offset patched by ELF builder.
     fn ldr_x_got_placeholder(&mut self, rt: u8, rn: u8) -> usize {
         let pos = self.pos();
         // LDR Xt, [Xn, #0]: 0xF9400000 | (Rn << 5) | Rt, imm12=0

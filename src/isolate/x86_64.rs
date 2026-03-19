@@ -1,6 +1,7 @@
 //! Machine code emitter for the isolate binary (x86_64)
 //!
 //! Emits raw x86_64 machine code that performs:
+//! ```text
 //!   Parent process:
 //!     1. Parse argc/argv from the Linux process stack
 //!     2. atoi(argv[1]) -> uid, atoi(argv[2]) -> gid
@@ -13,19 +14,24 @@
 //!     8. Child: if uid > 0: setgroups(0, NULL) -> setgid(gid) -> setuid(uid)
 //!     9. Child: chdir(argv[3])
 //!    10. Child: execve(argv[4], &argv[4..], envp)
+//! ```
 //!
 //! Linux x86_64 syscall ABI:
+//! ```text
 //!   rax = syscall number
 //!   rdi, rsi, rdx, r10, r8, r9 = arguments
 //!   syscall instruction; return in rax (negative = -errno)
+//! ```
 //!
 //! Linux process startup ABI (no libc, _start):
+//! ```text
 //!   [rsp+0]  = argc
 //!   [rsp+8]  = argv[0]
 //!   [rsp+16] = argv[1]
 //!   ...
 //!   NULL
 //!   envp[0], envp[1], ..., NULL
+//! ```
 
 // Syscall numbers
 const SYS_WRITE: u8 = 1;

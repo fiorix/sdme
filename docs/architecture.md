@@ -525,6 +525,15 @@ If stopped, it temporarily mounts overlayfs (lower=rootfs,
 upper=container upper, work=container work) for the duration of the
 export, then unmounts.
 
+### Timezone
+
+`--timezone` (e.g. `America/New_York`) sets the timezone in the exported
+rootfs by symlinking `/etc/localtime` to the corresponding zoneinfo file
+and writing `/etc/timezone`. The timezone is validated against the rootfs
+zoneinfo database before export begins. Works with all output formats
+(directory, tarball, raw image). Not needed for `sdme fs import` since
+`systemd-nspawn` handles timezone at container boot via `--timezone=copy`.
+
 ### VM export
 
 When `--vm` is passed, the raw disk image is GPT-partitioned instead of

@@ -8,20 +8,24 @@
 //!   svc #0; return in x0 (negative = -errno)
 //!
 //! Linux process startup ABI (_start, no libc):
+//! ```text
 //!   [sp+0]  = argc
 //!   [sp+8]  = argv[0]
 //!   [sp+16] = argv[1]
 //!   ...
 //!   NULL
 //!   envp[0], envp[1], ..., NULL
+//! ```
 //!
 //! Callee-saved registers (preserved across bl calls):
+//! ```text
 //!   x19 = argc
 //!   x20 = &argv[0] (sp + 8)
 //!   x21 = uid
 //!   x22 = gid
 //!   x23 = child pid (parent path)
 //!   x30 = link register
+//! ```
 
 // Syscall numbers (aarch64)
 const SYS_MOUNT: u16 = 40;
@@ -73,13 +77,13 @@ const STR_SLASH_PROC: &[u8] = b"/proc\0";
 struct Label(usize);
 
 enum FixupKind {
-    /// b.cond: 19-bit signed offset (in 4-byte units) at bits [23:5]
+    /// b.cond: 19-bit signed offset (in 4-byte units) at bits \[23:5\]
     BCond,
-    /// b / bl: 26-bit signed offset (in 4-byte units) at bits [25:0]
+    /// b / bl: 26-bit signed offset (in 4-byte units) at bits \[25:0\]
     Branch26,
-    /// adr: 21-bit signed offset (byte granularity), immlo at [30:29], immhi at [23:5]
+    /// adr: 21-bit signed offset (byte granularity), immlo at \[30:29\], immhi at \[23:5\]
     Adr,
-    /// cbz / cbnz: 19-bit signed offset (in 4-byte units) at bits [23:5]
+    /// cbz / cbnz: 19-bit signed offset (in 4-byte units) at bits \[23:5\]
     Cbz,
 }
 

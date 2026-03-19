@@ -356,9 +356,9 @@ pub(crate) struct OciAppSetup<'a> {
     pub unit_type: Option<&'a str>,
     /// Whether to add `RemainAfterExit=yes` (for oneshot init containers).
     pub remain_after_exit: bool,
-    /// `After=` dependencies for the [Unit] section.
+    /// `After=` dependencies for the `[Unit]` section.
     pub after_units: Vec<String>,
-    /// `Requires=` dependencies for the [Unit] section.
+    /// `Requires=` dependencies for the `[Unit]` section.
     pub requires_units: Vec<String>,
     /// `ExecStartPost=` command for readiness checks (non-kube path only).
     pub readiness_exec: Option<String>,
