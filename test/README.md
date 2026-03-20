@@ -2,7 +2,7 @@
 
 ## Unit tests
 
-sdme has unit tests across 15 modules, all inline in the source files
+sdme has unit tests across 21 modules, all inline in the source files
 they test. No external test dependencies are required.
 
 ### Running
@@ -19,22 +19,27 @@ cargo test -- --list          # list all tests without running
 
 | Module       | Coverage area                                    |
 |--------------|--------------------------------------------------|
-| import       | OCI registry, tarball, directory, disk image     |
+| build        | Buildfile parsing (FROM/RUN/COPY), copy validate |
+| config       | Config loading/saving, defaults, path resolution |
 | containers   | Create, state, opaque dirs, OCI ports/volumes/env |
 | devfd_shim   | LD_PRELOAD shim ELF generation (x86_64, aarch64) |
-| mounts       | Bind mount and env var configuration             |
-| build        | Buildfile parsing (FROM/RUN/COPY), copy validate |
-| security     | Capabilities, seccomp, AppArmor, hardening modes |
-| rootfs       | Rootfs listing, removal, os-release, distro      |
-| lib          | Utility: sudo_user, resource limits, interrupts  |
 | elf          | Shared Arch enum and ELF builder (x86_64, aarch64) |
-| systemd      | D-Bus unit management, boot wait, lifecycle      |
-| config       | Config loading/saving, defaults, path resolution |
-| pod          | Pod creation, netns sharing, state persistence   |
-| network      | Network config validation, state serialization   |
+| export       | Format detection, tar writing, disk image export |
+| import       | OCI registry, tarball, directory, disk image     |
+| isolate      | PID/IPC namespace isolate ELF (x86_64, aarch64)  |
+| kube         | Plan validation, secrets, configmaps             |
+| lib          | Utility: sudo_user, resource limits, interrupts  |
+| main         | Limits, OCI port auto-wiring, masked services    |
+| mounts       | Bind mount and env var configuration             |
 | names        | Name generation, collision avoidance             |
-| main         | OCI port auto-wiring integration tests           |
+| network      | Network config validation, state serialization   |
+| oci          | App setup, cache, layout, registry, rootfs       |
+| pod          | Pod creation, netns sharing, state persistence   |
+| rootfs       | Rootfs listing, removal, os-release, distro      |
+| security     | Capabilities, seccomp, AppArmor, hardening modes |
 | system_check | Dependency and version checks                    |
+| systemd      | D-Bus unit management, boot wait, lifecycle      |
+| txn          | Transaction staging, stale cleanup               |
 
 3 tests are ignored by default (require root or network access):
 

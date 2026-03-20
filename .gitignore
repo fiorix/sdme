@@ -1,3 +1,4 @@
 /target
 /dist/out/
 /test/reports/
+/verify-*.md

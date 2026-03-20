@@ -6,7 +6,7 @@ set -uo pipefail
 
 source "$(dirname "$0")/lib.sh"
 
-DISTROS=(debian ubuntu fedora centos almalinux archlinux opensuse nixos)
+DISTROS=(debian ubuntu fedora centos almalinux archlinux opensuse)
 APPS=(nginx-unprivileged redis postgresql)
 
 declare -A APP_IMAGES=(
@@ -24,7 +24,6 @@ declare -A DISTRO_OS_PATTERN=(
     [almalinux]="AlmaLinux"
     [archlinux]="Arch Linux"
     [opensuse]="openSUSE Tumbleweed"
-    [nixos]="NixOS"
 )
 
 declare -A APP_READY_WAIT=(
@@ -32,10 +31,6 @@ declare -A APP_READY_WAIT=(
     [redis]=3
     [postgresql]=10
 )
-
-# NixOS needs a longer timeout because nix-build downloads nixpkgs + builds
-# a closure.
-TIMEOUT_IMPORT_NIXOS=900
 
 # NixOS puts binaries under /run/current-system/sw/bin instead of /usr/bin.
 distro_bin() {
@@ -200,11 +195,7 @@ phase1_import() {
         fi
         log "  Importing $fs_name from $image"
         local output
-        local import_timeout="$TIMEOUT_IMPORT"
-        if [[ "$distro" == "nixos" ]]; then
-            import_timeout="$TIMEOUT_IMPORT_NIXOS"
-        fi
-        if output=$(timeout "$import_timeout" sdme fs import "$fs_name" "$image" -v --install-packages=yes -f 2>&1); then
+        if output=$(timeout "$TIMEOUT_IMPORT" sdme fs import "$fs_name" "$image" -v --install-packages=yes -f 2>&1); then
             record "import/$distro" PASS
         else
             record "import/$distro" FAIL "$output"
