@@ -397,6 +397,7 @@ enum Command {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum RootfsCommand {
     /// Import a root filesystem from a directory, tarball, URL, OCI image, registry image, or QCOW2 disk image
     #[command(after_long_help = "\
