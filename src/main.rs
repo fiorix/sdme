@@ -11,7 +11,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 use sdme::import::{ImportOptions, InstallPackages, OciMode};
 use sdme::{
-    check_interrupted, config, confirm, containers, export, kube, oci, pod, rootfs, security,
+    check_interrupted, config, confirm, containers, export, kube, lock, oci, pod, rootfs, security,
     system_check, systemd, BindConfig, EnvConfig, NetworkConfig, ResourceLimits, SecurityConfig,
 };
 
@@ -810,6 +810,9 @@ fn start_and_await_boot(
     config_boot_timeout: u64,
     verbose: bool,
 ) -> Result<()> {
+    // Hold shared lock to prevent `sdme rm` during start+boot window.
+    let _lock = lock::lock_shared(datadir, "containers", name)
+        .with_context(|| format!("cannot lock container '{name}' for starting"))?;
     systemd::start(datadir, name, tasks_max, config_boot_timeout, verbose)?;
     if let Err(e) = systemd::await_boot(name, boot_timeout, verbose) {
         let (was, sig) = sdme::save_and_reset_interrupt();

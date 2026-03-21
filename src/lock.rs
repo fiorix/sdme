@@ -1,8 +1,22 @@
-//! Advisory file locking for build dependency protection.
+//! Advisory file locking for resource protection across all mutating operations.
 //!
 //! Uses `flock(2)` to prevent concurrent operations from conflicting.
-//! For example, a build holds shared locks on its FROM rootfs and COPY
-//! sources so that `sdme fs rm` cannot delete them mid-build.
+//! Shared (read) locks allow concurrent readers (build, export, create,
+//! start) while exclusive (write) locks protect mutating operations
+//! (import, remove, kube delete, pod create/remove, secret/configmap
+//! create/remove).
+//!
+//! # Lock ordering
+//!
+//! When multiple locks are needed, acquire in this order to prevent
+//! deadlocks:
+//!
+//! ```text
+//! fs → containers → pods → secrets → configmaps
+//! ```
+//!
+//! Within the same kind, acquire SHARED before EXCLUSIVE on different
+//! names.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
@@ -17,7 +31,7 @@ use anyhow::{bail, Context, Result};
 /// file descriptor is closed, which releases the flock). On process
 /// crash or SIGKILL the kernel releases the lock.
 #[derive(Debug)]
-pub(crate) struct ResourceLock {
+pub struct ResourceLock {
     _file: File,
 }
 
@@ -25,7 +39,7 @@ pub(crate) struct ResourceLock {
 ///
 /// Multiple shared locks can coexist. Returns `Err` if an exclusive
 /// lock is already held.
-pub(crate) fn lock_shared(datadir: &Path, kind: &str, name: &str) -> Result<ResourceLock> {
+pub fn lock_shared(datadir: &Path, kind: &str, name: &str) -> Result<ResourceLock> {
     do_lock(datadir, kind, name, libc::LOCK_SH)
 }
 
@@ -33,7 +47,7 @@ pub(crate) fn lock_shared(datadir: &Path, kind: &str, name: &str) -> Result<Reso
 ///
 /// No other locks (shared or exclusive) can coexist. Returns `Err` if
 /// any lock is already held.
-pub(crate) fn lock_exclusive(datadir: &Path, kind: &str, name: &str) -> Result<ResourceLock> {
+pub fn lock_exclusive(datadir: &Path, kind: &str, name: &str) -> Result<ResourceLock> {
     do_lock(datadir, kind, name, libc::LOCK_EX)
 }
 

@@ -38,6 +38,10 @@ pub struct PodInfo {
 pub fn create(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
     validate_name(name)?;
 
+    // Exclusive lock prevents concurrent pod creation with the same name.
+    let _lock = crate::lock::lock_exclusive(datadir, "pods", name)
+        .with_context(|| format!("cannot lock pod '{name}' for creation"))?;
+
     // Ensure persistent state directory exists.
     let pod_dir = datadir.join(STATE_SUBDIR).join(name);
     if pod_dir.exists() {
@@ -125,6 +129,10 @@ pub fn remove(datadir: &Path, name: &str, force: bool, verbose: bool) -> Result<
     if !state_path.exists() {
         bail!("pod not found: {name}");
     }
+
+    // Exclusive lock prevents concurrent delete and blocks new container joins.
+    let _lock = crate::lock::lock_exclusive(datadir, "pods", name)
+        .with_context(|| format!("cannot lock pod '{name}' for removal"))?;
 
     // Check for containers referencing this pod.
     if !force {

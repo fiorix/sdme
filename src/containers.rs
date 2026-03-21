@@ -89,6 +89,15 @@ pub fn create(datadir: &Path, opts: &CreateOptions, verbose: bool) -> Result<Str
         eprintln!("rootfs: {}", rootfs.display());
     }
 
+    // Hold shared lock on rootfs to prevent deletion during container creation.
+    let _rootfs_lock = match &opts.rootfs {
+        Some(r) => Some(
+            crate::lock::lock_shared(datadir, "fs", r)
+                .with_context(|| format!("cannot lock rootfs '{r}' for reading"))?,
+        ),
+        None => None,
+    };
+
     let opaque_dirs = validate_opaque_dirs(&opts.opaque_dirs)?;
 
     // Atomically claim the name by creating the state file with O_CREAT|O_EXCL.

@@ -1090,6 +1090,17 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
 
     validate_name(name)?;
 
+    // Lock ordering: SHARED on base_fs first, then EXCLUSIVE on target name.
+    let _base_lock = match base_fs {
+        Some(base) => Some(
+            crate::lock::lock_shared(datadir, "fs", base)
+                .with_context(|| format!("cannot lock base rootfs '{base}' for reading"))?,
+        ),
+        None => None,
+    };
+    let _name_lock = crate::lock::lock_exclusive(datadir, "fs", name)
+        .with_context(|| format!("cannot lock rootfs '{name}' for import"))?;
+
     let kind = detect_source_kind(source)?;
 
     let rootfs_dir = datadir.join("fs");

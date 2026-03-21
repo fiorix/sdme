@@ -73,6 +73,10 @@ pub fn kube_create(datadir: &Path, opts: &KubeCreateOptions<'_>) -> Result<Strin
         bail!("base rootfs not found: {}", opts.base_fs);
     }
 
+    // Shared lock on base rootfs prevents deletion during copy.
+    let _base_lock = crate::lock::lock_shared(datadir, "fs", opts.base_fs)
+        .with_context(|| format!("cannot lock base rootfs '{}' for reading", opts.base_fs))?;
+
     let (pod_name, spec) = parse_yaml(opts.yaml_content)?;
     let mut plan = validate_and_plan(&pod_name, spec)?;
 
@@ -81,6 +85,8 @@ pub fn kube_create(datadir: &Path, opts: &KubeCreateOptions<'_>) -> Result<Strin
     let final_dir = rootfs_dir.join(&rootfs_name);
 
     // If a kube pod already exists with this name, delete it first (idempotent apply).
+    // The kube rootfs lock is acquired AFTER this block to avoid self-deadlock
+    // (kube_delete also acquires it).
     if final_dir.exists() {
         let state_path = datadir.join("state").join(&plan.pod_name);
         if state_path.exists() {
@@ -102,6 +108,10 @@ pub fn kube_create(datadir: &Path, opts: &KubeCreateOptions<'_>) -> Result<Strin
             );
         }
     }
+
+    // Exclusive lock on kube rootfs prevents concurrent kube creates for the same pod.
+    let _rootfs_lock = crate::lock::lock_exclusive(datadir, "fs", &rootfs_name)
+        .with_context(|| format!("cannot lock rootfs '{rootfs_name}' for kube create"))?;
 
     // 1. Copy base rootfs to staging dir.
     let mut txn = crate::txn::Txn::new(
@@ -152,6 +162,8 @@ pub fn kube_create(datadir: &Path, opts: &KubeCreateOptions<'_>) -> Result<Strin
             default_mode,
         } = vol.kind
         {
+            let _secret_lock = crate::lock::lock_shared(datadir, "secrets", secret_name)
+                .with_context(|| format!("cannot lock secret '{secret_name}' for reading"))?;
             let data = super::secret::read_data(datadir, secret_name).with_context(|| {
                 format!(
                     "volume '{}': failed to read secret '{secret_name}'",
@@ -178,6 +190,8 @@ pub fn kube_create(datadir: &Path, opts: &KubeCreateOptions<'_>) -> Result<Strin
             default_mode,
         } = vol.kind
         {
+            let _cm_lock = crate::lock::lock_shared(datadir, "configmaps", configmap_name)
+                .with_context(|| format!("cannot lock configmap '{configmap_name}' for reading"))?;
             let data = super::configmap::read_data(datadir, configmap_name).with_context(|| {
                 format!(
                     "volume '{}': failed to read configmap '{configmap_name}'",
@@ -479,6 +493,17 @@ pub fn kube_delete(datadir: &Path, name: &str, force: bool, verbose: bool) -> Re
 
     let rootfs_name = state.rootfs().to_string();
 
+    // Exclusive lock on kube rootfs prevents concurrent operations.
+    // Acquired before containers::remove() to follow fs → containers lock ordering.
+    let _rootfs_lock = if !rootfs_name.is_empty() {
+        Some(
+            crate::lock::lock_exclusive(datadir, "fs", &rootfs_name)
+                .with_context(|| format!("cannot lock rootfs '{rootfs_name}' for kube delete"))?,
+        )
+    } else {
+        None
+    };
+
     // Stop and remove the container.
     crate::containers::remove(datadir, name, verbose)?;
 
@@ -591,6 +616,8 @@ pub(crate) fn setup_kube_container(
         let pairs: Vec<(String, String)> = match env_val {
             KubeEnvValue::Literal(v) => vec![(key.clone(), v.clone())],
             KubeEnvValue::SecretKeyRef { name, key: k } => {
+                let _lock = crate::lock::lock_shared(datadir, "secrets", name)
+                    .with_context(|| format!("cannot lock secret '{name}' for reading"))?;
                 let data = super::secret::read_data(datadir, name)
                     .with_context(|| format!("env '{key}': failed to read secret '{name}'"))?;
                 let (_, contents) = data
@@ -603,6 +630,8 @@ pub(crate) fn setup_kube_container(
                 vec![(key.clone(), value)]
             }
             KubeEnvValue::ConfigMapKeyRef { name, key: k } => {
+                let _lock = crate::lock::lock_shared(datadir, "configmaps", name)
+                    .with_context(|| format!("cannot lock configmap '{name}' for reading"))?;
                 let data = super::configmap::read_data(datadir, name)
                     .with_context(|| format!("env '{key}': failed to read configmap '{name}'"))?;
                 let (_, contents) = data
@@ -615,6 +644,8 @@ pub(crate) fn setup_kube_container(
                 vec![(key.clone(), value)]
             }
             KubeEnvValue::SecretRef { name, prefix } => {
+                let _lock = crate::lock::lock_shared(datadir, "secrets", name)
+                    .with_context(|| format!("cannot lock secret '{name}' for reading"))?;
                 let data = super::secret::read_data(datadir, name)
                     .with_context(|| format!("envFrom: failed to read secret '{name}'"))?;
                 data.into_iter()
@@ -627,6 +658,8 @@ pub(crate) fn setup_kube_container(
                     .collect::<Result<Vec<_>>>()?
             }
             KubeEnvValue::ConfigMapRef { name, prefix } => {
+                let _lock = crate::lock::lock_shared(datadir, "configmaps", name)
+                    .with_context(|| format!("cannot lock configmap '{name}' for reading"))?;
                 let data = super::configmap::read_data(datadir, name)
                     .with_context(|| format!("envFrom: failed to read configmap '{name}'"))?;
                 data.into_iter()

@@ -41,6 +41,10 @@ pub(super) fn create(
 ) -> Result<()> {
     validate_name(name)?;
 
+    // Exclusive lock prevents concurrent creates of the same entry.
+    let _lock = crate::lock::lock_exclusive(datadir, cfg.subdir, name)
+        .with_context(|| format!("cannot lock {} '{name}' for creation", cfg.noun))?;
+
     if literals.is_empty() && files.is_empty() {
         bail!("at least one --from-literal or --from-file is required");
     }
@@ -145,6 +149,9 @@ pub(super) fn list(cfg: &StoreConfig, datadir: &Path) -> Result<Vec<StoreInfo>> 
 pub(super) fn remove(cfg: &StoreConfig, datadir: &Path, names: &[String]) -> Result<()> {
     for name in names {
         crate::check_interrupted()?;
+        // Exclusive lock prevents deletion while a kube create is reading.
+        let _lock = crate::lock::lock_exclusive(datadir, cfg.subdir, name)
+            .with_context(|| format!("cannot lock {} '{name}' for removal", cfg.noun))?;
         let entry_dir = datadir.join(cfg.subdir).join(name);
         if !entry_dir.join("state").exists() {
             bail!("{} not found: {name}", cfg.noun);
