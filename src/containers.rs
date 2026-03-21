@@ -1388,10 +1388,14 @@ pub fn stop(name: &str, mode: StopMode, timeout_secs: u64, verbose: bool) -> Res
             let signal = libc::SIGRTMIN() + 4;
             systemd::kill_machine(name, "leader", signal)?;
             systemd::wait_for_shutdown(name, timeout, verbose).with_context(|| {
-                format!(
-                    "hint: the container may be stuck during shutdown; \
-                         try 'sdme stop --kill {name}' to force-kill it"
-                )
+                if crate::INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed) {
+                    format!("shutdown of '{name}' interrupted")
+                } else {
+                    format!(
+                        "hint: the container may be stuck during shutdown; \
+                             try 'sdme stop --kill {name}' to force-kill it"
+                    )
+                }
             })
         }
         StopMode::Terminate => {
@@ -1400,10 +1404,14 @@ pub fn stop(name: &str, mode: StopMode, timeout_secs: u64, verbose: bool) -> Res
             }
             systemd::terminate_machine(name)?;
             systemd::wait_for_shutdown(name, timeout, verbose).with_context(|| {
-                format!(
-                    "hint: the container may be stuck; \
-                         try 'sdme stop --kill {name}' to force-kill it"
-                )
+                if crate::INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed) {
+                    format!("shutdown of '{name}' interrupted")
+                } else {
+                    format!(
+                        "hint: the container may be stuck; \
+                             try 'sdme stop --kill {name}' to force-kill it"
+                    )
+                }
             })
         }
         StopMode::Kill => {

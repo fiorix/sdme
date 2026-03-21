@@ -299,9 +299,10 @@ If `sdme new` or `sdme kube apply` fails to boot or join the container
 (or is interrupted with Ctrl+C or SIGTERM), it stops the container but
 preserves it on disk for debugging or manual cleanup via `sdme rm`.
 `sdme start` behaves the same way: it stops the container on boot
-failure or interrupt and preserves it on disk. All paths reset the
-interrupt flag before the stop operation so that `check_interrupted()`
-in the stop path does not short-circuit.
+failure or interrupt and preserves it on disk. All paths use
+`save_and_reset_interrupt()` before the stop operation so that
+`check_interrupted()` in the stop path does not short-circuit, then
+`restore_interrupt()` afterward so the interrupt propagates to callers.
 
 ## 5. Container Names
 
@@ -475,10 +476,10 @@ container is cleaned up regardless of success or failure.
 
 ## 8. fs export: Exporting Root Filesystems
 
-`sdme fs export` is the inverse of import: it takes an imported rootfs
-(or a container's merged overlayfs view) and writes it to a directory,
-tarball, or raw disk image (ext4 or btrfs). The implementation lives in
-`src/export.rs`.
+`sdme fs export` is the inverse of import: it exports a container's
+merged overlayfs view (default) or an imported rootfs (with `fs:`
+prefix) to a directory, tarball, or raw disk image (ext4 or btrfs).
+The implementation lives in `src/export.rs`.
 
 ### Format detection
 
@@ -531,14 +532,32 @@ the `default_export_free_space` config key). The `--size` flag overrides
 the calculation entirely with a fixed value (e.g. `2G`, `500M`); when
 set, `--free-space` is ignored.
 
-### Container export
+### Container export (default)
 
-When `--container` is passed, the export reads the container's merged
-overlayfs view instead of an imported rootfs. If the container is
-running, it reads directly from `merged/` with a consistency warning.
-If stopped, it temporarily mounts overlayfs (lower=rootfs,
-upper=container upper, work=container work) for the duration of the
-export, then unmounts.
+Container export is the default mode — a bare name (no `fs:` prefix)
+exports the named container. If the container is running, the export
+reads directly from `merged/` with a consistency warning. If stopped,
+it mounts a **read-only** overlayfs view via `mount_overlay_ro()`
+(multi-lower `lowerdir=upper:rootfs` — no upperdir/workdir needed)
+wrapped in an `OverlayGuard` that unmounts on drop. A `Txn` with
+`TxnKind::Export` marks the overlay mount lifetime so `sdme fs gc`
+can detect and clean up stale mounts from interrupted exports.
+
+### Resource locking
+
+The unified `export()` function holds shared `flock` locks for the
+duration of the export:
+
+- **Container lock** (`locks/containers/{name}.lock`): prevents
+  `sdme rm` from deleting the container during export.
+- **Rootfs lock** (`locks/fs/{rootfs}.lock`): prevents `sdme fs rm`
+  from deleting the lower-layer rootfs of a stopped container during
+  export. Also held for rootfs catalogue exports (`fs:` prefix).
+
+This matches the locking pattern used by `sdme fs build`. Locks are
+released by the kernel on process exit (flock semantics), so
+SIGKILL does not leave stale locks. Partial tar output files are
+cleaned up on error.
 
 ### Timezone
 
@@ -1178,8 +1197,20 @@ during blocked DNS resolution or TCP connection attempts.
 **Boot failure cleanup**: `sdme new` and `sdme kube apply` stop (but do
 not remove) the container on boot failure or interrupt, leaving it on
 disk for debugging or manual cleanup. `sdme start` behaves the same
-way. All paths reset the interrupt flag before the stop operation so
-that `check_interrupted()` in the stop path does not short-circuit.
+way. All paths use `save_and_reset_interrupt()` before the stop
+operation so that `check_interrupted()` in the stop path does not
+short-circuit, then `restore_interrupt()` afterward so the interrupt
+propagates to callers.
+
+**Multi-container loop cancellation.** Batch operations (`rm -a`,
+`start --all`, `stop`, `enable`, `disable`, `pod rm`, `fs rm`) use
+`for_each_container` or equivalent loops that check the `INTERRUPTED`
+flag after every action and break immediately. A `check_interrupted()?`
+call before the final error summary ensures the process exits with code
+128+signum (e.g. 130 for SIGINT) and prints "interrupted, exiting".
+Cleanup paths (boot failure, build failure) use
+`save_and_reset_interrupt()` / `restore_interrupt()` so the flag
+survives the cleanup stop and propagates to the outer loop.
 
 **Health checks** in `sdme ps` detect containers with missing
 directories or missing rootfs and report them as `broken` rather than

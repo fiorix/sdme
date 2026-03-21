@@ -789,7 +789,11 @@ fn for_each_container(
         } else {
             println!("{name}");
         }
+        if sdme::INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed) {
+            break;
+        }
     }
+    check_interrupted()?;
     if failed {
         bail!("some containers could not be {past}");
     }
@@ -811,9 +815,10 @@ fn start_and_await_boot(
 ) -> Result<()> {
     systemd::start(datadir, name, tasks_max, config_boot_timeout, verbose)?;
     if let Err(e) = systemd::await_boot(name, boot_timeout, verbose) {
-        sdme::reset_interrupt();
+        let (was, sig) = sdme::save_and_reset_interrupt();
         eprintln!("boot failed, stopping '{name}'");
         let _ = containers::stop(name, containers::StopMode::Terminate, 30, verbose);
+        sdme::restore_interrupt(was, sig);
         return Err(e);
     }
     Ok(())
@@ -1363,7 +1368,18 @@ fn validate_kube_oci_pod_args(datadir: &std::path::Path, oci_pod: Option<&str>) 
     Ok(())
 }
 
-fn main() -> Result<()> {
+fn main() {
+    if let Err(e) = run() {
+        if sdme::INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed) {
+            eprintln!("interrupted, exiting");
+            std::process::exit(sdme::interrupt_exit_code());
+        }
+        eprintln!("Error: {e:#}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<()> {
     let cli = Cli::parse();
 
     // Handle commands that don't require root.
@@ -2000,7 +2016,7 @@ fn main() -> Result<()> {
             })();
 
             if let Err(e) = boot_result {
-                sdme::reset_interrupt();
+                let (was, sig) = sdme::save_and_reset_interrupt();
                 eprintln!("boot failed, stopping '{name}'");
                 let _ = containers::stop(
                     &name,
@@ -2008,6 +2024,7 @@ fn main() -> Result<()> {
                     cfg.stop_timeout_terminate,
                     cli.verbose,
                 );
+                sdme::restore_interrupt(was, sig);
                 return Err(e);
             }
 
@@ -2215,7 +2232,11 @@ fn main() -> Result<()> {
                     } else {
                         println!("{name}");
                     }
+                    if sdme::INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed) {
+                        break;
+                    }
                 }
+                check_interrupted()?;
                 if failed {
                     bail!("some pods could not be removed");
                 }
@@ -2286,7 +2307,7 @@ fn main() -> Result<()> {
                     Ok(())
                 })();
                 if let Err(e) = boot_result {
-                    sdme::reset_interrupt();
+                    let (was, sig) = sdme::save_and_reset_interrupt();
                     eprintln!("boot failed, stopping '{name}'");
                     let _ = containers::stop(
                         &name,
@@ -2294,6 +2315,7 @@ fn main() -> Result<()> {
                         cfg.stop_timeout_terminate,
                         cli.verbose,
                     );
+                    sdme::restore_interrupt(was, sig);
                     return Err(e);
                 }
                 eprintln!("joining '{name}'");
@@ -2557,7 +2579,11 @@ fn main() -> Result<()> {
                     } else {
                         println!("{name}");
                     }
+                    if sdme::INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed) {
+                        break;
+                    }
                 }
+                check_interrupted()?;
                 if failed {
                     bail!("some fs entries could not be removed");
                 }

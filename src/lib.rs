@@ -136,6 +136,31 @@ pub fn reset_interrupt() {
     install_interrupt_handler();
 }
 
+/// Save the current interrupt state and reset it.
+///
+/// Returns the previous `(INTERRUPTED, INTERRUPT_SIGNAL)` values so the
+/// caller can restore them after a cleanup operation (e.g. stopping a
+/// container after boot failure). Use [`restore_interrupt`] to put them
+/// back.
+pub fn save_and_reset_interrupt() -> (bool, i32) {
+    let was = INTERRUPTED.load(Ordering::Relaxed);
+    let sig = INTERRUPT_SIGNAL.load(Ordering::Relaxed);
+    reset_interrupt();
+    (was, sig)
+}
+
+/// Restore a previously saved interrupt state.
+///
+/// If the saved state was interrupted, re-sets the global flags so
+/// callers higher up the stack (e.g. `for_each_container`) can detect
+/// the interruption and break out of loops.
+pub fn restore_interrupt(was_interrupted: bool, signal: i32) {
+    if was_interrupted {
+        INTERRUPTED.store(true, Ordering::Relaxed);
+        INTERRUPT_SIGNAL.store(signal, Ordering::Relaxed);
+    }
+}
+
 /// Install the SIGINT and SIGTERM handler that sets the global [`INTERRUPTED`] flag.
 pub fn install_interrupt_handler() {
     unsafe {

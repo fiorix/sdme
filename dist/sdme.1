@@ -236,8 +236,12 @@ Start one or more stopped containers.
 Installs or updates the
 .B sdme@.service
 template unit if needed, then starts each unit via D\-Bus.
-Containers are started sequentially; if one fails to boot, it is stopped
-and the remaining containers are still attempted.
+Containers are started sequentially.
+If one fails to boot, it is stopped and the remaining containers are
+still attempted.
+If interrupted (Ctrl+C or SIGTERM), the current container is stopped
+and the operation exits immediately without processing remaining
+containers.
 .PP
 Use
 .B \-\-all
@@ -560,8 +564,14 @@ Use a different path (e.g.\&
 Lines starting with
 .B #
 and blank lines are ignored.
-.SS sdme fs export \fIname\fR \fIoutput\fR [\-\-container] [\-f] [\-\-fmt \fIformat\fR] [\-s \fIsize\fR] [\-\-free\-space \fIsize\fR] [\-\-filesystem \fItype\fR] [\-\-timezone \fItz\fR] [\-\-vm] [\-\-dns \fIip\fR]... [\-\-net\-ifaces \fIn\fR] [\-\-root\-password \fIpass\fR] [\-\-ssh\-key \fIpath\fR] [\-\-swap \fIsize\fR] [\-\-hostname \fIname\fR] [\-\-install\-packages \fImode\fR]
-Export a root filesystem or container to a directory, tarball, or disk image.
+.SS sdme fs export \fIname\fR \fIoutput\fR [\-f] [\-\-fmt \fIformat\fR] [\-s \fIsize\fR] [\-\-free\-space \fIsize\fR] [\-\-filesystem \fItype\fR] [\-\-timezone \fItz\fR] [\-\-vm] [\-\-dns \fIip\fR]... [\-\-net\-ifaces \fIn\fR] [\-\-root\-password \fIpass\fR] [\-\-ssh\-key \fIpath\fR] [\-\-swap \fIsize\fR] [\-\-hostname \fIname\fR] [\-\-install\-packages \fImode\fR]
+Export a container or rootfs to a directory, tarball, or disk image.
+By default,
+.I name
+refers to a container. Prefix with
+.B fs:
+to export from the rootfs catalogue (e.g.\&
+.IR fs:ubuntu ).
 The output format is auto\-detected from the file extension:
 .RS
 .TP
@@ -598,12 +608,13 @@ Use
 to override the auto\-detected format
 .RI ( dir ", " tar ", " tar.gz ", " tar.bz2 ", " tar.xz ", " tar.zst ", " raw ).
 .PP
-Use
-.B \-\-container
-to export a container's merged overlayfs view instead of an imported rootfs.
 Running containers are exported directly from the live filesystem (with a
-consistency warning); stopped containers have overlayfs temporarily mounted
-for the export.
+consistency warning). Stopped containers are exported via a temporary
+read\-only overlayfs mount. The export holds shared file locks to prevent
+.B sdme rm
+or
+.B sdme fs rm
+from deleting resources during export.
 .PP
 Use
 .B \-s
@@ -1583,6 +1594,13 @@ Success.
 .B non\-zero
 An error occurred.
 Error messages are printed to standard error.
+.TP
+.B 130
+Interrupted by SIGINT (Ctrl+C). Batch operations abort immediately;
+remaining items are not processed.
+.TP
+.B 143
+Interrupted by SIGTERM. Same behaviour as SIGINT.
 .SH EXAMPLES
 Import an Ubuntu rootfs from a URL and create a container:
 .PP
@@ -2328,6 +2346,12 @@ the container is stopped but preserved on disk for debugging or manual cleanup v
 For
 .BR "sdme start" ,
 the container is stopped but preserved on disk.
+.PP
+For batch operations (\fBrm \-a\fR, \fBstart \-\-all\fR,
+\fBstop\fR, \fBfs rm\fR, \fBpod rm\fR), pressing Ctrl+C
+aborts the entire operation immediately. The current item may
+complete, but no further items are processed. The exit code is
+130 (128 + SIGINT) or 143 (128 + SIGTERM).
 .SH SECURITY
 .B sdme
 runs as root and processes untrusted input (tarballs, OCI images, disk images,
