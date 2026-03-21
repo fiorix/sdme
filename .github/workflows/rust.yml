@@ -10,17 +10,32 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-
+  lint:
+    name: Lint
     runs-on: ubuntu-latest
-
     steps:
-    - uses: actions/checkout@v4
-    - name: Check formatting
-      run: cargo fmt --check
-    - name: Clippy
-      run: cargo clippy --locked -- -D warnings
-    - name: Build
-      run: cargo build --locked --verbose
-    - name: Run tests
-      run: cargo test --locked --verbose
+      - uses: actions/checkout@v4
+      - name: Check formatting
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --locked -- -D warnings
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: cargo build --locked --verbose
+      - name: Run tests
+        run: cargo test --locked --verbose
+
+  doc:
+    name: Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build docs
+        run: cargo doc --locked --no-deps
+        env:
+          RUSTDOCFLAGS: "-D warnings"
