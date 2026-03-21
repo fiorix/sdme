@@ -24,9 +24,9 @@ REDIS_IMAGE="docker.io/redis"
 POSTGRES_IMAGE="docker.io/postgres"
 
 # Timeouts (seconds)
-TIMEOUT_IMPORT=600
-TIMEOUT_BOOT=120
-TIMEOUT_TEST=60
+TIMEOUT_IMPORT=$(scale_timeout 600)
+TIMEOUT_BOOT=$(scale_timeout 120)
+TIMEOUT_TEST=$(scale_timeout 60)
 
 usage() {
     cat <<EOF
@@ -1036,6 +1036,8 @@ main() {
 
     ensure_root
     ensure_sdme
+    require_gate smoke
+    require_gate interrupt
 
     echo "Usage guide verification"
     echo "Base image: $BASE_IMAGE"

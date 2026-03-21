@@ -51,4 +51,17 @@ clean:
 	cargo clean
 	rm -rf dist/out
 
-.PHONY: all install install-extras install-man install-completions uninstall uninstall-man uninstall-completions deb rpm pkg clean
+e2e:
+	sudo test/scripts/run-parallel.sh
+
+e2e-quick:
+	sudo test/scripts/run-parallel.sh --only verify-export \
+		--only verify-build --only verify-interrupt
+
+e2e-smoke:
+	sudo test/scripts/smoke.sh
+
+e2e-preflight:
+	sudo test/scripts/preflight.sh
+
+.PHONY: all install install-extras install-man install-completions uninstall uninstall-man uninstall-completions deb rpm pkg clean e2e e2e-quick e2e-smoke e2e-preflight

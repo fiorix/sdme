@@ -3,9 +3,13 @@
 #
 # Source this from verify-*.sh scripts. Provides:
 #   - build_and_install: build sdme and install to PATH
-#   - ensure_sdme: verify sdme is in PATH and matches the repo version
+#   - ensure_sdme: verify sdme is in PATH (warns if version mismatches Cargo.toml)
 #   - ensure_root: check we're running as root
-#   - DISTRO_IMAGES: canonical distro → OCI image mapping
+#   - DISTRO_IMAGES: canonical distro -> OCI image mapping
+#   - DISTRO_OS_PATTERN: expected OS column substring in `sdme ps`
+#   - distro_bin: resolve binary path (NixOS uses /run/current-system/sw/bin)
+#   - check_os: verify `sdme ps` OS column matches expected pattern
+#   - fix_redis_oci: apply Redis 8.x workarounds (ARM64 COW bug, locale)
 #   - ensure_base_fs: import a base rootfs if not already present
 #   - ensure_default_base_fs: import ubuntu if BASE_FS is "ubuntu"
 #   - cleanup_prefix: remove all containers and rootfs matching a prefix
@@ -14,6 +18,8 @@
 #   - parse_standard_args: common --base-fs/--report-dir/--help arg parsing
 #   - generate_standard_report: markdown report with system info and results
 #   - stop_container/cleanup_container: container lifecycle helpers
+#   - write_gate/check_gate/require_gate: inter-stage dependency gating
+#   - scale_timeout: apply TIMEOUT_SCALE multiplier to timeout values
 #
 # Convention: every test script uses a unique prefix for all artifacts
 # (containers, rootfs, pods). The prefix is cleaned on startup so tests
@@ -28,7 +34,7 @@
 #   5432  PostgreSQL           verify-usage.sh
 #   6379  Redis                verify-kube-L5-redis-stack.sh (private net)
 #   8080  nginx-unprivileged   verify-usage.sh,
-#                              verify-matrix.sh (private net),
+#                              verify-distro-oci.sh (private net),
 #                              verify-oci.sh (private net),
 #                              verify-nixos.sh (private net),
 #                              verify-kube-L4-networking.sh (private net),
@@ -81,6 +87,78 @@ print_summary() {
     return 0
 }
 
+# -- Timeout scaling ----------------------------------------------------------
+# Set TIMEOUT_SCALE > 1 to proportionally increase all timeouts (for slow
+# machines). The runner passes --timeout-scale N which exports this variable.
+
+TIMEOUT_SCALE="${TIMEOUT_SCALE:-1}"
+
+# Apply the timeout scale multiplier to a base value.
+#   scale_timeout 600   # returns 600 * TIMEOUT_SCALE
+scale_timeout() {
+    local base="$1"
+    echo $((base * TIMEOUT_SCALE))
+}
+
+# -- Gate system --------------------------------------------------------------
+# Inter-stage dependency gating for the test runner. Gate files are written
+# by early-stage scripts (preflight, smoke, interrupt) and checked by
+# downstream scripts. When running standalone (no gate files), require_gate
+# is a no-op so scripts remain independently runnable.
+#
+# The runner sets GATE_DIR to its temp directory. For standalone runs, a
+# default location is used (stale gate files from a prior standalone run
+# are harmless).
+
+GATE_DIR="${GATE_DIR:-/tmp/sdme-e2e-gates}"
+
+# Write a gate marker file.
+#   write_gate <name> <pass|fail>
+write_gate() {
+    local name="$1" result="$2"
+    mkdir -p "$GATE_DIR"
+    if [[ "$result" == "pass" ]]; then
+        touch "$GATE_DIR/${name}.pass"
+        rm -f "$GATE_DIR/${name}.fail"
+    else
+        touch "$GATE_DIR/${name}.fail"
+        rm -f "$GATE_DIR/${name}.pass"
+    fi
+}
+
+# Check a gate.
+# Returns: 0 = passed, 1 = failed, 2 = not found (standalone mode).
+#   check_gate <name>
+check_gate() {
+    local name="$1"
+    if [[ -f "$GATE_DIR/${name}.pass" ]]; then
+        return 0
+    elif [[ -f "$GATE_DIR/${name}.fail" ]]; then
+        return 1
+    else
+        return 2  # gate not found (standalone mode)
+    fi
+}
+
+# Require a gate to have passed. If the gate failed, skip all tests in this
+# script and exit 0. If the gate is not found (standalone mode), continue.
+#   require_gate <name>
+require_gate() {
+    local name="$1"
+    local rc=0
+    check_gate "$name" || rc=$?
+    case $rc in
+        0) return 0 ;;  # gate passed, continue
+        1)
+            echo "SKIPPING: gate '$name' failed"
+            echo ""
+            echo "Results: 0 passed, 0 failed, 0 skipped (total 0)"
+            exit 0
+            ;;
+        2) return 0 ;;  # gate not found, standalone mode, continue
+    esac
+}
+
 # -- Build and install ---------------------------------------------------------
 
 build_and_install() {
@@ -115,6 +193,13 @@ ensure_sdme() {
         echo "error: sdme not found in PATH; run build_and_install first" >&2
         exit 1
     fi
+    # Warn if installed version doesn't match Cargo.toml.
+    local cargo_ver installed_ver
+    cargo_ver=$(sed -n 's/^version = "\(.*\)"/\1/p' "$REPO_ROOT/Cargo.toml" 2>/dev/null || true)
+    installed_ver=$("$SDME" --version 2>&1 | awk '{print $2}' || true)
+    if [[ -n "$cargo_ver" && -n "$installed_ver" && "$cargo_ver" != "$installed_ver" ]]; then
+        echo "warning: sdme version mismatch: installed=$installed_ver, Cargo.toml=$cargo_ver" >&2
+    fi
 }
 
 ensure_root() {
@@ -124,8 +209,10 @@ ensure_root() {
     fi
 }
 
-# Canonical distro → OCI image mapping. Test scripts reference this instead
+# -- Distro data --------------------------------------------------------------
+# Canonical distro -> OCI image mapping. Test scripts reference this instead
 # of maintaining their own copies.
+
 declare -A DISTRO_IMAGES=(
     [debian]="docker.io/debian:stable"
     [ubuntu]="docker.io/ubuntu:24.04"
@@ -136,6 +223,84 @@ declare -A DISTRO_IMAGES=(
     [opensuse]="registry.opensuse.org/opensuse/tumbleweed:latest"
     [nixos]="docker.io/nixos/nix"
 )
+
+# Expected OS column substring in `sdme ps` output for each distro.
+declare -A DISTRO_OS_PATTERN=(
+    [debian]="Debian"
+    [ubuntu]="Ubuntu"
+    [fedora]="Fedora"
+    [centos]="CentOS"
+    [almalinux]="AlmaLinux"
+    [archlinux]="Arch Linux"
+    [opensuse]="openSUSE Tumbleweed"
+)
+
+# NixOS puts binaries under /run/current-system/sw/bin instead of /usr/bin.
+distro_bin() {
+    local distro="$1" cmd="$2"
+    if [[ "$distro" == "nixos" ]]; then
+        echo "/run/current-system/sw/bin/$cmd"
+    else
+        echo "/usr/bin/$cmd"
+    fi
+}
+
+# Check that `sdme ps` shows the expected OS pattern for a container.
+#   check_os <container_name> <distro>
+# Returns 0 on match, 1 on mismatch. On mismatch, prints the actual OS value.
+check_os() {
+    local ct_name="$1" distro="$2"
+    local pattern="${DISTRO_OS_PATTERN[$distro]}"
+    local os_col
+    os_col=$($SDME ps 2>/dev/null | awk -v name="$ct_name" '$1 == name {
+        # OS is the 4th column, but it may contain spaces (e.g. "Arch Linux").
+        # Columns 1-3 are single-word (NAME, STATUS, HEALTH). Print from field 4
+        # to the end, then strip trailing columns that start with known suffixes.
+        for (i=4; i<=NF; i++) printf "%s ", $i
+        printf "\n"
+    }')
+    # Trim trailing whitespace.
+    os_col="${os_col%"${os_col##*[![:space:]]}"}"
+    if [[ "$os_col" == *"$pattern"* ]]; then
+        return 0
+    else
+        echo "$os_col"
+        return 1
+    fi
+}
+
+# Redis 8.x workarounds for container environments:
+# - ARM64: tests for a kernel COW bug, fails inside containers, and exits.
+#   Suppress with --ignore-warnings ARM64-COW-BUG.
+# - Locale: redis treats locale config failure as fatal. The OCI root may
+#   lack the host container's locale (e.g. en_US.UTF-8 on archlinux).
+#   Force LANG=C.UTF-8 which is universally available.
+#
+#   fix_redis_oci <container_name> [distro]
+fix_redis_oci() {
+    local ct_name="$1" distro="${2:-}"
+    local datadir="/var/lib/sdme"
+    # NixOS replaces /etc/systemd/system with an immutable symlink;
+    # drop-ins must go to system.control instead.
+    local unit_dir="etc/systemd/system"
+    if [[ "$distro" == "nixos" ]]; then
+        unit_dir="etc/systemd/system.control"
+    fi
+    local svc_dir="$datadir/containers/$ct_name/upper/$unit_dir/sdme-oci-redis.service.d"
+    mkdir -p "$svc_dir"
+    local extra_args=""
+    if [[ "$(uname -m)" == "aarch64" ]]; then
+        extra_args=" --ignore-warnings ARM64-COW-BUG"
+    fi
+    cat > "$svc_dir/workarounds.conf" <<DROPIN
+[Service]
+Environment=LANG=C.UTF-8
+ExecStart=
+ExecStart=/.sdme-isolate 0 0 /data /usr/local/bin/docker-entrypoint.sh redis-server${extra_args}
+DROPIN
+}
+
+# -- Rootfs management ---------------------------------------------------------
 
 # Import a base rootfs if it doesn't exist. Idempotent (OCI cache makes
 # re-imports fast).

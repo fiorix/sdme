@@ -10,8 +10,8 @@ set -euo pipefail
 
 source "$(dirname "$0")/lib.sh"
 
-TIMEOUT_BOOT=120
-TIMEOUT_TEST=60
+TIMEOUT_BOOT=$(scale_timeout 120)
+TIMEOUT_TEST=$(scale_timeout 60)
 
 cleanup_pod() {
     $SDME pod rm -f "$1" 2>/dev/null || true
@@ -32,6 +32,8 @@ trap cleanup_all EXIT INT TERM
 
 ensure_root
 ensure_sdme
+require_gate smoke
+require_gate interrupt
 ensure_base_fs ubuntu docker.io/ubuntu:24.04
 
 # ---------------------------------------------------------------------------

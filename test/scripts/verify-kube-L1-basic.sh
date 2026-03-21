@@ -17,8 +17,8 @@ DATADIR="/var/lib/sdme"
 REPORT_DIR="."
 
 # Timeouts (seconds)
-TIMEOUT_CREATE=600
-TIMEOUT_BOOT=120
+TIMEOUT_CREATE=$(scale_timeout 600)
+TIMEOUT_BOOT=$(scale_timeout 120)
 
 # --- Test 0: Validate YAML files with kubeconform ---
 test_validate_yaml() {
@@ -354,6 +354,8 @@ main() {
 
     ensure_root
     ensure_sdme
+    require_gate smoke
+    require_gate interrupt
 
     ensure_default_base_fs
 
@@ -369,6 +371,12 @@ main() {
     test_ps_kube_column
 
     generate_standard_report "verify-kube" "sdme Kube Basic Verification Report"
+
+    if [[ $_fail -eq 0 ]]; then
+        write_gate kube-l1 pass
+    else
+        write_gate kube-l1 fail
+    fi
 
     print_summary
 }

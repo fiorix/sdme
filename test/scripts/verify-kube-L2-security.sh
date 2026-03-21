@@ -25,8 +25,8 @@ REPORT_DIR="."
 POD_NAME="vfy-ks-sec"
 
 # Timeouts (seconds)
-TIMEOUT_CREATE=600
-TIMEOUT_BOOT=120
+TIMEOUT_CREATE=$(scale_timeout 600)
+TIMEOUT_BOOT=$(scale_timeout 120)
 
 # State flags
 POD_CREATED=0
@@ -466,6 +466,9 @@ main() {
 
     ensure_root
     ensure_sdme
+    require_gate smoke
+    require_gate interrupt
+    require_gate kube-l1
 
     ensure_default_base_fs
 

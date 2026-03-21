@@ -27,8 +27,8 @@ SECRET_ALL="test-secret"
 SECRET_PROJ="mysecret"
 
 # Timeouts (seconds)
-TIMEOUT_CREATE=600
-TIMEOUT_BOOT=120
+TIMEOUT_CREATE=$(scale_timeout 600)
+TIMEOUT_BOOT=$(scale_timeout 120)
 
 # State flags
 SECRETS_CREATED=0
@@ -512,6 +512,8 @@ main() {
 
     ensure_root
     ensure_sdme
+    require_gate smoke
+    require_gate interrupt
 
     ensure_default_base_fs
 

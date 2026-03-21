@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-# run-parallel.sh - parallel e2e test runner for sdme
+# run-parallel.sh - staged parallel e2e test runner for sdme
 #
-# Runs all verify-*.sh tests with maximum parallelism while respecting
-# resource constraints (host ports, shared secrets/configmaps).
+# Runs all verify-*.sh tests with staged execution and controlled parallelism.
+#
+# Stages:
+#   0. Preflight: validate environment (systemd, binaries, disk, ports)
+#   1. Setup + Smoke + Interrupt: build, import base-fs, smoke test, interrupt test
+#   2. Parallel tests:
+#      Wave A: core tests + kube-L1 (semaphore-bounded)
+#      Wave B: kube L2+ (launched after L1 completes, only if L1 passed)
+#   3. Destructive: verify-usage.sh (batch ops affect all containers)
 #
 # Usage:
 #   sudo ./test/scripts/run-parallel.sh [OPTIONS]
-#
-# Grouping:
-#   - 17 tests run in parallel (bounded by --jobs)
-#   - kube-L3-secrets + kube-L3-volumes run as a serial pair within the wave
-#   - verify-usage.sh runs LAST (its batch ops affect all containers)
 
 source "$(dirname "$0")/lib.sh"
 
@@ -22,6 +24,7 @@ MAX_JOBS=8
 REPORT_DIR="./test-reports"
 BASE_FS="ubuntu"
 DO_SETUP=1
+STAGGER=1
 SKIP_SCRIPTS=()
 ONLY_SCRIPTS=()
 
@@ -30,6 +33,25 @@ START_TIME=""
 TMPDIR_RUN=""
 FIFO=""
 CHILD_PIDS=()
+KUBE_L1_PID=""
+
+# Known test prefixes for stale cleanup.
+KNOWN_PREFIXES=(
+    smoke-
+    net-
+    sec-
+    usrns-
+    vfy-dboot-
+    vfy-doci-
+    vfy-oci-
+    vfy-usage-
+    vfy-int-
+    vfy-bld-
+    vfy-exp-
+    vfy-nixos-
+    kube-vfy-
+    vfy-mx-
+)
 
 # -- Usage --------------------------------------------------------------------
 
@@ -37,24 +59,27 @@ usage() {
     cat <<EOF
 Usage: $(basename "$0") [OPTIONS]
 
-Parallel e2e test runner for sdme.
+Staged parallel e2e test runner for sdme.
 Must be run as root.
 
 Options:
-  --jobs N           Max parallel jobs (default: $MAX_JOBS)
-  --report-dir DIR   Report output directory (default: $REPORT_DIR)
-  --base-fs NAME     Base rootfs name (default: $BASE_FS)
-  --skip SCRIPT      Skip a script (repeatable, basename without .sh)
-  --only SCRIPT      Run only these scripts (repeatable)
-  --no-setup         Skip build + base rootfs import
-  -v, --verbose      Show test output in real time
-  --help             Show help
+  --jobs N             Max parallel jobs (default: $MAX_JOBS)
+  --report-dir DIR     Report output directory (default: $REPORT_DIR)
+  --base-fs NAME       Base rootfs name (default: $BASE_FS)
+  --timeout-scale N    Multiply all timeouts by N (default: 1)
+  --stagger N          Seconds between OCI-pulling test launches (default: $STAGGER)
+  --skip SCRIPT        Skip a script (repeatable, basename without .sh)
+  --only SCRIPT        Run only these scripts (repeatable)
+  --no-setup           Skip build + base rootfs import
+  -v, --verbose        Show test output in real time
+  --help               Show help
 
 Examples:
   sudo $0                                    # run all tests, 8 jobs
   sudo $0 --jobs 4                           # limit to 4 parallel jobs
-  sudo $0 --only verify-export --only verify-interrupt --jobs 2
-  sudo $0 --skip verify-matrix --skip verify-nixos   # skip slow tests
+  sudo $0 --timeout-scale 2                  # double all timeouts (slow machine)
+  sudo $0 --only verify-export --only verify-build --jobs 2
+  sudo $0 --skip verify-distro-oci --skip verify-nixos   # skip slow tests
 EOF
 }
 
@@ -66,10 +91,11 @@ parse_runner_args() {
             --jobs)     shift; MAX_JOBS="$1" ;;
             --report-dir) shift; REPORT_DIR="$1" ;;
             --base-fs)  shift; BASE_FS="$1" ;;
+            --timeout-scale) shift; export TIMEOUT_SCALE="$1" ;;
+            --stagger)  shift; STAGGER="$1" ;;
             --skip)     shift; SKIP_SCRIPTS+=("$1") ;;
             --only)     shift; ONLY_SCRIPTS+=("$1") ;;
             --no-setup) DO_SETUP=0 ;;
-            # shellcheck disable=SC2034  # VFLAG is used by lib.sh helpers
             -v|--verbose) VERBOSE=1; VFLAG="-v" ;;
             --help)     usage; exit 0 ;;
             *)          echo "error: unknown option: $1" >&2; usage >&2; exit 1 ;;
@@ -123,7 +149,7 @@ test_args() {
     local script_name="$1"
     local args="--report-dir $REPORT_DIR"
     case "$script_name" in
-        verify-matrix.sh|verify-export.sh|verify-usage.sh|verify-oci.sh|verify-nixos.sh|verify-security.sh|verify-pods.sh)
+        verify-distro-boot.sh|verify-distro-oci.sh|verify-export.sh|verify-usage.sh|verify-oci.sh|verify-nixos.sh|verify-security.sh|verify-pods.sh)
             # These scripts don't accept --base-fs (custom or no arg parser).
             ;;
         *)
@@ -131,6 +157,16 @@ test_args() {
             ;;
     esac
     echo "$args"
+}
+
+# -- Stale cleanup ------------------------------------------------------------
+# Remove leftover artifacts from prior interrupted runs.
+
+cleanup_stale() {
+    log "Cleaning up stale test artifacts..."
+    for prefix in "${KNOWN_PREFIXES[@]}"; do
+        cleanup_prefix "$prefix"
+    done
 }
 
 # -- Semaphore ----------------------------------------------------------------
@@ -255,6 +291,7 @@ aggregate_reports() {
         sdme_ver=$(sed -n 's/^version = "\(.*\)"/\1/p' "$REPO_ROOT/Cargo.toml" 2>/dev/null || echo unknown)
         echo "| sdme | $sdme_ver |"
         echo "| Parallel jobs | $MAX_JOBS |"
+        echo "| Timeout scale | ${TIMEOUT_SCALE:-1} |"
         echo "| Wall clock | $(fmt_duration $total_duration) |"
         echo ""
 
@@ -349,57 +386,103 @@ main() {
     ensure_root
 
     TMPDIR_RUN=$(mktemp -d /tmp/sdme-test-run-XXXXXX)
+    export GATE_DIR="$TMPDIR_RUN/gates"
+    mkdir -p "$GATE_DIR"
     trap cleanup_runner EXIT INT TERM
 
     mkdir -p "$REPORT_DIR"
 
-    # -- Setup phase --
+    # ========================================================================
+    # Stage 0: Preflight
+    # ========================================================================
+    log "Stage 0: Preflight"
+    if ! "$SCRIPT_DIR/preflight.sh"; then
+        log "PREFLIGHT FAILED - aborting"
+        exit 1
+    fi
+    echo ""
+
+    # ========================================================================
+    # Stage 1: Setup + Smoke + Interrupt
+    # ========================================================================
+    log "Stage 1: Setup + Smoke + Interrupt"
+
     if [[ $DO_SETUP -eq 1 ]]; then
-        log "Setup: building and installing sdme"
+        log "Building and installing sdme"
         build_and_install
 
-        log "Setup: importing $BASE_FS base rootfs"
+        log "Importing $BASE_FS base rootfs"
         ensure_base_fs "$BASE_FS" "${DISTRO_IMAGES[$BASE_FS]}"
     else
         ensure_sdme
     fi
 
+    # Smoke test: validates core container lifecycle.
+    log "Running smoke test"
+    if ! "$SCRIPT_DIR/smoke.sh" --report-dir "$REPORT_DIR" --base-fs "$BASE_FS"; then
+        log "SMOKE TEST FAILED - aborting"
+        write_gate smoke fail
+        exit 1
+    fi
+    write_gate smoke pass
+
+    # Interrupt test: validates SIGINT/SIGTERM handling (foundational for cleanup).
+    if should_run "verify-interrupt"; then
+        log "Running interrupt test"
+        local int_args
+        int_args=$(test_args "verify-interrupt.sh")
+        # shellcheck disable=SC2086
+        if ! "$SCRIPT_DIR/verify-interrupt.sh" $int_args; then
+            log "INTERRUPT TEST FAILED - aborting"
+            write_gate interrupt fail
+            exit 1
+        fi
+        write_gate interrupt pass
+    else
+        # If skipped via --skip/--only, write pass so downstream gates don't block.
+        write_gate interrupt pass
+    fi
+
+    echo ""
+
+    # ========================================================================
+    # Stage 2: Parallel tests
+    # ========================================================================
     START_TIME=$(now_epoch)
     init_semaphore
 
-    log "Starting tests (max $MAX_JOBS parallel jobs)"
+    # Clean up stale artifacts from prior interrupted runs.
+    cleanup_stale
+
+    # -- Wave A: core tests + kube-L1 --
+    log "Stage 2, Wave A: core tests (max $MAX_JOBS parallel jobs)"
     echo ""
 
-    # -- Parallel wave: tests with no host port conflicts --
-    local parallel_tests=(
+    local wave_a_tests=(
         verify-export.sh
-        verify-interrupt.sh
         verify-build.sh
         verify-security.sh
         verify-pods.sh
         verify-network.sh
         verify-oci.sh
         verify-nixos.sh
-        verify-matrix.sh
+        verify-distro-boot.sh
+        verify-distro-oci.sh
         verify-kube-L1-basic.sh
-        verify-kube-L2-spec.sh
-        verify-kube-L2-security.sh
-        verify-kube-L2-probes.sh
-        verify-kube-L4-networking.sh
-        verify-kube-L5-redis-stack.sh
-        verify-kube-L6-gitea-stack.sh
     )
 
     local _launch_count=0
-    for script_name in "${parallel_tests[@]}"; do
+    for script_name in "${wave_a_tests[@]}"; do
         local name="${script_name%.sh}"
         if should_run "$name"; then
-            # Stagger launches by 2s to avoid Docker Hub rate limiting
-            # when many tests pull OCI images simultaneously.
-            if [[ $_launch_count -gt 0 ]]; then
-                sleep 2
+            if [[ $_launch_count -gt 0 && $STAGGER -gt 0 ]]; then
+                sleep "$STAGGER"
             fi
             run_test "$SCRIPT_DIR/$script_name"
+            # Track kube-L1 PID for Wave B gating.
+            if [[ "$script_name" == "verify-kube-L1-basic.sh" ]]; then
+                KUBE_L1_PID="${CHILD_PIDS[-1]}"
+            fi
             ((_launch_count++)) || true
         fi
     done
@@ -420,17 +503,82 @@ main() {
         fi
     fi
 
-    # -- Wait for parallel wave --
-    log "Waiting for parallel tests to complete..."
+    # -- Wait for kube-L1 to complete, then launch Wave B --
+    local wave_b_tests=(
+        verify-kube-L2-spec.sh
+        verify-kube-L2-security.sh
+        verify-kube-L2-probes.sh
+        verify-kube-L4-networking.sh
+        verify-kube-L5-redis-stack.sh
+        verify-kube-L6-gitea-stack.sh
+    )
+
+    local wave_b_wanted=0
+    for script_name in "${wave_b_tests[@]}"; do
+        local name="${script_name%.sh}"
+        if should_run "$name"; then
+            wave_b_wanted=1
+            break
+        fi
+    done
+
+    if [[ $wave_b_wanted -eq 1 ]]; then
+        if [[ -n "$KUBE_L1_PID" ]]; then
+            log "Waiting for kube-L1 to complete before launching Wave B..."
+            wait "$KUBE_L1_PID" 2>/dev/null || true
+        fi
+
+        local kube_l1_rc=0
+        check_gate kube-l1 || kube_l1_rc=$?
+
+        if [[ $kube_l1_rc -eq 0 ]]; then
+            log "Stage 2, Wave B: kube advanced tests"
+            echo ""
+            for script_name in "${wave_b_tests[@]}"; do
+                local name="${script_name%.sh}"
+                if should_run "$name"; then
+                    if [[ $_launch_count -gt 0 && $STAGGER -gt 0 ]]; then
+                        sleep "$STAGGER"
+                    fi
+                    run_test "$SCRIPT_DIR/$script_name"
+                    ((_launch_count++)) || true
+                fi
+            done
+        elif [[ $kube_l1_rc -eq 1 ]]; then
+            log "Stage 2, Wave B: SKIPPED (kube-L1 failed)"
+        else
+            # Gate not found (L1 was filtered out). Launch Wave B anyway;
+            # scripts have their own require_gate which will no-op.
+            log "Stage 2, Wave B: kube advanced tests (L1 not run)"
+            echo ""
+            for script_name in "${wave_b_tests[@]}"; do
+                local name="${script_name%.sh}"
+                if should_run "$name"; then
+                    if [[ $_launch_count -gt 0 && $STAGGER -gt 0 ]]; then
+                        sleep "$STAGGER"
+                    fi
+                    run_test "$SCRIPT_DIR/$script_name"
+                    ((_launch_count++)) || true
+                fi
+            done
+        fi
+    fi
+
+    # -- Wait for all parallel tests --
+    log "Waiting for all parallel tests to complete..."
     local overall_rc=0
     for pid in "${CHILD_PIDS[@]}"; do
         wait "$pid" 2>/dev/null || overall_rc=1
     done
 
-    # -- verify-usage.sh runs LAST --
+    # ========================================================================
+    # Stage 3: Destructive (verify-usage.sh)
+    # ========================================================================
     # Its batch tests (sdme stop --all, sdme rm --all) affect ALL containers
     # system-wide, so it must run after everything else finishes.
     if should_run "verify-usage"; then
+        echo ""
+        log "Stage 3: Destructive tests"
         CHILD_PIDS=()
         run_test "$SCRIPT_DIR/verify-usage.sh"
         for pid in "${CHILD_PIDS[@]}"; do

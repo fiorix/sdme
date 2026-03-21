@@ -30,8 +30,8 @@ if [[ -n "$VERBOSE" ]]; then
     VFLAG=("-v")
 fi
 
-TIMEOUT_BOOT=120
-TIMEOUT_TEST=60
+TIMEOUT_BOOT=$(scale_timeout 120)
+TIMEOUT_TEST=$(scale_timeout 60)
 DATADIR="/var/lib/sdme"
 
 cleanup_all() {
@@ -50,6 +50,8 @@ trap cleanup_all EXIT INT TERM
 
 ensure_root
 ensure_sdme
+require_gate smoke
+require_gate interrupt
 ensure_base_fs ubuntu docker.io/ubuntu:24.04
 
 # ===========================================================================

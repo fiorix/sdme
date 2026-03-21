@@ -233,6 +233,7 @@ main() {
 
     ensure_root
     ensure_sdme
+    require_gate smoke
 
     ensure_default_base_fs
 
@@ -250,6 +251,12 @@ main() {
     test_fs_rm_interrupt
 
     generate_standard_report "interrupt" "Interrupt Handling Tests"
+
+    if [[ $_fail -eq 0 ]]; then
+        write_gate interrupt pass
+    else
+        write_gate interrupt fail
+    fi
 
     echo ""
     print_summary

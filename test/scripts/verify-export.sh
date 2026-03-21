@@ -37,6 +37,8 @@ trap cleanup EXIT INT TERM
 
 ensure_root
 ensure_sdme
+require_gate smoke
+require_gate interrupt
 ensure_base_fs ubuntu docker.io/ubuntu:24.04
 
 # Check optional dependencies for some tests.

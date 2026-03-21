@@ -20,12 +20,12 @@ POD_NAME="gitea-pod"
 YAML_FILE="test/kube/gitea-stack.yaml"
 
 # Timeouts (seconds)
-TIMEOUT_CREATE=600
-TIMEOUT_BOOT=120
-TIMEOUT_MYSQL=90
-TIMEOUT_GITEA=90
-TIMEOUT_NGINX=30
-TIMEOUT_ADMIN=60
+TIMEOUT_CREATE=$(scale_timeout 600)
+TIMEOUT_BOOT=$(scale_timeout 120)
+TIMEOUT_MYSQL=$(scale_timeout 90)
+TIMEOUT_GITEA=$(scale_timeout 90)
+TIMEOUT_NGINX=$(scale_timeout 30)
+TIMEOUT_ADMIN=$(scale_timeout 60)
 
 # State flags
 POD_CREATED=0
@@ -429,6 +429,9 @@ main() {
 
     ensure_root
     ensure_sdme
+    require_gate smoke
+    require_gate interrupt
+    require_gate kube-l1
 
     ensure_default_base_fs
 

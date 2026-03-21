@@ -18,6 +18,8 @@ parse_standard_args "Verify sdme fs build features." "$@"
 
 ensure_root
 ensure_sdme
+require_gate smoke
+require_gate interrupt
 
 # -- Logging -------------------------------------------------------------------
 
