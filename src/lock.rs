@@ -59,6 +59,7 @@ fn do_lock(datadir: &Path, kind: &str, name: &str, operation: libc::c_int) -> Re
     let lock_path = lock_dir.join(format!("{name}.lock"));
     let mut file = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(&lock_path)
