@@ -205,7 +205,6 @@ phase4_test_oci() {
 
     if [[ "$(result_status "oci/import")" != "PASS" ]]; then
         record "oci/create" SKIP "app import failed"
-        record "oci/state-ports" SKIP "app import failed"
         record "oci/volume-dir" SKIP "app import failed"
         record "oci/boot" SKIP "app import failed"
         record "oci/service" SKIP "app import failed"
@@ -220,11 +219,12 @@ phase4_test_oci() {
     echo "$VOLUME_PATH" >> "$volumes_file"
     log "  Appended $VOLUME_PATH to $volumes_file"
 
-    # Create container with private network + veth for port forwarding.
+    # Create container with private network + veth.
+    # --no-oci-ports prevents auto port forwarding to the host; this
+    # test uses nsenter to curl from inside the container's net namespace.
     local output
-    if ! output=$(timeout "$TIMEOUT_BOOT" sdme create -r "$APP_FS" --private-network --network-veth "$CT_OCI" 2>&1); then
+    if ! output=$(timeout "$TIMEOUT_BOOT" sdme create -r "$APP_FS" --private-network --network-veth --no-oci-ports "$CT_OCI" 2>&1); then
         record "oci/create" FAIL "$output"
-        record "oci/state-ports" SKIP "create failed"
         record "oci/volume-dir" SKIP "create failed"
         record "oci/boot" SKIP "create failed"
         record "oci/service" SKIP "create failed"
@@ -234,16 +234,6 @@ phase4_test_oci() {
         return
     fi
     record "oci/create" PASS
-
-    # Verify state file has ports
-    local state_file="$DATADIR/state/$CT_OCI"
-    local ports_val
-    ports_val=$(grep '^PORTS=' "$state_file" 2>/dev/null | cut -d= -f2- || true)
-    if [[ "$ports_val" == *"$APP_PORT"* ]]; then
-        record "oci/state-ports" PASS "$ports_val"
-    else
-        record "oci/state-ports" FAIL "PORTS=$ports_val"
-    fi
 
     # Verify volume directory
     local vol_dir="$DATADIR/volumes/$CT_OCI/usr-share-nginx-html"
@@ -597,7 +587,7 @@ generate_report() {
         echo "| Test | Status | Details |"
         echo "|------|--------|---------|"
         for key in import plain/create plain/boot plain/exec \
-                   oci/import oci/create oci/state-ports oci/volume-dir \
+                   oci/import oci/create oci/volume-dir \
                    oci/boot oci/service oci/logs oci/curl-port oci/curl-content \
                    kube/create kube/boot kube/service kube/curl-port kube/delete \
                    kube-multi/create kube-multi/boot \

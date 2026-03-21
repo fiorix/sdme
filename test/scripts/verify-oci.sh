@@ -124,7 +124,6 @@ phase2_test_oci() {
 
         if [[ "$(result_status "$distro/import-base")" != "PASS" ]]; then
             record "$distro/import-app" SKIP "base import failed"
-            record "$distro/state-ports" SKIP "base import failed"
             record "$distro/state-volumes" SKIP "base import failed"
             record "$distro/volume-dir" SKIP "base import failed"
             record "$distro/boot" SKIP "base import failed"
@@ -147,7 +146,6 @@ phase2_test_oci() {
             record "$distro/import-app" PASS
         else
             record "$distro/import-app" FAIL "$output"
-            record "$distro/state-ports" SKIP "app import failed"
             record "$distro/state-volumes" SKIP "app import failed"
             record "$distro/volume-dir" SKIP "app import failed"
             record "$distro/boot" SKIP "app import failed"
@@ -166,11 +164,10 @@ phase2_test_oci() {
         log "  Appended $VOLUME_PATH to $volumes_file"
 
         # -- Create container with private network + veth --
-        # --private-network triggers port auto-forwarding; --network-veth
-        # creates the virtual ethernet pair needed for the forwarding to work.
-        if ! output=$(timeout "$TIMEOUT_BOOT" sdme create -r "$app_fs" --private-network --network-veth "$ct_name" 2>&1); then
-            record "$distro/state-ports" SKIP "create failed: $output"
-            record "$distro/state-volumes" SKIP "create failed"
+        # --no-oci-ports prevents auto port forwarding to the host; this
+        # test curls the container's veth IP directly so host ports stay free.
+        if ! output=$(timeout "$TIMEOUT_BOOT" sdme create -r "$app_fs" --private-network --network-veth --no-oci-ports "$ct_name" 2>&1); then
+            record "$distro/state-volumes" SKIP "create failed: $output"
             record "$distro/volume-dir" SKIP "create failed"
             record "$distro/boot" SKIP "create failed"
             record "$distro/service" SKIP "create failed"
@@ -182,15 +179,6 @@ phase2_test_oci() {
 
         # -- Verify state file --
         local state_file="$DATADIR/state/$ct_name"
-
-        # Check PORTS contains 8080
-        local ports_val
-        ports_val=$(grep '^PORTS=' "$state_file" 2>/dev/null | cut -d= -f2- || true)
-        if [[ "$ports_val" == *"$APP_PORT"* ]]; then
-            record "$distro/state-ports" PASS "$ports_val"
-        else
-            record "$distro/state-ports" FAIL "PORTS=$ports_val"
-        fi
 
         # Check OCI_VOLUMES is set
         local volumes_val
@@ -366,13 +354,12 @@ generate_report() {
 
         echo "## Results"
         echo ""
-        echo "| Distro | Import Base | Import App | State Ports | State Volumes | Volume Dir | Boot | Service | OCI Logs | Curl Port | Curl Content |"
-        echo "|--------|------------|------------|-------------|---------------|------------|------|---------|----------|-----------|--------------|"
+        echo "| Distro | Import Base | Import App | State Volumes | Volume Dir | Boot | Service | OCI Logs | Curl Port | Curl Content |"
+        echo "|--------|------------|------------|---------------|------------|------|---------|----------|-----------|--------------|"
         for distro in "${DISTROS[@]}"; do
-            local ib ia sp sv vd bo se ol cp cc
+            local ib ia sv vd bo se ol cp cc
             ib=$(result_status "$distro/import-base")
             ia=$(result_status "$distro/import-app")
-            sp=$(result_status "$distro/state-ports")
             sv=$(result_status "$distro/state-volumes")
             vd=$(result_status "$distro/volume-dir")
             bo=$(result_status "$distro/boot")
@@ -380,7 +367,7 @@ generate_report() {
             ol=$(result_status "$distro/oci-logs")
             cp=$(result_status "$distro/curl-port")
             cc=$(result_status "$distro/curl-content")
-            echo "| $distro | $ib | $ia | $sp | $sv | $vd | $bo | $se | $ol | $cp | $cc |"
+            echo "| $distro | $ib | $ia | $sv | $vd | $bo | $se | $ol | $cp | $cc |"
         done
         echo ""
 

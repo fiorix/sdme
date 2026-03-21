@@ -25,10 +25,12 @@
 #   ----  -------------------  -------------------------------------------
 #   3000  Gitea                verify-kube-L6-gitea-stack.sh (private net)
 #   3306  MySQL                verify-kube-L6-gitea-stack.sh (private net)
-#   5432  PostgreSQL           verify-matrix.sh, verify-usage.sh
+#   5432  PostgreSQL           verify-usage.sh
 #   6379  Redis                verify-kube-L5-redis-stack.sh (private net)
-#   8080  nginx-unprivileged   verify-matrix.sh, verify-usage.sh,
-#                              verify-oci.sh, verify-nixos.sh,
+#   8080  nginx-unprivileged   verify-usage.sh,
+#                              verify-matrix.sh (private net),
+#                              verify-oci.sh (private net),
+#                              verify-nixos.sh (private net),
 #                              verify-kube-L4-networking.sh (private net),
 #                              verify-kube-L6-gitea-stack.sh (private net),
 #                              verify-kube-L2-probes.sh (private net)

@@ -2,7 +2,7 @@
 set -uo pipefail
 
 # verify-matrix.sh - end-to-end verification of distro x OCI app matrix
-# Run as root. Uses vfy- prefix for all artifacts.
+# Run as root. Uses vfy-mx- prefix for all artifacts.
 
 source "$(dirname "$0")/lib.sh"
 
@@ -177,7 +177,7 @@ log() { echo "==> $*"; }
 
 # -- Cleanup -------------------------------------------------------------------
 
-cleanup() { cleanup_prefix vfy-; }
+cleanup() { cleanup_prefix vfy-mx-; }
 
 trap cleanup EXIT INT TERM
 
@@ -186,7 +186,7 @@ trap cleanup EXIT INT TERM
 phase1_import() {
     log "Phase 1: Import base OS rootfs"
     for distro in "${DISTROS[@]}"; do
-        local fs_name="vfy-$distro"
+        local fs_name="vfy-mx-$distro"
         local image="${DISTRO_IMAGES[$distro]}"
         if fs_exists "$fs_name"; then
             log "  $fs_name already exists, skipping import"
@@ -208,8 +208,8 @@ phase1_import() {
 phase2_boot() {
     log "Phase 2: Boot tests"
     for distro in "${DISTROS[@]}"; do
-        local fs_name="vfy-$distro"
-        local ct_name="vfy-boot-$distro"
+        local fs_name="vfy-mx-$distro"
+        local ct_name="vfy-mx-boot-$distro"
 
         if [[ "$(result_status "import/$distro")" != "PASS" ]]; then
             record "boot/$distro/create" SKIP "base import failed"
@@ -299,14 +299,16 @@ app_verify() {
     local app="$1" ct_name="$2"
     case "$app" in
         nginx-unprivileged)
-            # Curl the marker file written into the upper layer before start.
+            # Curl the marker file via exec --oci (enters net namespace).
             local body
-            body=$(timeout 10 curl -s http://localhost:8080/sdme-test.txt 2>&1) || true
+            body=$(timeout 10 sdme exec --oci -- "$ct_name" \
+                curl -s http://127.0.0.1:8080/sdme-test.txt 2>&1) || true
             if [[ "$body" == *"$NGINX_MARKER"* ]]; then
                 return 0
             else
                 local code
-                code=$(timeout 10 curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/sdme-test.txt 2>&1) || true
+                code=$(timeout 10 sdme exec --oci -- "$ct_name" \
+                    curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/sdme-test.txt 2>&1) || true
                 echo "HTTP $code"
                 return 1
             fi
@@ -345,10 +347,10 @@ phase3_apps() {
         fi
 
         for app in "${APPS[@]}"; do
-            local fs_name="vfy-$app-on-$distro"
-            local ct_name="vfy-app-$app-on-$distro"
+            local fs_name="vfy-mx-$app-on-$distro"
+            local ct_name="vfy-mx-app-$app-on-$distro"
             local image="${APP_IMAGES[$app]}"
-            local base_fs="vfy-$distro"
+            local base_fs="vfy-mx-$distro"
 
             log "  Testing $app on $distro"
 
@@ -370,22 +372,9 @@ phase3_apps() {
                 continue
             fi
 
-            # Skip nginx if port 8080 is already in use (host-network containers
-            # share ports with the host; a conflicting listener causes silent
-            # bind failures inside the container).
-            if [[ "$app" == "nginx-unprivileged" ]] && ss -tlnH '( sport = :8080 )' | grep -q .; then
-                local blocker
-                blocker=$(ss -tlnp '( sport = :8080 )' | tail -1)
-                record "app/$app-on-$distro/boot" SKIP "port 8080 in use: $blocker"
-                record "app/$app-on-$distro/service" SKIP "port 8080 in use"
-                record "app/$app-on-$distro/logs" SKIP "port 8080 in use"
-                record "app/$app-on-$distro/status" SKIP "port 8080 in use"
-                record "app/$app-on-$distro/verify" SKIP "port 8080 in use"
-                continue
-            fi
-
-            # Build create args with OCI env vars
-            local create_args=(-r "$fs_name")
+            # Build create args: private network + veth so no host port binding.
+            # --no-oci-ports prevents auto port forwarding to the host.
+            local create_args=(-r "$fs_name" --private-network --network-veth --no-oci-ports)
             case "$app" in
                 postgresql) create_args+=(--oci-env "POSTGRES_PASSWORD=secret") ;;
             esac
@@ -475,8 +464,8 @@ phase3_apps() {
 phase3b_hardened_boot() {
     log "Phase 3b: Hardened boot tests"
     for distro in "${DISTROS[@]}"; do
-        local fs_name="vfy-$distro"
-        local ct_name="vfy-h-boot-$distro"
+        local fs_name="vfy-mx-$distro"
+        local ct_name="vfy-mx-h-boot-$distro"
 
         if [[ "$(result_status "import/$distro")" != "PASS" ]]; then
             record "hardened-boot/$distro/create" SKIP "base import failed"
@@ -535,8 +524,8 @@ phase3c_hardened_apps() {
         fi
 
         for app in "${APPS[@]}"; do
-            local fs_name="vfy-$app-on-$distro"
-            local ct_name="vfy-h-app-$app-on-$distro"
+            local fs_name="vfy-mx-$app-on-$distro"
+            local ct_name="vfy-mx-h-app-$app-on-$distro"
 
             # The rootfs must already exist from Phase 3.
             if [[ "$(result_status "app/$app-on-$distro/import")" != "PASS" ]]; then
@@ -611,12 +600,12 @@ phase4_cleanup() {
     # Remove app rootfs
     for distro in "${DISTROS[@]}"; do
         for app in "${APPS[@]}"; do
-            sdme fs rm "vfy-$app-on-$distro" 2>/dev/null || true
+            sdme fs rm "vfy-mx-$app-on-$distro" 2>/dev/null || true
         done
     done
     # Remove base rootfs
     for distro in "${DISTROS[@]}"; do
-        sdme fs rm "vfy-$distro" 2>/dev/null || true
+        sdme fs rm "vfy-mx-$distro" 2>/dev/null || true
     done
 }
 

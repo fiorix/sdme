@@ -301,8 +301,41 @@ sudo ./test/scripts/verify-kube-L6-gitea-stack.sh --base-fs ubuntu
 
 ## Running a full test pass
 
-Before tagging a release, run everything from a clean state. Each script
-sources `lib.sh`, which handles root checks, sdme validation, and base
+### Parallel (recommended)
+
+The parallel runner executes all 18 test scripts with maximum concurrency
+while respecting resource constraints. It builds sdme, imports the base
+rootfs, then launches tests in parallel with a configurable job limit.
+
+```bash
+# 1. Unit tests
+cargo test
+
+# 2. Integration tests (parallel, builds sdme automatically)
+sudo ./test/scripts/run-parallel.sh
+sudo ./test/scripts/run-parallel.sh --jobs 4              # limit concurrency
+sudo ./test/scripts/run-parallel.sh --skip verify-nixos   # skip slow tests
+sudo ./test/scripts/run-parallel.sh --only verify-export --only verify-interrupt
+```
+
+**Parallelization groups:**
+
+- **Parallel wave** (16 tests): all tests that use private networking
+  or no networking. Runs up to `--jobs` tests concurrently.
+- **Host port serial group** (2 tests): `verify-usage.sh` and
+  `verify-matrix.sh` bind host ports 8080/5432 and must run one at a
+  time. They run as a serial pair occupying one job slot.
+- **Kube L3 serial pair**: `verify-kube-L3-secrets.sh` and
+  `verify-kube-L3-volumes.sh` share secret/configmap names and run
+  serially within one job slot.
+
+Reports are written to `--report-dir` (default: `./test-reports/`) with
+a summary linking to individual test reports.
+
+### Sequential
+
+Each script is self-contained and can be run individually. Scripts
+source `lib.sh`, which handles root checks, sdme validation, and base
 rootfs imports automatically. Scripts clean up their own prefixed
 artifacts on exit; the OCI blob cache makes re-imports fast.
 
@@ -336,6 +369,20 @@ sudo ./test/scripts/verify-kube-L4-networking.sh --base-fs ubuntu
 sudo ./test/scripts/verify-kube-L5-redis-stack.sh --base-fs ubuntu
 sudo ./test/scripts/verify-kube-L6-gitea-stack.sh --base-fs ubuntu
 ```
+
+### Adding new tests
+
+When adding a new `verify-*.sh` script:
+
+1. **Choose a unique prefix** for all artifacts (containers, rootfs, pods,
+   secrets). Use `cleanup_prefix "yourprefix-"` in the cleanup trap.
+   Ensure no other script's prefix is a substring of yours (e.g. don't
+   use `vfy-` since `verify-matrix.sh` used to use it).
+2. **Declare port usage** in the `lib.sh` port inventory comment at the
+   top of the file.
+3. **Add to `run-parallel.sh`**: if the test uses host networking with
+   port binding, add it to the `host_port_scripts` serial group.
+   Otherwise, add it to `parallel_tests`.
 
 ## Test results
 
