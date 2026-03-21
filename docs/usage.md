@@ -869,7 +869,7 @@ postgresql           all 7
 ```
 
 OCI port forwarding and volume mounting are additionally tested on ubuntu
-and fedora. See [test/results.md](../test/results.md) for the complete
+and fedora. See [test/README.md](../test/README.md) for the complete
 test matrix.
 
 ## 7. Pods
@@ -981,7 +981,7 @@ Pod tests verify loopback connectivity between `--pod` containers, correct
 rejection of incompatible flag combinations (`--pod` with `--hardened`,
 `--pod` with `--userns`, `--oci-pod` without `--private-network`), and
 successful `--oci-pod` with `--hardened`. See
-[test/results.md](../test/results.md) for details.
+[test/README.md](../test/README.md) for details.
 
 For the pod implementation internals, see
 [architecture.md, Section 10](architecture.md#10-pods).
@@ -1117,7 +1117,7 @@ escalation, seccomp, AppArmor, runAsUser/runAsGroup), L3-volumes
 L3-secrets (secret volumes, projected items, defaultMode),
 L4 (multi-container localhost connectivity), L5 (Redis round-trip), and
 L6 (a full Gitea + MySQL + Nginx stack). See
-[test/results.md](../test/results.md) for the complete results.
+[test/README.md](../test/README.md) for the complete results.
 
 ### 8.3 Composing kube pods with pod networking
 
