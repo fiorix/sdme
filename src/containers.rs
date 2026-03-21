@@ -728,6 +728,17 @@ pub(crate) fn mount_overlay_ro(rootfs_dir: &Path, container_dir: &Path) -> Resul
     Ok(())
 }
 
+/// RAII guard that unmounts overlayfs on drop.
+pub(crate) struct OverlayGuard {
+    pub container_dir: PathBuf,
+}
+
+impl Drop for OverlayGuard {
+    fn drop(&mut self) {
+        unmount_overlay(&self.container_dir);
+    }
+}
+
 /// Unmount overlayfs from a container's `merged/` directory.
 pub(crate) fn unmount_overlay(container_dir: &Path) {
     let merged_dir = container_dir.join("merged");

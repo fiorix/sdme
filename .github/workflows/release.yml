@@ -50,6 +50,9 @@ jobs:
       - name: Add rustup target
         run: rustup target add ${{ matrix.target }}
 
+      - name: Build probe binary
+        run: cargo zigbuild --locked --release --target ${{ matrix.target }} --features probe --bin sdme-kube-probe
+
       - name: Build
         run: cargo zigbuild --locked --release --target ${{ matrix.target }}
 

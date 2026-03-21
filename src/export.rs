@@ -6,7 +6,7 @@
 use std::fs::{self, File};
 use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 
@@ -117,17 +117,6 @@ pub enum ExportSource {
     Rootfs(String),
 }
 
-/// RAII guard that unmounts overlayfs on drop.
-struct OverlayGuard {
-    container_dir: PathBuf,
-}
-
-impl Drop for OverlayGuard {
-    fn drop(&mut self) {
-        containers::unmount_overlay(&self.container_dir);
-    }
-}
-
 /// Unified export entry point.
 ///
 /// Handles source validation, flock locking, overlay mounting for stopped
@@ -209,7 +198,7 @@ pub fn export(
                 }
 
                 containers::mount_overlay_ro(&rootfs_dir, &container_dir)?;
-                let _guard = OverlayGuard {
+                let _guard = containers::OverlayGuard {
                     container_dir: container_dir.clone(),
                 };
 

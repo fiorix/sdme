@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
+use sha2::{Digest, Sha256};
+
 use crate::copy::sanitize_dest_path;
 use crate::{check_interrupted, containers, copy, lock, rootfs, systemd, validate_name, State};
 
@@ -219,21 +221,10 @@ fn parse_build_config(path: &Path) -> Result<BuildConfig> {
 
 // --- Source resolution ---
 
-/// RAII guard that unmounts overlayfs on drop.
-struct OverlayGuard {
-    container_dir: PathBuf,
-}
-
-impl Drop for OverlayGuard {
-    fn drop(&mut self) {
-        containers::unmount_overlay(&self.container_dir);
-    }
-}
-
 struct ResolvedSource {
     path: PathBuf,
     /// If we temporarily mounted overlayfs, this guard handles unmount on drop.
-    _mount_guard: Option<OverlayGuard>,
+    _mount_guard: Option<containers::OverlayGuard>,
     /// Resource lock held for the duration of the copy.
     _lock: Option<lock::ResourceLock>,
 }
@@ -293,7 +284,7 @@ fn resolve_copy_source(datadir: &Path, src: &CopySource, verbose: bool) -> Resul
                     .join("merged")
                     .join(path.strip_prefix("/").unwrap_or(path));
                 (
-                    Some(OverlayGuard {
+                    Some(containers::OverlayGuard {
                         container_dir: container_dir.clone(),
                     }),
                     full_path,
@@ -440,12 +431,16 @@ struct ExecuteBuildContext<'a> {
     opaque_dirs: &'a [String],
     boot_timeout: u64,
     tasks_max: u32,
+    /// Number of ops to skip (already completed in a previous run).
+    skip_ops: usize,
     verbose: bool,
 }
 
 fn execute_build(datadir: &Path, ctx: &ExecuteBuildContext<'_>) -> Result<()> {
     let mut container_running = false;
     let timeout = std::time::Duration::from_secs(ctx.boot_timeout);
+    let total = ctx.config.ops.len();
+    let state_path = datadir.join("state").join(ctx.container_name);
 
     // Eagerly start the container before any ops. This ensures:
     // 1. systemd-tmpfiles cleanup of /tmp has finished before any COPY
@@ -466,8 +461,18 @@ fn execute_build(datadir: &Path, ctx: &ExecuteBuildContext<'_>) -> Result<()> {
         container_running = true;
     }
 
-    for op in &ctx.config.ops {
+    for (i, op) in ctx.config.ops.iter().enumerate() {
         check_interrupted()?;
+
+        let step = format!("[{}/{}]", i + 1, total);
+        let summary = op_summary(op);
+
+        if i < ctx.skip_ops {
+            eprintln!("{step} {summary} (cached)");
+            continue;
+        }
+
+        eprintln!("{step} {summary}");
 
         match op {
             BuildOp::Run { command, lineno } => {
@@ -505,6 +510,11 @@ fn execute_build(datadir: &Path, ctx: &ExecuteBuildContext<'_>) -> Result<()> {
                 .with_context(|| format!("{}:{}", ctx.config.path.display(), lineno))?;
             }
         }
+
+        // Mark this op as completed in the state file.
+        let mut state = State::read_from(&state_path)?;
+        state.set("BUILD_LAST_COMPLETED_OP", i.to_string());
+        state.write_to(&state_path)?;
     }
 
     // Ensure container is stopped; overlayfs must be unmounted for merged layer copy.
@@ -519,6 +529,36 @@ fn execute_build(datadir: &Path, ctx: &ExecuteBuildContext<'_>) -> Result<()> {
     }
 
     Ok(())
+}
+
+// --- Hashing ---
+
+/// Compute SHA-256 hex digest of a file's contents.
+fn config_hash(path: &Path) -> Result<String> {
+    let data = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let hash = Sha256::digest(&data);
+    Ok(format!("{hash:x}"))
+}
+
+/// Return a short summary of a build op for progress output.
+fn op_summary(op: &BuildOp) -> String {
+    match op {
+        BuildOp::Run { command, .. } => {
+            if command.len() > 60 {
+                format!("RUN {}...", &command[..60])
+            } else {
+                format!("RUN {command}")
+            }
+        }
+        BuildOp::Copy { src, dst, .. } => {
+            let src_str = match src {
+                CopySource::Host(p) => p.display().to_string(),
+                CopySource::Container { name, path } => format!("{name}:{}", path.display()),
+                CopySource::Rootfs { name, path } => format!("fs:{name}:{}", path.display()),
+            };
+            format!("COPY {src_str} {}", dst.display())
+        }
+    }
 }
 
 // --- Main entry point ---
@@ -537,6 +577,8 @@ pub struct BuildOptions<'a> {
     pub force: bool,
     /// Automatically clean up stale transactions before building.
     pub auto_gc: bool,
+    /// Do not resume from a previous failed build.
+    pub no_cache: bool,
     /// Enable verbose output.
     pub verbose: bool,
 }
@@ -572,8 +614,18 @@ pub fn build(datadir: &Path, opts: &BuildOptions<'_>) -> Result<()> {
     let _output_lock = lock::lock_exclusive(datadir, "fs", name)
         .with_context(|| format!("cannot lock output rootfs '{name}'"))?;
 
-    // Clean up leftover build container from a prior interrupted build.
+    // Compute config hash for resume detection.
+    let hash = config_hash(opts.config_path)?;
+
+    // Check for an existing build container and decide whether to resume.
     let state_path = datadir.join("state").join(&staging_name);
+    let mut skip_ops = 0usize;
+    let create_opts = containers::CreateOptions {
+        name: Some(staging_name.clone()),
+        rootfs: Some(config.rootfs.clone()),
+        ..Default::default()
+    };
+
     if state_path.exists() {
         if systemd::is_active(&staging_name)? {
             bail!(
@@ -581,45 +633,66 @@ pub fn build(datadir: &Path, opts: &BuildOptions<'_>) -> Result<()> {
                  is another build in progress?"
             );
         }
-        eprintln!("removing stale build container '{staging_name}'");
-        containers::remove(datadir, &staging_name, verbose)?;
+
+        if opts.no_cache {
+            eprintln!("removing build container '{staging_name}' (--no-cache)");
+            containers::remove(datadir, &staging_name, verbose)?;
+        } else {
+            // Check if config hash matches for resume.
+            let state = State::read_from(&state_path)?;
+            let saved_hash = state.get("BUILD_CONFIG_HASH").unwrap_or("");
+            if saved_hash == hash {
+                if let Some(last_op) = state.get("BUILD_LAST_COMPLETED_OP") {
+                    if let Ok(idx) = last_op.parse::<usize>() {
+                        skip_ops = idx + 1;
+                        let total = config.ops.len();
+                        eprintln!(
+                            "resuming build '{staging_name}' from step {}/{total}",
+                            skip_ops + 1
+                        );
+                    }
+                }
+            } else {
+                eprintln!("config changed, removing build container '{staging_name}'");
+                containers::remove(datadir, &staging_name, verbose)?;
+            }
+        }
     }
 
-    eprintln!("creating build container '{staging_name}'");
-    let create_opts = containers::CreateOptions {
-        name: Some(staging_name.clone()),
-        rootfs: Some(config.rootfs.clone()),
-        ..Default::default()
-    };
-    containers::create(datadir, &create_opts, verbose)?;
-
-    // Make /tmp persistent across RUN and COPY steps by bind-mounting
-    // upper/tmp into the container. systemd-nspawn mounts tmpfs on /tmp
-    // before systemd starts (masking tmp.mount doesn't prevent this), so
-    // we bind-mount over the tmpfs to get a persistent /tmp backed by
-    // the overlayfs upper layer.
-    let upper_tmp = datadir
-        .join("containers")
-        .join(&staging_name)
-        .join("upper/tmp");
-    if !upper_tmp.exists() {
-        fs::create_dir(&upper_tmp)
-            .with_context(|| format!("failed to create {}", upper_tmp.display()))?;
-    }
-    fs::set_permissions(&upper_tmp, fs::Permissions::from_mode(0o1777))
-        .with_context(|| format!("failed to set permissions on {}", upper_tmp.display()))?;
-
-    // Add the /tmp bind mount to the container's state file.
+    // Create a fresh build container if one doesn't exist (removed above or never existed).
     let state_path = datadir.join("state").join(&staging_name);
-    let mut state = State::read_from(&state_path)?;
-    let bind_spec = format!("{}:/tmp:rw", upper_tmp.display());
-    let existing_binds = state.get("BINDS").unwrap_or("").to_string();
-    if existing_binds.is_empty() {
-        state.set("BINDS", &bind_spec);
-    } else {
-        state.set("BINDS", format!("{existing_binds}|{bind_spec}"));
+    if !state_path.exists() {
+        eprintln!("creating build container '{staging_name}'");
+        containers::create(datadir, &create_opts, verbose)?;
+
+        // Make /tmp persistent across RUN and COPY steps by bind-mounting
+        // upper/tmp into the container. systemd-nspawn mounts tmpfs on /tmp
+        // before systemd starts (masking tmp.mount doesn't prevent this), so
+        // we bind-mount over the tmpfs to get a persistent /tmp backed by
+        // the overlayfs upper layer.
+        let upper_tmp = datadir
+            .join("containers")
+            .join(&staging_name)
+            .join("upper/tmp");
+        if !upper_tmp.exists() {
+            fs::create_dir(&upper_tmp)
+                .with_context(|| format!("failed to create {}", upper_tmp.display()))?;
+        }
+        fs::set_permissions(&upper_tmp, fs::Permissions::from_mode(0o1777))
+            .with_context(|| format!("failed to set permissions on {}", upper_tmp.display()))?;
+
+        // Add the /tmp bind mount and config hash to the container's state file.
+        let mut state = State::read_from(&state_path)?;
+        let bind_spec = format!("{}:/tmp:rw", upper_tmp.display());
+        let existing_binds = state.get("BINDS").unwrap_or("").to_string();
+        if existing_binds.is_empty() {
+            state.set("BINDS", &bind_spec);
+        } else {
+            state.set("BINDS", format!("{existing_binds}|{bind_spec}"));
+        }
+        state.set("BUILD_CONFIG_HASH", &hash);
+        state.write_to(&state_path)?;
     }
-    state.write_to(&state_path)?;
 
     // Execute all build operations; clean up on failure.
     if let Err(e) = execute_build(
@@ -630,6 +703,7 @@ pub fn build(datadir: &Path, opts: &BuildOptions<'_>) -> Result<()> {
             opaque_dirs: &create_opts.opaque_dirs,
             boot_timeout: opts.boot_timeout,
             tasks_max: opts.tasks_max,
+            skip_ops,
             verbose,
         },
     ) {

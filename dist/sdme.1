@@ -1,4 +1,4 @@
-.TH SDME 1 "2026-03-19" "sdme" "User Commands"
+.TH SDME 1 "2026-03-21" "sdme" "User Commands"
 .SH NAME
 sdme \- the systemd machine editor
 .SH SYNOPSIS
@@ -491,7 +491,7 @@ to remove all imported root filesystems (cannot be combined with names).
 Use
 .B \-f
 to skip confirmation prompts.
-.SS sdme fs build \fIname\fR \fIbuild.conf\fR [\-t \fIseconds\fR] [\-f]
+.SS sdme fs build \fIname\fR \fIbuild.conf\fR [\-t \fIseconds\fR] [\-f] [\-\-no\-cache]
 Build a root filesystem from a build config file.
 Creates a temporary staging container from the base rootfs specified by
 .BR FROM ,
@@ -511,6 +511,13 @@ config value).
 Use
 .B \-f
 to replace an existing rootfs with the same name.
+.PP
+If a previous build failed or was interrupted, re\-running the same
+command resumes from the failed step (the build container's overlayfs
+upper layer is preserved). The config file is hashed; if it changed
+since the last attempt, the build starts fresh. Use
+.B \-\-no\-cache
+to force a clean build without resuming.
 .PP
 The staging container is automatically removed after the build completes
 or on failure/Ctrl+C.

@@ -40,6 +40,7 @@ fn main() {
     }
 
     // Empty placeholder: probes won't work without the real binary.
+    println!("cargo:warning=sdme-kube-probe binary not found, kube probes will not work");
     std::fs::write(&probe_dst, b"").unwrap();
     println!("cargo:rerun-if-changed=src/kube/probe/");
 }

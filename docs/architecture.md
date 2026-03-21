@@ -464,10 +464,20 @@ rootfs and any COPY source rootfs or container. `sdme fs rm` and
 `sdme rm` acquire exclusive locks, so they block while a build is using
 the resource.
 
+**Resumable builds.** When a build fails at a RUN step, the build
+container's overlayfs upper layer is preserved. On re-run, if the
+config file hash matches (SHA-256 of file content), completed steps
+are skipped and execution resumes from the failed step. The state
+file stores `BUILD_CONFIG_HASH` and `BUILD_LAST_COMPLETED_OP` (0-based
+index). If the config changes, the stale build container is removed
+and a fresh build starts. `--no-cache` forces a clean build. COPY
+source file changes are not tracked — use `--no-cache` when sources
+change.
+
 **Stale build cleanup.** If a prior build was interrupted (Ctrl+C,
-crash), the next `sdme fs build` invocation automatically detects and
-removes the stale staging container before proceeding. Manual cleanup
-is also available via `sdme fs gc`.
+crash) and cannot be resumed (config changed or `--no-cache`), the
+next `sdme fs build` invocation removes the stale staging container
+before proceeding. Manual cleanup is also available via `sdme fs gc`.
 
 After all operations complete, the engine mounts the overlayfs manually
 (the container is stopped), copies the merged view to a staging rootfs

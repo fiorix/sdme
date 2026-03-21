@@ -58,7 +58,7 @@ Runner options: `--jobs N`, `--timeout-scale N`, `--stagger N`,
 | smoke.sh | Minimal container lifecycle gate test |
 | verify-interrupt.sh | SIGINT/SIGTERM abort handling |
 | verify-export.sh | Rootfs/container export (dir, tar, raw image) |
-| verify-build.sh | `sdme fs build` hot COPY, source prefixes, locking |
+| verify-build.sh | `sdme fs build` hot COPY, source prefixes, locking, cache/resume |
 | verify-security.sh | Capabilities, seccomp, AppArmor, userns, hardened |
 | verify-pods.sh | Pod shared network namespace |
 | verify-network.sh | Zones, bridges, service masking, LLMNR |
@@ -123,14 +123,14 @@ automatically via `fix_redis_oci()` in lib.sh.
 
 Last verified: 2026-03-21
 
-System: Linux 6.17.0-19-generic (aarch64), systemd 257, sdme 0.4.6,
+System: Linux 6.17.0-19-generic (aarch64), systemd 257, sdme 0.4.8,
 AppArmor enabled
 
 | # | Test Suite | Status | Pass | Fail | Skip |
 |---|-----------|--------|------|------|------|
 | 1 | verify-export | PASS | 20 | 0 | 0 |
 | 2 | verify-interrupt | PASS | 8 | 0 | 0 |
-| 3 | verify-build | PASS | 8 | 0 | 0 |
+| 3 | verify-build | PASS | 11 | 0 | 0 |
 | 4 | verify-security | PASS | 31 | 0 | 0 |
 | 5 | verify-pods | PASS | 9 | 0 | 0 |
 | 6 | verify-network | PASS | 9 | 0 | 0 |

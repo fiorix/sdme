@@ -605,6 +605,15 @@ Use `--force` (`-f`) to replace an existing output rootfs with the same
 name. Use `-t` to override the boot timeout for long-running RUN steps
 (e.g. `sdme fs build -t 180 build.conf my-rootfs`).
 
+**Resumable builds.** If a build fails at a RUN step (e.g. missing
+package, network error), re-running the same command resumes from the
+failed step. The build container's overlayfs upper layer is preserved,
+and completed steps are skipped. The config file is hashed; if it
+changed since the last attempt, the build starts fresh automatically.
+Use `--no-cache` to force a clean build without resuming. Note that
+changes to COPY source files are not detected — use `--no-cache` if
+a COPY source was modified since the last run.
+
 See [architecture.md, Section 7](architecture.md#7-fs-build-building-root-filesystems)
 for design details (resource locking, stale build cleanup, overlayfs
 lifecycle).

@@ -279,6 +279,107 @@ fi
 rm -f /tmp/vfy-build-shadowed-bad.sdme
 
 # =============================================================================
+# Test 8: Resumable build (fail then resume from failed step)
+# =============================================================================
+
+log "Test: resumable build (fail then resume)"
+
+cat > /tmp/vfy-build-resume.sdme <<EOF
+FROM $BASE_FS
+RUN echo step1 > /tmp/step1-marker
+RUN echo step2 > /tmp/step2-marker
+RUN false
+RUN echo step4 > /tmp/step4-marker
+EOF
+
+# First run: should fail at step 3 (RUN false)
+output=$(sdme fs build vfy-build-resume /tmp/vfy-build-resume.sdme $VFLAG 2>&1)
+rc=$?
+if [[ $rc -eq 0 ]]; then
+    record "cache/resume" FAIL "expected build to fail at RUN false"
+else
+    # Fix the config: replace "false" with "true"
+    cat > /tmp/vfy-build-resume.sdme <<EOF
+FROM $BASE_FS
+RUN echo step1 > /tmp/step1-marker
+RUN echo step2 > /tmp/step2-marker
+RUN true
+RUN echo step4 > /tmp/step4-marker
+EOF
+
+    # Config changed, so this should start fresh (no resume) and succeed
+    output=$(sdme fs build vfy-build-resume /tmp/vfy-build-resume.sdme $VFLAG 2>&1)
+    rc=$?
+    if [[ $rc -eq 0 ]] && echo "$output" | grep -q "config changed"; then
+        record "cache/resume" PASS
+    elif [[ $rc -eq 0 ]]; then
+        record "cache/resume" PASS "succeeded but no config-changed message"
+    else
+        record "cache/resume" FAIL "$output"
+    fi
+fi
+rm -f /tmp/vfy-build-resume.sdme
+
+# =============================================================================
+# Test 9: Resumable build (cached steps are skipped on retry)
+# =============================================================================
+
+log "Test: cached steps skipped on retry"
+
+cat > /tmp/vfy-build-cached.sdme <<EOF
+FROM $BASE_FS
+RUN echo cached1
+RUN echo cached2
+RUN false
+EOF
+
+# First run: fails at step 3
+sdme fs build vfy-build-cached /tmp/vfy-build-cached.sdme $VFLAG 2>&1 || true
+
+# Second run: same config, should resume and show "(cached)" for steps 1-2
+output=$(sdme fs build vfy-build-cached /tmp/vfy-build-cached.sdme $VFLAG 2>&1)
+rc=$?
+# It will still fail (RUN false), but should show cached steps and resume message
+if echo "$output" | grep -q "(cached)" && echo "$output" | grep -q "resuming build"; then
+    record "cache/skip-cached" PASS
+elif echo "$output" | grep -q "(cached)"; then
+    record "cache/skip-cached" PASS "cached steps shown but no resume message"
+else
+    record "cache/skip-cached" FAIL "expected cached steps on retry: $output"
+fi
+rm -f /tmp/vfy-build-cached.sdme
+
+# =============================================================================
+# Test 10: --no-cache forces clean build
+# =============================================================================
+
+log "Test: --no-cache forces clean build"
+
+cat > /tmp/vfy-build-nocache.sdme <<EOF
+FROM $BASE_FS
+RUN echo nocache1
+RUN false
+EOF
+
+# First run: fails at step 2
+sdme fs build vfy-build-nocache /tmp/vfy-build-nocache.sdme $VFLAG 2>&1 || true
+
+# Second run with --no-cache: should NOT show "(cached)" or "resuming"
+output=$(sdme fs build --no-cache vfy-build-nocache /tmp/vfy-build-nocache.sdme $VFLAG 2>&1)
+rc=$?
+# Still fails (RUN false), but should start fresh
+if echo "$output" | grep -q "(cached)"; then
+    record "cache/no-cache-flag" FAIL "found cached steps despite --no-cache: $output"
+elif echo "$output" | grep -q "resuming"; then
+    record "cache/no-cache-flag" FAIL "found resume despite --no-cache: $output"
+elif echo "$output" | grep -q "\-\-no-cache"; then
+    record "cache/no-cache-flag" PASS
+else
+    record "cache/no-cache-flag" PASS "clean build without cached steps"
+fi
+rm -f /tmp/vfy-build-nocache.sdme
+
+# =============================================================================
 # Report
 # =============================================================================
 

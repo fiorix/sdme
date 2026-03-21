@@ -505,6 +505,9 @@ EXAMPLE:
         /// Remove existing rootfs with the same name before building
         #[arg(short, long)]
         force: bool,
+        /// Do not resume from a previous failed build
+        #[arg(long)]
+        no_cache: bool,
     },
     /// Export a container or rootfs to a directory, tarball, or disk image
     Export {
@@ -2593,6 +2596,7 @@ fn run() -> Result<()> {
                 config,
                 timeout,
                 force,
+                no_cache,
             } => {
                 system_check::check_systemd_version(252)?;
                 let boot_timeout = timeout.unwrap_or(cfg.boot_timeout);
@@ -2605,6 +2609,7 @@ fn run() -> Result<()> {
                         tasks_max: cfg.tasks_max,
                         force,
                         auto_gc: cfg.auto_fs_gc,
+                        no_cache,
                         verbose: cli.verbose,
                     },
                 )?;
