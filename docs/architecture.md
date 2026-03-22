@@ -591,9 +591,8 @@ login (patched `serial-getty@.service`), `/etc/fstab` with a
 `/dev/vda1` root entry (and `/dev/vda2` swap if requested), DHCP
 networking via `systemd-networkd`, and a hostname. Optional additions
 include DNS configuration, a root password, and an SSH public key. If
-the rootfs lacks udev, it can be installed via chroot. See the
-[usage guide, Section 4.6](usage.md#46-exporting-for-vm-boot) for the
-full set of options and hypervisor examples.
+the rootfs lacks udev, it can be installed via chroot. See
+`sdme fs export --help` for the full set of options and hypervisor examples.
 
 ## 9. Networking
 
@@ -1752,8 +1751,7 @@ does not have).
 sdme can run Kubernetes Pod YAML files as nspawn containers. Each pod maps
 to a single container where each workload runs as a separate systemd
 service chrooted into its own rootfs under `/oci/apps/{name}/root`. For
-usage examples and CLI reference, see
-[usage.md, Section 8](usage.md#8-kubernetes-pod-yaml).
+usage examples and CLI reference, see `sdme kube --help`.
 
 ### Pipeline
 

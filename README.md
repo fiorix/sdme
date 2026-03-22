@@ -1,90 +1,115 @@
 # sdme
 
-The systemd machine editor: a command line tool for managing
-systemd-nspawn booted containers on Linux. Written in Rust.
-
-sdme is primarily a **development tool**. It makes systemd-nspawn containers
-first-class citizens on any Linux machine, letting you spin up almost any
-distro that can boot with systemd.
-
-## Quick start
-
-The simplest way to start is to clone your running system. This creates an
-overlayfs snapshot of your host, boots systemd inside it, and drops you into
-your own shell with your $HOME and configs intact. Install packages, change
-configs, break things; the host is untouched.
+Run Linux distros as containers on your machine. Each container boots
+a real systemd init, so it looks and works like a normal system: services,
+journalctl, systemctl, the whole stack. Changes stay in the container;
+the base filesystem is never touched.
 
 ```
 sudo sdme new
 ```
 
-See [docs/usage.md](docs/usage.md) for the full guide covering installation,
-importing distros, OCI apps, networking, security, and more.
+This uses your root filesystem as a template, creates an overlayfs
+snapshot, boots systemd inside it, and drops you into a shell. You can
+import other root filesystems (Ubuntu, Fedora, etc.) and use them as
+templates to spin up containers from. Changes are written to the
+overlayfs upper layer; the template is never modified.
+
+## Why sdme?
+
+sdme containers are full systems, not single processes.
+
+- **Full init**: containers boot systemd. Services start, timers fire, journald collects logs. It looks and works like a real machine.
+- **Test real scenarios**: systemd units, multi-service setups, distro packaging, upgrade paths. Anything that needs a booted system.
+- **Clone your machine**: `sudo sdme new` gives you your system with your shell, your $HOME, and your configs.
+- **Any systemd distro**: Ubuntu, Fedora, Arch, NixOS, openSUSE, CentOS, CachyOS, and more. Import from OCI registries, tarballs, directories, or QCOW2 images.
+- **OCI images too**: run nginx, redis, postgres from Docker Hub as systemd services inside a booted system.
+- **Kubernetes Pod YAML**: deploy multi-container pods from standard manifests, with volumes, secrets, configmaps, and health probes.
+- **No daemon**: single static binary, no background service needed.
+
+## Install
+
+Download the latest release:
+
+```bash
+curl -L https://github.com/fiorix/sdme/releases/latest/download/sdme-x86_64-linux -o sdme
+chmod +x sdme
+sudo mv sdme /usr/local/bin/
+```
+
+Install the container runtime for your distro:
+
+```bash
+sudo apt install systemd-container   # Debian / Ubuntu
+sudo dnf install systemd-container   # Fedora / CentOS
+sudo pacman -S systemd               # Arch (included in base)
+```
+
+Requires Linux with systemd 252+. Runs as root.
 
 On macOS? See [docs/macos.md](docs/macos.md) for setting up a Linux VM
 with lima-vm, then install sdme inside it.
 
-## Importing any root filesystem
+## Quick start
 
-Beyond cloning your host, sdme can import a root filesystem from virtually any
-source: OCI registries, local directories, tarballs, URLs, or QCOW2 cloud
-images. Each imported rootfs becomes a reusable template. Spin up as many
-containers as you want from it, across Debian, Ubuntu, Fedora, CentOS,
-AlmaLinux, openSUSE, Arch Linux, CachyOS, and NixOS.
+```bash
+# Clone your machine
+sudo sdme new
 
-See [importing root filesystems](docs/usage.md#4-importing-root-filesystems).
+# Import and boot Ubuntu
+sudo sdme fs import ubuntu docker.io/ubuntu:24.04
+sudo sdme new -r ubuntu
 
-## Fully featured containers
+# Import and boot Fedora
+sudo sdme fs import fedora docker.io/fedora:41
+sudo sdme new -r fedora
+```
 
-These containers support all the expected systemd-nspawn capabilities: port
-binding, private networking, bind mounts, and complex security configurations.
-Run pretty much any systemd-capable distro as a container on any Linux machine.
+## What you can do
 
-See [security, networking, and resource limits](docs/usage.md#5-security-networking-and-resource-limits).
+**Manage containers**
 
-## Exporting rootfs and containers
+- `sdme new`: create, start, and enter a container in one step
+- `sdme create` / `start` / `stop` / `rm`: full lifecycle control
+- `sdme join`: enter a running container
+- `sdme exec`: run a command inside a container
+- `sdme ps`: list containers with status and health
+- `sdme logs`: view container logs via journalctl
+- `sdme enable` / `disable`: auto-start containers on boot
 
-Export any imported rootfs or container filesystem as a directory, tarball, or
-raw disk image for sharing or producing bootable VM images.
+**Import and export filesystems**
 
-See [docs/usage.md](docs/usage.md#45-exporting-root-filesystems) for export details.
+- `sdme fs import`: from OCI registries, directories, tarballs, URLs, or QCOW2 images
+- `sdme fs export`: to directories, tarballs, or raw disk images (ext4/btrfs)
+- `sdme fs build`: build a rootfs from a config file with resumable steps
+- `sdme fs ls` / `rm`: list and remove imported filesystems
 
----
+**Run OCI application images**
 
-## Experimental features
+Run Docker Hub images (nginx, redis, postgres, etc.) as systemd services
+inside a booted container. Port bindings and volumes are wired through
+automatically.
 
-Everything below this line is experimental. These features work and are
-actively developed, but their interfaces may change.
+**Networking and security**
 
-### OCI application support
+Private networking, port forwarding, bind mounts, environment variables.
+Three security tiers: individual flags, `--hardened`, and `--strict`
+(seccomp filters, capability restrictions, AppArmor). User namespace
+support included.
 
-sdme can run OCI application images (e.g. nginx, redis, mysql) as systemd
-services inside a booted container, with port bindings and volumes wired
-through. The OCI application runs in a chroot inside the systemd container.
+**Pods**
 
-See [OCI applications](docs/usage.md#6-oci-applications).
+Shared network namespaces for multi-container setups. Containers in a pod
+communicate over localhost.
 
-### Dual security model and pods
+**Kubernetes Pod YAML**
 
-The OCI application has a security model resembling Docker and Podman, while
-the systemd container can have different configurations and security
-permissions. Containers can be placed in a **pod**, a shared network namespace,
-letting you compose a control plane and an application plane separately.
-
-See [pods](docs/usage.md#7-pods).
-
-### Kubernetes pod support
-
-sdme can consume Kube Pod YAML and set up multi-container pods on a systemd
-container, with volumes, port bindings, config maps, secrets, and probes.
-
-See [Kubernetes Pod YAML](docs/usage.md#8-kubernetes-pod-yaml).
+`sdme kube apply -f pod.yaml --base-fs ubuntu` creates multi-container
+pods from standard Kubernetes manifests.
 
 ## Further reading
 
-- [docs/usage.md](docs/usage.md): install, lifecycle, rootfs management,
-  networking, OCI, pods, security, builds
 - [docs/architecture.md](docs/architecture.md): internals, design, OCI
   bridging, Kubernetes mapping
 - [docs/security.md](docs/security.md): container isolation model,
-  comparison with Docker and Podman
+  comparison with other container runtimes

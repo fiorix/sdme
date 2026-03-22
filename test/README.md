@@ -66,7 +66,7 @@ Runner options: `--jobs N`, `--timeout-scale N`, `--stagger N`,
 | verify-distro-boot.sh | Boot + hardened boot across 7 distros |
 | verify-distro-oci.sh | OCI app matrix: 3 apps x 7 distros (+ hardened) |
 | verify-nixos.sh | NixOS container, OCI app, kube pod |
-| verify-usage.sh | Walks docs/usage.md commands end-to-end |
+| verify-usage.sh | CLI commands end-to-end across all features |
 | verify-kube-L1-basic.sh | Kube lifecycle, YAML validation, emptyDir |
 | verify-kube-L2-spec.sh | Pod spec compliance, initContainers, resources |
 | verify-kube-L2-probes.sh | Startup, liveness, readiness probes |

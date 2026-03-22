@@ -15,11 +15,507 @@ use sdme::{
     system_check, systemd, BindConfig, EnvConfig, NetworkConfig, ResourceLimits, SecurityConfig,
 };
 
+// ---------------------------------------------------------------------------
+// Help text constants (referenced by #[command(after_long_help = ...)])
+// ---------------------------------------------------------------------------
+
+const CLI_HELP: &str = "\
+sdme boots systemd-nspawn containers using overlayfs copy-on-write layers.
+Each container gets its own upper layer; the base rootfs stays untouched.
+By default, the host root filesystem is used as the base layer. Other distros
+can be imported and used instead.
+
+Requires root. Runs on Linux with systemd >= 252.
+
+GETTING STARTED:
+    # Clone the host as a throwaway container
+    sdme new
+
+    # Import Ubuntu from Docker Hub and create a named container
+    sdme fs import ubuntu docker.io/ubuntu:24.04 -v --install-packages=yes
+    sdme new mybox -r ubuntu
+
+    # Run an OCI application image (nginx) on top of ubuntu
+    sdme fs import nginx docker.io/nginx --base-fs=ubuntu -v
+    sdme new -r nginx
+
+COMMON COMMANDS:
+    sdme ps                 List containers
+    sdme join <name>        Enter a running container
+    sdme exec <name> CMD    Run a command in a running container
+    sdme stop <name>        Stop a container
+    sdme rm <name>          Remove a container
+    sdme logs <name>        View container logs
+    sdme fs ls              List imported root filesystems
+    sdme config get         Show configuration";
+
+const NEW_HELP: &str = "\
+Create a new container, start it, and open a shell. Accepts the same flags as
+'create'. If no name is given, one is generated automatically.
+
+EXAMPLES:
+    # Host clone with generated name
+    sdme new
+
+    # Named container from imported rootfs
+    sdme new mybox -r ubuntu
+
+    # OCI application image with port forwarding
+    sdme new web -r nginx -p 8080:80
+
+    # Private network with virtual ethernet and resource limits
+    sdme new dev -r ubuntu --network-veth --memory 2G --cpus 2
+
+    # Network zone for inter-container DNS
+    sdme new node1 -r ubuntu --network-zone myzone
+    sdme new node2 -r ubuntu --network-zone myzone
+
+    # Hardened security (userns, private-network, no-new-privileges, cap drops)
+    sdme new sandbox -r ubuntu --hardened
+
+    # Strict security (hardened + Docker-equivalent caps, seccomp, AppArmor)
+    sdme new jail -r ubuntu --strict
+
+    # Bind mount and environment variable
+    sdme new -r ubuntu -b /srv/data:/data:ro -e MYVAR=hello
+
+    # OCI environment variables (set inside the OCI app service)
+    sdme new -r nginx --oci-env PORT=8080 --oci-env DEBUG=1
+
+    # Custom boot timeout (seconds)
+    sdme new -r ubuntu -t 120
+
+    # Specific shell or command
+    sdme new -r ubuntu -- /bin/bash";
+
+const CREATE_HELP: &str = "\
+Create a new container without starting it. Use 'sdme start' to start it later.
+
+EXAMPLES:
+    # Create from imported rootfs
+    sdme create mybox -r ubuntu
+
+    # Create with auto-start on boot
+    sdme create mybox -r ubuntu --enable
+
+    # Join a pod network namespace
+    sdme pod new mypod
+    sdme create app1 -r nginx --pod mypod
+    sdme create app2 -r redis --pod mypod
+
+    # Override default masked services
+    sdme create mybox -r ubuntu --masked-services systemd-resolved.service,systemd-timesyncd.service
+
+    # Create with no services masked
+    sdme create mybox -r ubuntu --masked-services ''
+
+    # User namespace isolation
+    sdme create mybox -r ubuntu --userns
+
+    # Read-only rootfs with dropped capabilities
+    sdme create mybox -r ubuntu --read-only --drop-capability CAP_NET_RAW";
+
+const STOP_HELP: &str = "\
+Three shutdown tiers, in order of escalation:
+
+  Default (graceful):  Sends SIGRTMIN+4 to the container leader, which
+                       tells systemd-nspawn to initiate a clean shutdown.
+                       Timeout: stop_timeout_graceful (default 90s).
+
+  --term (terminate):  Sends SIGTERM to the nspawn leader via TerminateMachine.
+                       Timeout: stop_timeout_terminate (default 30s).
+
+  --kill (force-kill): Sends SIGKILL to all container processes via KillMachine.
+                       Timeout: stop_timeout_kill (default 15s).
+
+--term and --kill are mutually exclusive. Timeouts are configurable via
+'sdme config set'.
+
+EXAMPLES:
+    sdme stop mybox
+    sdme stop mybox --term
+    sdme stop mybox --kill
+    sdme stop --all";
+
+const JOIN_HELP: &str = "\
+Open an interactive shell inside a running container via machinectl.
+
+EXAMPLES:
+    # Enter with the default login shell
+    sdme join mybox
+
+    # Start the container first if it is stopped
+    sdme join mybox --start
+
+    # Run a specific shell
+    sdme join mybox -- /bin/bash
+
+    # Enter the OCI app's PID/IPC/mount namespaces
+    sdme join mybox --oci
+
+    # Target a specific app in a multi-container kube pod
+    sdme join mypod --oci nginx";
+
+const EXEC_HELP: &str = "\
+Run a one-off command inside a running container via machinectl.
+The exit status of the command is forwarded.
+
+EXAMPLES:
+    sdme exec mybox -- cat /etc/os-release
+    sdme exec mybox -- apt-get update
+
+    # Enter the OCI app's PID/IPC/mount namespaces
+    sdme exec mybox --oci -- ls /app
+
+    # Target a specific app in a multi-container kube pod
+    sdme exec mypod --oci redis -- redis-cli ping";
+
+const LOGS_HELP: &str = "\
+View container logs via journalctl inside the container. Extra arguments
+are passed through to journalctl.
+
+EXAMPLES:
+    sdme logs mybox
+    sdme logs mybox -- -f
+    sdme logs mybox -- -n 100
+    sdme logs mybox -- --since '5 min ago'
+
+    # Show OCI app service logs
+    sdme logs mybox --oci
+
+    # Target a specific app in a multi-container kube pod
+    sdme logs mypod --oci nginx";
+
+const FS_HELP: &str = "\
+Manage root filesystems used as base layers for containers. Each rootfs is
+stored under {datadir}/fs/{name} and used as the lower layer in overlayfs.
+
+SUBCOMMANDS:
+    import   Import from a directory, tarball, URL, OCI image, or QCOW2
+    ls       List imported root filesystems
+    rm       Remove root filesystems
+    build    Build a rootfs from a config file (FROM/RUN/COPY)
+    export   Export a container or rootfs to a directory, tarball, or disk image
+    cache    Manage the OCI blob cache
+    gc       Clean up stale staging directories from interrupted operations
+
+EXAMPLES:
+    sdme fs import ubuntu docker.io/ubuntu:24.04 -v --install-packages=yes
+    sdme fs import debian /tmp/debootstrap-output
+    sdme fs ls
+    sdme fs rm ubuntu";
+
+const FS_IMPORT_HELP: &str = "\
+SUPPORTED SOURCES:
+    Directory           Local path containing a root filesystem tree
+    Tarball             .tar, .tar.gz, .tar.bz2, .tar.xz, .tar.zst
+    URL                 http:// or https:// (downloads, then auto-detects)
+    OCI tarball         Tarball containing an oci-layout file
+    OCI registry        docker.io/ubuntu:24.04, ghcr.io/org/app:v1, etc.
+    QCOW2 disk image    Requires qemu-nbd
+
+OCI REGISTRY IMAGES:
+    --oci-mode controls how the image is classified:
+
+      auto (default)    Auto-detect from image config. Base OS images have no
+                        entrypoint, a shell as default command, and no exposed
+                        ports. Everything else is an application image.
+
+      base              Force base OS mode. The rootfs goes through systemd
+                        detection and package installation (apt/dnf). Use this
+                        for OS images that the heuristic misclassifies.
+
+      app               Force application mode. Requires --base-fs to specify
+                        a systemd-capable rootfs as the base layer. The OCI
+                        rootfs is placed under /oci/apps/{name}/root and a
+                        systemd unit is generated to run the application.
+
+    The default_base_fs config key provides a default --base-fs value for OCI
+    app imports when the flag is not specified on the command line.
+
+TESTED DISTROS:
+    docker.io/ubuntu:24.04
+    docker.io/debian:bookworm
+    docker.io/fedora:41
+    docker.io/archlinux:latest
+    docker.io/opensuse/tumbleweed:latest
+
+EXAMPLES:
+    # Import from Docker Hub
+    sdme fs import ubuntu docker.io/ubuntu:24.04 -v --install-packages=yes
+
+    # Import an OCI app image with a base filesystem
+    sdme fs import nginx docker.io/nginx --base-fs=ubuntu -v
+
+    # Import from a local directory (e.g. debootstrap output)
+    sdme fs import debian /tmp/debian-root
+
+    # Import from URL
+    sdme fs import arch https://example.com/archlinux-rootfs.tar.zst
+
+    # Force re-fetch from registry (skip manifest cache)
+    sdme fs import ubuntu docker.io/ubuntu:24.04 --no-cache -v
+
+    # Override distro import prehook via config
+    sdme config set distros.debian.import_prehook '[\"apt-get update\",\"apt-get install -y systemd dbus\"]'";
+
+const FS_BUILD_HELP: &str = "\
+BUILD CONFIG FORMAT:
+    The build config is a line-oriented text file with three directives:
+
+        FROM <rootfs>       Base rootfs (must be first, required, only once).
+                            Use 'FROM fs:<name>' for explicit rootfs prefix.
+        RUN <command>       Run a shell command inside the container.
+        COPY <src> <dst>    Copy a file or directory into the rootfs.
+
+    Lines starting with # and blank lines are ignored.
+    RUN commands execute via /bin/sh -c and support pipes, &&, etc.
+    COPY writes through the merged overlayfs mount while the container
+    stays running, so copied files are immediately visible inside.
+
+    COPY does not support these destinations: /run, /dev/shm. systemd
+    mounts tmpfs over them at boot, which hides files written to the
+    overlayfs upper layer. /tmp is allowed because the build container
+    bind-mounts upper/tmp over nspawn's default tmpfs. Overlayfs opaque
+    directories are also rejected as destinations.
+
+COPY SOURCE PREFIXES:
+    <host-path>             Copy from the host filesystem (default)
+    fs:<name>:<path>        Copy from an imported rootfs
+    <container>:<path>      Copy from another container
+
+RESUMABLE BUILDS:
+    If a build fails at a RUN step, the container's upper layer is preserved.
+    Re-running with the same config file resumes from where it left off.
+    Config file changes or --no-cache discard the stale state and start fresh.
+    COPY source file changes are not tracked for cache invalidation.
+
+EXAMPLE:
+    # Import a base rootfs
+    sudo debootstrap --include=dbus,systemd noble /tmp/ubuntu
+    sudo sdme fs import ubuntu /tmp/ubuntu
+
+    # Create a build config
+    cat << EOF > examplefs.conf
+    FROM ubuntu
+    RUN apt-get update
+    RUN apt-get install -y systemd-container
+    COPY ./target/release/sdme /usr/local/bin/sdme
+    EOF
+
+    # Build and use
+    sudo sdme fs build examplefs examplefs.conf
+    sudo sdme new -r examplefs";
+
+const FS_EXPORT_HELP: &str = "\
+OUTPUT FORMATS (auto-detected from extension or overridden with --fmt):
+    dir         Directory copy
+    tar         Uncompressed tarball
+    tar.gz      Gzip-compressed tarball
+    tar.bz2     Bzip2-compressed tarball
+    tar.xz      XZ-compressed tarball
+    tar.zst     Zstd-compressed tarball
+    raw         Bare filesystem disk image (ext4 or btrfs)
+    raw --vm    GPT-partitioned disk image for VM boot
+
+CONTAINER VS ROOTFS EXPORT:
+    sdme fs export mybox out.tar.gz         Export a container
+    sdme fs export fs:ubuntu out.tar.gz     Export from the rootfs catalogue
+
+    Running containers are read from their merged overlayfs view (with a
+    consistency warning). Stopped containers use a temporary read-only
+    overlay mount.
+
+VM EXPORT:
+    sdme fs export mybox disk.raw --vm --root-password '' --ssh-key ~/.ssh/id_ed25519.pub
+
+    Creates a GPT-partitioned image with serial console, fstab, and DHCP
+    networking. Boot with:
+
+      cloud-hypervisor --kernel vmlinuz --disk path=disk.raw --console tty --serial off
+      qemu-system-x86_64 -drive file=disk.raw,format=raw -nographic
+
+    Optional flags: --dns (copy host resolv.conf or specify IPs), --swap 512M,
+    --hostname myvm, --install-packages yes (installs udev), --timezone UTC,
+    --net-ifaces 2 (number of DHCP interfaces).
+
+CONFIG KEYS:
+    default_export_fs           Filesystem type for raw images (default: ext4)
+    default_export_free_space   Extra free space in auto-sized images (default: 256M)
+
+EXAMPLES:
+    sdme fs export mybox /tmp/backup.tar.zst
+    sdme fs export fs:ubuntu /tmp/ubuntu.tar.gz
+    sdme fs export mybox disk.raw --fmt raw --size 4G
+    sdme fs export mybox disk.raw --vm --timezone America/New_York";
+
+const FS_CACHE_HELP: &str = "\
+The OCI blob cache stores downloaded container image layer blobs and resolved
+manifests. Layers are content-addressed by SHA-256 digest. Manifests are cached
+with a configurable TTL to avoid redundant registry requests.
+
+CONFIG KEYS:
+    oci_cache_dir              Cache directory (default: {datadir}/cache/oci)
+    oci_cache_max_size         Maximum cache size with LRU eviction (default: 10G)
+    oci_manifest_cache_ttl     Manifest cache TTL in seconds (default: 900, 0 disables)
+
+The --no-cache flag on 'fs import', 'kube apply', and 'kube create' overrides
+the manifest TTL to 0 for a single invocation, forcing a fresh registry fetch.
+
+EXAMPLES:
+    sdme fs cache info
+    sdme fs cache ls
+    sdme fs cache clean
+    sdme fs cache clean --all";
+
+const CONFIG_HELP: &str = "\
+CONFIG KEYS:
+    interactive                    bool     yes       Prompt on destructive ops
+    datadir                        path     /var/lib/sdme
+    boot_timeout                   u64      60        Seconds to wait for boot
+    join_as_sudo_user              bool     yes       Drop to sudo user on join
+    host_rootfs_opaque_dirs        string   /etc/systemd/system,/var/log
+    hardened_drop_caps             string   CAP_SYS_PTRACE,CAP_NET_RAW,CAP_SYS_RAWIO,CAP_SYS_BOOT
+    default_base_fs                string   (empty)   Default --base-fs for OCI app imports
+    default_export_fs              string   ext4      Filesystem for raw image export
+    default_export_free_space      string   256M      Extra free space in auto-sized images
+    tasks_max                      u32      16384     Max tasks per container
+    oci_cache_dir                  string   (empty)   OCI cache dir ({datadir}/cache/oci)
+    oci_cache_max_size             string   10G       Max OCI cache size (0 disables)
+    oci_manifest_cache_ttl         u64      900       Manifest cache TTL in seconds (0 disables)
+    http_timeout                   u64      30        HTTP connect/resolve timeout (seconds)
+    http_body_timeout              u64      300       HTTP body receive timeout (seconds)
+    max_download_size              string   50G       Max download size (0 = unlimited)
+    stop_timeout_graceful          u64      90        Graceful stop timeout (seconds)
+    stop_timeout_terminate         u64      30        Terminate stop timeout (seconds)
+    stop_timeout_kill              u64      15        Force-kill stop timeout (seconds)
+    auto_fs_gc                     bool     yes       Auto-clean stale transactions
+    default_create_masked_services string   systemd-resolved.service
+    docker_user                    string   (empty)   Docker Hub username
+    docker_token                   string   (empty)   Docker Hub access token
+
+DISTRO PREHOOKS:
+    Per-distro chroot commands for import/export preparation. Absent = built-in
+    defaults. Empty array = do nothing.
+
+    sdme config set distros.debian.import_prehook '[\"cmd1\",\"cmd2\"]'
+    sdme config set distros.debian.import_prehook ''
+
+    Available families: debian, fedora, arch, suse, nixos, unknown.
+    Hooks: import_prehook, export_prehook, export_vm_prehook.
+
+EXAMPLES:
+    sdme config get
+    sdme config set boot_timeout 120
+    sdme config set default_base_fs ubuntu
+    sdme config set oci_manifest_cache_ttl 0";
+
+const APPARMOR_PROFILE_HELP: &str = "\
+INSTALLATION:
+    Save the profile and load it into AppArmor:
+
+        sdme config apparmor-profile > /etc/apparmor.d/sdme-default
+        apparmor_parser -r /etc/apparmor.d/sdme-default
+
+    To verify the profile is loaded:
+
+        aa-status | grep sdme-default
+
+    The profile is automatically applied when using --strict, or can
+    be applied manually with --apparmor-profile sdme-default.
+
+    The deb and rpm packages install and load the profile automatically.
+
+APPARMOR DOCUMENTATION:
+    https://gitlab.com/apparmor/apparmor/-/wikis/Documentation";
+
+const POD_HELP: &str = "\
+A pod is a shared network namespace (loopback only) that multiple containers
+can join, allowing them to communicate via localhost. Similar in concept to a
+Kubernetes pod.
+
+Two ways to join a pod:
+
+  --pod <name>       The entire nspawn container runs in the pod's network
+                     namespace. Incompatible with --userns and --hardened
+                     because the kernel blocks setns(CLONE_NEWNET) across
+                     user namespace boundaries.
+
+  --oci-pod <name>   Only the OCI app process enters the pod's network
+                     namespace (via a systemd NetworkNamespacePath= drop-in).
+                     Requires --private-network (or --hardened/--strict).
+                     Works with user namespace isolation.
+
+Both flags can be combined on the same container.
+
+EXAMPLES:
+    # Create a pod and add containers
+    sdme pod new mypod
+    sdme new app1 -r nginx --pod mypod
+    sdme new app2 -r redis --pod mypod
+
+    # OCI pod with hardened security
+    sdme pod new mypod
+    sdme new app -r nginx --oci-pod mypod --hardened
+
+    # List and remove
+    sdme pod ls
+    sdme pod rm mypod";
+
+const KUBE_HELP: &str = "\
+Run Kubernetes Pod YAML as a local systemd-nspawn container. Accepts kind: Pod
+(v1) and kind: Deployment (apps/v1, extracts the pod template). Multi-container
+pods run as a single nspawn container with one systemd service per app.
+
+WORKFLOW:
+    # Import a base filesystem
+    sdme fs import ubuntu docker.io/ubuntu:24.04 -v --install-packages=yes
+
+    # Apply a Pod YAML
+    sdme kube apply -f pod.yaml --base-fs ubuntu
+
+    # Interact with the container
+    sdme join <podname> --oci
+    sdme exec <podname> --oci -- curl localhost:8080
+    sdme logs <podname> --oci
+
+    # Clean up
+    sdme kube delete <podname>
+
+MINIMAL POD YAML:
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      name: myapp
+    spec:
+      containers:
+        - name: web
+          image: docker.io/nginx
+
+SUPPORTED FEATURES:
+    - Multi-container pods (shared network namespace via localhost)
+    - command/args (overrides Docker ENTRYPOINT/CMD)
+    - env, envFrom (valueFrom: secretKeyRef, configMapKeyRef)
+    - Volumes: emptyDir, hostPath, secret, configMap, persistentVolumeClaim
+    - Volume mounts with readOnly and subPath
+    - Probes: startup, liveness, readiness (exec, httpGet, tcpSocket, grpc)
+    - Restart policy: Always, OnFailure, Never
+    - Security: --strict, --hardened, --userns (nspawn-level)
+    - Secrets and configmaps: sdme kube secret create, sdme kube configmap create
+
+SECURITY:
+    CLI flags (--strict, --hardened, etc.) apply at the nspawn container level.
+    Pod YAML securityContext applies at the OCI app service level. Both layers
+    are complementary and can be used together.";
+
+// ---------------------------------------------------------------------------
+
 #[derive(Parser)]
 #[command(
     name = "sdme",
     version,
-    about = "Lightweight systemd-nspawn containers with overlayfs"
+    about = "Lightweight systemd-nspawn containers with overlayfs",
+    after_long_help = CLI_HELP
 )]
 struct Cli {
     /// Enable verbose output (implies non-interactive mode at runtime)
@@ -120,6 +616,7 @@ enum Command {
     Config(ConfigCommand),
 
     /// Create a new container
+    #[command(after_long_help = CREATE_HELP)]
     Create {
         /// Container name (generated if not provided)
         name: Option<String>,
@@ -183,6 +680,7 @@ enum Command {
     },
 
     /// Run a command in a running container
+    #[command(after_long_help = EXEC_HELP)]
     Exec {
         /// Container name
         name: String,
@@ -195,6 +693,7 @@ enum Command {
     },
 
     /// Enter a running container
+    #[command(after_long_help = JOIN_HELP)]
     Join {
         /// Container name
         name: String,
@@ -217,6 +716,7 @@ enum Command {
     },
 
     /// Show container logs (journalctl)
+    #[command(after_long_help = LOGS_HELP)]
     Logs {
         /// Container name
         name: String,
@@ -229,6 +729,7 @@ enum Command {
     },
 
     /// Create, start, and enter a new container
+    #[command(after_long_help = NEW_HELP)]
     New {
         /// Container name (generated if not provided)
         name: Option<String>,
@@ -318,6 +819,7 @@ enum Command {
     },
 
     /// Stop one or more running containers
+    #[command(after_long_help = STOP_HELP)]
     Stop {
         /// Container names
         #[arg(required_unless_present = "all")]
@@ -397,33 +899,11 @@ enum Command {
 }
 
 #[derive(Subcommand)]
+#[command(after_long_help = FS_HELP)]
 #[allow(clippy::large_enum_variant)]
 enum RootfsCommand {
     /// Import a root filesystem from a directory, tarball, URL, OCI image, registry image, or QCOW2 disk image
-    #[command(after_long_help = "\
-OCI REGISTRY IMAGES:
-    When the source is an OCI registry image (e.g. docker.io/ubuntu:24.04),
-    sdme pulls the image layers and extracts the root filesystem.
-
-    --oci-mode controls how the image is classified:
-
-      auto (default)  Auto-detect from image config. Base OS images have no
-                      entrypoint, a shell as default command, and no exposed
-                      ports. Everything else is an application image.
-
-      base            Force base OS mode. The rootfs goes through systemd
-                      detection and package installation (apt/dnf). Use this
-                      for OS images that the heuristic misclassifies.
-
-      app             Force application mode. Requires --base-fs to
-                      specify a systemd-capable rootfs as the base layer.
-                      The OCI rootfs is placed under /oci/apps/{name}/root and a systemd
-                      unit is generated to run the application.
-
-    Examples:
-      sdme fs import ubuntu docker.io/ubuntu -v --install-packages=yes
-      sdme fs import nginx docker.io/nginx --base-fs=ubuntu -v
-      sdme fs import myapp ghcr.io/org/app:v1 --oci-mode=app --base-fs=ubuntu")]
+    #[command(after_long_help = FS_IMPORT_HELP)]
     Import {
         /// Name for the imported rootfs
         name: String,
@@ -463,40 +943,7 @@ OCI REGISTRY IMAGES:
         force: bool,
     },
     /// Build a root filesystem from a build config
-    #[command(after_long_help = "\
-BUILD CONFIG FORMAT:
-    The build config is a line-oriented text file with three directives:
-
-        FROM <rootfs>       Base rootfs (must be first, required, only once)
-        RUN <command>       Run a shell command inside the container
-        COPY <src> <dst>    Copy a host file or directory into the rootfs
-
-    Lines starting with # and blank lines are ignored.
-    RUN commands execute via /bin/sh -c and support pipes, &&, etc.
-    COPY stops the container (if running) and writes directly to the
-    overlayfs upper layer. Paths with '..' components are rejected.
-
-    COPY does not support these destinations: /tmp, /run, /dev/shm.
-    systemd mounts tmpfs over them at boot, which hides files written
-    to the overlayfs upper layer. Overlayfs opaque directories are also
-    rejected. Use a different path (e.g. /root, /opt, /srv).
-
-EXAMPLE:
-    # Import a base rootfs
-    sudo debootstrap --include=dbus,systemd noble /tmp/ubuntu
-    sudo sdme fs import ubuntu /tmp/ubuntu
-
-    # Create a build config
-    cat << EOF > examplefs.conf
-    FROM ubuntu
-    RUN apt-get update
-    RUN apt-get install -y systemd-container
-    COPY ./target/release/sdme /usr/local/bin/sdme
-    EOF
-
-    # Build and use
-    sudo sdme fs build examplefs examplefs.conf
-    sudo sdme new -r examplefs")]
+    #[command(after_long_help = FS_BUILD_HELP)]
     Build {
         /// Name for the new rootfs
         name: String,
@@ -514,6 +961,7 @@ EXAMPLE:
         no_cache: bool,
     },
     /// Export a container or rootfs to a directory, tarball, or disk image
+    #[command(after_long_help = FS_EXPORT_HELP)]
     Export {
         /// Container name, or fs:<name> for rootfs catalogue export
         name: String,
@@ -570,6 +1018,7 @@ EXAMPLE:
 }
 
 #[derive(Subcommand)]
+#[command(after_long_help = CONFIG_HELP)]
 enum ConfigCommand {
     /// Show current configuration
     Get,
@@ -581,27 +1030,7 @@ enum ConfigCommand {
         value: String,
     },
     /// Print the default AppArmor profile for sdme containers
-    #[command(
-        name = "apparmor-profile",
-        after_long_help = "\
-INSTALLATION:
-    Save the profile and load it into AppArmor:
-
-        sdme config apparmor-profile > /etc/apparmor.d/sdme-default
-        apparmor_parser -r /etc/apparmor.d/sdme-default
-
-    To verify the profile is loaded:
-
-        aa-status | grep sdme-default
-
-    The profile is automatically applied when using --strict, or can
-    be applied manually with --apparmor-profile sdme-default.
-
-    The deb and rpm packages install and load the profile automatically.
-
-APPARMOR DOCUMENTATION:
-    https://gitlab.com/apparmor/apparmor/-/wikis/Documentation"
-    )]
+    #[command(name = "apparmor-profile", after_long_help = APPARMOR_PROFILE_HELP)]
     AppArmorProfile,
     /// Generate shell completions
     Completions {
@@ -612,6 +1041,7 @@ APPARMOR DOCUMENTATION:
 }
 
 #[derive(Subcommand)]
+#[command(after_long_help = POD_HELP)]
 enum PodCommand {
     /// Create a new pod network namespace
     New {
@@ -632,6 +1062,7 @@ enum PodCommand {
 }
 
 #[derive(Subcommand)]
+#[command(after_long_help = KUBE_HELP)]
 enum KubeCommand {
     /// Create and start a kube pod from a YAML file, then enter the container
     Apply {
@@ -763,6 +1194,7 @@ enum KubeConfigmapCommand {
 }
 
 #[derive(Subcommand)]
+#[command(after_long_help = FS_CACHE_HELP)]
 enum CacheCommand {
     /// Show cache location, size, and blob count
     Info,

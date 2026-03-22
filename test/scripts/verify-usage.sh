@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-# verify-usage.sh - verify the commands documented in docs/usage.md
+# verify-usage.sh - verify CLI commands end-to-end
 #
-# Walks through each section of the usage guide and runs the documented
-# commands (or close equivalents) to ensure nothing is stale or broken.
+# Walks through each major feature area and runs representative commands
+# to ensure nothing is stale or broken.
 # Uses vfy-usage- prefix for all artifacts.
 #
 # Requires: root, sdme in PATH, network access for OCI registry pulls.
@@ -32,7 +32,7 @@ usage() {
     cat <<EOF
 Usage: $(basename "$0") [OPTIONS]
 
-Verify the commands documented in docs/usage.md.
+Verify CLI commands end-to-end across all major features.
 Must be run as root.
 
 Options:
