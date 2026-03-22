@@ -55,6 +55,7 @@ The project is a single Rust binary (`src/main.rs`) backed by a shared library (
 | Command | Description |
 |---------|-------------|
 | `sdme new` | Create, start, and enter a new container (accepts same flags as `create`) |
+| `sdme cp` | Copy files between host, containers, and root filesystems |
 | `sdme create` | Create a new container (overlayfs dirs + state file). Security flags: `--strict`, `--hardened`, `--drop-capability`, `--capability`, `--no-new-privileges`, `--read-only`, `--system-call-filter`, `--apparmor-profile`. OCI flags: `--no-oci-ports`, `--no-oci-volumes`, `--oci-env KEY=VALUE` (sets env vars for the OCI app service via the `/oci/apps/{name}/env` file, separate from `-e` which sets nspawn env vars). `--masked-services` overrides the `default_create_masked_services` config (comma-separated systemd units to mask) |
 | `sdme start` | Start one or more containers (installs/updates template unit, starts via D-Bus). Supports `--all` to start all stopped containers |
 | `sdme join` | Enter a running container (`machinectl shell`). `--start` starts the container first if stopped. `--oci [APP]` enters the OCI app's PID/IPC/mount namespaces via `nsenter` (default shell: `/bin/sh`; optional app name for multi-container kube pods) |
@@ -102,6 +103,7 @@ The `dist/` directory contains both checked-in packaging files and generated bui
 | `src/main.rs` | CLI entry point (clap derive), command dispatch |
 | `src/lib.rs` | Shared types: `State` (KEY=VALUE), `validate_name`, `sudo_user`, global interrupt handler (`INTERRUPTED`, `check_interrupted`, `install_interrupt_handler` for SIGINT+SIGTERM) |
 | `src/containers.rs` | Container create/remove/join/exec/stop/list, overlayfs directory management, overlay mount/unmount helpers, DNS setup, volume directory management |
+| `src/cp.rs` | File copy between host, containers, and rootfs (`sdme cp`) |
 | `src/systemd.rs` | D-Bus helpers (start/status/stop), template unit generation (`Type=notify`), env files, boot/shutdown waiting |
 | `src/system_check.rs` | Version checks (systemd), dependency checks (`find_program`) |
 | `src/rootfs.rs` | Rootfs listing, removal, os-release parsing, distro detection |
@@ -119,7 +121,7 @@ The `dist/` directory contains both checked-in packaging files and generated bui
 | `src/names.rs` | Container name generation from a Tupi-Guarani wordlist with collision avoidance |
 | `src/config.rs` | Config file loading/saving (`/etc/sdme.conf`) |
 | `src/build.rs` | Build config parsing and rootfs build execution |
-| `src/lock.rs` | Advisory file locking (`flock`) for build dependency protection |
+| `src/lock.rs` | Advisory file locking (`flock`) for resource protection across all mutating operations |
 | `src/txn.rs` | Enumerated transaction staging (`.{name}.{kind}-txn-{pid}`) and `sdme fs gc` helpers |
 | `src/copy.rs` | Filesystem tree copying with xattr and special file support, path sanitization |
 | `src/mounts.rs` | Bind mount (`BindConfig`) and environment variable (`EnvConfig`) configuration |
@@ -207,3 +209,5 @@ Dependencies are checked at runtime before use via `system_check::check_dependen
   - Opaque dir paths: must be absolute, no `..`, no duplicates; normalized before storage.
   - URL downloads: capped by `max_download_size` config key (default 50 GiB, `0` = unlimited).
   - Config files: written with explicit permissions (`0o600`).
+- **Resource locking**: all operations that read or mutate containers, rootfs, pods, secrets, or configmaps use advisory `flock(2)` locks via `src/lock.rs` to prevent data races. **Shared locks** (read) allow concurrent operations (build, export, cp, start, create) and coexist with each other. **Exclusive locks** (write) protect destructive mutations (rm, fs rm, import, kube delete, pod rm) and block all other lock holders. All locks are **non-blocking** (`LOCK_NB`): if a lock cannot be acquired immediately, the operation fails with an error identifying the holder PID (read from the lock file at `{datadir}/locks/{kind}/{name}.lock`). Lock ordering to prevent deadlocks: `fs → containers → pods → secrets → configmaps`. Within the same kind, acquire shared before exclusive on different names. Locks are released automatically when the `ResourceLock` value is dropped (file descriptor closed); on process crash or SIGKILL the kernel releases the lock. **Note**: `stop` operates via D-Bus (`KillMachine`/`TerminateMachine`) and does not use flock, so stopping a container is never blocked by any lock. **When adding new operations**, follow the pattern: shared lock for reading/non-destructive access, exclusive lock for deletion/replacement.
+- **File copy (`sdme cp`)**: copies files between host and containers/rootfs. One side must always be a host path. Container/rootfs paths must be absolute (after the colon). Recursive by default. Shares the same copy engine, path validation (`sanitize_dest_path`), and directory/file semantics as `fs build` COPY — when modifying one, keep both in sync. Running containers: read/write through `/proc/<leader>/root/` for full mount namespace access (sees tmpfs at `/tmp`, `/run`, `/dev/shm`). Userns containers (`--userns`/`--hardened`/`--strict`) fall back to `merged/` because the kernel blocks `/proc/<leader>/root/` traversal across user namespace boundaries; shadowed paths are rejected with an error suggesting `sdme exec`. Stopped containers: source reads via temporary read-only overlay mount; destination writes to `upper/` directly. Rootfs: direct read/write; running containers using the rootfs will not see changes until restarted (overlayfs lower-layer caching), and a warning is printed. Safety: device nodes refused when copying to host (use `--force`); setuid/setgid warned; shadowed dirs (`/tmp`, `/run`, `/dev/shm`) rejected for stopped container destinations (differs from build COPY which allows `/tmp` via a bind-mount trick). Shared flock locks prevent concurrent deletion during copy; see Resource locking design decision.

@@ -323,7 +323,7 @@ mod dbus {
     /// Get the leader PID of a registered machine via org.freedesktop.machine1.
     ///
     /// Returns `None` if the machine is not registered.
-    fn get_machine_leader(conn: &Connection, name: &str) -> Result<Option<u32>> {
+    pub(super) fn get_machine_leader(conn: &Connection, name: &str) -> Result<Option<u32>> {
         let manager = machine1_manager(conn)?;
 
         let reply = match manager.call_method("GetMachine", &(name,)) {
@@ -461,7 +461,7 @@ mod dbus {
 
     /// Check whether the container leader has a different user namespace
     /// than the host (i.e., the container was started with `--userns`).
-    fn has_foreign_userns(leader: u32) -> bool {
+    pub(super) fn has_foreign_userns(leader: u32) -> bool {
         use std::os::unix::fs::MetadataExt;
         let host_ino = match std::fs::metadata("/proc/self/ns/user") {
             Ok(m) => m.ino(),
@@ -794,6 +794,18 @@ pub fn kill_machine(name: &str, who: &str, signal: i32) -> Result<()> {
 /// Wait for a container's systemd unit to become inactive.
 pub fn wait_for_shutdown(name: &str, timeout: std::time::Duration, verbose: bool) -> Result<()> {
     dbus::wait_for_shutdown(name, timeout, verbose)
+}
+
+/// Get the leader PID of a running container via machined D-Bus.
+/// Returns `None` if the machine is not registered.
+pub fn get_machine_leader(name: &str) -> Result<Option<u32>> {
+    let conn = dbus::connect()?;
+    dbus::get_machine_leader(&conn, name)
+}
+
+/// Check whether a container's leader has a different user namespace than the host.
+pub fn has_foreign_userns(leader: u32) -> bool {
+    dbus::has_foreign_userns(leader)
 }
 
 /// Return the names of all registered machines from machined.

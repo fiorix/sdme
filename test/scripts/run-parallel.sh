@@ -51,6 +51,7 @@ KNOWN_PREFIXES=(
     vfy-nixos-
     kube-vfy-
     vfy-mx-
+    vfy-cp-
 )
 
 # -- Usage --------------------------------------------------------------------
@@ -459,6 +460,7 @@ main() {
     echo ""
 
     local wave_a_tests=(
+        verify-cp.sh
         verify-export.sh
         verify-build.sh
         verify-security.sh

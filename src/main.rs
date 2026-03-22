@@ -11,8 +11,9 @@ use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 use sdme::import::{ImportOptions, InstallPackages, OciMode};
 use sdme::{
-    check_interrupted, config, confirm, containers, export, kube, lock, oci, pod, rootfs, security,
-    system_check, systemd, BindConfig, EnvConfig, NetworkConfig, ResourceLimits, SecurityConfig,
+    check_interrupted, config, confirm, containers, cp, export, kube, lock, oci, pod, rootfs,
+    security, system_check, systemd, BindConfig, EnvConfig, NetworkConfig, ResourceLimits,
+    SecurityConfig,
 };
 
 // ---------------------------------------------------------------------------
@@ -43,6 +44,7 @@ COMMON COMMANDS:
     sdme ps                 List containers
     sdme join <name>        Enter a running container
     sdme exec <name> CMD    Run a command in a running container
+    sdme cp SRC DST         Copy files between host and containers
     sdme stop <name>        Stop a container
     sdme rm <name>          Remove a container
     sdme logs <name>        View container logs
@@ -238,6 +240,78 @@ EXAMPLES:
 
     # Target a specific app in a multi-container kube pod
     sdme logs mypod --oci nginx";
+
+const CP_HELP: &str = "\
+Copy files between host, containers, and root filesystems.
+
+Paths inside containers and rootfs must be absolute. Host paths may be
+relative or absolute. Copies are always recursive (no -r flag needed).
+
+PATH FORMATS:
+    /path or ./path         Host filesystem path
+    NAME:/path              Container path (abbreviations supported)
+    fs:NAME:/path           Root filesystem path
+
+When the destination is an existing directory, the source is copied into
+it (like cp -r). When the source is a directory, its contents are copied
+recursively with ownership, permissions, timestamps, and extended
+attributes preserved.
+
+RUNNING CONTAINERS:
+    Files are read/written through /proc/<leader>/root/, which provides
+    access to the container's full mount namespace including tmpfs paths
+    (/tmp, /run, /dev/shm). A consistency warning is printed because the
+    filesystem may be changing concurrently.
+
+    User namespace containers (--userns, --hardened, --strict) fall back
+    to the overlayfs merged/ directory because the kernel blocks /proc/
+    root traversal across user namespace boundaries. Paths under /tmp,
+    /run, and /dev/shm are not accessible for userns containers; use
+    /var/tmp/ as an alternative, or 'sdme exec' to read/write those
+    paths directly.
+
+STOPPED CONTAINERS:
+    Source reads use a temporary read-only overlay mount. Destination
+    writes go directly to the overlayfs upper layer. Writes to /tmp, /run,
+    and /dev/shm are refused (systemd mounts tmpfs over them at boot).
+
+LOCKING:
+    Shared locks are held on containers and rootfs during the copy to
+    prevent concurrent deletion (sdme rm, sdme fs rm). The locks are
+    non-blocking: if a deletion is attempted during a copy, it fails
+    immediately with a message identifying the holder PID.
+
+ROOT FILESYSTEMS:
+    Writes go directly to the rootfs directory. Running containers that
+    use this rootfs will NOT see changes (the kernel caches the overlayfs
+    lower layer). Stop and restart affected containers to pick up changes.
+
+SAFETY:
+    When copying to the host, device nodes are refused by default (use
+    --force to override). Setuid/setgid files produce a warning.
+
+NOTES:
+    Copy behavior (path handling, file type preservation, directory
+    semantics) matches 'fs build' COPY directives. The same copy engine
+    and path validation are used by both.
+
+EXAMPLES:
+    # Copy a file into a container
+    sdme cp ./app.conf mybox:/etc/app.conf
+
+    # Copy from container to host
+    sdme cp mybox:/etc/os-release .
+    sdme cp mybox:/var/log ./logs
+
+    # Copy to/from a root filesystem
+    sdme cp ./config fs:ubuntu:/etc/myconfig
+    sdme cp fs:ubuntu:/etc/hostname .
+
+EXIT STATUS:
+    0       Success
+    1       Error
+    130     Interrupted by Ctrl+C (SIGINT)
+    143     Interrupted by SIGTERM";
 
 const FS_HELP: &str = "\
 Manage root filesystems used as base layers for containers. Each rootfs is
@@ -733,6 +807,18 @@ enum Command {
         /// Systemd services to mask in the overlayfs upper layer (comma-separated, overrides config default)
         #[arg(long, value_delimiter = ',')]
         masked_services: Option<Vec<String>>,
+    },
+
+    /// Copy files between host, containers, and root filesystems
+    #[command(after_long_help = CP_HELP)]
+    Cp {
+        /// Source path (host path, NAME:/path, or fs:NAME:/path)
+        source: String,
+        /// Destination path (host path, NAME:/path, or fs:NAME:/path)
+        destination: String,
+        /// Allow device nodes and skip safety prompts
+        #[arg(short, long)]
+        force: bool,
     },
 
     /// Run a command in a running container
@@ -2122,6 +2208,24 @@ fn run() -> Result<()> {
             ConfigCommand::AppArmorProfile => unreachable!(),
             ConfigCommand::Completions { .. } => unreachable!(),
         },
+        Command::Cp {
+            source,
+            destination,
+            force,
+        } => {
+            let src = cp::parse_endpoint(&source)?;
+            let dst = cp::parse_endpoint(&destination)?;
+            cp::cp(
+                &cfg.datadir,
+                &src,
+                &dst,
+                &cp::CpOptions {
+                    force,
+                    verbose: cli.verbose,
+                    interactive,
+                },
+            )?;
+        }
         Command::Create {
             name,
             fs,

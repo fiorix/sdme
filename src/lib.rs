@@ -33,6 +33,7 @@
 pub mod build;
 pub mod config;
 pub mod containers;
+pub mod cp;
 pub(crate) mod copy;
 pub(crate) mod devfd_shim;
 pub(crate) mod elf;
