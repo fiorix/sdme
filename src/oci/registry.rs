@@ -21,7 +21,9 @@ use crate::check_interrupted;
 
 use super::layout::unpack_oci_layer;
 use super::sorted_keys_csv;
-use crate::import::{build_http_agent, build_http_agent_no_error, open_decoder};
+use crate::import::{
+    build_http_agent, build_http_agent_no_error, open_decoder_limited, DecompressLimit,
+};
 
 /// Parsed OCI image reference (e.g. `quay.io/centos/centos:stream10`).
 #[derive(Debug, PartialEq)]
@@ -115,8 +117,10 @@ impl std::fmt::Display for ImageReference {
 // --- Auth ---
 
 /// Parse a `WWW-Authenticate: Bearer realm="...",service="..."` header.
-fn parse_www_authenticate(header: &str) -> Option<(String, String)> {
-    let header = header.strip_prefix("Bearer ")?;
+fn parse_www_authenticate(header: &str) -> Result<(String, String)> {
+    let header = header
+        .strip_prefix("Bearer ")
+        .with_context(|| "not a Bearer challenge")?;
 
     let mut realm = None;
     let mut service = None;
@@ -132,7 +136,8 @@ fn parse_www_authenticate(header: &str) -> Option<(String, String)> {
         }
     }
 
-    Some((realm?, service.unwrap_or_default()))
+    let realm = realm.with_context(|| "missing 'realm' parameter")?;
+    Ok((realm, service.unwrap_or_default()))
 }
 
 /// Split auth header parameters, respecting quoted values.
@@ -163,6 +168,28 @@ const DOCKER_HUB_REGISTRIES: &[&str] = &["registry-1.docker.io", "docker.io", "i
 /// Check if a registry hostname is Docker Hub.
 fn is_docker_hub(registry: &str) -> bool {
     DOCKER_HUB_REGISTRIES.contains(&registry)
+}
+
+/// Trusted Docker Hub auth realm hostnames.
+const TRUSTED_DOCKER_REALMS: &[&str] = &["auth.docker.io"];
+
+/// Check if an auth realm URL points to a trusted Docker Hub endpoint.
+///
+/// The `realm` URL comes from the server's `WWW-Authenticate` header.
+/// A compromised or MITM'd registry could redirect credentials to an
+/// attacker-controlled host. This function extracts the hostname from
+/// the realm URL and validates it against a trusted allowlist.
+fn is_trusted_docker_realm(realm: &str) -> bool {
+    // Extract host from URL: skip "https://" or "http://", take until '/' or ':'
+    let after_scheme = realm
+        .strip_prefix("https://")
+        .or_else(|| realm.strip_prefix("http://"));
+    let Some(after_scheme) = after_scheme else {
+        return false;
+    };
+    let host = after_scheme.split('/').next().unwrap_or("");
+    let host = host.split(':').next().unwrap_or("");
+    TRUSTED_DOCKER_REALMS.contains(&host)
 }
 
 /// Obtain a bearer token for pulling from a registry.
@@ -226,7 +253,7 @@ fn obtain_token(
     }
 
     let (realm, service) = parse_www_authenticate(&www_auth)
-        .with_context(|| format!("failed to parse WWW-Authenticate header: {www_auth}"))?;
+        .with_context(|| format!("invalid WWW-Authenticate header: {www_auth}"))?;
 
     let token_url = if service.is_empty() {
         format!("{realm}?scope=repository:{repository}:pull")
@@ -234,8 +261,20 @@ fn obtain_token(
         format!("{realm}?service={service}&scope=repository:{repository}:pull")
     };
 
-    // Only use credentials for Docker Hub registries.
-    let use_credentials = docker_credentials.filter(|_| is_docker_hub(registry));
+    // Only use credentials for Docker Hub registries with trusted realm URLs.
+    let use_credentials = docker_credentials.filter(|_| {
+        if !is_docker_hub(registry) {
+            return false;
+        }
+        if !is_trusted_docker_realm(&realm) {
+            eprintln!(
+                "warning: Docker Hub registry returned untrusted auth realm '{realm}'; \
+                 skipping credentials"
+            );
+            return false;
+        }
+        true
+    });
     if verbose {
         if use_credentials.is_some() {
             eprintln!("requesting token from {token_url} (with docker credentials)");
@@ -941,6 +980,9 @@ fn download_layers(
     fs::create_dir_all(staging_dir)
         .with_context(|| format!("failed to create staging dir {}", staging_dir.display()))?;
 
+    // Share a decompression size limit across all layers.
+    let limit = DecompressLimit::new(max_download_size);
+
     for (i, layer) in manifest.layers.iter().enumerate() {
         check_interrupted()?;
 
@@ -966,7 +1008,7 @@ fn download_layers(
                 max_download_size,
             })?;
 
-            let decoder = open_decoder(&temp_path)?;
+            let decoder = open_decoder_limited(&temp_path, &limit)?;
             unpack_oci_layer(decoder, staging_dir)?;
 
             Ok(())
@@ -1089,7 +1131,36 @@ mod tests {
 
     #[test]
     fn test_parse_www_authenticate_not_bearer() {
-        assert!(parse_www_authenticate("Basic realm=\"test\"").is_none());
+        assert!(parse_www_authenticate("Basic realm=\"test\"").is_err());
+    }
+
+    #[test]
+    fn test_parse_www_authenticate_missing_realm() {
+        assert!(parse_www_authenticate("Bearer service=\"foo\"").is_err());
+    }
+
+    #[test]
+    fn test_is_trusted_docker_realm_valid() {
+        assert!(is_trusted_docker_realm("https://auth.docker.io/token"));
+        assert!(is_trusted_docker_realm(
+            "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/nginx:pull"
+        ));
+    }
+
+    #[test]
+    fn test_is_trusted_docker_realm_invalid() {
+        assert!(!is_trusted_docker_realm("https://evil.example.com/token"));
+        assert!(!is_trusted_docker_realm(
+            "https://auth.docker.io.evil.com/token"
+        ));
+        assert!(!is_trusted_docker_realm("not-a-url"));
+        assert!(!is_trusted_docker_realm(""));
+    }
+
+    #[test]
+    fn test_is_trusted_docker_realm_with_port() {
+        // auth.docker.io with a port should still match the host portion.
+        assert!(is_trusted_docker_realm("https://auth.docker.io:443/token"));
     }
 
     #[test]

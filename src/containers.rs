@@ -579,7 +579,7 @@ pub fn validate_opaque_dirs(dirs: &[String]) -> Result<Vec<String>> {
 fn set_opaque_xattr(path: &Path) -> Result<()> {
     let c_path =
         CString::new(path.as_os_str().as_encoded_bytes()).context("path contains null byte")?;
-    let c_name = CString::new("trusted.overlay.opaque").unwrap();
+    let c_name = CString::new("trusted.overlay.opaque").expect("static string literal");
     let value = b"y";
     let ret = unsafe {
         libc::lsetxattr(
@@ -1895,7 +1895,7 @@ mod tests {
         for dir in &["var", "opt/data"] {
             let path = upper.join(dir);
             let c_path = CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
-            let c_name = CString::new("trusted.overlay.opaque").unwrap();
+            let c_name = CString::new("trusted.overlay.opaque").expect("static string literal");
             let mut buf = [0u8; 16];
             let size = unsafe {
                 libc::lgetxattr(

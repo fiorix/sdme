@@ -42,19 +42,9 @@ impl NetworkConfig {
         Self {
             private_network: state.get("PRIVATE_NETWORK") == Some("1"),
             network_veth: state.get("NETWORK_VETH") == Some("1"),
-            network_bridge: state
-                .get("NETWORK_BRIDGE")
-                .filter(|s| !s.is_empty())
-                .map(String::from),
-            network_zone: state
-                .get("NETWORK_ZONE")
-                .filter(|s| !s.is_empty())
-                .map(String::from),
-            ports: state
-                .get("PORTS")
-                .filter(|s| !s.is_empty())
-                .map(|s| s.split(',').map(String::from).collect())
-                .unwrap_or_default(),
+            network_bridge: state.get_nonempty("NETWORK_BRIDGE").map(String::from),
+            network_zone: state.get_nonempty("NETWORK_ZONE").map(String::from),
+            ports: state.get_list("PORTS", ','),
         }
     }
 
@@ -82,11 +72,7 @@ impl NetworkConfig {
             None => state.remove("NETWORK_ZONE"),
         }
 
-        if self.ports.is_empty() {
-            state.remove("PORTS");
-        } else {
-            state.set("PORTS", self.ports.join(","));
-        }
+        state.set_list("PORTS", &self.ports, ',');
     }
 
     /// Generate systemd-nspawn arguments for network configuration.

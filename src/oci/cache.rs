@@ -14,6 +14,7 @@
 //! ```
 //! Where: `{digest}={size_bytes},{last_access_unix_epoch}`
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -96,7 +97,9 @@ impl BlobCache {
                 eprintln!("cache miss: {digest}");
             }
             // Clean stale index entry if present.
-            let _ = self.remove_index_entry(digest);
+            if let Err(e) = self.remove_index_entry(digest) {
+                eprintln!("warning: cache: failed to remove stale index entry for {digest}: {e}");
+            }
             return None;
         }
 
@@ -113,13 +116,21 @@ impl BlobCache {
                         eprintln!("cache miss: {digest} (size mismatch)");
                     }
                     // Remove stale entry and file.
-                    let _ = fs::remove_file(&blob_path);
-                    let _ = self.remove_index_entry(digest);
+                    if let Err(e) = fs::remove_file(&blob_path) {
+                        eprintln!("warning: cache: failed to remove stale blob {digest}: {e}");
+                    }
+                    if let Err(e) = self.remove_index_entry(digest) {
+                        eprintln!(
+                            "warning: cache: failed to remove stale index entry for {digest}: {e}"
+                        );
+                    }
                     return None;
                 }
                 // Update atime.
                 entry.2 = now_epoch();
-                let _ = self.save_index(&index);
+                if let Err(e) = self.save_index(&index) {
+                    eprintln!("warning: cache: failed to save index after atime update: {e}");
+                }
             }
             None => {
                 // File exists but not in index; stale file.
@@ -279,7 +290,7 @@ impl BlobCache {
 
         let mut freed: u64 = 0;
         let mut current = total;
-        let mut to_remove = Vec::new();
+        let mut to_remove = HashSet::new();
 
         for (digest, size, _) in &index {
             if current <= self.max_size {
@@ -287,7 +298,11 @@ impl BlobCache {
             }
             if let Some(hex) = digest.strip_prefix("sha256:") {
                 let blob_path = self.dir.join("sha256").join(hex);
-                if fs::remove_file(&blob_path).is_ok() {
+                if let Err(e) = fs::remove_file(&blob_path) {
+                    if verbose {
+                        eprintln!("warning: cache: failed to evict blob {digest}: {e}");
+                    }
+                } else {
                     if verbose {
                         eprintln!("cache: evicted {digest} ({size} bytes)");
                     }
@@ -295,7 +310,7 @@ impl BlobCache {
                     current -= size;
                 }
             }
-            to_remove.push(digest.clone());
+            to_remove.insert(digest.clone());
         }
 
         index.retain(|(d, _, _)| !to_remove.contains(d));

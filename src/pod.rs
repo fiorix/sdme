@@ -221,7 +221,7 @@ pub fn runtime_path(name: &str) -> String {
 fn create_netns(name: &str, verbose: bool) -> Result<()> {
     // 1. Save current netns fd.
     let saved_fd = {
-        let path = CString::new("/proc/self/ns/net").unwrap();
+        let path = CString::new("/proc/self/ns/net").expect("static string literal");
         let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
         if fd < 0 {
             return Err(std::io::Error::last_os_error())
@@ -305,7 +305,7 @@ fn bind_mount_netns(name: &str, verbose: bool) -> Result<()> {
     // Create empty file as mount point.
     fs::write(&target, "").with_context(|| format!("failed to create {}", target.display()))?;
 
-    let source = CString::new("/proc/self/ns/net").unwrap();
+    let source = CString::new("/proc/self/ns/net").expect("static string literal");
     let c_target =
         CString::new(target.as_os_str().as_encoded_bytes()).context("path contains null byte")?;
 

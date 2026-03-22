@@ -19,6 +19,7 @@ use anyhow::{bail, Context, Result};
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use std::collections::HashMap;
 
@@ -325,7 +326,14 @@ pub(super) fn detect_compression_magic(magic: &[u8]) -> Result<Compression> {
 /// Opens the file, reads the first 6 bytes to detect compression, then reopens
 /// the file and wraps it in the appropriate decoder. This avoids seeking (which
 /// not all readers support) by using a cheap reopen.
-pub(crate) fn open_decoder(path: &Path) -> Result<Box<dyn Read>> {
+///
+/// When the [`DecompressLimit`] is active, wraps the decoder in a
+/// [`LimitReader`] that errors when cumulative decompressed bytes exceed
+/// the limit.
+pub(crate) fn open_decoder_limited<'a>(
+    path: &Path,
+    limit: &'a DecompressLimit,
+) -> Result<Box<dyn Read + 'a>> {
     let mut file =
         File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     let mut magic = [0u8; 6];
@@ -333,7 +341,12 @@ pub(crate) fn open_decoder(path: &Path) -> Result<Box<dyn Read>> {
     drop(file);
     let file = File::open(path)?;
     let compression = detect_compression_magic(&magic[..n])?;
-    get_decoder(file, &compression)
+    let decoder = get_decoder(file, &compression)?;
+    if limit.is_active() {
+        Ok(Box::new(LimitReader::new(decoder, limit)))
+    } else {
+        Ok(decoder)
+    }
 }
 
 /// Get a decompression reader wrapping the given reader.
@@ -351,6 +364,73 @@ pub(super) fn get_decoder(
             Ok(Box::new(decoder))
         }
         Compression::None => Ok(Box::new(reader)),
+    }
+}
+
+// --- Decompression size limit ---
+
+/// A shared counter for tracking total decompressed bytes across readers.
+///
+/// Used by [`LimitReader`] to enforce a maximum decompressed size across
+/// multiple tar extraction passes (e.g. OCI layers).
+pub(crate) struct DecompressLimit {
+    total: AtomicU64,
+    max: u64,
+}
+
+impl DecompressLimit {
+    /// Create a new limit. When `max` is 0, the limit is unlimited.
+    pub(crate) fn new(max: u64) -> Self {
+        Self {
+            total: AtomicU64::new(0),
+            max,
+        }
+    }
+
+    /// Check whether the limit is active (non-zero).
+    pub(crate) fn is_active(&self) -> bool {
+        self.max > 0
+    }
+
+    /// Add bytes to the running total and check the limit.
+    fn add(&self, n: u64) -> std::io::Result<()> {
+        if self.max == 0 {
+            return Ok(());
+        }
+        let prev = self.total.fetch_add(n, Ordering::Relaxed);
+        if prev + n > self.max {
+            return Err(std::io::Error::other(format!(
+                "decompressed data exceeds maximum size of {} bytes",
+                self.max
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// A reader wrapper that enforces a decompressed size limit.
+///
+/// Wraps any `Read` implementation and counts bytes read through it,
+/// sharing a counter with a [`DecompressLimit`]. Returns an error when
+/// the cumulative decompressed data exceeds the configured maximum.
+pub(crate) struct LimitReader<'a, R> {
+    inner: R,
+    limit: &'a DecompressLimit,
+}
+
+impl<'a, R: Read> LimitReader<'a, R> {
+    pub(crate) fn new(inner: R, limit: &'a DecompressLimit) -> Self {
+        Self { inner, limit }
+    }
+}
+
+impl<R: Read> Read for LimitReader<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        if n > 0 {
+            self.limit.add(n as u64)?;
+        }
+        Ok(n)
     }
 }
 
@@ -542,7 +622,9 @@ fn import_url(
         match kind {
             DownloadedFileKind::QcowImage => img::import_qcow2(&temp_file, staging_dir, verbose),
             DownloadedFileKind::RawImage => img::import_raw(&temp_file, staging_dir, verbose),
-            DownloadedFileKind::Tarball => tar::import_tarball(&temp_file, staging_dir, verbose),
+            DownloadedFileKind::Tarball => {
+                tar::import_tarball(&temp_file, staging_dir, verbose, http.max_download_size)
+            }
         }
     })();
 
@@ -1135,7 +1217,9 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
     let mut oci_config = None;
     let result = match kind {
         SourceKind::Directory(ref path) => dir::do_import(path, &staging_dir, verbose),
-        SourceKind::Tarball(ref path) => tar::import_tarball(path, &staging_dir, verbose),
+        SourceKind::Tarball(ref path) => {
+            tar::import_tarball(path, &staging_dir, verbose, http.max_download_size)
+        }
         SourceKind::QcowImage(ref path) => img::import_qcow2(path, &staging_dir, verbose),
         SourceKind::RawImage(ref path) => img::import_raw(path, &staging_dir, verbose),
         SourceKind::Url(ref url) => import_url(url, &staging_dir, &rootfs_dir, name, verbose, http),

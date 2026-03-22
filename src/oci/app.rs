@@ -209,6 +209,7 @@ pub(crate) struct OciServiceSecurity {
 /// for `unshare()`+`mount()` before dropping it via `prctl(PR_CAPBSET_DROP)`.
 fn build_hardening_block(security: Option<&OciServiceSecurity>) -> String {
     use crate::security::OCI_DEFAULT_CAPS;
+    use std::collections::HashSet;
 
     // 1. Compute bounding set.
     let mut caps: Vec<String> = match security {
@@ -217,9 +218,10 @@ fn build_hardening_block(security: Option<&OciServiceSecurity>) -> String {
             vec!["CAP_SYS_ADMIN".to_string()]
         }
         Some(sec) => {
+            let drop_set: HashSet<&str> = sec.drop_caps.iter().map(|s| s.as_str()).collect();
             let mut set: Vec<String> = OCI_DEFAULT_CAPS
                 .iter()
-                .filter(|c| !sec.drop_caps.iter().any(|d| d == **c))
+                .filter(|c| !drop_set.contains(**c))
                 .map(|c| c.to_string())
                 .collect();
             // Ensure CAP_SYS_ADMIN is present even if someone tried to drop it.

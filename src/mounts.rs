@@ -29,21 +29,13 @@ impl BindConfig {
     /// Read bind config from a state file's key-value pairs.
     pub fn from_state(state: &State) -> Self {
         Self {
-            binds: state
-                .get("BINDS")
-                .filter(|s| !s.is_empty())
-                .map(|s| s.split('|').map(String::from).collect())
-                .unwrap_or_default(),
+            binds: state.get_list("BINDS", '|'),
         }
     }
 
     /// Write bind config into a state's key-value pairs.
     pub fn write_to_state(&self, state: &mut State) {
-        if self.binds.is_empty() {
-            state.remove("BINDS");
-        } else {
-            state.set("BINDS", self.binds.join("|"));
-        }
+        state.set_list("BINDS", &self.binds, '|');
     }
 
     /// Generate systemd-nspawn arguments for bind mounts.
@@ -196,21 +188,13 @@ impl EnvConfig {
     /// Read env config from a state file's key-value pairs.
     pub fn from_state(state: &State) -> Self {
         Self {
-            vars: state
-                .get("ENVS")
-                .filter(|s| !s.is_empty())
-                .map(|s| s.split('|').map(String::from).collect())
-                .unwrap_or_default(),
+            vars: state.get_list("ENVS", '|'),
         }
     }
 
     /// Write env config into a state's key-value pairs.
     pub fn write_to_state(&self, state: &mut State) {
-        if self.vars.is_empty() {
-            state.remove("ENVS");
-        } else {
-            state.set("ENVS", self.vars.join("|"));
-        }
+        state.set_list("ENVS", &self.vars, '|');
     }
 
     /// Generate systemd-nspawn arguments for environment variables.

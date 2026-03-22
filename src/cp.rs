@@ -171,11 +171,7 @@ pub fn cp(datadir: &Path, src: &CpEndpoint, dst: &CpEndpoint, opts: &CpOptions) 
     )
 }
 
-fn resolve_source(
-    datadir: &Path,
-    endpoint: &CpEndpoint,
-    verbose: bool,
-) -> Result<ResolvedSource> {
+fn resolve_source(datadir: &Path, endpoint: &CpEndpoint, verbose: bool) -> Result<ResolvedSource> {
     match endpoint {
         CpEndpoint::Host(path) => {
             if !path.exists() {
@@ -289,10 +285,9 @@ fn resolve_source(
                 // Lock ordering: fs before containers.
                 let rootfs_lock = if !rootfs_name.is_empty() {
                     Some(
-                        lock::lock_shared(datadir, "fs", rootfs_name)
-                            .with_context(|| {
-                                format!("cannot lock rootfs '{rootfs_name}' for reading")
-                            })?,
+                        lock::lock_shared(datadir, "fs", rootfs_name).with_context(|| {
+                            format!("cannot lock rootfs '{rootfs_name}' for reading")
+                        })?,
                     )
                 } else {
                     None
@@ -429,10 +424,9 @@ fn resolve_destination(
                 // Lock ordering: fs before containers.
                 let rootfs_lock = if !rootfs_name.is_empty() {
                     Some(
-                        lock::lock_shared(datadir, "fs", rootfs_name)
-                            .with_context(|| {
-                                format!("cannot lock rootfs '{rootfs_name}' for reading")
-                            })?,
+                        lock::lock_shared(datadir, "fs", rootfs_name).with_context(|| {
+                            format!("cannot lock rootfs '{rootfs_name}' for reading")
+                        })?,
                     )
                 } else {
                     None
@@ -546,9 +540,7 @@ fn scan_dir_safety(dir: &Path, opts: &CpOptions) -> Result<()> {
     }
 
     if suid_count > 0 {
-        eprintln!(
-            "warning: source directory contains {suid_count} setuid/setgid file(s)"
-        );
+        eprintln!("warning: source directory contains {suid_count} setuid/setgid file(s)");
     }
 
     Ok(())
@@ -600,10 +592,8 @@ fn warn_rootfs_in_use(datadir: &Path, rootfs_name: &str) {
             Ok(s) => s,
             Err(_) => continue,
         };
-        if state.rootfs() == rootfs_name {
-            if systemd::is_active(&name).unwrap_or(false) {
-                running.push(name);
-            }
+        if state.rootfs() == rootfs_name && systemd::is_active(&name).unwrap_or(false) {
+            running.push(name);
         }
     }
 
@@ -931,7 +921,10 @@ mod tests {
         execute_copy(&src_file, &upper, &lower, &dst, false).unwrap();
 
         assert!(upper.join("etc/marker").is_file());
-        assert_eq!(fs::read_to_string(upper.join("etc/marker")).unwrap(), "data");
+        assert_eq!(
+            fs::read_to_string(upper.join("etc/marker")).unwrap(),
+            "data"
+        );
     }
 
     #[test]

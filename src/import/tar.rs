@@ -8,7 +8,7 @@ use std::path::Path;
 use crate::check_interrupted;
 use crate::copy::make_removable;
 
-use super::{detect_compression, get_decoder};
+use super::{detect_compression, get_decoder, DecompressLimit, LimitReader};
 use crate::oci::layout::{import_oci_layout, is_oci_layout};
 
 /// Unpack a tar archive from a reader into a destination directory.
@@ -34,8 +34,14 @@ pub(super) fn unpack_tar<R: Read>(reader: R, dest: &Path) -> Result<()> {
 /// Extract a tarball into the staging directory using native Rust crates.
 ///
 /// After extraction, checks if the result is an OCI image layout and
-/// processes it accordingly.
-pub(super) fn import_tarball(tarball: &Path, staging_dir: &Path, verbose: bool) -> Result<()> {
+/// processes it accordingly. `max_decompressed` limits total decompressed
+/// bytes written to disk (0 = unlimited).
+pub(super) fn import_tarball(
+    tarball: &Path,
+    staging_dir: &Path,
+    verbose: bool,
+    max_decompressed: u64,
+) -> Result<()> {
     let compression = detect_compression(tarball)?;
 
     fs::create_dir_all(staging_dir)
@@ -49,10 +55,18 @@ pub(super) fn import_tarball(tarball: &Path, staging_dir: &Path, verbose: bool) 
         );
     }
 
+    let limit = DecompressLimit::new(max_decompressed);
     let file =
         File::open(tarball).with_context(|| format!("failed to open {}", tarball.display()))?;
 
-    unpack_tar(get_decoder(file, &compression)?, staging_dir)?;
+    let decoder = get_decoder(file, &compression)?;
+    let reader: Box<dyn Read> = if limit.is_active() {
+        Box::new(LimitReader::new(decoder, &limit))
+    } else {
+        decoder
+    };
+
+    unpack_tar(reader, staging_dir)?;
 
     // Check if the extracted content is an OCI image layout.
     if is_oci_layout(staging_dir) {
@@ -66,7 +80,7 @@ pub(super) fn import_tarball(tarball: &Path, staging_dir: &Path, verbose: bool) 
         oci_name.push(".oci");
         let oci_dir = staging_dir.with_file_name(oci_name);
         fs::rename(staging_dir, &oci_dir)?;
-        let result = import_oci_layout(&oci_dir, staging_dir, verbose);
+        let result = import_oci_layout(&oci_dir, staging_dir, verbose, max_decompressed);
         let _ = make_removable(&oci_dir);
         let _ = fs::remove_dir_all(&oci_dir);
         return result;

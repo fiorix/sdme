@@ -33,8 +33,8 @@
 pub mod build;
 pub mod config;
 pub mod containers;
-pub mod cp;
 pub(crate) mod copy;
+pub mod cp;
 pub(crate) mod devfd_shim;
 pub(crate) mod elf;
 pub mod export;
@@ -308,6 +308,39 @@ impl State {
         self.entries.remove(key);
     }
 
+    /// Get a delimited list value, returning empty Vec for missing/empty keys.
+    pub fn get_list(&self, key: &str, delimiter: char) -> Vec<String> {
+        self.get(key)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.split(delimiter).map(String::from).collect())
+            .unwrap_or_default()
+    }
+
+    /// Set a delimited list, removing the key when empty.
+    pub fn set_list(&mut self, key: &str, values: &[String], delimiter: char) {
+        if values.is_empty() {
+            self.remove(key);
+        } else {
+            let joined: String =
+                values
+                    .iter()
+                    .enumerate()
+                    .fold(String::new(), |mut acc, (i, v)| {
+                        if i > 0 {
+                            acc.push(delimiter);
+                        }
+                        acc.push_str(v);
+                        acc
+                    });
+            self.set(key, joined);
+        }
+    }
+
+    /// Get a non-empty string value (returns None for missing or empty).
+    pub fn get_nonempty(&self, key: &str) -> Option<&str> {
+        self.get(key).filter(|s| !s.is_empty())
+    }
+
     /// Parse KEY=VALUE lines into a new state.
     ///
     /// # Examples
@@ -503,6 +536,7 @@ fn validate_cpus(s: &str) -> Result<()> {
 }
 
 /// Convert a cpus string to a percentage for CPUQuota.
+// Safe: validate_cpus() has already verified this parses to a positive f64
 fn cpus_to_quota(s: &str) -> u64 {
     let v: f64 = s.parse().unwrap_or(1.0);
     (v * 100.0).round() as u64
@@ -872,6 +906,75 @@ mod tests {
 
         assert_eq!(state.get("MEMORY"), Some("4G"));
         assert_eq!(state.get("CPUS"), None); // removed
+    }
+
+    // --- State helper tests ---
+
+    #[test]
+    fn test_get_list_present() {
+        let state = State::parse("CAPS=A,B,C\n").unwrap();
+        assert_eq!(state.get_list("CAPS", ','), vec!["A", "B", "C"]);
+    }
+
+    #[test]
+    fn test_get_list_missing() {
+        let state = State::new();
+        let result: Vec<String> = state.get_list("CAPS", ',');
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_get_list_empty_value() {
+        let state = State::parse("CAPS=\n").unwrap();
+        let result: Vec<String> = state.get_list("CAPS", ',');
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_get_list_pipe_delimiter() {
+        let state = State::parse("BINDS=a|b|c\n").unwrap();
+        assert_eq!(state.get_list("BINDS", '|'), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_set_list_nonempty() {
+        let mut state = State::new();
+        state.set_list("CAPS", &["A".into(), "B".into()], ',');
+        assert_eq!(state.get("CAPS"), Some("A,B"));
+    }
+
+    #[test]
+    fn test_set_list_empty_removes() {
+        let mut state = State::new();
+        state.set("CAPS", "old");
+        state.set_list("CAPS", &[], ',');
+        assert_eq!(state.get("CAPS"), None);
+    }
+
+    #[test]
+    fn test_set_list_roundtrip() {
+        let mut state = State::new();
+        let values = vec!["x".to_string(), "y".to_string(), "z".to_string()];
+        state.set_list("ITEMS", &values, '|');
+        assert_eq!(state.get_list("ITEMS", '|'), values);
+    }
+
+    #[test]
+    fn test_get_nonempty_present() {
+        let state = State::parse("KEY=value\n").unwrap();
+        assert_eq!(state.get_nonempty("KEY"), Some("value"));
+    }
+
+    #[test]
+    fn test_get_nonempty_missing() {
+        let state = State::new();
+        assert_eq!(state.get_nonempty("KEY"), None);
+    }
+
+    #[test]
+    fn test_get_nonempty_empty_value() {
+        let state = State::parse("KEY=\n").unwrap();
+        assert_eq!(state.get_nonempty("KEY"), None);
     }
 }
 

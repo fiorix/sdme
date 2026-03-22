@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use crate::check_interrupted;
 use crate::copy::{make_removable, sanitize_dest_path};
 
-use crate::import::open_decoder;
+use crate::import::{open_decoder_limited, DecompressLimit};
 
 /// Deserialized `oci-layout` file.
 #[derive(Deserialize)]
@@ -95,7 +95,13 @@ fn resolve_blob(oci_dir: &Path, digest: &str) -> Result<PathBuf> {
 }
 
 /// Import an OCI image layout by reading the manifest chain and extracting layers.
-pub(crate) fn import_oci_layout(oci_dir: &Path, staging_dir: &Path, verbose: bool) -> Result<()> {
+/// `max_decompressed` limits total decompressed bytes across all layers (0 = unlimited).
+pub(crate) fn import_oci_layout(
+    oci_dir: &Path,
+    staging_dir: &Path,
+    verbose: bool,
+    max_decompressed: u64,
+) -> Result<()> {
     // Validate oci-layout version.
     let layout: OciLayout = read_json(&oci_dir.join("oci-layout"))?;
     if layout.image_layout_version != "1.0.0" {
@@ -140,7 +146,8 @@ pub(crate) fn import_oci_layout(oci_dir: &Path, staging_dir: &Path, verbose: boo
     fs::create_dir_all(staging_dir)
         .with_context(|| format!("failed to create staging dir {}", staging_dir.display()))?;
 
-    // Extract layers in order.
+    // Extract layers in order, sharing a decompression size limit across all layers.
+    let limit = DecompressLimit::new(max_decompressed);
     for (i, layer) in manifest.layers.iter().enumerate() {
         check_interrupted()?;
         let blob_path = resolve_blob(oci_dir, &layer.digest)?;
@@ -153,7 +160,7 @@ pub(crate) fn import_oci_layout(oci_dir: &Path, staging_dir: &Path, verbose: boo
             );
         }
 
-        let decoder = open_decoder(&blob_path)?;
+        let decoder = open_decoder_limited(&blob_path, &limit)?;
         unpack_oci_layer(decoder, staging_dir)?;
     }
 

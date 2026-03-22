@@ -106,27 +106,12 @@ impl SecurityConfig {
     pub fn from_state(state: &State) -> Self {
         Self {
             userns: state.is_yes("USERNS"),
-            drop_caps: state
-                .get("DROP_CAPS")
-                .filter(|s| !s.is_empty())
-                .map(|s| s.split(',').map(String::from).collect())
-                .unwrap_or_default(),
-            add_caps: state
-                .get("ADD_CAPS")
-                .filter(|s| !s.is_empty())
-                .map(|s| s.split(',').map(String::from).collect())
-                .unwrap_or_default(),
+            drop_caps: state.get_list("DROP_CAPS", ','),
+            add_caps: state.get_list("ADD_CAPS", ','),
             no_new_privileges: state.is_yes("NO_NEW_PRIVS"),
             read_only: state.is_yes("READ_ONLY"),
-            system_call_filter: state
-                .get("SYSCALL_FILTER")
-                .filter(|s| !s.is_empty())
-                .map(|s| s.split(',').map(String::from).collect())
-                .unwrap_or_default(),
-            apparmor_profile: state
-                .get("APPARMOR_PROFILE")
-                .filter(|s| !s.is_empty())
-                .map(String::from),
+            system_call_filter: state.get_list("SYSCALL_FILTER", ','),
+            apparmor_profile: state.get_nonempty("APPARMOR_PROFILE").map(String::from),
         }
     }
 
@@ -138,17 +123,8 @@ impl SecurityConfig {
             state.remove("USERNS");
         }
 
-        if self.drop_caps.is_empty() {
-            state.remove("DROP_CAPS");
-        } else {
-            state.set("DROP_CAPS", self.drop_caps.join(","));
-        }
-
-        if self.add_caps.is_empty() {
-            state.remove("ADD_CAPS");
-        } else {
-            state.set("ADD_CAPS", self.add_caps.join(","));
-        }
+        state.set_list("DROP_CAPS", &self.drop_caps, ',');
+        state.set_list("ADD_CAPS", &self.add_caps, ',');
 
         if self.no_new_privileges {
             state.set("NO_NEW_PRIVS", "yes");
@@ -162,11 +138,7 @@ impl SecurityConfig {
             state.remove("READ_ONLY");
         }
 
-        if self.system_call_filter.is_empty() {
-            state.remove("SYSCALL_FILTER");
-        } else {
-            state.set("SYSCALL_FILTER", self.system_call_filter.join(","));
-        }
+        state.set_list("SYSCALL_FILTER", &self.system_call_filter, ',');
 
         match &self.apparmor_profile {
             Some(p) => state.set("APPARMOR_PROFILE", p.as_str()),
