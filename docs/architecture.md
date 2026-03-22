@@ -17,20 +17,8 @@ writes, and you have a full-featured Linux environment that shares the
 host's binaries but can't damage the host's files. That was the seed.
 
 From there it grew: importing rootfs from other distros, pulling OCI
-images from Docker Hub, building custom root filesystems, managing
-container lifecycle through D-Bus. Each piece turned out to be
-surprisingly tractable when you let claude (and systemd) do the heavy
-lifting.
-
-sdme is not similar to Podman, Docker, or any other container runtime.
-It is a different thing entirely. It boots full systemd inside nspawn
-containers, manages overlayfs layering directly, and bridges the OCI
-ecosystem, all without a daemon and without pulling in a container
-runtime.
-
-You get the operational model of systemd (journalctl, systemctl,
-resource limits) with the packaging model of OCI (Docker Hub, GHCR,
-Quay).
+images from registries, building custom root filesystems, and managing
+container lifecycle through D-Bus.
 
 The name stands for *Systemd Machine Editor*, and its pronunciation is
 left as an exercise for the reader.
@@ -307,8 +295,8 @@ failure or interrupt and preserves it on disk. All paths use
 ## 5. Container Names
 
 When you don't specify a name, sdme generates one from a wordlist of
-200 Tupi-Guarani words and variations. The choice is an easter egg, a
-nod to the indigenous languages of Brazil - our roots!
+200 Tupi-Guarani words and variations. The wordlist draws from Tupi-Guarani, an indigenous language family of
+Brazil.
 
 Name generation shuffles the wordlist (Fisher-Yates, seeded from
 `/dev/urandom`), checks each candidate against the three-way conflict
@@ -471,7 +459,7 @@ are skipped and execution resumes from the failed step. The state
 file stores `BUILD_CONFIG_HASH` and `BUILD_LAST_COMPLETED_OP` (0-based
 index). If the config changes, the stale build container is removed
 and a fresh build starts. `--no-cache` forces a clean build. COPY
-source file changes are not tracked — use `--no-cache` when sources
+source file changes are not tracked; use `--no-cache` when sources
 change.
 
 **Stale build cleanup.** If a prior build was interrupted (Ctrl+C,
@@ -544,11 +532,11 @@ set, `--free-space` is ignored.
 
 ### Container export (default)
 
-Container export is the default mode — a bare name (no `fs:` prefix)
+Container export is the default mode. A bare name (no `fs:` prefix)
 exports the named container. If the container is running, the export
 reads directly from `merged/` with a consistency warning. If stopped,
 it mounts a **read-only** overlayfs view via `mount_overlay_ro()`
-(multi-lower `lowerdir=upper:rootfs` — no upperdir/workdir needed)
+(multi-lower `lowerdir=upper:rootfs`; no upperdir/workdir needed)
 wrapped in an `OverlayGuard` that unmounts on drop. A `Txn` with
 `TxnKind::Export` marks the overlay mount lifetime so `sdme fs gc`
 can detect and clean up stale mounts from interrupted exports.
@@ -1244,10 +1232,6 @@ Everything below this line is experimental. These features work and
 are actively developed, but their interfaces may change.
 
 ## 16. OCI Integration
-
-> *The goal isn't to replace Docker or Podman. It's to give systemd-nspawn users
-> a way to tap into the OCI ecosystem without leaving the systemd operational
-> model.*
 
 ### Learning the spec
 

@@ -16,7 +16,7 @@ AppArmor, `--hardened`, `--strict`), see
 
 sdme's security model is different from Docker and Podman by design. The
 full systemd init environment inside every container is not a compromise;
-it is the primary value proposition.
+it is a core design choice.
 
 ### Familiar systems
 
@@ -66,9 +66,9 @@ privileges. Every other restriction matches or exceeds Docker defaults.
 
 For environments that cannot accept `CAP_SYS_ADMIN` under any
 circumstances, Docker or Podman is the right choice. For environments
-that value operational familiarity, extensibility, and the full power
-of systemd, sdme with `--strict` provides strong isolation while
-preserving these benefits.
+that need operational familiarity and the full systemd environment,
+sdme with `--strict` applies comparable restrictions while preserving
+these properties.
 
 ## 2. Design Philosophy and Scope
 
@@ -84,17 +84,17 @@ and has no persistent daemon.
 
 **Docker** applies defense-in-depth by default: reduced capabilities, a
 restrictive seccomp profile, a default AppArmor profile, and optional user
-namespace remapping. It is daemon-based (containerd) and designed for
+namespace remapping. It uses a daemon (containerd) and targets
 application containers that typically run a single process.
 
 **Podman** provides similar defense-in-depth with rootless execution by
 default, SELinux integration on Fedora/RHEL, and a daemonless architecture.
 It is designed for OCI-compatible workflows and Docker CLI compatibility.
 
-The key philosophical difference: Docker and Podman apply security layers by
-default and require explicit opt-out. sdme provides the layers but requires
-explicit opt-in (or `--hardened` for a sensible bundle). Out of the box,
-sdme trusts its workloads; Docker and Podman do not.
+The key difference: Docker and Podman apply security layers by default
+and require explicit opt-out. sdme provides the layers but requires
+explicit opt-in (or `--hardened` for a reasonable bundle). Out of the
+box, sdme applies no restrictions; Docker and Podman do.
 
 ## 3. Namespace Isolation
 

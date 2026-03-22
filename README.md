@@ -109,6 +109,8 @@ pods from standard Kubernetes manifests.
 
 ## Further reading
 
+Every command is documented via `sdme <command> --help`.
+
 - [docs/architecture.md](docs/architecture.md): internals, design, OCI
   bridging, Kubernetes mapping
 - [docs/security.md](docs/security.md): container isolation model,
