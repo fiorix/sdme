@@ -57,6 +57,7 @@ Runner options: `--jobs N`, `--timeout-scale N`, `--stagger N`,
 | preflight.sh | Environment validation (no containers) |
 | smoke.sh | Minimal container lifecycle gate test |
 | verify-interrupt.sh | SIGINT/SIGTERM abort handling |
+| verify-cp.sh | File copy between host, containers, and rootfs |
 | verify-export.sh | Rootfs/container export (dir, tar, raw image) |
 | verify-build.sh | `sdme fs build` hot COPY, source prefixes, locking, cache/resume |
 | verify-security.sh | Capabilities, seccomp, AppArmor, userns, hardened |
@@ -121,36 +122,42 @@ automatically via `fix_redis_oci()` in lib.sh.
 
 ## Results
 
-Last verified: 2026-03-21
+Last verified: 2026-03-22
 
-System: Linux 6.19.6-2-cachyos (x86_64), systemd 259, sdme 0.5.0,
+System: Linux 6.19.6-2-cachyos (x86_64), systemd 259, sdme 0.5.2,
 AppArmor enabled
 
 | # | Test Suite | Status | Pass | Fail | Skip |
 |---|-----------|--------|------|------|------|
-| 1 | verify-export | PASS | 20 | 0 | 0 |
-| 2 | verify-build | PASS | 11 | 0 | 0 |
-| 3 | verify-security | PASS | 31 | 0 | 0 |
-| 4 | verify-pods | PASS | 9 | 0 | 0 |
-| 5 | verify-network | PASS | 9 | 0 | 0 |
-| 6 | verify-oci | PASS | 18 | 0 | 0 |
-| 7 | verify-distro-boot | PASS | 63 | 0 | 0 |
-| 8 | verify-distro-oci | PASS | 175 | 0 | 0 |
-| 9 | verify-nixos | PASS | 26 | 0 | 0 |
-| 10 | verify-usage | PASS | 49 | 0 | 0 |
-| 11 | verify-kube-L1-basic | PASS | 14 | 0 | 0 |
-| 12 | verify-kube-L2-spec | PASS | 12 | 0 | 0 |
-| 13 | verify-kube-L2-probes | PASS | 41 | 0 | 0 |
-| 14 | verify-kube-L2-security | PASS | 17 | 0 | 0 |
-| 15 | verify-kube-L3-secrets | PASS | 16 | 0 | 0 |
-| 16 | verify-kube-L3-volumes | PASS | 39 | 0 | 0 |
-| 17 | verify-kube-L4-networking | PASS | 6 | 0 | 0 |
-| 18 | verify-kube-L5-redis-stack | PASS | 6 | 0 | 0 |
-| 19 | verify-kube-L6-gitea-stack | PASS | 15 | 0 | 0 |
+| 1 | verify-build | PASS | 11 | 0 | 0 |
+| 2 | verify-cp | PASS | 16 | 0 | 0 |
+| 3 | verify-distro-boot | PASS | 63 | 0 | 0 |
+| 4 | verify-distro-oci | PASS | 175 | 0 | 0 |
+| 5 | verify-export | PASS | 20 | 0 | 0 |
+| 6 | verify-kube-L1-basic | PASS | 14 | 0 | 0 |
+| 7 | verify-kube-L2-probes | PASS | 41 | 0 | 0 |
+| 8 | verify-kube-L2-security | PASS | 17 | 0 | 0 |
+| 9 | verify-kube-L2-spec | PASS | 12 | 0 | 0 |
+| 10 | verify-kube-L3-secrets | PASS | 16 | 0 | 0 |
+| 11 | verify-kube-L3-volumes | PASS | 39 | 0 | 0 |
+| 12 | verify-kube-L4-networking | PASS | 6 | 0 | 0 |
+| 13 | verify-kube-L5-redis-stack | PASS | 6 | 0 | 0 |
+| 14 | verify-kube-L6-gitea-stack | PASS | 15 | 0 | 0 |
+| 15 | verify-network | PASS | 9 | 0 | 0 |
+| 16 | verify-nixos | PASS | 26 | 0 | 0 |
+| 17 | verify-oci | PASS | 18 | 0 | 0 |
+| 18 | verify-pods | PASS | 9 | 0 | 0 |
+| 19 | verify-security | PASS | 31 | 0 | 0 |
+| 20 | verify-usage | PASS | 49 | 0 | 0 |
 
-**Totals: 577 passed, 0 failed, 0 skipped -- 19 suites**
+**Totals: 593 passed, 0 failed, 0 skipped -- 20 suites**
 
 ## Log
+
+### 0.5.2 -- sdme cp, version bump (2026-03-22, x86_64)
+
+593 passed, 0 failed, 0 skipped across 20 suites. New verify-cp suite
+(16 tests). Clean run. Wall clock: 9m33s.
 
 ### 0.5.0 -- version bump, clean run (2026-03-21, x86_64)
 
