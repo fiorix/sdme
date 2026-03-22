@@ -174,17 +174,11 @@ parseable with `grep`, editable with `sed` in an emergency. The `State`
 type in the code uses a `BTreeMap<String, String>` for deterministic
 key ordering.
 
-**Transactional operations** follow a staging pattern throughout sdme.
-Mutating filesystem operations write to enumerated staging directories
-named `.{name}.{kind}-txn-{pid}` (e.g. `.ubuntu.import-txn-42195`),
-then do an atomic `rename()` to the final path on success. If the
-operation fails or is interrupted, the staging directory is left behind;
-no cleanup runs during signal handling. On the next mutating
-operation, `cleanup_stale_txns()` detects dead PIDs via `/proc/{pid}`
-and removes their artifacts automatically (controlled by the
-`auto_fs_gc` config key, default `true`). Manual cleanup is available
-via `sdme fs gc`. The `Txn` type in `src/txn.rs` encodes the operation
-kind and creator PID.
+**Transactional operations** ensure that failed or interrupted mutations
+never leave a half-written artifact in place. All mutating filesystem
+operations use atomic staging directories with a rename-on-success
+pattern. See [Reliability](#15-reliability) for details on staging,
+locking, and interrupt handling.
 
 **Health detection** in `sdme ps` checks that a container's expected
 directories actually exist and that its rootfs (if specified) is
@@ -282,15 +276,10 @@ crash or unclean shutdown:
    an error, preventing accidental removal of host filesystem
    contents that were visible through a stale bind mount.
 
-**Boot failure cleanup** differs between `sdme new` and `sdme start`.
-If `sdme new` or `sdme kube apply` fails to boot or join the container
-(or is interrupted with Ctrl+C or SIGTERM), it stops the container but
-preserves it on disk for debugging or manual cleanup via `sdme rm`.
-`sdme start` behaves the same way: it stops the container on boot
-failure or interrupt and preserves it on disk. All paths use
-`save_and_reset_interrupt()` before the stop operation so that
-`check_interrupted()` in the stop path does not short-circuit, then
-`restore_interrupt()` afterward so the interrupt propagates to callers.
+**Boot failure cleanup.** If `sdme new`, `sdme kube apply`, or
+`sdme start` fails to boot (or is interrupted), the container is
+stopped but preserved on disk for debugging. See
+[Reliability](#15-reliability) for the interrupt handling details.
 
 ## 5. Container Names
 
@@ -324,7 +313,8 @@ Containers reference them by name.
   (e.g. `docker.io/ubuntu:24.04`, `quay.io/fedora/fedora`). Pulled via
   the OCI Distribution Spec.
 - **Directory**: path is a directory. Copied with `copy_tree()`
-  preserving ownership, permissions, xattrs, and special files.
+  preserving ownership, permissions, xattrs, hard links, and special
+  files.
 - **QCOW2 image**: magic bytes `QFI\xfb` at the start of the file.
   Mounted read-only via `qemu-nbd`, then copied with `copy_tree()`.
 - **Raw disk image**: MBR/GPT signature or `.raw`/`.img` extension.
@@ -344,9 +334,23 @@ use `l`-prefixed variants (lstat, lchown, lgetxattr) to avoid following
 symlinks.
 
 **Extended attributes** carry security and filesystem metadata.
-`copy_xattrs()` lists and copies all xattrs except `security.selinux`
-(which doesn't transfer meaningfully between filesystems). The overlayfs
-`trusted.overlay.opaque` xattr is preserved when present.
+`read_xattrs()` lists all xattrs except `security.selinux`;
+`copy_xattrs()` calls it and writes each attribute to the destination.
+SELinux labels are skipped because they reference types and roles from
+the source system's installed policy, which may not exist on the
+destination. The correct practice is to relabel via `restorecon` or
+`/.autorelabel` against the active policy after import; this is what
+container runtimes (Docker, Podman) do as well. The overlayfs
+`trusted.overlay.opaque` xattr is preserved when present. The same
+`read_xattrs()` function is used by the tar export path to emit
+`SCHILY.xattr.*` PAX extended headers.
+
+**Hard links** are preserved by `copy_tree()` via a `HardLinkMap` that
+tracks `(st_dev, st_ino)` → destination path. When a file with
+`st_nlink > 1` is encountered and its inode was already copied, a hard
+link is created instead of duplicating the data. This preserves link
+semantics and avoids doubling disk usage for packages that hard-link
+identical files (common in `/usr/share/doc`, locale data, etc.).
 
 **Special files** (block devices, character devices, FIFOs, and Unix
 sockets) are recreated with `mknod()` and `mkfifo()` using the original
@@ -356,12 +360,12 @@ mode and device numbers. This matters for rootfs that include
 **Compression auto-detection** uses magic bytes rather than file
 extensions. The first few bytes of a file reveal its compression format:
 
-| Magic bytes            | Format |
-|------------------------|--------|
-| `1f 8b`                | gzip   |
-| `BZh`                  | bzip2  |
-| `fd 37 7a 58 5a 00`   | xz     |
-| `28 b5 2f fd`          | zstd   |
+| Magic bytes          | Format |
+|----------------------|--------|
+| `1f 8b`              | gzip   |
+| `BZh`                | bzip2  |
+| `fd 37 7a 58 5a 00`  | xz     |
+| `28 b5 2f fd`        | zstd   |
 
 This means `sdme fs import ubuntu rootfs.tar.zst` works even if the
 file is named `rootfs.tar`, because the content, not the name,
@@ -383,29 +387,20 @@ zone containers that need resolved, `systemd-logind` is unmasked if
 masked (some OCI images like CentOS/AlmaLinux mask it, but
 `machinectl shell` requires logind), and missing packages needed by
 `machinectl shell` (e.g. `util-linux` and `pam` on RHEL-family, which
-provide `/etc/pam.d/login`) are installed via chroot. Service masking
-(e.g. `systemd-resolved`) is handled at container create time via the
-configurable `--masked-services` / `default_create_masked_services`
-mechanism, not at import time.
+provide `/etc/pam.d/login`) are installed via chroot. The chroot
+commands that make a rootfs bootable are per-distro and configurable
+via `distros.<family>.import_prehook` in `/etc/sdme.conf` (see
+[Configuration](#13-configuration) for the full list of prehook keys
+and family names). Absent means use built-in defaults; an empty array
+explicitly does nothing. Service masking (e.g. `systemd-resolved`) is
+handled at container create time via the configurable
+`--masked-services` / `default_create_masked_services` mechanism, not
+at import time.
 
-**Staging areas and atomic operations** ensure that a failed import
-doesn't leave a half-written rootfs. The staging directory
-`.{name}.{kind}-txn-{pid}` is renamed to the final location only on
-complete success. If the operation is interrupted, the staging directory
-is left behind. On the next mutating operation, stale staging from dead
-PIDs is automatically cleaned up (when `auto_fs_gc` is enabled), or
-manually via `sdme fs gc`.
-
-**Cooperative interrupt handling** runs throughout the import pipeline.
-A global `INTERRUPTED` flag is set by a POSIX signal handler for both
-SIGINT and SIGTERM (installed with `sigaction`, deliberately without
-`SA_RESTART` so blocking reads return `EINTR`). `INTERRUPT_SIGNAL`
-records which signal fired for correct exit codes (128+signum).
-`check_interrupted()` is called after every subprocess `.status()`
-wait, not just between loop iterations, allowing clean cancellation of
-multi-gigabyte downloads and extractions. Second delivery of the same
-signal force-kills the process (the handler restores `SIG_DFL` after
-the first press).
+Import uses transactional staging and cooperative interrupt handling
+to ensure that a failed or interrupted import never leaves a
+half-written rootfs. Ctrl+C cleanly cancels multi-gigabyte downloads
+and extractions. See [Reliability](#15-reliability) for details.
 
 ## 7. fs build: Building Root Filesystems
 
@@ -448,9 +443,9 @@ rejected. Errors include the config file path and line number for easy
 debugging.
 
 **Resource locking.** Builds hold shared `flock` locks on the FROM
-rootfs and any COPY source rootfs or container. `sdme fs rm` and
-`sdme rm` acquire exclusive locks, so they block while a build is using
-the resource.
+rootfs and any COPY source containers/rootfs, preventing deletion while
+in use. See [Resource locking](#resource-locking) for the full locking
+model.
 
 **Resumable builds.** When a build fails at a RUN step, the build
 container's overlayfs upper layer is preserved. On re-run, if the
@@ -462,10 +457,11 @@ and a fresh build starts. `--no-cache` forces a clean build. COPY
 source file changes are not tracked; use `--no-cache` when sources
 change.
 
-**Stale build cleanup.** If a prior build was interrupted (Ctrl+C,
-crash) and cannot be resumed (config changed or `--no-cache`), the
-next `sdme fs build` invocation removes the stale staging container
-before proceeding. Manual cleanup is also available via `sdme fs gc`.
+**Stale build cleanup.** If a prior build was interrupted and cannot be
+resumed (config changed or `--no-cache`), the next `sdme fs build`
+removes the stale staging container before proceeding. Manual cleanup
+is also available via `sdme fs gc`. See
+[Reliability](#15-reliability) for the staging and cleanup model.
 
 After all operations complete, the engine mounts the overlayfs manually
 (the container is stopped), copies the merged view to a staging rootfs
@@ -485,15 +481,15 @@ The output format is determined by file extension, following the same
 convention as import's compression detection but using extensions
 instead of magic bytes (since we are creating, not reading):
 
-| Extension                  | Format              |
-|----------------------------|---------------------|
-| `.tar`                     | uncompressed tar    |
-| `.tar.gz`, `.tgz`         | gzip tar            |
-| `.tar.bz2`, `.tbz2`       | bzip2 tar           |
-| `.tar.xz`, `.txz`         | xz tar              |
-| `.tar.zst`, `.tzst`       | zstandard tar       |
-| `.img`, `.raw`            | raw disk image      |
-| anything else              | directory copy      |
+| Extension              | Format           |
+|------------------------|------------------|
+| `.tar`                 | uncompressed tar |
+| `.tar.gz`, `.tgz`      | gzip tar         |
+| `.tar.bz2`, `.tbz2`    | bzip2 tar        |
+| `.tar.xz`, `.txz`      | xz tar           |
+| `.tar.zst`, `.tzst`    | zstandard tar    |
+| `.img`, `.raw`         | raw disk image   |
+| anything else          | directory copy   |
 
 The `--fmt` flag overrides detection. Format names match the extension
 without the dot: `dir`, `tar`, `tar.gz`, `tar.bz2`, `tar.xz`,
@@ -502,17 +498,23 @@ without the dot: `dir`, `tar`, `tar.gz`, `tar.bz2`, `tar.xz`,
 ### Directory export
 
 Delegates to `copy_tree()` (the same function used by import), so
-ownership, permissions, xattrs, and special files are preserved. The
-destination must not already exist.
+ownership, permissions, xattrs, hard links, and special files are
+preserved. The destination must not already exist.
 
 ### Tarball export
 
 Creates a tar archive using the Rust `tar` crate. Each entry preserves
-uid/gid, permissions, and symlink targets. Compression uses the same
-Rust crates as import decompression (flate2, bzip2, xz2, zstd) but on
-the write side. Symlinks are stored as symlink entries (not followed).
-Block/char devices, FIFOs, and sockets are stored as header-only
-entries.
+uid/gid, permissions, and symlink targets. Hard links are tracked via a
+`(dev, ino)` map; the second and subsequent occurrences of a
+multiply-linked inode are written as `EntryType::Link` entries pointing
+to the first path, matching standard tar semantics. Extended attributes
+are written as `SCHILY.xattr.*` PAX extended headers via
+`builder.append_pax_extensions()`, preserving file capabilities, ACLs,
+and custom xattrs across export/import round-trips. Compression uses the
+same Rust crates as import decompression (flate2, bzip2, xz2, zstd) but
+on the write side. Symlinks are stored as symlink entries (not
+followed). Block/char devices, FIFOs, and sockets are stored as
+header-only entries.
 
 ### Raw disk image export
 
@@ -537,25 +539,13 @@ exports the named container. If the container is running, the export
 reads directly from `merged/` with a consistency warning. If stopped,
 it mounts a **read-only** overlayfs view via `mount_overlay_ro()`
 (multi-lower `lowerdir=upper:rootfs`; no upperdir/workdir needed)
-wrapped in an `OverlayGuard` that unmounts on drop. A `Txn` with
-`TxnKind::Export` marks the overlay mount lifetime so `sdme fs gc`
-can detect and clean up stale mounts from interrupted exports.
+wrapped in an `OverlayGuard` that unmounts on drop.
 
-### Resource locking
-
-The unified `export()` function holds shared `flock` locks for the
-duration of the export:
-
-- **Container lock** (`locks/containers/{name}.lock`): prevents
-  `sdme rm` from deleting the container during export.
-- **Rootfs lock** (`locks/fs/{rootfs}.lock`): prevents `sdme fs rm`
-  from deleting the lower-layer rootfs of a stopped container during
-  export. Also held for rootfs catalogue exports (`fs:` prefix).
-
-This matches the locking pattern used by `sdme fs build`. Locks are
-released by the kernel on process exit (flock semantics), so
-SIGKILL does not leave stale locks. Partial tar output files are
-cleaned up on error.
+Exports hold shared `flock` locks on the container and/or rootfs to
+prevent deletion mid-export, and use transactional staging for the
+overlay mount lifetime. Partial tar output files are cleaned up on
+error. See [Reliability](#15-reliability) for the full locking and
+staging model.
 
 ### Timezone
 
@@ -777,11 +767,11 @@ pipe-separated) and reconstituted into nspawn arguments on every start.
 
 sdme exposes three cgroup-based resource controls:
 
-| Flag                     | systemd property | Example             |
-|--------------------------|------------------|---------------------|
-| `--memory <size>`        | `MemoryMax=`     | `--memory 2G`       |
+| Flag                     | systemd property | Example            |
+|--------------------------|------------------|--------------------|
+| `--memory <size>`        | `MemoryMax=`     | `--memory 2G`      |
 | `--cpus <count>`         | `CPUQuota=`      | `--cpus 0.5` (50%) |
-| `--cpu-weight <1-10000>` | `CPUWeight=`     | `--cpu-weight 100`  |
+| `--cpu-weight <1-10000>` | `CPUWeight=`     | `--cpu-weight 100` |
 
 These flags are available on `sdme create`, `sdme new`, and `sdme set`.
 They are applied via a systemd drop-in file (`limits.conf`) installed
@@ -802,31 +792,31 @@ contended.
 
 sdme stores its settings in a TOML file at `/etc/sdme.conf`:
 
-| Setting                   | Default                          |
-|---------------------------|----------------------------------|
-| `interactive`             | `true`                           |
-| `datadir`                 | `/var/lib/sdme`                  |
-| `boot_timeout`            | `60`                             |
-| `join_as_sudo_user`       | `true`                           |
-| `host_rootfs_opaque_dirs` | `/etc/systemd/system,/var/log`   |
-| `hardened_drop_caps`      | `CAP_SYS_PTRACE,CAP_NET_RAW,...` |
-| `default_base_fs`         | (empty)                          |
-| `default_export_fs`       | `ext4`                           |
-| `tasks_max`               | `16384`                          |
-| `docker_user`             | (empty)                          |
-| `docker_token`            | (empty)                          |
-| `oci_cache_dir`           | (empty = `{datadir}/cache/oci`)  |
-| `oci_cache_max_size`      | `10G`                            |
-| `oci_manifest_cache_ttl`  | `900`                            |
-| `http_timeout`            | `30`                             |
-| `http_body_timeout`       | `300`                            |
-| `max_download_size`       | `50G`                            |
-| `default_create_masked_services` | `systemd-resolved.service` |
-| `stop_timeout_graceful`   | `90`                             |
-| `stop_timeout_terminate`  | `30`                             |
-| `stop_timeout_kill`       | `15`                             |
-| `auto_fs_gc`              | `true`                           |
-| `default_export_free_space` | `256M`                         |
+| Setting                          | Default                          |
+|----------------------------------|----------------------------------|
+| `interactive`                    | `true`                           |
+| `datadir`                        | `/var/lib/sdme`                  |
+| `boot_timeout`                   | `60`                             |
+| `join_as_sudo_user`              | `true`                           |
+| `host_rootfs_opaque_dirs`        | `/etc/systemd/system,/var/log`   |
+| `hardened_drop_caps`             | `CAP_SYS_PTRACE,CAP_NET_RAW,...` |
+| `default_base_fs`                | (empty)                          |
+| `default_export_fs`              | `ext4`                           |
+| `tasks_max`                      | `16384`                          |
+| `docker_user`                    | (empty)                          |
+| `docker_token`                   | (empty)                          |
+| `oci_cache_dir`                  | (empty = `{datadir}/cache/oci`)  |
+| `oci_cache_max_size`             | `10G`                            |
+| `oci_manifest_cache_ttl`         | `900`                            |
+| `http_timeout`                   | `30`                             |
+| `http_body_timeout`              | `300`                            |
+| `max_download_size`              | `50G`                            |
+| `default_create_masked_services` | `systemd-resolved.service`       |
+| `stop_timeout_graceful`          | `90`                             |
+| `stop_timeout_terminate`         | `30`                             |
+| `stop_timeout_kill`              | `15`                             |
+| `auto_fs_gc`                     | `true`                           |
+| `default_export_free_space`      | `256M`                           |
 
 - `interactive`: enable interactive prompts.
 - `datadir`: root directory for all container and rootfs data.
@@ -985,9 +975,13 @@ apparmor_parser -r /etc/apparmor.d/sdme-default
 The deb and rpm packages install and load the profile automatically.
 
 **SELinux is not supported.** sdme has no SELinux integration. During
-rootfs import (`sdme fs import`), `security.selinux` extended
-attributes are explicitly skipped because they do not transfer
-meaningfully between filesystems.
+rootfs import and copy operations, `security.selinux` extended
+attributes are explicitly skipped because they carry labels (types,
+roles, levels) from the source system's SELinux policy, which may not
+exist in the destination's policy. Preserving them would either be
+silently ignored or cause access denials on enforcing systems. The
+correct approach on SELinux-enabled hosts is to relabel after import
+via `restorecon -R` or by touching `/.autorelabel`.
 
 ### Privilege escalation prevention
 
@@ -1172,37 +1166,92 @@ the host filesystem through sdme, please open an issue.
 ## 15. Reliability
 
 Multi-step operations in sdme are designed to fail cleanly rather than
-leave broken state behind.
+leave broken state behind. This section is the single reference for
+transactional staging, signal handling, resource locking, and cleanup
+semantics; other sections link here rather than repeating the details.
 
-**Transactional staging** uses enumerated staging directories named
-`.{name}.{kind}-txn-{pid}` (e.g. `.ubuntu.import-txn-42195`) that are
-atomically renamed on success. On interruption or error, the staging
-directory is left behind; no cleanup runs during signal handling.
+### Transactional staging
+
+Mutating filesystem operations (import, build, export, kube create)
+write to enumerated staging directories named
+`.{name}.{kind}-txn-{pid}` (e.g. `.ubuntu.import-txn-42195`), then do
+an atomic `rename()` to the final path on success. If the operation
+fails or is interrupted, the staging directory is left behind; no
+cleanup runs during signal handling.
+
 Stale staging from dead PIDs is automatically cleaned up on the next
-mutating operation when `auto_fs_gc` is enabled (default), or manually
-via `sdme fs gc`. The `Txn` type in `src/txn.rs` encodes the operation
-kind and creator PID.
+mutating operation when `auto_fs_gc` is enabled (default `true`; see
+[Configuration](#13-configuration)), or manually via `sdme fs gc`. The
+`Txn` type in `src/txn.rs` encodes the operation kind and creator PID;
+`cleanup_stale_txns()` detects dead PIDs via `/proc/{pid}` and removes
+their artifacts.
 
-**Cooperative interrupt handling** uses a global `AtomicBool` flag set
-by a POSIX handler for both `SIGINT` and `SIGTERM`. The handler is
-installed without `SA_RESTART`, so blocking system calls (file reads,
-network I/O) return `EINTR` immediately. `INTERRUPT_SIGNAL` records
-which signal fired for correct exit codes (128+signum).
-`check_interrupted()` is called after every subprocess `.status()`
-wait, not just between loop iterations, allowing Ctrl+C or SIGTERM to
-cancel cleanly at any point. The handler restores `SIG_DFL` after the
-first delivery, so a second press of the same signal force-kills the
-process. This covers cases where Rust's stdlib retries
-`poll()`/`connect()` on EINTR, preventing cooperative cancellation
-during blocked DNS resolution or TCP connection attempts.
+Stopped container exports use a `Txn` with `TxnKind::Export` to mark
+the temporary read-only overlay mount lifetime, so `sdme fs gc` can
+detect and clean up stale mounts from interrupted exports.
 
-**Boot failure cleanup**: `sdme new` and `sdme kube apply` stop (but do
-not remove) the container on boot failure or interrupt, leaving it on
-disk for debugging or manual cleanup. `sdme start` behaves the same
-way. All paths use `save_and_reset_interrupt()` before the stop
+### Resource locking
+
+All operations that read or mutate containers, rootfs, pods, secrets,
+or configmaps use advisory `flock(2)` locks via `src/lock.rs`.
+
+- **Shared locks** (read) allow concurrent operations (build, export,
+  cp, start, create) and coexist with each other.
+- **Exclusive locks** (write) protect destructive mutations (rm, fs rm,
+  import, kube delete, pod rm) and block all other lock holders.
+
+Lock files live at `{datadir}/locks/{kind}/{name}.lock`. All locks are
+**non-blocking** (`LOCK_NB`): if a lock cannot be acquired immediately,
+the operation fails with an error identifying the holder PID (read from
+the lock file). Lock ordering to prevent deadlocks:
+`fs → containers → pods → secrets → configmaps`. Within the same kind,
+acquire shared before exclusive on different names.
+
+Locks are released automatically when the `ResourceLock` value is
+dropped (file descriptor closed). On process crash or `SIGKILL`, the
+kernel releases the lock. Flock semantics guarantee no stale locks.
+
+Examples:
+
+- `sdme fs build` holds shared locks on the FROM rootfs and any COPY
+  source rootfs or container. `sdme fs rm` and `sdme rm` acquire
+  exclusive locks, so they block while a build is using the resource.
+- `sdme fs export` holds shared locks on the container and/or rootfs
+  for the duration of the export, preventing `sdme rm` / `sdme fs rm`
+  from deleting resources mid-export.
+- `sdme cp` holds shared locks to prevent concurrent deletion during
+  copy.
+- `stop` operates via D-Bus (`KillMachine`/`TerminateMachine`) and
+  does **not** use flock, so stopping a container is never blocked by
+  any lock.
+
+### Cooperative interrupt handling
+
+A global `INTERRUPTED` `AtomicBool` flag is set by a POSIX signal
+handler for both `SIGINT` and `SIGTERM` (installed via `sigaction`
+without `SA_RESTART`, so blocking system calls (file reads, network
+I/O) return `EINTR` immediately). `INTERRUPT_SIGNAL` records which
+signal fired for correct exit codes (128+signum).
+
+`check_interrupted()` is called after every subprocess `.status()` wait,
+not just between loop iterations, allowing Ctrl+C or SIGTERM to cancel
+cleanly at any point, including multi-gigabyte downloads, extractions,
+and blocked DNS resolution or TCP connection attempts. The handler
+restores `SIG_DFL` after the first delivery, so a second press of the
+same signal force-kills the process.
+
+**Boot failure cleanup.** `sdme new`, `sdme kube apply`, and
+`sdme start` stop (but do not remove) the container on boot failure or
+interrupt, leaving it on disk for debugging or manual cleanup via
+`sdme rm`. All paths use `save_and_reset_interrupt()` before the stop
 operation so that `check_interrupted()` in the stop path does not
 short-circuit, then `restore_interrupt()` afterward so the interrupt
 propagates to callers.
+
+**Build failure cleanup.** If a build fails, the staging container is
+stopped on error. The overlayfs upper layer is preserved for resumable
+builds (see [fs build](#7-fs-build-building-root-filesystems)). Any
+partial rootfs is left behind for cleanup via `sdme fs gc`.
 
 **Multi-container loop cancellation.** Batch operations (`rm -a`,
 `start --all`, `stop`, `enable`, `disable`, `pod rm`, `fs rm`) use
@@ -1214,12 +1263,12 @@ Cleanup paths (boot failure, build failure) use
 `save_and_reset_interrupt()` / `restore_interrupt()` so the flag
 survives the cleanup stop and propagates to the outer loop.
 
-**Health checks** in `sdme ps` detect containers with missing
-directories or missing rootfs and report them as `broken` rather than
-crashing or silently hiding them.
+### Health checks
 
-**Build failure cleanup** stops the staging container on error. Any
-partial rootfs is left behind for cleanup via `sdme fs gc`.
+`sdme ps` detects containers with missing directories or missing rootfs
+and reports them as `broken` rather than crashing or silently hiding
+them. OS detection uses the container's overlayfs layers (not the host
+root) to resolve the distro name.
 
 If you find a way to leave sdme's state inconsistent (a container that
 can't be listed, removed, or recovered), please open an issue.
@@ -1252,9 +1301,9 @@ destination directory.
 When importing an OCI image, sdme classifies it as either a **base OS
 image** or an **application image** based on the image config:
 
-| Classification    | Criteria                              |
-|-------------------|---------------------------------------|
-| Base OS image     | No entrypoint, shell default, no ports |
+| Classification    | Criteria                                |
+|-------------------|-----------------------------------------|
+| Base OS image     | No entrypoint, shell default, no ports  |
 | Application image | Has entrypoint, non-shell cmd, or ports |
 
 - **Base OS image**: extracted as a first-class sdme rootfs.
@@ -1278,9 +1327,9 @@ The `--oci-mode` flag overrides auto-detection:
 
 | Flag              | Behavior                                     |
 |-------------------|----------------------------------------------|
-| `--oci-mode=auto` | Auto-detect from image config (default)       |
-| `--oci-mode=base` | Force base OS mode                            |
-| `--oci-mode=app`  | Force application mode (requires `--base-fs`) |
+| `--oci-mode=auto` | Auto-detect from image config (default)      |
+| `--oci-mode=base` | Force base OS mode                           |
+| `--oci-mode=app`  | Force application mode (requires `--base-fs`)|
 
 **Base OS import** (debian, ubuntu, fedora) is straightforward: extract
 the rootfs and install systemd if missing. The result is a first-class
@@ -1621,16 +1670,16 @@ fixed 4-byte instructions.
 
 **Module layout:**
 
-| File                         | Purpose                             |
-|------------------------------|-------------------------------------|
-| `src/elf.rs`                 | Shared `Arch` enum + ELF builder    |
-| `src/isolate/mod.rs`         | Public API: `generate(Arch)`        |
-| `src/isolate/x86_64.rs`     | x86_64 emitter (PID/IPC ns + privs) |
-| `src/isolate/aarch64.rs`    | AArch64 emitter (PID/IPC ns + privs)|
-| `src/devfd_shim/mod.rs`     | Public API: `generate(Arch)`        |
-| `src/devfd_shim/elf.rs`     | ET_DYN ELF builder (SysV hash)      |
-| `src/devfd_shim/x86_64.rs`  | x86_64 emitter                      |
-| `src/devfd_shim/aarch64.rs` | AArch64 emitter                     |
+| File                        | Purpose                              |
+|-----------------------------|--------------------------------------|
+| `src/elf.rs`                | Shared `Arch` enum + ELF builder     |
+| `src/isolate/mod.rs`        | Public API: `generate(Arch)`         |
+| `src/isolate/x86_64.rs`     | x86_64 emitter (PID/IPC ns + privs)  |
+| `src/isolate/aarch64.rs`    | AArch64 emitter (PID/IPC ns + privs) |
+| `src/devfd_shim/mod.rs`     | Public API: `generate(Arch)`         |
+| `src/devfd_shim/elf.rs`     | ET_DYN ELF builder (SysV hash)       |
+| `src/devfd_shim/x86_64.rs`  | x86_64 emitter                       |
+| `src/devfd_shim/aarch64.rs` | AArch64 emitter                      |
 
 Both architecture modules use the same pattern: an `Asm` struct that emits
 machine code bytes, a label system for forward references, and a fixup pass
@@ -1758,34 +1807,34 @@ usage examples and CLI reference, see `sdme kube --help`.
 
 ### Supported Pod spec fields
 
-| Field                            | Description                        |
-|----------------------------------|------------------------------------|
-| `containers[].image`             | OCI image reference                |
-| `containers[].name`              | Container name (service name)      |
-| `containers[].command`           | Override ENTRYPOINT                |
-| `containers[].args`              | Override CMD                       |
-| `containers[].env`               | Per-container env vars             |
-| `containers[].env[].valueFrom`   | secretKeyRef or configMapKeyRef    |
-| `containers[].envFrom`           | Bulk-import from configMap/secret  |
-| `containers[].ports`             | Port forwarding (private network)  |
-| `containers[].volumeMounts`      | Bind volumes into app rootfs       |
-| `containers[].workingDir`        | Override working directory         |
-| `containers[].imagePullPolicy`   | Always, IfNotPresent, or Never     |
-| `containers[].resources`         | Memory/CPU limits and weights      |
-| `containers[].startupProbe`      | exec, httpGet, tcpSocket, grpc     |
-| `containers[].livenessProbe`     | exec, httpGet, tcpSocket, grpc     |
-| `containers[].readinessProbe`    | exec, httpGet, tcpSocket, grpc     |
-| `initContainers[]`               | Run-to-completion before app start |
-| `volumes` (emptyDir)             | Shared directory between apps      |
-| `volumes` (hostPath)             | Mount host directory into the pod  |
-| `volumes` (secret)               | From sdme kube secret              |
-| `volumes` (configMap)            | From sdme kube configmap           |
-| `volumes` (persistentVolumeClaim)| Host dir at {datadir}/volumes/     |
-| `restartPolicy`                  | Maps to systemd Restart=           |
-| `terminationGracePeriodSeconds`  | Shutdown timeout                   |
-| `securityContext.runAsUser`       | Pod-level UID for all containers   |
-| `securityContext.runAsGroup`      | Pod-level GID for all containers   |
-| `securityContext.runAsNonRoot`    | Validates runAsUser is non-zero    |
+| Field                              | Description                        |
+|------------------------------------|------------------------------------|
+| `containers[].image`               | OCI image reference                |
+| `containers[].name`                | Container name (service name)      |
+| `containers[].command`             | Override ENTRYPOINT                |
+| `containers[].args`                | Override CMD                       |
+| `containers[].env`                 | Per-container env vars             |
+| `containers[].env[].valueFrom`     | secretKeyRef or configMapKeyRef    |
+| `containers[].envFrom`             | Bulk-import from configMap/secret  |
+| `containers[].ports`               | Port forwarding (private network)  |
+| `containers[].volumeMounts`        | Bind volumes into app rootfs       |
+| `containers[].workingDir`          | Override working directory         |
+| `containers[].imagePullPolicy`     | Always, IfNotPresent, or Never     |
+| `containers[].resources`           | Memory/CPU limits and weights      |
+| `containers[].startupProbe`        | exec, httpGet, tcpSocket, grpc     |
+| `containers[].livenessProbe`       | exec, httpGet, tcpSocket, grpc     |
+| `containers[].readinessProbe`      | exec, httpGet, tcpSocket, grpc     |
+| `initContainers[]`                 | Run-to-completion before app start |
+| `volumes` (emptyDir)               | Shared directory between apps      |
+| `volumes` (hostPath)               | Mount host directory into the pod  |
+| `volumes` (secret)                 | From sdme kube secret              |
+| `volumes` (configMap)              | From sdme kube configmap           |
+| `volumes` (persistentVolumeClaim)  | Host dir at {datadir}/volumes/     |
+| `restartPolicy`                    | Maps to systemd Restart=           |
+| `terminationGracePeriodSeconds`    | Shutdown timeout                   |
+| `securityContext.runAsUser`        | Pod-level UID for all containers   |
+| `securityContext.runAsGroup`       | Pod-level GID for all containers   |
+| `securityContext.runAsNonRoot`     | Validates runAsUser is non-zero    |
 
 Secret and configMap volumes support `items` for projected key
 paths and `defaultMode` for file permissions.

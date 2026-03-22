@@ -4,6 +4,7 @@
 //! timestamps, extended attributes, and special file types (symlinks, devices,
 //! fifos, sockets). Used by both the import and build modules.
 
+use std::collections::HashMap;
 use std::ffi::CString;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
@@ -14,8 +15,21 @@ use anyhow::{bail, Context, Result};
 
 use crate::check_interrupted;
 
+/// Maps `(st_dev, st_ino)` to the first destination path for hard link preservation.
+type HardLinkMap = HashMap<(u64, u64), PathBuf>;
+
 /// Recursively copy all entries from `src_dir` to `dst_dir`.
 pub(crate) fn copy_tree(src_dir: &Path, dst_dir: &Path, verbose: bool) -> Result<()> {
+    let mut hardlinks = HardLinkMap::new();
+    copy_tree_inner(src_dir, dst_dir, verbose, &mut hardlinks)
+}
+
+fn copy_tree_inner(
+    src_dir: &Path,
+    dst_dir: &Path,
+    verbose: bool,
+    hardlinks: &mut HardLinkMap,
+) -> Result<()> {
     let entries = fs::read_dir(src_dir)
         .with_context(|| format!("failed to read directory {}", src_dir.display()))?;
 
@@ -27,7 +41,7 @@ pub(crate) fn copy_tree(src_dir: &Path, dst_dir: &Path, verbose: bool) -> Result
         let file_name = entry.file_name();
         let dst_path = dst_dir.join(&file_name);
 
-        copy_entry(&src_path, &dst_path, verbose)
+        copy_entry_inner(&src_path, &dst_path, verbose, hardlinks)
             .with_context(|| format!("failed to copy {}", src_path.display()))?;
     }
 
@@ -36,6 +50,16 @@ pub(crate) fn copy_tree(src_dir: &Path, dst_dir: &Path, verbose: bool) -> Result
 
 /// Copy a single filesystem entry (file, dir, symlink, device, fifo, socket).
 pub(crate) fn copy_entry(src: &Path, dst: &Path, verbose: bool) -> Result<()> {
+    let mut hardlinks = HardLinkMap::new();
+    copy_entry_inner(src, dst, verbose, &mut hardlinks)
+}
+
+fn copy_entry_inner(
+    src: &Path,
+    dst: &Path,
+    verbose: bool,
+    hardlinks: &mut HardLinkMap,
+) -> Result<()> {
     let stat = lstat_entry(src)?;
     let mode = stat.st_mode & libc::S_IFMT;
 
@@ -45,9 +69,23 @@ pub(crate) fn copy_entry(src: &Path, dst: &Path, verbose: bool) -> Result<()> {
                 .with_context(|| format!("failed to create directory {}", dst.display()))?;
             copy_metadata_from_stat(dst, &stat)?;
             copy_xattrs(src, dst)?;
-            copy_tree(src, dst, verbose)?;
+            copy_tree_inner(src, dst, verbose, hardlinks)?;
         }
         libc::S_IFREG => {
+            if stat.st_nlink > 1 {
+                let key = (stat.st_dev, stat.st_ino);
+                if let Some(existing) = hardlinks.get(&key) {
+                    fs::hard_link(existing, dst).with_context(|| {
+                        format!(
+                            "failed to hard link {} -> {}",
+                            dst.display(),
+                            existing.display()
+                        )
+                    })?;
+                    return Ok(());
+                }
+                hardlinks.insert(key, dst.to_path_buf());
+            }
             fs::copy(src, dst).with_context(|| format!("failed to copy file {}", src.display()))?;
             copy_metadata_from_stat(dst, &stat)?;
             copy_xattrs(src, dst)?;
@@ -188,45 +226,48 @@ pub(crate) fn copy_metadata(src: &Path, dst: &Path) -> Result<()> {
     copy_metadata_from_stat(dst, &stat)
 }
 
-/// Copy extended attributes from `src` to `dst`, skipping security.selinux.
-pub(crate) fn copy_xattrs(src: &Path, dst: &Path) -> Result<()> {
-    let c_src = path_to_cstring(src)?;
-    let c_dst = path_to_cstring(dst)?;
+/// Read extended attributes from `path`, skipping security.selinux
+/// (labels are policy-specific and must be derived from the active
+/// policy via restorecon/autorelabel, not carried from the source).
+pub(crate) fn read_xattrs(path: &Path) -> Result<Vec<(CString, Vec<u8>)>> {
+    let c_path = path_to_cstring(path)?;
 
     // Get the size of the xattr name list.
-    let size = unsafe { libc::llistxattr(c_src.as_ptr(), std::ptr::null_mut(), 0) };
+    let size = unsafe { libc::llistxattr(c_path.as_ptr(), std::ptr::null_mut(), 0) };
     if size < 0 {
         let err = std::io::Error::last_os_error();
         if err.raw_os_error() == Some(libc::ENOTSUP) || err.raw_os_error() == Some(libc::ENODATA) {
-            return Ok(());
+            return Ok(Vec::new());
         }
-        return Err(err).with_context(|| format!("llistxattr failed for {}", src.display()));
+        return Err(err).with_context(|| format!("llistxattr failed for {}", path.display()));
     }
     if size == 0 {
-        return Ok(());
+        return Ok(Vec::new());
     }
 
     let mut names_buf = vec![0u8; size as usize];
     let size = unsafe {
         libc::llistxattr(
-            c_src.as_ptr(),
+            c_path.as_ptr(),
             names_buf.as_mut_ptr() as *mut libc::c_char,
             names_buf.len(),
         )
     };
     if size < 0 {
         return Err(std::io::Error::last_os_error())
-            .with_context(|| format!("llistxattr failed for {}", src.display()));
+            .with_context(|| format!("llistxattr failed for {}", path.display()));
     }
 
-    // Parse null-terminated name list.
+    let mut result = Vec::new();
     let names_buf = &names_buf[..size as usize];
     for name_bytes in names_buf.split(|&b| b == 0) {
         if name_bytes.is_empty() {
             continue;
         }
 
-        // Skip security.selinux.
+        // Skip security.selinux: labels reference the source policy's
+        // types/roles which may not exist on the destination system.
+        // Correct labeling requires restorecon against the active policy.
         if name_bytes.starts_with(b"security.selinux") {
             continue;
         }
@@ -236,7 +277,7 @@ pub(crate) fn copy_xattrs(src: &Path, dst: &Path) -> Result<()> {
 
         // Get xattr value size.
         let val_size =
-            unsafe { libc::lgetxattr(c_src.as_ptr(), c_name.as_ptr(), std::ptr::null_mut(), 0) };
+            unsafe { libc::lgetxattr(c_path.as_ptr(), c_name.as_ptr(), std::ptr::null_mut(), 0) };
         if val_size < 0 {
             let err = std::io::Error::last_os_error();
             if err.raw_os_error() == Some(libc::ENODATA) {
@@ -245,7 +286,7 @@ pub(crate) fn copy_xattrs(src: &Path, dst: &Path) -> Result<()> {
             return Err(err).with_context(|| {
                 format!(
                     "lgetxattr failed for {} attr {}",
-                    src.display(),
+                    path.display(),
                     c_name.to_string_lossy()
                 )
             });
@@ -254,7 +295,7 @@ pub(crate) fn copy_xattrs(src: &Path, dst: &Path) -> Result<()> {
         let mut val_buf = vec![0u8; val_size as usize];
         let val_size = unsafe {
             libc::lgetxattr(
-                c_src.as_ptr(),
+                c_path.as_ptr(),
                 c_name.as_ptr(),
                 val_buf.as_mut_ptr() as *mut libc::c_void,
                 val_buf.len(),
@@ -264,18 +305,34 @@ pub(crate) fn copy_xattrs(src: &Path, dst: &Path) -> Result<()> {
             return Err(std::io::Error::last_os_error()).with_context(|| {
                 format!(
                     "lgetxattr failed for {} attr {}",
-                    src.display(),
+                    path.display(),
                     c_name.to_string_lossy()
                 )
             });
         }
+        val_buf.truncate(val_size as usize);
+        result.push((c_name, val_buf));
+    }
 
+    Ok(result)
+}
+
+/// Copy extended attributes from `src` to `dst`, skipping security.selinux
+/// (see `read_xattrs` for rationale).
+pub(crate) fn copy_xattrs(src: &Path, dst: &Path) -> Result<()> {
+    let xattrs = read_xattrs(src)?;
+    if xattrs.is_empty() {
+        return Ok(());
+    }
+
+    let c_dst = path_to_cstring(dst)?;
+    for (c_name, val_buf) in &xattrs {
         let ret = unsafe {
             libc::lsetxattr(
                 c_dst.as_ptr(),
                 c_name.as_ptr(),
                 val_buf.as_ptr() as *const libc::c_void,
-                val_size as usize,
+                val_buf.len(),
                 0,
             )
         };
@@ -486,4 +543,70 @@ pub(crate) fn lchown(path: &Path, uid: u32, gid: u32) -> Result<()> {
             .with_context(|| format!("lchown failed for {}", path.display()));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::MetadataExt;
+
+    #[test]
+    fn test_copy_tree_preserves_hard_links() {
+        let src = crate::testutil::TempDataDir::new("copy-hl-src");
+        let dst = crate::testutil::TempDataDir::new("copy-hl-dst");
+        let out = dst.path().join("out");
+        fs::create_dir(&out).unwrap();
+
+        // Create file `a` and hard link `b`.
+        fs::write(src.path().join("a"), "hardlink-test").unwrap();
+        fs::hard_link(src.path().join("a"), src.path().join("b")).unwrap();
+
+        copy_tree(src.path(), &out, false).unwrap();
+
+        let ino_a = fs::metadata(out.join("a")).unwrap().ino();
+        let ino_b = fs::metadata(out.join("b")).unwrap().ino();
+        assert_eq!(ino_a, ino_b, "hard links should share the same inode");
+        assert_eq!(fs::metadata(out.join("a")).unwrap().nlink(), 2);
+    }
+
+    #[test]
+    fn test_copy_tree_hardlinks_across_subdirs() {
+        let src = crate::testutil::TempDataDir::new("copy-hl-cross-src");
+        let dst = crate::testutil::TempDataDir::new("copy-hl-cross-dst");
+        let out = dst.path().join("out");
+        fs::create_dir(&out).unwrap();
+
+        fs::create_dir(src.path().join("dir1")).unwrap();
+        fs::create_dir(src.path().join("dir2")).unwrap();
+        fs::write(src.path().join("dir1/a"), "cross-dir-hl").unwrap();
+        fs::hard_link(src.path().join("dir1/a"), src.path().join("dir2/b")).unwrap();
+
+        copy_tree(src.path(), &out, false).unwrap();
+
+        let ino_a = fs::metadata(out.join("dir1/a")).unwrap().ino();
+        let ino_b = fs::metadata(out.join("dir2/b")).unwrap().ino();
+        assert_eq!(ino_a, ino_b, "cross-dir hard links should share inode");
+    }
+
+    #[test]
+    fn test_copy_entry_standalone_no_tracking() {
+        let src = crate::testutil::TempDataDir::new("copy-entry-standalone-src");
+        let dst = crate::testutil::TempDataDir::new("copy-entry-standalone-dst");
+
+        // Create a file with nlink > 1.
+        fs::write(src.path().join("a"), "standalone").unwrap();
+        fs::hard_link(src.path().join("a"), src.path().join("b")).unwrap();
+
+        // copy_entry on a single file succeeds (data copy, no tracking).
+        copy_entry(
+            &src.path().join("a"),
+            &dst.path().join("a-copy"),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(dst.path().join("a-copy")).unwrap(),
+            "standalone"
+        );
+    }
 }

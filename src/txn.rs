@@ -49,7 +49,7 @@ impl TxnKind {
 /// atomically renames to the final path.
 ///
 /// On drop without [`commit`](Txn::commit) or [`done`](Txn::done), the
-/// staging directory is left in place — no cleanup is attempted. This
+/// staging directory is left in place; no cleanup is attempted. This
 /// ensures that signal handlers never need to perform filesystem writes.
 pub(crate) struct Txn {
     /// The staging directory path.
@@ -345,7 +345,7 @@ mod tests {
     #[test]
     fn test_cleanup_stale_removes_dead_pid() {
         let dir = setup_dir("stale-dead");
-        // Create a staging dir with PID 1 (init — always running).
+        // Create a staging dir with PID 1 (init, always running).
         let live = dir.join(".myfs.import-txn-1");
         fs::create_dir_all(&live).unwrap();
         // Create a staging dir with a PID that doesn't exist.

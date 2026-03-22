@@ -477,6 +477,9 @@ fn export_to_dir(src: &Path, dst: &Path, verbose: bool, force: bool) -> Result<(
         .with_context(|| format!("failed to copy {} to {}", src.display(), dst.display()))
 }
 
+/// Maps `(dev, ino)` to the first relative tar path for hard link tracking.
+type TarHardLinkMap = HashMap<(u64, u64), std::path::PathBuf>;
+
 /// Build a tar archive from a source directory into the given writer.
 /// Returns the writer so callers can finalize compression encoders.
 fn write_tar<W: std::io::Write>(
@@ -487,7 +490,8 @@ fn write_tar<W: std::io::Write>(
 ) -> Result<W> {
     let mut builder = tar::Builder::new(writer);
     builder.follow_symlinks(false);
-    append_dir_recursive(&mut builder, src, src, verbose)?;
+    let mut hardlinks = TarHardLinkMap::new();
+    append_dir_recursive(&mut builder, src, src, verbose, &mut hardlinks)?;
 
     if let Some(tz) = timezone {
         // Add /etc/localtime symlink.
@@ -570,13 +574,16 @@ fn export_to_tar(src: &Path, output: &Path, opts: &ExportOptions) -> Result<()> 
 }
 
 /// Recursively append directory entries to a tar builder, preserving
-/// ownership, permissions, and special file types.
+/// ownership, permissions, special file types, hard links, and xattrs.
 fn append_dir_recursive<W: std::io::Write>(
     builder: &mut tar::Builder<W>,
     root: &Path,
     dir: &Path,
     verbose: bool,
+    hardlinks: &mut TarHardLinkMap,
 ) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
     let entries =
         fs::read_dir(dir).with_context(|| format!("failed to read directory {}", dir.display()))?;
 
@@ -602,24 +609,64 @@ fn append_dir_recursive<W: std::io::Write>(
         header.set_gid(meta_gid(&meta));
 
         if meta.is_dir() {
+            append_pax_xattrs(builder, &path)?;
             builder.append_data(&mut header, rel, &[] as &[u8])?;
-            append_dir_recursive(builder, root, &path, verbose)?;
+            append_dir_recursive(builder, root, &path, verbose, hardlinks)?;
         } else if meta.is_symlink() {
+            append_pax_xattrs(builder, &path)?;
             let target = fs::read_link(&path)
                 .with_context(|| format!("failed to read symlink {}", path.display()))?;
             header.set_entry_type(tar::EntryType::Symlink);
             header.set_size(0);
             builder.append_link(&mut header, rel, &target)?;
         } else if meta.is_file() {
+            // Hard link detection.
+            if meta.nlink() > 1 {
+                let key = (meta.dev(), meta.ino());
+                if let Some(first) = hardlinks.get(&key) {
+                    header.set_entry_type(tar::EntryType::Link);
+                    header.set_size(0);
+                    builder.append_link(&mut header, rel, first)?;
+                    continue;
+                }
+                hardlinks.insert(key, rel.to_path_buf());
+            }
+            append_pax_xattrs(builder, &path)?;
             let file =
                 File::open(&path).with_context(|| format!("failed to open {}", path.display()))?;
             builder.append_data(&mut header, rel, file)?;
         } else {
             // Block/char devices, fifos, sockets: append header only.
+            append_pax_xattrs(builder, &path)?;
             header.set_size(0);
             builder.append_data(&mut header, rel, &[] as &[u8])?;
         }
     }
+    Ok(())
+}
+
+/// Write xattrs as PAX extended headers (`SCHILY.xattr.*`) before the entry.
+fn append_pax_xattrs<W: std::io::Write>(
+    builder: &mut tar::Builder<W>,
+    path: &Path,
+) -> Result<()> {
+    let xattrs = copy::read_xattrs(path)?;
+    if xattrs.is_empty() {
+        return Ok(());
+    }
+    let pax: Vec<(String, &[u8])> = xattrs
+        .iter()
+        .map(|(name, val)| {
+            (
+                format!("SCHILY.xattr.{}", name.to_string_lossy()),
+                val.as_slice(),
+            )
+        })
+        .collect();
+    let refs: Vec<(&str, &[u8])> = pax.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+    builder
+        .append_pax_extensions(refs.iter().copied())
+        .context("failed to write PAX xattr extensions")?;
     Ok(())
 }
 
@@ -2871,9 +2918,9 @@ WantedBy=getty.target
         fs::create_dir(&dir).unwrap();
         // Regular file: 100 bytes -> 4096 after block alignment.
         fs::write(dir.join("file.txt"), vec![0u8; 100]).unwrap();
-        // Symlink to a file — should not add to size.
+        // Symlink to a file: should not add to size.
         std::os::unix::fs::symlink(dir.join("file.txt"), dir.join("link.txt")).unwrap();
-        // Symlink cycle — must not cause infinite recursion.
+        // Symlink cycle: must not cause infinite recursion.
         std::os::unix::fs::symlink(&dir, dir.join("cycle")).unwrap();
         let size = dir_size(&dir).unwrap();
         assert_eq!(size, 4096, "expected one block-aligned file, got {size}");
@@ -2897,5 +2944,289 @@ WantedBy=getty.target
             err.to_string().contains("invalid DNS nameserver"),
             "got: {err}"
         );
+    }
+
+    // --- hard link tests ---
+
+    #[test]
+    fn test_tar_export_preserves_hard_links() {
+        let _guard = lock_and_clear_interrupted();
+        let src = crate::testutil::TempDataDir::new("export-tar-hl-src");
+        fs::write(src.path().join("original"), "hardlink-data").unwrap();
+        fs::hard_link(src.path().join("original"), src.path().join("link")).unwrap();
+
+        let dst = crate::testutil::TempDataDir::new("export-tar-hl-dst");
+        let tarball = dst.path().join("out.tar");
+
+        let opts = ExportOptions {
+            format: &ExportFormat::Tar,
+            size: None,
+            free_space: 0,
+            vm_opts: None,
+            verbose: false,
+            force: false,
+            timezone: None,
+        };
+        export_to_tar(src.path(), &tarball, &opts).unwrap();
+
+        let file = File::open(&tarball).unwrap();
+        let mut archive = tar::Archive::new(file);
+        let mut found_link = false;
+        for entry in archive.entries().unwrap() {
+            let entry = entry.unwrap();
+            if entry.header().entry_type() == tar::EntryType::Link {
+                found_link = true;
+                // The link target should point to the first occurrence.
+                let link_name = entry.header().link_name().unwrap().unwrap();
+                let path = entry.path().unwrap();
+                // One of them is the link, the other is the original.
+                assert!(
+                    (path.to_str() == Some("link")
+                        && link_name.to_str() == Some("original"))
+                        || (path.to_str() == Some("original")
+                            && link_name.to_str() == Some("link")),
+                    "unexpected link: {} -> {}",
+                    path.display(),
+                    link_name.display()
+                );
+            }
+        }
+        assert!(found_link, "no hard link entry found in tar");
+    }
+
+    #[test]
+    fn test_tar_export_no_hardlink_for_nlink_1() {
+        let _guard = lock_and_clear_interrupted();
+        let src = crate::testutil::TempDataDir::new("export-tar-nohl-src");
+        fs::write(src.path().join("single"), "no-hardlink").unwrap();
+
+        let dst = crate::testutil::TempDataDir::new("export-tar-nohl-dst");
+        let tarball = dst.path().join("out.tar");
+
+        let opts = ExportOptions {
+            format: &ExportFormat::Tar,
+            size: None,
+            free_space: 0,
+            vm_opts: None,
+            verbose: false,
+            force: false,
+            timezone: None,
+        };
+        export_to_tar(src.path(), &tarball, &opts).unwrap();
+
+        let file = File::open(&tarball).unwrap();
+        let mut archive = tar::Archive::new(file);
+        for entry in archive.entries().unwrap() {
+            let entry = entry.unwrap();
+            assert_ne!(
+                entry.header().entry_type(),
+                tar::EntryType::Link,
+                "nlink=1 file should not produce a Link entry"
+            );
+        }
+    }
+
+    // --- xattr tests ---
+
+    /// Helper: try setting a user xattr. Returns false if the filesystem
+    /// doesn't support user.* xattrs (e.g. tmpfs in some configs).
+    fn can_set_user_xattr(path: &Path) -> bool {
+        let c_path = copy::path_to_cstring(path).unwrap();
+        let name = std::ffi::CString::new("user.test").unwrap();
+        let val = b"probe";
+        let ret = unsafe {
+            libc::lsetxattr(
+                c_path.as_ptr(),
+                name.as_ptr(),
+                val.as_ptr() as *const libc::c_void,
+                val.len(),
+                0,
+            )
+        };
+        if ret == 0 {
+            // Clean up.
+            unsafe { libc::lremovexattr(c_path.as_ptr(), name.as_ptr()) };
+            true
+        } else {
+            false
+        }
+    }
+
+    #[test]
+    fn test_tar_export_preserves_xattrs() {
+        let _guard = lock_and_clear_interrupted();
+        let src = crate::testutil::TempDataDir::new("export-tar-xattr-src");
+        let file_path = src.path().join("with-xattr");
+        fs::write(&file_path, "xattr-data").unwrap();
+
+        if !can_set_user_xattr(&file_path) {
+            eprintln!("skipping xattr test: filesystem does not support user.* xattrs");
+            return;
+        }
+
+        // Set a user xattr.
+        let c_path = copy::path_to_cstring(&file_path).unwrap();
+        let name = std::ffi::CString::new("user.test").unwrap();
+        let val = b"hello";
+        let ret = unsafe {
+            libc::lsetxattr(
+                c_path.as_ptr(),
+                name.as_ptr(),
+                val.as_ptr() as *const libc::c_void,
+                val.len(),
+                0,
+            )
+        };
+        assert_eq!(ret, 0, "lsetxattr failed");
+
+        let dst = crate::testutil::TempDataDir::new("export-tar-xattr-dst");
+        let tarball = dst.path().join("out.tar");
+
+        let opts = ExportOptions {
+            format: &ExportFormat::Tar,
+            size: None,
+            free_space: 0,
+            vm_opts: None,
+            verbose: false,
+            force: false,
+            timezone: None,
+        };
+        export_to_tar(src.path(), &tarball, &opts).unwrap();
+
+        // Read the tar and look for PAX xattr headers.
+        let file = File::open(&tarball).unwrap();
+        let mut archive = tar::Archive::new(file);
+        let mut found_xattr = false;
+        for entry in archive.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            if let Some(pax) = entry.pax_extensions().unwrap() {
+                for ext in pax {
+                    let ext = ext.unwrap();
+                    if ext.key_bytes() == b"SCHILY.xattr.user.test" {
+                        assert_eq!(ext.value_bytes(), b"hello");
+                        found_xattr = true;
+                    }
+                }
+            }
+        }
+        assert!(found_xattr, "SCHILY.xattr.user.test not found in tar");
+    }
+
+    #[test]
+    fn test_tar_export_xattrs_on_directory() {
+        let _guard = lock_and_clear_interrupted();
+        let src = crate::testutil::TempDataDir::new("export-tar-xattr-dir-src");
+        let dir_path = src.path().join("mydir");
+        fs::create_dir(&dir_path).unwrap();
+
+        if !can_set_user_xattr(&dir_path) {
+            eprintln!("skipping xattr test: filesystem does not support user.* xattrs");
+            return;
+        }
+
+        let c_path = copy::path_to_cstring(&dir_path).unwrap();
+        let name = std::ffi::CString::new("user.dirattr").unwrap();
+        let val = b"dirvalue";
+        let ret = unsafe {
+            libc::lsetxattr(
+                c_path.as_ptr(),
+                name.as_ptr(),
+                val.as_ptr() as *const libc::c_void,
+                val.len(),
+                0,
+            )
+        };
+        assert_eq!(ret, 0, "lsetxattr failed");
+
+        let dst = crate::testutil::TempDataDir::new("export-tar-xattr-dir-dst");
+        let tarball = dst.path().join("out.tar");
+
+        let opts = ExportOptions {
+            format: &ExportFormat::Tar,
+            size: None,
+            free_space: 0,
+            vm_opts: None,
+            verbose: false,
+            force: false,
+            timezone: None,
+        };
+        export_to_tar(src.path(), &tarball, &opts).unwrap();
+
+        let file = File::open(&tarball).unwrap();
+        let mut archive = tar::Archive::new(file);
+        let mut found_xattr = false;
+        for entry in archive.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            if let Some(pax) = entry.pax_extensions().unwrap() {
+                for ext in pax {
+                    let ext = ext.unwrap();
+                    if ext.key_bytes() == b"SCHILY.xattr.user.dirattr" {
+                        assert_eq!(ext.value_bytes(), b"dirvalue");
+                        found_xattr = true;
+                    }
+                }
+            }
+        }
+        assert!(found_xattr, "SCHILY.xattr.user.dirattr not found in tar");
+    }
+
+    #[test]
+    fn test_tar_export_hardlink_skips_xattrs() {
+        let _guard = lock_and_clear_interrupted();
+        let src = crate::testutil::TempDataDir::new("export-tar-hl-xattr-src");
+        let file_path = src.path().join("original");
+        fs::write(&file_path, "hl-xattr-data").unwrap();
+
+        let has_xattr = can_set_user_xattr(&file_path);
+        if has_xattr {
+            let c_path = copy::path_to_cstring(&file_path).unwrap();
+            let name = std::ffi::CString::new("user.hltest").unwrap();
+            let val = b"first";
+            unsafe {
+                libc::lsetxattr(
+                    c_path.as_ptr(),
+                    name.as_ptr(),
+                    val.as_ptr() as *const libc::c_void,
+                    val.len(),
+                    0,
+                );
+            }
+        }
+
+        fs::hard_link(src.path().join("original"), src.path().join("link")).unwrap();
+
+        let dst = crate::testutil::TempDataDir::new("export-tar-hl-xattr-dst");
+        let tarball = dst.path().join("out.tar");
+
+        let opts = ExportOptions {
+            format: &ExportFormat::Tar,
+            size: None,
+            free_space: 0,
+            vm_opts: None,
+            verbose: false,
+            force: false,
+            timezone: None,
+        };
+        export_to_tar(src.path(), &tarball, &opts).unwrap();
+
+        // Verify: the Link entry should NOT have its own PAX xattr block.
+        let file = File::open(&tarball).unwrap();
+        let mut archive = tar::Archive::new(file);
+        for entry in archive.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            if entry.header().entry_type() == tar::EntryType::Link {
+                // Hard link entries should not have PAX xattr extensions.
+                if let Some(pax) = entry.pax_extensions().unwrap() {
+                    for ext in pax {
+                        let ext = ext.unwrap();
+                        let key = String::from_utf8_lossy(ext.key_bytes());
+                        assert!(
+                            !key.starts_with("SCHILY.xattr."),
+                            "hard link entry should not have xattr PAX headers, found: {key}"
+                        );
+                    }
+                }
+            }
+        }
     }
 }

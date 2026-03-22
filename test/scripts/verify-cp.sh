@@ -273,6 +273,43 @@ fi
 rm -f "$dev_dir/testdev"
 
 # ---------------------------------------------------------------------------
+# Test 12: hard link preservation via sdme cp
+# ---------------------------------------------------------------------------
+echo "=== Test 12: hard link preservation ==="
+
+hl_src="$TMPDIR/hl-src"
+hl_dst="$TMPDIR/hl-dst"
+mkdir -p "$hl_src"
+echo "hardlink-data" > "$hl_src/original"
+ln "$hl_src/original" "$hl_src/link"
+
+# Verify source has nlink=2.
+src_nlink=$(stat -c %h "$hl_src/original")
+if [[ "$src_nlink" -ne 2 ]]; then
+    fail "hard link: source nlink=$src_nlink, expected 2"
+else
+    # Copy into rootfs.
+    if $SDME cp "$hl_src/" "fs:ubuntu:/tmp/hl-test/" $VFLAG 2>/dev/null; then
+        rootfs_dir="/var/lib/sdme/fs/ubuntu/tmp/hl-test"
+        if [[ -f "$rootfs_dir/original" ]] && [[ -f "$rootfs_dir/link" ]]; then
+            ino_a=$(stat -c %i "$rootfs_dir/original")
+            ino_b=$(stat -c %i "$rootfs_dir/link")
+            nlink=$(stat -c %h "$rootfs_dir/original")
+            if [[ "$ino_a" == "$ino_b" ]] && [[ "$nlink" -eq 2 ]]; then
+                ok "hard link preservation"
+            else
+                fail "hard link: inodes differ ($ino_a != $ino_b) or nlink=$nlink"
+            fi
+        else
+            fail "hard link: files not found in rootfs"
+        fi
+        rm -rf "$rootfs_dir"
+    else
+        fail "hard link: sdme cp failed"
+    fi
+fi
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 print_summary

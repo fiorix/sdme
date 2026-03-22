@@ -411,7 +411,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Test 17: Smart error — container not found, rootfs exists (hint)
+# Test 17: Smart error, container not found, rootfs exists (hint)
 # ---------------------------------------------------------------------------
 echo "=== Test 17: smart error hint (container not found, rootfs exists) ==="
 
@@ -424,7 +424,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Test 18: Smart error — rootfs not found, container exists (hint)
+# Test 18: Smart error, rootfs not found, container exists (hint)
 # ---------------------------------------------------------------------------
 echo "=== Test 18: smart error hint (rootfs not found, container exists) ==="
 
@@ -464,6 +464,103 @@ if $SDME create -r ubuntu "$ctr_name" $VFLAG 2>/dev/null; then
 else
     fail "container export: failed to create test container"
 fi
+
+# ---------------------------------------------------------------------------
+# Test 20: Tar export preserves hard links
+# ---------------------------------------------------------------------------
+echo "=== Test 20: tar hard links ==="
+
+# Write a file into the rootfs upper layer and hard link it.
+upper="/var/lib/sdme/fs/ubuntu"
+hl_file="$upper/tmp/hl-export-test"
+hl_link="$upper/tmp/hl-export-link"
+echo "hardlink-export" > "$hl_file"
+ln "$hl_file" "$hl_link"
+
+targz="$TMPDIR/hl-out.tar.gz"
+if $SDME fs export fs:ubuntu "$targz" $VFLAG; then
+    # Check tar listing for "link to" which indicates a hard link entry.
+    if ( set +o pipefail; tar tzvf "$targz" 2>/dev/null | grep "hl-export-link" | grep -q "link to" ); then
+        ok "tar hard links"
+    else
+        fail "tar hard links: no 'link to' entry for hl-export-link"
+    fi
+else
+    fail "tar hard links: export failed"
+fi
+rm -f "$targz" "$hl_file" "$hl_link"
+
+# ---------------------------------------------------------------------------
+# Test 21: Tar export preserves xattrs
+# ---------------------------------------------------------------------------
+echo "=== Test 21: tar xattrs ==="
+
+HAS_XATTR_TOOLS=true
+if ! command -v setfattr &>/dev/null || ! command -v getfattr &>/dev/null; then
+    echo "note: setfattr/getfattr not found; xattr tar test will be skipped"
+    HAS_XATTR_TOOLS=false
+fi
+
+if [[ "$HAS_XATTR_TOOLS" == "true" ]]; then
+    xattr_file="$upper/tmp/xattr-export-test"
+    echo "xattr-data" > "$xattr_file"
+    if setfattr -n user.test -v hello "$xattr_file" 2>/dev/null; then
+        targz="$TMPDIR/xattr-out.tar.gz"
+        if $SDME fs export fs:ubuntu "$targz" $VFLAG; then
+            extract_dir="$TMPDIR/xattr-extract"
+            mkdir -p "$extract_dir"
+            tar xzf "$targz" -C "$extract_dir"
+            extracted="$extract_dir/tmp/xattr-export-test"
+            if [[ -f "$extracted" ]]; then
+                val=$(getfattr -n user.test --only-values "$extracted" 2>/dev/null) || true
+                if [[ "$val" == "hello" ]]; then
+                    ok "tar xattrs"
+                else
+                    fail "tar xattrs: expected 'hello', got '$val'"
+                fi
+            else
+                fail "tar xattrs: extracted file not found"
+            fi
+            rm -rf "$extract_dir"
+        else
+            fail "tar xattrs: export failed"
+        fi
+        rm -f "$targz"
+    else
+        skipped "tar xattrs (setfattr failed, filesystem may not support user.* xattrs)"
+    fi
+    rm -f "$xattr_file"
+else
+    skipped "tar xattrs (setfattr/getfattr not available)"
+fi
+
+# ---------------------------------------------------------------------------
+# Test 22: Dir export preserves hard links
+# ---------------------------------------------------------------------------
+echo "=== Test 22: dir export hard links ==="
+
+hl_file="$upper/tmp/hl-dir-test"
+hl_link="$upper/tmp/hl-dir-link"
+echo "hardlink-dir" > "$hl_file"
+ln "$hl_file" "$hl_link"
+
+outdir="$TMPDIR/hl-dir-export"
+if $SDME fs export fs:ubuntu "$outdir" $VFLAG; then
+    if [[ -f "$outdir/tmp/hl-dir-test" ]] && [[ -f "$outdir/tmp/hl-dir-link" ]]; then
+        ino_a=$(stat -c %i "$outdir/tmp/hl-dir-test")
+        ino_b=$(stat -c %i "$outdir/tmp/hl-dir-link")
+        if [[ "$ino_a" == "$ino_b" ]]; then
+            ok "dir export hard links"
+        else
+            fail "dir export hard links: inodes differ ($ino_a != $ino_b)"
+        fi
+    else
+        fail "dir export hard links: files not found"
+    fi
+else
+    fail "dir export hard links: export failed"
+fi
+rm -rf "$outdir" "$hl_file" "$hl_link"
 
 # ---------------------------------------------------------------------------
 # Summary

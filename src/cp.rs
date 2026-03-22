@@ -48,9 +48,9 @@ pub struct CpOptions {
 /// Parse a source or destination string into a `CpEndpoint`.
 ///
 /// Formats:
-/// - `/path` or `./path` — host filesystem
-/// - `NAME:/path` — container (path must be absolute)
-/// - `fs:NAME:/path` — root filesystem (path must be absolute)
+/// - `/path` or `./path`: host filesystem
+/// - `NAME:/path`: container (path must be absolute)
+/// - `fs:NAME:/path`: root filesystem (path must be absolute)
 pub fn parse_endpoint(input: &str) -> Result<CpEndpoint> {
     if input.is_empty() {
         bail!("path must not be empty");
@@ -74,7 +74,7 @@ pub fn parse_endpoint(input: &str) -> Result<CpEndpoint> {
         });
     }
 
-    // NAME:/path — only if the part before : is a valid container name
+    // NAME:/path (only if the part before : is a valid container name)
     if let Some((maybe_name, path)) = input.split_once(':') {
         if validate_name(maybe_name).is_ok() {
             if path.is_empty() || !path.starts_with('/') {
@@ -517,7 +517,7 @@ fn scan_dir_safety(dir: &Path, opts: &CpOptions) -> Result<()> {
             suid_count += 1;
         }
         if ft == libc::S_IFDIR {
-            // Don't recurse deeply for performance — just report what we find.
+            // Don't recurse deeply for performance; just report what we find.
         }
     }
 
@@ -559,7 +559,7 @@ fn check_container_dest_safety(write_dir: &Path, endpoint: &CpEndpoint) -> Resul
             .find(|d| path_str == **d || path_str.starts_with(&format!("{d}/")))
             .unwrap();
         // For rootfs endpoints, also reject shadowed dirs since the rootfs
-        // is the lower layer — the same dirs are shadowed at boot.
+        // is the lower layer; the same dirs are shadowed at boot.
         let _ = write_dir; // suppress unused warning
         bail!(
             "refusing to copy to {path_str}: systemd mounts tmpfs over {dir} at boot, \
@@ -832,7 +832,7 @@ mod tests {
 
     #[test]
     fn test_both_container_rejected() {
-        // Both are containers — one side must be host.
+        // Both are containers; one side must be host.
         let src = parse_endpoint("box-a:/etc/a").unwrap();
         let dst = parse_endpoint("box-b:/etc/b").unwrap();
         assert!(matches!(src, CpEndpoint::Container { .. }));

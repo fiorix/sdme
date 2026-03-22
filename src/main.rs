@@ -644,7 +644,8 @@ SECURITY:
 #[command(
     name = "sdme",
     version,
-    about = "Lightweight systemd-nspawn containers with overlayfs",
+    about = "The systemd machine editor",
+    long_about = "The systemd machine editor\n\nhttps://github.com/fiorix/sdme",
     after_long_help = CLI_HELP
 )]
 struct Cli {

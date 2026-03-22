@@ -164,7 +164,7 @@ require_gate() {
 build_and_install() {
     echo "==> Building sdme..."
     if [[ $(id -u) -eq 0 && -n "${SUDO_USER:-}" ]]; then
-        # Running as root via sudo — build as the original user so that
+        # Running as root via sudo: build as the original user so that
         # rustup/cargo (which are configured per-user) work correctly.
         (cd "$REPO_ROOT" && sudo -u "$SUDO_USER" cargo build --release --quiet) || {
             echo "error: cargo build failed" >&2

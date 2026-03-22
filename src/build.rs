@@ -86,7 +86,7 @@ fn parse_copy_source(src: &str, config_path: &Path, lineno: usize) -> Result<Cop
             path: PathBuf::from(path),
         })
     } else if let Some((maybe_name, path)) = src.split_once(':') {
-        // container-name:/path — only if the part before : is a valid name
+        // container-name:/path (only if the part before : is a valid name)
         if validate_name(maybe_name).is_ok() {
             if path.is_empty() || !path.starts_with('/') {
                 bail!(

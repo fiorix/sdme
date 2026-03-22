@@ -239,7 +239,7 @@ pub fn remove(datadir: &Path, name: &str, auto_gc: bool, verbose: bool) -> Resul
         auto_gc,
         verbose,
     );
-    // Clean up stale transactions (but don't create a staging dir — we rename into it).
+    // Clean up stale transactions (but don't create a staging dir; we rename into it).
     if auto_gc {
         crate::txn::cleanup_stale_txns(&rootfs_dir, name, verbose)?;
     }

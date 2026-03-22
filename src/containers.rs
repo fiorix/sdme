@@ -706,7 +706,7 @@ pub(crate) fn mount_overlay(rootfs_dir: &Path, container_dir: &Path) -> Result<(
 
 /// Mount a read-only overlay view of a container's merged filesystem.
 ///
-/// Uses multi-lower lowerdir (upper:rootfs) — no upperdir/workdir needed.
+/// Uses multi-lower lowerdir (upper:rootfs); no upperdir/workdir needed.
 /// The resulting mount is inherently read-only and correctly handles
 /// whiteouts and opaque dirs from the upper layer.
 pub(crate) fn mount_overlay_ro(rootfs_dir: &Path, container_dir: &Path) -> Result<()> {

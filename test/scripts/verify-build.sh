@@ -127,7 +127,7 @@ rc=$?
 if [[ $rc -ne 0 ]]; then
     record "copy/hot-copy" FAIL "$output"
 else
-    # Count "stopping build container" messages — should only appear once (at the end)
+    # Count "stopping build container" messages; should only appear once (at the end)
     stop_count=$(echo "$output" | grep -c "stopping build container" || true)
     if [[ $stop_count -le 1 ]]; then
         record "copy/hot-copy" PASS

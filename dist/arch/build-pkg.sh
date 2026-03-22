@@ -77,7 +77,7 @@ INSTALLED_SIZE=$(du -sb "$STAGING" | cut -f1)
 cat > "$STAGING/.PKGINFO" <<EOF
 pkgname = ${PKGNAME}
 pkgver = ${PKGVER}
-pkgdesc = Lightweight systemd-nspawn containers with overlayfs
+pkgdesc = The systemd machine editor
 url = https://github.com/fiorix/sdme
 builddate = ${BUILDDATE}
 packager = CI
