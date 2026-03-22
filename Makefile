@@ -2,7 +2,6 @@ PREFIX ?= /usr/local
 DESTDIR ?= $(PREFIX)
 
 all:
-	cargo build --release --features probe --bin sdme-kube-probe
 	cargo build --release
 
 install:

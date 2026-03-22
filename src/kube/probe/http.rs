@@ -52,7 +52,7 @@ pub fn check(port: u16, path: &str, scheme: &str, headers: &[String], timeout_se
     if let Some(status_line) = response.lines().next() {
         if let Some(code_str) = status_line.split_whitespace().nth(1) {
             if let Ok(code) = code_str.parse::<u16>() {
-                return code >= 200 && code < 400;
+                return (200..400).contains(&code);
             }
         }
     }

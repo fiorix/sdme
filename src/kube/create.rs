@@ -14,7 +14,7 @@ use crate::{check_interrupted, validate_name, State};
 
 /// Embedded `sdme-kube-probe` binary for Kubernetes probes.
 ///
-/// Built separately via `cargo build --features probe --bin sdme-kube-probe`.
+/// Automatically built by `build.rs` and embedded via `include_bytes!()`.
 /// If the probe binary wasn't built, this is an empty slice and probe
 /// creation will fail with a clear error message.
 const PROBE_BINARY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/sdme-kube-probe"));
@@ -331,10 +331,7 @@ pub fn kube_create(datadir: &Path, opts: &KubeCreateOptions<'_>) -> Result<Strin
         // its emptiness depends on build ordering, not source code.
         #[allow(clippy::const_is_empty)]
         if PROBE_BINARY.is_empty() {
-            bail!(
-                "probe binary not available; build with: \
-                 cargo build --features probe --bin sdme-kube-probe"
-            );
+            bail!("probe binary not available; rebuild sdme or check build.rs output");
         }
         let probe_path = staging_dir.join("oci/.sdme-kube-probe");
         fs::write(&probe_path, PROBE_BINARY)

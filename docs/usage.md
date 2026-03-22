@@ -62,9 +62,8 @@ your distro's equivalent) for `qemu-nbd`.
 If you prefer to build sdme yourself:
 
 ```bash
-cargo build --release       # build the binary
+cargo build --release       # build the binary (with embedded probe)
 cargo test                  # run all tests
-make                        # build probe binary + sdme (with embedded probe)
 sudo make install           # install to /usr/local (does NOT rebuild)
 ```
 

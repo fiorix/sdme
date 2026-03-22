@@ -24,7 +24,7 @@ pub fn check(app_root: &str, timeout_secs: u32, command: &[String]) -> bool {
                 if libc::chroot(c_root.as_ptr()) != 0 {
                     return Err(std::io::Error::last_os_error());
                 }
-                if libc::chdir(b"/\0".as_ptr() as *const libc::c_char) != 0 {
+                if libc::chdir(c"/".as_ptr()) != 0 {
                     return Err(std::io::Error::last_os_error());
                 }
                 Ok(())

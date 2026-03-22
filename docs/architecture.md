@@ -1906,9 +1906,8 @@ Read-only mounts get an additional `remount,ro,bind` line.
 
 Startup, liveness, and readiness probes are implemented via an embedded
 `sdme-kube-probe` binary deployed at `/oci/.sdme-kube-probe` inside the
-container rootfs. The binary is built separately (`cargo build --features
-probe --bin sdme-kube-probe`) and embedded into sdme via `include_bytes!()`
-at compile time.
+container rootfs. The binary is automatically built by `build.rs` and
+embedded into sdme via `include_bytes!()` at compile time.
 
 All three probe types use systemd timer + oneshot service pairs. No
 shell scripts are generated and no external tools are required (wget,
