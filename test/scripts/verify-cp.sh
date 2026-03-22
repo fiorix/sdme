@@ -288,9 +288,9 @@ src_nlink=$(stat -c %h "$hl_src/original")
 if [[ "$src_nlink" -ne 2 ]]; then
     fail "hard link: source nlink=$src_nlink, expected 2"
 else
-    # Copy into rootfs.
-    if $SDME cp "$hl_src/" "fs:ubuntu:/tmp/hl-test/" $VFLAG 2>/dev/null; then
-        rootfs_dir="/var/lib/sdme/fs/ubuntu/tmp/hl-test"
+    # Copy into rootfs (avoid /tmp — it's a shadowed dir).
+    if $SDME cp "$hl_src/" "fs:ubuntu:/var/lib/hl-test/" $VFLAG 2>/dev/null; then
+        rootfs_dir="/var/lib/sdme/fs/ubuntu/var/lib/hl-test"
         if [[ -f "$rootfs_dir/original" ]] && [[ -f "$rootfs_dir/link" ]]; then
             ino_a=$(stat -c %i "$rootfs_dir/original")
             ino_b=$(stat -c %i "$rootfs_dir/link")

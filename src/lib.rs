@@ -162,6 +162,31 @@ pub fn restore_interrupt(was_interrupted: bool, signal: i32) {
     }
 }
 
+/// RAII guard that saves and resets interrupt state on creation, and
+/// restores it on drop.
+///
+/// Use this instead of manual [`save_and_reset_interrupt`] /
+/// [`restore_interrupt`] pairs to ensure the restore always happens,
+/// even on early returns.
+pub struct InterruptGuard {
+    was: bool,
+    sig: i32,
+}
+
+impl InterruptGuard {
+    /// Save the current interrupt state and reset it.
+    pub fn save_and_reset() -> Self {
+        let (was, sig) = save_and_reset_interrupt();
+        Self { was, sig }
+    }
+}
+
+impl Drop for InterruptGuard {
+    fn drop(&mut self) {
+        restore_interrupt(self.was, self.sig);
+    }
+}
+
 /// Install the SIGINT and SIGTERM handler that sets the global [`INTERRUPTED`] flag.
 pub fn install_interrupt_handler() {
     unsafe {

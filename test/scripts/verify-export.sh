@@ -509,7 +509,7 @@ if [[ "$HAS_XATTR_TOOLS" == "true" ]]; then
         if $SDME fs export fs:ubuntu "$targz" $VFLAG; then
             extract_dir="$TMPDIR/xattr-extract"
             mkdir -p "$extract_dir"
-            tar xzf "$targz" -C "$extract_dir"
+            tar xzf "$targz" --xattrs -C "$extract_dir"
             extracted="$extract_dir/tmp/xattr-export-test"
             if [[ -f "$extracted" ]]; then
                 val=$(getfattr -n user.test --only-values "$extracted" 2>/dev/null) || true

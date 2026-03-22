@@ -477,9 +477,6 @@ fn export_to_dir(src: &Path, dst: &Path, verbose: bool, force: bool) -> Result<(
         .with_context(|| format!("failed to copy {} to {}", src.display(), dst.display()))
 }
 
-/// Maps `(dev, ino)` to the first relative tar path for hard link tracking.
-type TarHardLinkMap = HashMap<(u64, u64), std::path::PathBuf>;
-
 /// Build a tar archive from a source directory into the given writer.
 /// Returns the writer so callers can finalize compression encoders.
 fn write_tar<W: std::io::Write>(
@@ -490,7 +487,7 @@ fn write_tar<W: std::io::Write>(
 ) -> Result<W> {
     let mut builder = tar::Builder::new(writer);
     builder.follow_symlinks(false);
-    let mut hardlinks = TarHardLinkMap::new();
+    let mut hardlinks = copy::HardLinkMap::new();
     append_dir_recursive(&mut builder, src, src, verbose, &mut hardlinks)?;
 
     if let Some(tz) = timezone {
@@ -580,7 +577,7 @@ fn append_dir_recursive<W: std::io::Write>(
     root: &Path,
     dir: &Path,
     verbose: bool,
-    hardlinks: &mut TarHardLinkMap,
+    hardlinks: &mut copy::HardLinkMap,
 ) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
 
@@ -646,10 +643,7 @@ fn append_dir_recursive<W: std::io::Write>(
 }
 
 /// Write xattrs as PAX extended headers (`SCHILY.xattr.*`) before the entry.
-fn append_pax_xattrs<W: std::io::Write>(
-    builder: &mut tar::Builder<W>,
-    path: &Path,
-) -> Result<()> {
+fn append_pax_xattrs<W: std::io::Write>(builder: &mut tar::Builder<W>, path: &Path) -> Result<()> {
     let xattrs = copy::read_xattrs(path)?;
     if xattrs.is_empty() {
         return Ok(());
@@ -663,9 +657,8 @@ fn append_pax_xattrs<W: std::io::Write>(
             )
         })
         .collect();
-    let refs: Vec<(&str, &[u8])> = pax.iter().map(|(k, v)| (k.as_str(), *v)).collect();
     builder
-        .append_pax_extensions(refs.iter().copied())
+        .append_pax_extensions(pax.iter().map(|(k, v)| (k.as_str(), *v)))
         .context("failed to write PAX xattr extensions")?;
     Ok(())
 }
@@ -2981,8 +2974,7 @@ WantedBy=getty.target
                 let path = entry.path().unwrap();
                 // One of them is the link, the other is the original.
                 assert!(
-                    (path.to_str() == Some("link")
-                        && link_name.to_str() == Some("original"))
+                    (path.to_str() == Some("link") && link_name.to_str() == Some("original"))
                         || (path.to_str() == Some("original")
                             && link_name.to_str() == Some("link")),
                     "unexpected link: {} -> {}",

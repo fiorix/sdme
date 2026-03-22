@@ -833,11 +833,7 @@ import_prehook = ["echo hi"]
         assert!(!key_exists_in_file(Some(&path), "interactive").unwrap());
 
         // Nested key.
-        fs::write(
-            &path,
-            "[distros.debian]\nimport_prehook = [\"echo hi\"]\n",
-        )
-        .unwrap();
+        fs::write(&path, "[distros.debian]\nimport_prehook = [\"echo hi\"]\n").unwrap();
         assert!(key_exists_in_file(Some(&path), "distros.debian.import_prehook").unwrap());
         assert!(!key_exists_in_file(Some(&path), "distros.fedora.import_prehook").unwrap());
 

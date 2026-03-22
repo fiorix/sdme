@@ -1405,10 +1405,9 @@ fn start_and_await_boot(
         .with_context(|| format!("cannot lock container '{name}' for starting"))?;
     systemd::start(datadir, name, tasks_max, config_boot_timeout, verbose)?;
     if let Err(e) = systemd::await_boot(name, boot_timeout, verbose) {
-        let (was, sig) = sdme::save_and_reset_interrupt();
+        let _guard = sdme::InterruptGuard::save_and_reset();
         eprintln!("boot failed, stopping '{name}'");
         let _ = containers::stop(name, containers::StopMode::Terminate, 30, verbose);
-        sdme::restore_interrupt(was, sig);
         return Err(e);
     }
     Ok(())
@@ -1776,6 +1775,15 @@ fn read_oci_volumes_for_rootfs(
 ///
 /// For kube containers with multiple apps and no explicit selection, returns
 /// an error listing available container names.
+/// Convert an `--oci` flag value to `Option<&str>`: empty means "auto-detect".
+fn oci_app_explicit(s: &str) -> Option<&str> {
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
 fn resolve_oci_app_name(
     datadir: &std::path::Path,
     name: &str,
@@ -2206,14 +2214,13 @@ fn run() -> Result<()> {
                 if let Some(ref val) = toml_val {
                     if let Some(default_val) = config::default_value_for_key(&toml_key) {
                         if *val == default_val {
-                            if config::key_exists_in_file(config_path, &toml_key)? {
+                            let msg = if config::key_exists_in_file(config_path, &toml_key)? {
                                 config::save_key(config_path, &toml_key, None)?;
-                                eprintln!(
-                                    "{toml_key} is the built-in default; removed override from config file"
-                                );
+                                format!("{toml_key} is the built-in default; removed override from config file")
                             } else {
-                                eprintln!("{toml_key} is already the built-in default");
-                            }
+                                format!("{toml_key} is already the built-in default")
+                            };
+                            eprintln!("{msg}");
                             return Ok(());
                         }
                     }
@@ -2338,12 +2345,8 @@ fn run() -> Result<()> {
         Command::Exec { name, oci, command } => {
             let name = containers::resolve_name(&cfg.datadir, &name)?;
             let status = if let Some(ref oci_app) = oci {
-                let explicit = if oci_app.is_empty() {
-                    None
-                } else {
-                    Some(oci_app.as_str())
-                };
-                let app_name = resolve_oci_app_name(&cfg.datadir, &name, explicit)?;
+                let app_name =
+                    resolve_oci_app_name(&cfg.datadir, &name, oci_app_explicit(oci_app))?;
                 containers::exec_oci(&cfg.datadir, &name, &app_name, &command, cli.verbose)?
             } else {
                 containers::exec(
@@ -2456,12 +2459,8 @@ fn run() -> Result<()> {
             }
 
             if let Some(ref oci_app) = oci {
-                let explicit = if oci_app.is_empty() {
-                    None
-                } else {
-                    Some(oci_app.as_str())
-                };
-                let app_name = resolve_oci_app_name(&cfg.datadir, &name, explicit)?;
+                let app_name =
+                    resolve_oci_app_name(&cfg.datadir, &name, oci_app_explicit(oci_app))?;
                 let command = if command.is_empty() {
                     vec!["/bin/sh".to_string()]
                 } else {
@@ -2486,12 +2485,8 @@ fn run() -> Result<()> {
         Command::Logs { name, oci, args } => {
             let name = containers::resolve_name(&cfg.datadir, &name)?;
             if let Some(ref oci_app) = oci {
-                let explicit = if oci_app.is_empty() {
-                    None
-                } else {
-                    Some(oci_app.as_str())
-                };
-                let app_name = resolve_oci_app_name(&cfg.datadir, &name, explicit)?;
+                let app_name =
+                    resolve_oci_app_name(&cfg.datadir, &name, oci_app_explicit(oci_app))?;
                 let mut command = vec![
                     "/usr/bin/journalctl".to_string(),
                     "-u".to_string(),
@@ -2646,7 +2641,7 @@ fn run() -> Result<()> {
             })();
 
             if let Err(e) = boot_result {
-                let (was, sig) = sdme::save_and_reset_interrupt();
+                let _guard = sdme::InterruptGuard::save_and_reset();
                 eprintln!("boot failed, stopping '{name}'");
                 let _ = containers::stop(
                     &name,
@@ -2654,7 +2649,6 @@ fn run() -> Result<()> {
                     cfg.stop_timeout_terminate,
                     cli.verbose,
                 );
-                sdme::restore_interrupt(was, sig);
                 return Err(e);
             }
 
@@ -2942,7 +2936,7 @@ fn run() -> Result<()> {
                     Ok(())
                 })();
                 if let Err(e) = boot_result {
-                    let (was, sig) = sdme::save_and_reset_interrupt();
+                    let _guard = sdme::InterruptGuard::save_and_reset();
                     eprintln!("boot failed, stopping '{name}'");
                     let _ = containers::stop(
                         &name,
@@ -2950,7 +2944,6 @@ fn run() -> Result<()> {
                         cfg.stop_timeout_terminate,
                         cli.verbose,
                     );
-                    sdme::restore_interrupt(was, sig);
                     return Err(e);
                 }
                 eprintln!("joining '{name}'");

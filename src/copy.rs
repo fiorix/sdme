@@ -16,7 +16,7 @@ use anyhow::{bail, Context, Result};
 use crate::check_interrupted;
 
 /// Maps `(st_dev, st_ino)` to the first destination path for hard link preservation.
-type HardLinkMap = HashMap<(u64, u64), PathBuf>;
+pub(crate) type HardLinkMap = HashMap<(u64, u64), PathBuf>;
 
 /// Recursively copy all entries from `src_dir` to `dst_dir`.
 pub(crate) fn copy_tree(src_dir: &Path, dst_dir: &Path, verbose: bool) -> Result<()> {
@@ -598,12 +598,7 @@ mod tests {
         fs::hard_link(src.path().join("a"), src.path().join("b")).unwrap();
 
         // copy_entry on a single file succeeds (data copy, no tracking).
-        copy_entry(
-            &src.path().join("a"),
-            &dst.path().join("a-copy"),
-            false,
-        )
-        .unwrap();
+        copy_entry(&src.path().join("a"), &dst.path().join("a-copy"), false).unwrap();
         assert_eq!(
             fs::read_to_string(dst.path().join("a-copy")).unwrap(),
             "standalone"

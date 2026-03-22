@@ -4,6 +4,7 @@
 //! writing per-container nspawn drop-in files, and starting containers
 //! via the systemd D-Bus interface.
 
+use std::fmt::Write;
 use std::fs;
 use std::path::Path;
 
@@ -907,35 +908,32 @@ pub fn nspawn_dropin(
     let umount = paths.umount.display();
     let nspawn = paths.nspawn.display();
 
-    let mut lines = Vec::new();
-    lines.push("[Service]".to_string());
+    let mut out = String::new();
+    writeln!(out, "[Service]").unwrap();
     for directive in service_directives {
-        lines.push(directive.clone());
+        writeln!(out, "{directive}").unwrap();
     }
-    lines.push("ExecStart=".to_string());
-    lines.push(format!("ExecStartPre={mount} -t overlay overlay \\",));
-    lines.push(format!(
-        "    -o lowerdir={lowerdir},upperdir={datadir}/containers/{name}/upper,workdir={datadir}/containers/{name}/work \\",
-    ));
-    lines.push(format!("    {datadir}/containers/{name}/merged",));
-    lines.push(format!("ExecStart={nspawn} \\",));
-    lines.push(format!(
-        "    --directory={datadir}/containers/{name}/merged \\",
-    ));
-    lines.push(format!("    --machine={name} \\",));
-
+    writeln!(out, "ExecStart=").unwrap();
+    writeln!(out, "ExecStartPre={mount} -t overlay overlay \\").unwrap();
+    writeln!(
+        out,
+        "    -o lowerdir={lowerdir},upperdir={datadir}/containers/{name}/upper,workdir={datadir}/containers/{name}/work \\"
+    )
+    .unwrap();
+    writeln!(out, "    {datadir}/containers/{name}/merged").unwrap();
+    writeln!(out, "ExecStart={nspawn} \\").unwrap();
+    writeln!(out, "    --directory={datadir}/containers/{name}/merged \\").unwrap();
+    writeln!(out, "    --machine={name} \\").unwrap();
     for arg in nspawn_args {
-        lines.push(format!("    {} \\", escape_exec_arg(arg)));
+        writeln!(out, "    {} \\", escape_exec_arg(arg)).unwrap();
     }
-
-    lines.push("    --boot".to_string());
-    lines.push(format!(
-        "ExecStopPost=-{umount} {datadir}/containers/{name}/merged",
-    ));
-    // Trailing newline.
-    lines.push(String::new());
-
-    lines.join("\n")
+    writeln!(out, "    --boot").unwrap();
+    writeln!(
+        out,
+        "ExecStopPost=-{umount} {datadir}/containers/{name}/merged"
+    )
+    .unwrap();
+    out
 }
 
 fn write_unit_if_changed(unit_path: &Path, content: &str, verbose: bool) -> Result<bool> {

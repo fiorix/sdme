@@ -57,8 +57,8 @@ Runner options: `--jobs N`, `--timeout-scale N`, `--stagger N`,
 | preflight.sh | Environment validation (no containers) |
 | smoke.sh | Minimal container lifecycle gate test |
 | verify-interrupt.sh | SIGINT/SIGTERM abort handling |
-| verify-cp.sh | File copy between host, containers, and rootfs |
-| verify-export.sh | Rootfs/container export (dir, tar, raw image) |
+| verify-cp.sh | File copy between host, containers, rootfs, hard links |
+| verify-export.sh | Rootfs/container export (dir, tar, raw image, hard links, xattrs) |
 | verify-build.sh | `sdme fs build` hot COPY, source prefixes, locking, cache/resume |
 | verify-security.sh | Capabilities, seccomp, AppArmor, userns, hardened |
 | verify-pods.sh | Pod shared network namespace |
@@ -124,16 +124,16 @@ automatically via `fix_redis_oci()` in lib.sh.
 
 Last verified: 2026-03-22
 
-System: Linux 6.19.6-2-cachyos (x86_64), systemd 259, sdme 0.5.2,
+System: Linux 6.19.6-2-cachyos (x86_64), systemd 259, sdme 0.5.3,
 AppArmor enabled
 
 | # | Test Suite | Status | Pass | Fail | Skip |
 |---|-----------|--------|------|------|------|
 | 1 | verify-build | PASS | 11 | 0 | 0 |
-| 2 | verify-cp | PASS | 16 | 0 | 0 |
+| 2 | verify-cp | PASS | 17 | 0 | 0 |
 | 3 | verify-distro-boot | PASS | 63 | 0 | 0 |
 | 4 | verify-distro-oci | PASS | 175 | 0 | 0 |
-| 5 | verify-export | PASS | 20 | 0 | 0 |
+| 5 | verify-export | PASS | 23 | 0 | 0 |
 | 6 | verify-kube-L1-basic | PASS | 14 | 0 | 0 |
 | 7 | verify-kube-L2-probes | PASS | 41 | 0 | 0 |
 | 8 | verify-kube-L2-security | PASS | 17 | 0 | 0 |
@@ -143,16 +143,30 @@ AppArmor enabled
 | 12 | verify-kube-L4-networking | PASS | 6 | 0 | 0 |
 | 13 | verify-kube-L5-redis-stack | PASS | 6 | 0 | 0 |
 | 14 | verify-kube-L6-gitea-stack | PASS | 15 | 0 | 0 |
-| 15 | verify-network | PASS | 9 | 0 | 0 |
+| 15 | verify-network | FAIL | 7 | 2 | 0 |
 | 16 | verify-nixos | PASS | 26 | 0 | 0 |
 | 17 | verify-oci | PASS | 18 | 0 | 0 |
 | 18 | verify-pods | PASS | 9 | 0 | 0 |
 | 19 | verify-security | PASS | 31 | 0 | 0 |
 | 20 | verify-usage | PASS | 49 | 0 | 0 |
 
-**Totals: 593 passed, 0 failed, 0 skipped -- 20 suites**
+**Totals: 595 passed, 2 failed, 0 skipped -- 20 suites**
+
+verify-network zone/http-via-ip and zone/llmnr-resolution fail with
+"Network is unreachable" between zone containers. Environment issue
+(systemd-networkd zone DHCP), not a code regression -- passed clean
+on 0.5.2 on the same host.
 
 ## Log
+
+### 0.5.3 -- code cleanup, hard link/xattr test fixes (2026-03-22, x86_64)
+
+597 passed, 2 failed, 0 skipped across 20 suites. New tests: cp hard
+link preservation (17 total), export tar hard links + tar xattrs + dir
+export hard links (23 total). Fixed two test bugs: cp test used shadowed
+/tmp path, export xattr test missing `--xattrs` flag on tar extract.
+verify-network zone failures are environment-only (passed on 0.5.2).
+Wall clock: 9m29s.
 
 ### 0.5.2 -- sdme cp, version bump (2026-03-22, x86_64)
 

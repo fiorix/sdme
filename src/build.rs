@@ -707,10 +707,9 @@ pub fn build(datadir: &Path, opts: &BuildOptions<'_>) -> Result<()> {
             verbose,
         },
     ) {
-        let (was, sig) = crate::save_and_reset_interrupt();
+        let _guard = crate::InterruptGuard::save_and_reset();
         eprintln!("build failed, stopping '{staging_name}'");
         let _ = containers::stop(&staging_name, containers::StopMode::Terminate, 30, verbose);
-        crate::restore_interrupt(was, sig);
         return Err(e);
     }
 
