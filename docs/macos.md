@@ -30,6 +30,28 @@ curl -fsSL https://fiorix.github.io/sdme/install.sh | sudo sh
 
 All sdme commands run inside the VM from this point.
 
+## Shell alias
+
+To run sdme directly from the Mac terminal without manually entering
+the VM each time, add this alias to your shell profile:
+
+```bash
+alias sdme='limactl shell dev sudo sdme'
+```
+
+This works because lima-vm automatically maps `/Users/$USER` from
+macOS into the VM at the same path, so file paths you specify on the
+Mac resolve correctly inside the VM. This means commands like
+`fs import`, `fs export`, and `fs build` work transparently with
+files on your Mac filesystem.
+
+Example -- import Ubuntu and start a shell, all from the Mac terminal:
+
+```bash
+sdme fs import docker.io/ubuntu:24.04 -r ubuntu
+sdme new -r ubuntu
+```
+
 ## Known limitations
 
 - **Apple Silicon (M1/M2/M3/M4):** The VM runs Linux on aarch64.
