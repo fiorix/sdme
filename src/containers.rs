@@ -258,10 +258,10 @@ fn do_create(
 
     // Set up /etc/resolv.conf in the overlayfs upper layer:
     //
-    // For zone containers (--network-zone): symlink to the systemd-resolved
-    // stub so resolved manages DNS and enables LLMNR/mDNS for inter-container
-    // name resolution. nspawn's --resolv-conf=auto detects this symlink and
-    // leaves resolved in control.
+    // For containers with a network interface (veth, zone, bridge):
+    // symlink to the systemd-resolved stub so resolved manages DNS.
+    // nspawn's --resolv-conf=auto detects this symlink and leaves
+    // resolved in control.
     //
     // For all other containers: write a placeholder regular file so
     // systemd-nspawn's --resolv-conf=auto can overwrite it with the host's
@@ -270,12 +270,15 @@ fn do_create(
     // copy variant won't overwrite a symlink, leaving DNS broken. A regular
     // file in the overlayfs upper layer shadows the lower layer's symlink.
     let resolv_path = etc_dir.join("resolv.conf");
-    let is_zone_with_resolved = opts.network.network_zone.is_some()
+    let has_interface = opts.network.network_veth
+        || opts.network.network_zone.is_some()
+        || opts.network.network_bridge.is_some();
+    let resolved_active = has_interface
         && !opts
             .masked_services
             .iter()
             .any(|s| s == "systemd-resolved.service");
-    if is_zone_with_resolved {
+    if resolved_active {
         // Remove any existing regular file before creating the symlink.
         let _ = fs::remove_file(&resolv_path);
         symlink("../run/systemd/resolve/stub-resolv.conf", &resolv_path)
@@ -290,6 +293,8 @@ fn do_create(
     // Enable LLMNR in systemd-resolved for zone containers so containers
     // on the same zone bridge can discover each other by hostname. Some
     // distros (Ubuntu) compile resolved with LLMNR=no by default.
+    // This is zone-specific; veth and bridge don't need LLMNR.
+    let is_zone_with_resolved = opts.network.network_zone.is_some() && resolved_active;
     if is_zone_with_resolved {
         let dropin_dir = etc_dir.join("systemd/resolved.conf.d");
         fs::create_dir_all(&dropin_dir)

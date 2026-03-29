@@ -153,8 +153,12 @@ By default, sdme masks `systemd-resolved.service` inside containers
 that use host networking. This prevents the container's resolved
 from conflicting with the host's DNS on port 53.
 
-When using `--network-zone`, sdme automatically unmasks resolved
-and configures LLMNR/mDNS for inter-container hostname discovery.
+When using `--network-veth`, `--network-zone`, or `--network-bridge`,
+sdme automatically unmasks resolved and symlinks `/etc/resolv.conf`
+to the resolved stub so DNS works inside the container.
+
+Zones additionally configure LLMNR/mDNS for inter-container hostname
+discovery.
 
 You can override the masking behavior with `--masked-services`:
 

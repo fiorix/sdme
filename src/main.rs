@@ -1772,8 +1772,12 @@ fn resolve_masked_services(
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
-        // Auto-unmask resolved for --network-zone containers.
-        if network.network_zone.is_some() {
+        // Auto-unmask resolved for containers with a network interface
+        // (veth, zone, bridge) so DNS works inside the container.
+        if network.network_veth
+            || network.network_zone.is_some()
+            || network.network_bridge.is_some()
+        {
             list.retain(|s| s != "systemd-resolved.service");
         }
         list
