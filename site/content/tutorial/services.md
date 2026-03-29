@@ -17,13 +17,23 @@ works:
 sudo sdme fs import fedora quay.io/fedora/fedora
 ```
 
-## Install a service
+## Create a container
 
-Create a container and enter it:
+We recommend using `--network-zone` and `--hardened` for service
+containers:
+
+- `--network-zone=services` gives the container its own network
+  namespace with DNS, avoiding port conflicts with the host. Other
+  containers can later join the same zone and reach each other by
+  hostname.
+- `--hardened` enables user namespace isolation so root inside the
+  container is not root on the host.
 
 ```sh
-sudo sdme new mywebserver -r fedora
+sudo sdme new mywebserver -r fedora --network-zone=services --hardened
 ```
+
+## Install a service
 
 Inside the container, install nginx:
 
@@ -35,52 +45,57 @@ systemctl enable --now nginx
 Exit the container shell with `exit`, `Ctrl+D`, or `Ctrl+]` three
 times to return to the host.
 
-From the host, verify it's running:
+## Verify from the host
+
+Containers in a zone are reachable by IP from the host. Find the
+container's IP:
 
 ```sh
-curl http://localhost
+sudo sdme exec mywebserver -- /bin/ip -4 addr show host0
 ```
 
-You should see the default nginx welcome page. This works because sdme
-containers share the host network by default.
-
-Inside the container, you manage services with standard systemd commands:
-`systemctl status nginx`, `systemctl restart nginx`,
-`journalctl -u nginx`, etc. Services enabled with `systemctl enable`
-start automatically when the container boots.
-
-## Troubleshooting: port already in use
-
-Because containers share the host network by default, nginx inside
-the container binds to the same port 80 as any service on the host.
-If something else is already listening on port 80, nginx will fail
-to start.
-
-Check from the host what's using the port:
+Then curl it:
 
 ```sh
-ss -tlnp | grep :80
+curl http://<container-ip>
 ```
 
-To work around this, enter the container and change the nginx listen
-port. On Fedora:
+You can also use port forwarding to map a host port to the
+container. Create the container with `--port`:
 
 ```sh
-sudo sdme join mywebserver
+sudo sdme new mywebserver -r fedora --network-zone=services --hardened --port 8080:80
 ```
 
-Edit the nginx config to listen on a different port (e.g. 8080):
-
-```sh
-sed -i 's/listen\s*80/listen 8080/' /etc/nginx/nginx.conf
-systemctl restart nginx
-```
-
-Then verify from the host:
+Then from the host:
 
 ```sh
 curl http://localhost:8080
 ```
+
+## Inter-container communication
+
+Other containers on the same zone can reach the nginx container by
+hostname:
+
+```sh
+sudo sdme new myclient -r fedora --network-zone=services --hardened
+```
+
+Inside the client:
+
+```sh
+curl http://mywebserver
+```
+
+This works because zone containers use LLMNR for hostname discovery.
+The host cannot resolve container names (it is not part of the zone),
+but it can reach containers by IP.
+
+Inside the container, you manage services with standard systemd
+commands: `systemctl status nginx`, `systemctl restart nginx`,
+`journalctl -u nginx`, etc. Services enabled with `systemctl enable`
+start automatically when the container boots.
 
 ## Auto-starting the container on boot
 

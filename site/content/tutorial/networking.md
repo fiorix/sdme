@@ -17,9 +17,8 @@ With no network flags, containers share the host's network namespace.
 They see the same interfaces, addresses, and routes. Services bind
 to the same ports as the host.
 
-This is the simplest mode but means port conflicts are possible (see
-[troubleshooting](@/tutorial/services.md#troubleshooting-port-already-in-use)
-in the services tutorial).
+This is the simplest mode but means port conflicts are possible.
+Use `--network-zone` or `--network-veth` to avoid them.
 
 ## Private network
 
