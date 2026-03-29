@@ -72,6 +72,10 @@ pub struct Config {
     #[serde(default)]
     pub default_output_format: String,
 
+    /// Default registry for unqualified image names in kube YAML (e.g. "docker.io").
+    #[serde(default = "default_kube_registry")]
+    pub default_kube_registry: String,
+
     /// Default filesystem type for raw disk image export (ext4 or btrfs).
     #[serde(default = "default_export_fs")]
     pub default_export_fs: String,
@@ -167,6 +171,10 @@ fn default_hardened_drop_caps() -> String {
     crate::security::HARDENED_DROP_CAPS.join(",")
 }
 
+fn default_kube_registry() -> String {
+    "docker.io".to_string()
+}
+
 fn default_export_fs() -> String {
     "ext4".to_string()
 }
@@ -230,6 +238,7 @@ impl Default for Config {
             hardened_drop_caps: default_hardened_drop_caps(),
             default_base_fs: String::new(),
             default_output_format: String::new(),
+            default_kube_registry: default_kube_registry(),
             default_export_fs: default_export_fs(),
             default_export_free_space: default_export_free_space(),
             tasks_max: default_tasks_max(),
@@ -287,6 +296,7 @@ impl Config {
         println!("hardened_drop_caps = {}", self.hardened_drop_caps);
         println!("default_base_fs = {}", self.default_base_fs);
         println!("default_output_format = {}", self.default_output_format);
+        println!("default_kube_registry = {}", self.default_kube_registry);
         println!("default_export_fs = {}", self.default_export_fs);
         println!(
             "default_export_free_space = {}",

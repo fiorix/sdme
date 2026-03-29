@@ -817,6 +817,7 @@ host_rootfs_opaque_dirs           /etc/systemd/system,/var/log
 hardened_drop_caps                CAP_SYS_PTRACE,CAP_NET_RAW,...
 default_base_fs                   (empty)
 default_output_format             (empty)
+default_kube_registry             docker.io
 default_export_fs                 ext4
 tasks_max                         16384
 docker_user                       (empty)
@@ -846,6 +847,9 @@ default_export_free_space         256M
 - `default_base_fs`: default base rootfs for OCI app images.
 - `default_output_format`: default output format for `ps` and
   `fs ls` (empty = table, `json`, `json-pretty`).
+- `default_kube_registry`: default registry for unqualified image
+  names in Kubernetes Pod YAML (e.g. `nginx` resolves to
+  `docker.io/library/nginx`).
 - `default_export_fs`: filesystem type for raw disk image export
   (`ext4` or `btrfs`).
 - `tasks_max`: maximum tasks (processes/threads) per container

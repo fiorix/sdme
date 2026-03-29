@@ -570,6 +570,7 @@ CONFIG KEYS:
     hardened_drop_caps             string   CAP_SYS_PTRACE,CAP_NET_RAW,CAP_SYS_RAWIO,CAP_SYS_BOOT
     default_base_fs                string   (empty)   Default --base-fs for OCI app imports
     default_output_format          string   (empty)   Default output for ps/fs ls (json, json-pretty)
+    default_kube_registry          string   docker.io Registry for unqualified kube image names
     default_export_fs              string   ext4      Filesystem for raw image export
     default_export_free_space      string   256M      Extra free space in auto-sized images
     tasks_max                      u32      16384     Max tasks per container
@@ -683,7 +684,13 @@ MINIMAL POD YAML:
     spec:
       containers:
         - name: web
-          image: docker.io/nginx
+          image: nginx
+
+IMAGE RESOLUTION:
+    Short image names (nginx, redis) are resolved using the default_kube_registry
+    config key (default: docker.io). Fully qualified names (quay.io/nginx/...)
+    are used as-is. Change the default with:
+        sdme config set default_kube_registry registry.example.com
 
 SUPPORTED FEATURES:
     - Multi-container pods (shared network namespace via localhost)
@@ -2190,6 +2197,13 @@ fn run() -> Result<()> {
                         toml_key = key.clone();
                         toml_val = Some(V::String(value));
                     }
+                    "default_kube_registry" => {
+                        if value.is_empty() {
+                            bail!("default_kube_registry cannot be empty");
+                        }
+                        toml_key = key.clone();
+                        toml_val = Some(V::String(value));
+                    }
                     "default_export_fs" => {
                         match value.as_str() {
                             "ext4" | "btrfs" => {}
@@ -3016,6 +3030,7 @@ fn run() -> Result<()> {
                         pod: pod.as_deref(),
                         oci_pod: oci_pod.as_deref(),
                         verbose: cli.verbose,
+                        default_kube_registry: &cfg.default_kube_registry,
                         http: &http,
                         auto_gc: cfg.auto_fs_gc,
                         security: sec,
@@ -3099,6 +3114,7 @@ fn run() -> Result<()> {
                         pod: pod.as_deref(),
                         oci_pod: oci_pod.as_deref(),
                         verbose: cli.verbose,
+                        default_kube_registry: &cfg.default_kube_registry,
                         http: &http,
                         auto_gc: cfg.auto_fs_gc,
                         security: sec,

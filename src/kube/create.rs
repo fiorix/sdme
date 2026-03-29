@@ -51,6 +51,8 @@ pub struct KubeCreateOptions<'a> {
     pub oci_pod: Option<&'a str>,
     /// Enable verbose output.
     pub verbose: bool,
+    /// Default registry for unqualified image names in kube YAML.
+    pub default_kube_registry: &'a str,
     /// HTTP configuration for downloads and OCI pulls.
     pub http: &'a crate::config::HttpConfig,
     /// Automatically clean up stale transactions before creating.
@@ -78,7 +80,7 @@ pub fn kube_create(datadir: &Path, opts: &KubeCreateOptions<'_>) -> Result<Strin
         .with_context(|| format!("cannot lock base rootfs '{}' for reading", opts.base_fs))?;
 
     let (pod_name, spec) = parse_yaml(opts.yaml_content)?;
-    let mut plan = validate_and_plan(&pod_name, spec)?;
+    let mut plan = validate_and_plan(&pod_name, spec, opts.default_kube_registry)?;
 
     let rootfs_name = format!("kube-{}", plan.pod_name);
     let rootfs_dir = datadir.join("fs");

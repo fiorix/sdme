@@ -33,7 +33,7 @@ metadata:
 spec:
   containers:
   - name: redis
-    image: docker.io/redis:latest
+    image: redis
 ```
 
 Deploy it:
@@ -52,8 +52,8 @@ Check the redis service:
 sudo sdme logs my-redis --oci redis
 ```
 
-{% callout(type="warn", title="Image names must be fully qualified") %}
-sdme requires the full registry prefix in image names (e.g. `docker.io/redis:latest`, not just `redis`). Standard Kubernetes specs that use short names need to be updated with the registry prefix.
+{% callout(type="tip", title="Image registry") %}
+Short image names like `redis` or `nginx` are resolved using the `default_kube_registry` config (default: `docker.io`). Fully qualified names like `quay.io/nginx/nginx-unprivileged` are used as-is. To use a different default registry: `sudo sdme config set default_kube_registry registry.example.com`
 {% end %}
 
 ## Multi-container pod
@@ -69,9 +69,9 @@ metadata:
 spec:
   containers:
   - name: nginx
-    image: docker.io/nginx:latest
+    image: nginx
   - name: redis
-    image: docker.io/redis:latest
+    image: redis
 ```
 
 ```sh
@@ -93,7 +93,7 @@ metadata:
 spec:
   containers:
   - name: postgres
-    image: docker.io/postgres:latest
+    image: postgres
     env:
     - name: POSTGRES_PASSWORD
       value: "secret"

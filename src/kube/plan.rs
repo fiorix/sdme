@@ -535,8 +535,13 @@ fn validate_apparmor_k8s(ap: &AppArmorProfile, container_name: &str) -> Result<S
 }
 
 /// Validate a container and build a KubeContainer plan entry.
-fn validate_container(c: Container) -> Result<KubeContainer> {
+fn validate_container(c: Container, default_registry: &str) -> Result<KubeContainer> {
     let image_ref = ImageReference::parse(&c.image)
+        .or_else(|| {
+            // Retry with default registry prefix for unqualified image names.
+            let qualified = format!("{}/{}", default_registry, c.image);
+            ImageReference::parse(&qualified)
+        })
         .with_context(|| format!("invalid image reference: {}", c.image))?;
     // Process envFrom first so explicit env entries can override them.
     let mut env: Vec<(String, KubeEnvValue)> = Vec::new();
@@ -751,7 +756,11 @@ fn validate_container(c: Container) -> Result<KubeContainer> {
 }
 
 /// Validate a PodSpec and produce a KubePlan.
-pub(crate) fn validate_and_plan(pod_name: &str, spec: PodSpec) -> Result<KubePlan> {
+pub(crate) fn validate_and_plan(
+    pod_name: &str,
+    spec: PodSpec,
+    default_kube_registry: &str,
+) -> Result<KubePlan> {
     if spec.containers.is_empty() {
         bail!("pod must have at least one container");
     }
@@ -989,14 +998,14 @@ pub(crate) fn validate_and_plan(pod_name: &str, spec: PodSpec) -> Result<KubePla
     let init_containers: Vec<KubeContainer> = spec
         .init_containers
         .into_iter()
-        .map(validate_container)
+        .map(|c| validate_container(c, default_kube_registry))
         .collect::<Result<Vec<_>>>()?;
 
     // Build container plans.
     let containers: Vec<KubeContainer> = spec
         .containers
         .into_iter()
-        .map(validate_container)
+        .map(|c| validate_container(c, default_kube_registry))
         .collect::<Result<Vec<_>>>()?;
 
     Ok(KubePlan {
@@ -1221,7 +1230,7 @@ spec:
       mountPath: /data
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let err = validate_and_plan(&name, spec).unwrap_err();
+        let err = validate_and_plan(&name, spec, "docker.io").unwrap_err();
         assert!(err.to_string().contains("undefined volume"));
     }
 
@@ -1271,7 +1280,7 @@ spec:
 "#
             );
             let (name, spec) = parse_yaml(&yaml).unwrap();
-            let plan = validate_and_plan(&name, spec).unwrap();
+            let plan = validate_and_plan(&name, spec, "docker.io").unwrap();
             assert_eq!(plan.restart_policy, expected, "policy={policy}");
         }
     }
@@ -1296,7 +1305,7 @@ spec:
     - containerPort: 3000
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let plan = validate_and_plan(&name, spec).unwrap();
+        let plan = validate_and_plan(&name, spec, "docker.io").unwrap();
         assert_eq!(plan.ports.len(), 3);
         let port_nums: Vec<u16> = plan.ports.iter().map(|p| p.container_port).collect();
         assert!(port_nums.contains(&80));
@@ -1315,7 +1324,7 @@ spec:
   containers: []
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let err = validate_and_plan(&name, spec).unwrap_err();
+        let err = validate_and_plan(&name, spec, "docker.io").unwrap_err();
         assert!(err.to_string().contains("at least one container"));
     }
 
@@ -1334,7 +1343,7 @@ spec:
     image: docker.io/redis:latest
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let err = validate_and_plan(&name, spec).unwrap_err();
+        let err = validate_and_plan(&name, spec, "docker.io").unwrap_err();
         assert!(err.to_string().contains("duplicate container name"));
     }
 
@@ -1355,7 +1364,7 @@ spec:
       path: relative/path
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let err = validate_and_plan(&name, spec).unwrap_err();
+        let err = validate_and_plan(&name, spec, "docker.io").unwrap_err();
         assert!(err.to_string().contains("absolute"));
     }
 
@@ -1376,7 +1385,7 @@ spec:
       path: /tmp/../etc
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let err = validate_and_plan(&name, spec).unwrap_err();
+        let err = validate_and_plan(&name, spec, "docker.io").unwrap_err();
         assert!(err.to_string().contains(".."));
     }
 
@@ -1393,7 +1402,7 @@ spec:
     image: docker.io/busybox:latest
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let plan = validate_and_plan(&name, spec).unwrap();
+        let plan = validate_and_plan(&name, spec, "docker.io").unwrap();
         assert_eq!(plan.restart_policy, "always");
     }
 
@@ -1438,7 +1447,7 @@ spec:
     imagePullPolicy: IfNotPresent
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let plan = validate_and_plan(&name, spec).unwrap();
+        let plan = validate_and_plan(&name, spec, "docker.io").unwrap();
         assert_eq!(plan.containers[0].image_pull_policy, "IfNotPresent");
     }
 
@@ -1455,7 +1464,7 @@ spec:
     image: docker.io/busybox:latest
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let plan = validate_and_plan(&name, spec).unwrap();
+        let plan = validate_and_plan(&name, spec, "docker.io").unwrap();
         assert_eq!(plan.containers[0].image_pull_policy, "Always");
     }
 
@@ -1473,7 +1482,7 @@ spec:
     imagePullPolicy: Bogus
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let err = validate_and_plan(&name, spec).unwrap_err();
+        let err = validate_and_plan(&name, spec, "docker.io").unwrap_err();
         assert!(err.to_string().contains("unsupported imagePullPolicy"));
     }
 
@@ -1493,7 +1502,7 @@ spec:
     image: docker.io/busybox:latest
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let plan = validate_and_plan(&name, spec).unwrap();
+        let plan = validate_and_plan(&name, spec, "docker.io").unwrap();
         assert_eq!(plan.termination_grace_period, Some(45));
     }
 
@@ -1511,7 +1520,7 @@ spec:
     image: docker.io/busybox:latest
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let err = validate_and_plan(&name, spec).unwrap_err();
+        let err = validate_and_plan(&name, spec, "docker.io").unwrap_err();
         assert!(err.to_string().contains("must be > 0"));
     }
 
@@ -1531,7 +1540,7 @@ spec:
     workingDir: /app
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let plan = validate_and_plan(&name, spec).unwrap();
+        let plan = validate_and_plan(&name, spec, "docker.io").unwrap();
         assert_eq!(
             plan.containers[0].working_dir_override,
             Some("/app".to_string())
@@ -1552,7 +1561,7 @@ spec:
     workingDir: relative/path
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let err = validate_and_plan(&name, spec).unwrap_err();
+        let err = validate_and_plan(&name, spec, "docker.io").unwrap_err();
         assert!(err.to_string().contains("workingDir must be absolute"));
     }
 
@@ -1570,7 +1579,7 @@ spec:
     workingDir: /app/../etc
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let err = validate_and_plan(&name, spec).unwrap_err();
+        let err = validate_and_plan(&name, spec, "docker.io").unwrap_err();
         assert!(err.to_string().contains("must not contain '..'"));
     }
 
@@ -1592,7 +1601,7 @@ spec:
         memory: 256Mi
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let plan = validate_and_plan(&name, spec).unwrap();
+        let plan = validate_and_plan(&name, spec, "docker.io").unwrap();
         assert!(plan.containers[0]
             .resource_lines
             .contains(&"MemoryMax=256M".to_string()));
@@ -1614,7 +1623,7 @@ spec:
         cpu: "2"
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let plan = validate_and_plan(&name, spec).unwrap();
+        let plan = validate_and_plan(&name, spec, "docker.io").unwrap();
         assert!(plan.containers[0]
             .resource_lines
             .contains(&"CPUQuota=200%".to_string()));
@@ -1636,7 +1645,7 @@ spec:
         cpu: 500m
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let plan = validate_and_plan(&name, spec).unwrap();
+        let plan = validate_and_plan(&name, spec, "docker.io").unwrap();
         assert!(plan.containers[0]
             .resource_lines
             .contains(&"CPUQuota=50%".to_string()));
@@ -1659,7 +1668,7 @@ spec:
         cpu: 250m
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let plan = validate_and_plan(&name, spec).unwrap();
+        let plan = validate_and_plan(&name, spec, "docker.io").unwrap();
         assert!(plan.containers[0]
             .resource_lines
             .contains(&"MemoryLow=128M".to_string()));
@@ -1705,7 +1714,7 @@ spec:
     image: docker.io/busybox:latest
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let plan = validate_and_plan(&name, spec).unwrap();
+        let plan = validate_and_plan(&name, spec, "docker.io").unwrap();
         assert_eq!(plan.run_as_user, Some(1000));
         assert_eq!(plan.run_as_group, Some(1000));
     }
@@ -1725,7 +1734,7 @@ spec:
     image: docker.io/busybox:latest
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let err = validate_and_plan(&name, spec).unwrap_err();
+        let err = validate_and_plan(&name, spec, "docker.io").unwrap_err();
         assert!(err.to_string().contains("runAsNonRoot is true"));
     }
 
@@ -1745,7 +1754,7 @@ spec:
     image: docker.io/busybox:latest
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let err = validate_and_plan(&name, spec).unwrap_err();
+        let err = validate_and_plan(&name, spec, "docker.io").unwrap_err();
         assert!(err.to_string().contains("runAsUser is 0"));
     }
 
@@ -1771,7 +1780,7 @@ spec:
         let (name, spec) = parse_yaml(yaml).unwrap();
         assert_eq!(spec.init_containers.len(), 1);
         assert_eq!(spec.init_containers[0].name, "init-setup");
-        let plan = validate_and_plan(&name, spec).unwrap();
+        let plan = validate_and_plan(&name, spec, "docker.io").unwrap();
         assert_eq!(plan.init_containers.len(), 1);
         assert_eq!(plan.init_containers[0].name, "init-setup");
         assert_eq!(plan.containers.len(), 1);
@@ -1794,7 +1803,7 @@ spec:
     image: docker.io/nginx:latest
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let err = validate_and_plan(&name, spec).unwrap_err();
+        let err = validate_and_plan(&name, spec, "docker.io").unwrap_err();
         assert!(err.to_string().contains("duplicate container name"));
     }
 
@@ -1819,7 +1828,7 @@ spec:
       failureThreshold: 5
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let plan = validate_and_plan(&name, spec).unwrap();
+        let plan = validate_and_plan(&name, spec, "docker.io").unwrap();
         let probe = plan.containers[0].probes.readiness.as_ref().unwrap();
         assert!(
             matches!(&probe.check, ProbeCheck::Exec { command } if command.iter().any(|a| a.contains("test -f"))),
@@ -1845,7 +1854,7 @@ spec:
       initialDelaySeconds: 5
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let err = validate_and_plan(&name, spec).unwrap_err();
+        let err = validate_and_plan(&name, spec, "docker.io").unwrap_err();
         let msg = format!("{err:#}");
         assert!(
             msg.contains("must specify exec, httpGet, tcpSocket, or grpc"),
@@ -1869,7 +1878,7 @@ spec:
         command: ["true"]
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let plan = validate_and_plan(&name, spec).unwrap();
+        let plan = validate_and_plan(&name, spec, "docker.io").unwrap();
         assert!(plan.containers[0].probes.liveness.is_some());
     }
 
@@ -1891,7 +1900,7 @@ spec:
       periodSeconds: 5
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let plan = validate_and_plan(&name, spec).unwrap();
+        let plan = validate_and_plan(&name, spec, "docker.io").unwrap();
         let probe = plan.containers[0].probes.liveness.as_ref().unwrap();
         assert!(
             matches!(&probe.check, ProbeCheck::Http { port: 8080, ref path, .. } if path == "/healthz"),
@@ -1923,7 +1932,7 @@ spec:
       periodSeconds: 5
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let plan = validate_and_plan(&name, spec).unwrap();
+        let plan = validate_and_plan(&name, spec, "docker.io").unwrap();
         let probe = plan.containers[0].probes.liveness.as_ref().unwrap();
         match &probe.check {
             ProbeCheck::Http {
@@ -1965,7 +1974,7 @@ spec:
       periodSeconds: 10
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let plan = validate_and_plan(&name, spec).unwrap();
+        let plan = validate_and_plan(&name, spec, "docker.io").unwrap();
         let probe = plan.containers[0].probes.readiness.as_ref().unwrap();
         assert!(
             matches!(&probe.check, ProbeCheck::Tcp { port: 3306 }),
@@ -1992,7 +2001,7 @@ spec:
       periodSeconds: 2
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let plan = validate_and_plan(&name, spec).unwrap();
+        let plan = validate_and_plan(&name, spec, "docker.io").unwrap();
         let probe = plan.containers[0].probes.startup.as_ref().unwrap();
         assert!(
             matches!(&probe.check, ProbeCheck::Http { port: 8080, ref path, .. } if path == "/ready"),
@@ -2044,7 +2053,7 @@ spec:
     emptyDir: {}
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let plan = validate_and_plan(&name, spec).unwrap();
+        let plan = validate_and_plan(&name, spec, "docker.io").unwrap();
 
         assert_eq!(plan.termination_grace_period, Some(30));
         assert_eq!(plan.run_as_user, Some(1000));
@@ -2586,7 +2595,7 @@ spec:
         assert!(secret.items.is_empty());
         assert_eq!(secret.default_mode, 0o644);
 
-        let plan = validate_and_plan(&name, spec).unwrap();
+        let plan = validate_and_plan(&name, spec, "docker.io").unwrap();
         assert!(matches!(
             plan.volumes[0].kind,
             KubeVolumeKind::Secret { .. }
@@ -2621,7 +2630,7 @@ spec:
       defaultMode: 256
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let plan = validate_and_plan(&name, spec).unwrap();
+        let plan = validate_and_plan(&name, spec, "docker.io").unwrap();
         if let KubeVolumeKind::Secret {
             ref items,
             default_mode,
@@ -2654,7 +2663,7 @@ spec:
       secretName: INVALID
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let err = validate_and_plan(&name, spec).unwrap_err();
+        let err = validate_and_plan(&name, spec, "docker.io").unwrap_err();
         assert!(
             err.to_string().contains("invalid secret name")
                 || err.to_string().contains("lowercase"),
@@ -2682,7 +2691,7 @@ spec:
         path: ../etc/passwd
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let err = validate_and_plan(&name, spec).unwrap_err();
+        let err = validate_and_plan(&name, spec, "docker.io").unwrap_err();
         assert!(err.to_string().contains(".."), "unexpected error: {err}");
     }
 
@@ -2706,7 +2715,7 @@ spec:
         path: /etc/passwd
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let err = validate_and_plan(&name, spec).unwrap_err();
+        let err = validate_and_plan(&name, spec, "docker.io").unwrap_err();
         assert!(
             err.to_string().contains("must not start with '/'"),
             "unexpected error: {err}"
@@ -2768,7 +2777,7 @@ spec:
         assert!(cm.items.is_empty());
         assert_eq!(cm.default_mode, 0o644);
 
-        let plan = validate_and_plan(&name, spec).unwrap();
+        let plan = validate_and_plan(&name, spec, "docker.io").unwrap();
         assert!(matches!(
             plan.volumes[0].kind,
             KubeVolumeKind::ConfigMap { .. }
@@ -2803,7 +2812,7 @@ spec:
       defaultMode: 256
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let plan = validate_and_plan(&name, spec).unwrap();
+        let plan = validate_and_plan(&name, spec, "docker.io").unwrap();
         if let KubeVolumeKind::ConfigMap {
             ref items,
             default_mode,
@@ -2836,7 +2845,7 @@ spec:
       name: INVALID
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let err = validate_and_plan(&name, spec).unwrap_err();
+        let err = validate_and_plan(&name, spec, "docker.io").unwrap_err();
         assert!(
             err.to_string().contains("invalid configmap name")
                 || err.to_string().contains("lowercase"),
@@ -2870,7 +2879,7 @@ spec:
         let pvc = spec.volumes[0].persistent_volume_claim.as_ref().unwrap();
         assert_eq!(pvc.claim_name, "test-data");
 
-        let plan = validate_and_plan(&name, spec).unwrap();
+        let plan = validate_and_plan(&name, spec, "docker.io").unwrap();
         assert!(matches!(plan.volumes[0].kind, KubeVolumeKind::Pvc(_)));
         // PVC volumes don't generate host binds at plan time (added in kube_create).
         assert!(plan.host_binds.is_empty());
@@ -2893,7 +2902,7 @@ spec:
       claimName: INVALID
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let err = validate_and_plan(&name, spec).unwrap_err();
+        let err = validate_and_plan(&name, spec, "docker.io").unwrap_err();
         assert!(
             err.to_string().contains("invalid PVC claim name")
                 || err.to_string().contains("lowercase"),
@@ -2922,7 +2931,7 @@ spec:
           key: password
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let plan = validate_and_plan(&name, spec).unwrap();
+        let plan = validate_and_plan(&name, spec, "docker.io").unwrap();
         assert!(matches!(
             plan.containers[0].env[0].1,
             KubeEnvValue::SecretKeyRef { .. }
@@ -2952,7 +2961,7 @@ spec:
           key: log-level
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let plan = validate_and_plan(&name, spec).unwrap();
+        let plan = validate_and_plan(&name, spec, "docker.io").unwrap();
         assert!(matches!(
             plan.containers[0].env[0].1,
             KubeEnvValue::ConfigMapKeyRef { .. }
@@ -2979,7 +2988,7 @@ spec:
       valueFrom: {}
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let err = validate_and_plan(&name, spec).unwrap_err();
+        let err = validate_and_plan(&name, spec, "docker.io").unwrap_err();
         assert!(
             err.to_string()
                 .contains("valueFrom must specify secretKeyRef or configMapKeyRef"),
@@ -3006,7 +3015,7 @@ spec:
         drop: ["NET_RAW"]
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let plan = validate_and_plan(&name, spec).unwrap();
+        let plan = validate_and_plan(&name, spec, "docker.io").unwrap();
         let c = &plan.containers[0];
         assert_eq!(c.security.add_caps, vec!["CAP_NET_ADMIN"]);
         assert_eq!(c.security.drop_caps, vec!["CAP_NET_RAW"]);
@@ -3029,7 +3038,7 @@ spec:
         drop: ["ALL"]
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let plan = validate_and_plan(&name, spec).unwrap();
+        let plan = validate_and_plan(&name, spec, "docker.io").unwrap();
         let c = &plan.containers[0];
         assert_eq!(c.security.add_caps, vec!["CAP_CHOWN"]);
         assert_eq!(c.security.drop_caps, vec!["ALL"]);
@@ -3051,7 +3060,7 @@ spec:
         add: ["BOGUS"]
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let err = validate_and_plan(&name, spec).unwrap_err();
+        let err = validate_and_plan(&name, spec, "docker.io").unwrap_err();
         let chain = format!("{err:#}");
         assert!(
             chain.contains("unknown capability"),
@@ -3075,7 +3084,7 @@ spec:
         type: RuntimeDefault
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let plan = validate_and_plan(&name, spec).unwrap();
+        let plan = validate_and_plan(&name, spec, "docker.io").unwrap();
         let c = &plan.containers[0];
         assert!(
             !c.security.syscall_filters.is_empty(),
@@ -3106,7 +3115,7 @@ spec:
         type: Unconfined
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let plan = validate_and_plan(&name, spec).unwrap();
+        let plan = validate_and_plan(&name, spec, "docker.io").unwrap();
         let c = &plan.containers[0];
         assert!(
             c.security.syscall_filters.is_empty(),
@@ -3131,7 +3140,7 @@ spec:
         localhostProfile: my-profile.json
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let err = validate_and_plan(&name, spec).unwrap_err();
+        let err = validate_and_plan(&name, spec, "docker.io").unwrap_err();
         assert!(
             err.to_string().contains("Localhost"),
             "unexpected error: {err}"
@@ -3154,7 +3163,7 @@ spec:
         type: RuntimeDefault
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let plan = validate_and_plan(&name, spec).unwrap();
+        let plan = validate_and_plan(&name, spec, "docker.io").unwrap();
         let c = &plan.containers[0];
         assert_eq!(c.security.apparmor_profile.as_deref(), Some("sdme-default"));
     }
@@ -3176,7 +3185,7 @@ spec:
         localhostProfile: my-custom-profile
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let plan = validate_and_plan(&name, spec).unwrap();
+        let plan = validate_and_plan(&name, spec, "docker.io").unwrap();
         let c = &plan.containers[0];
         assert_eq!(
             c.security.apparmor_profile.as_deref(),
@@ -3200,7 +3209,7 @@ spec:
         type: Unconfined
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let plan = validate_and_plan(&name, spec).unwrap();
+        let plan = validate_and_plan(&name, spec, "docker.io").unwrap();
         let c = &plan.containers[0];
         // Unconfined resolves to empty string.
         assert_eq!(c.security.apparmor_profile.as_deref(), Some(""));
@@ -3222,7 +3231,7 @@ spec:
       runAsGroup: 1000
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let plan = validate_and_plan(&name, spec).unwrap();
+        let plan = validate_and_plan(&name, spec, "docker.io").unwrap();
         let c = &plan.containers[0];
         assert_eq!(c.security.run_as_user, Some(1000));
         assert_eq!(c.security.run_as_group, Some(1000));
@@ -3243,7 +3252,7 @@ spec:
       runAsNonRoot: true
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let err = validate_and_plan(&name, spec).unwrap_err();
+        let err = validate_and_plan(&name, spec, "docker.io").unwrap_err();
         assert!(
             err.to_string().contains("runAsNonRoot"),
             "unexpected error: {err}"
@@ -3265,7 +3274,7 @@ spec:
       allowPrivilegeEscalation: false
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let plan = validate_and_plan(&name, spec).unwrap();
+        let plan = validate_and_plan(&name, spec, "docker.io").unwrap();
         let c = &plan.containers[0];
         assert_eq!(c.security.allow_privilege_escalation, Some(false));
     }
@@ -3285,7 +3294,7 @@ spec:
       readOnlyRootFilesystem: true
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let plan = validate_and_plan(&name, spec).unwrap();
+        let plan = validate_and_plan(&name, spec, "docker.io").unwrap();
         let c = &plan.containers[0];
         assert!(c.security.read_only_root_filesystem);
     }
@@ -3316,7 +3325,7 @@ spec:
         type: RuntimeDefault
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let plan = validate_and_plan(&name, spec).unwrap();
+        let plan = validate_and_plan(&name, spec, "docker.io").unwrap();
         let c = &plan.containers[0];
         assert_eq!(c.security.run_as_user, Some(1000));
         assert_eq!(c.security.run_as_group, Some(1000));
@@ -3344,7 +3353,7 @@ spec:
     image: docker.io/busybox:latest
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let plan = validate_and_plan(&name, spec).unwrap();
+        let plan = validate_and_plan(&name, spec, "docker.io").unwrap();
         assert_eq!(plan.seccomp_profile_type.as_deref(), Some("RuntimeDefault"));
     }
 
@@ -3364,7 +3373,7 @@ spec:
     image: docker.io/busybox:latest
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let plan = validate_and_plan(&name, spec).unwrap();
+        let plan = validate_and_plan(&name, spec, "docker.io").unwrap();
         assert_eq!(plan.apparmor_profile.as_deref(), Some("sdme-default"));
     }
 
@@ -3507,7 +3516,7 @@ spec:
     emptyDir: {}
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let plan = validate_and_plan(&name, spec).unwrap();
+        let plan = validate_and_plan(&name, spec, "docker.io").unwrap();
         assert!(plan.containers[0].volume_mounts[0].read_only);
     }
 
@@ -3624,7 +3633,7 @@ spec:
         name: my-config
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let plan = validate_and_plan(&name, spec).unwrap();
+        let plan = validate_and_plan(&name, spec, "docker.io").unwrap();
         assert!(matches!(
             plan.containers[0].env[0].1,
             KubeEnvValue::ConfigMapRef { .. }
@@ -3655,7 +3664,7 @@ spec:
         name: my-secret
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let plan = validate_and_plan(&name, spec).unwrap();
+        let plan = validate_and_plan(&name, spec, "docker.io").unwrap();
         assert!(matches!(
             plan.containers[0].env[0].1,
             KubeEnvValue::SecretRef { .. }
@@ -3687,7 +3696,7 @@ spec:
       prefix: APP_
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let plan = validate_and_plan(&name, spec).unwrap();
+        let plan = validate_and_plan(&name, spec, "docker.io").unwrap();
         if let KubeEnvValue::ConfigMapRef { ref prefix, .. } = plan.containers[0].env[0].1 {
             assert_eq!(prefix, "APP_");
         } else {
@@ -3710,7 +3719,7 @@ spec:
     - prefix: FOO_
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let err = validate_and_plan(&name, spec).unwrap_err();
+        let err = validate_and_plan(&name, spec, "docker.io").unwrap_err();
         assert!(
             err.to_string()
                 .contains("envFrom entry must specify configMapRef or secretRef"),
@@ -3734,7 +3743,7 @@ spec:
         name: INVALID
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let err = validate_and_plan(&name, spec).unwrap_err();
+        let err = validate_and_plan(&name, spec, "docker.io").unwrap_err();
         assert!(
             err.to_string().contains("invalid secret name")
                 || err.to_string().contains("lowercase"),
@@ -3763,7 +3772,7 @@ spec:
       value: explicit-value
 "#;
         let (name, spec) = parse_yaml(yaml).unwrap();
-        let plan = validate_and_plan(&name, spec).unwrap();
+        let plan = validate_and_plan(&name, spec, "docker.io").unwrap();
         // envFrom should be first, explicit env should be last.
         assert!(matches!(
             plan.containers[0].env[0].1,
