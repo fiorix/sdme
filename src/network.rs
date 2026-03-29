@@ -28,6 +28,12 @@ pub struct NetworkConfig {
 }
 
 impl NetworkConfig {
+    /// Returns true if the container has a dedicated network interface
+    /// (veth, bridge, or zone).
+    pub fn has_interface(&self) -> bool {
+        self.network_veth || self.network_bridge.is_some() || self.network_zone.is_some()
+    }
+
     /// Returns true if no network options are set (uses host network).
     pub fn is_empty(&self) -> bool {
         !self.private_network
@@ -229,6 +235,47 @@ mod tests {
     use super::*;
 
     // --- NetworkConfig tests ---
+
+    #[test]
+    fn test_has_interface_false_when_empty() {
+        assert!(!NetworkConfig::default().has_interface());
+    }
+
+    #[test]
+    fn test_has_interface_false_with_only_private_network() {
+        let network = NetworkConfig {
+            private_network: true,
+            ..Default::default()
+        };
+        assert!(!network.has_interface());
+    }
+
+    #[test]
+    fn test_has_interface_true_with_veth() {
+        let network = NetworkConfig {
+            network_veth: true,
+            ..Default::default()
+        };
+        assert!(network.has_interface());
+    }
+
+    #[test]
+    fn test_has_interface_true_with_zone() {
+        let network = NetworkConfig {
+            network_zone: Some("myzone".to_string()),
+            ..Default::default()
+        };
+        assert!(network.has_interface());
+    }
+
+    #[test]
+    fn test_has_interface_true_with_bridge() {
+        let network = NetworkConfig {
+            network_bridge: Some("br0".to_string()),
+            ..Default::default()
+        };
+        assert!(network.has_interface());
+    }
 
     #[test]
     fn test_network_default_is_empty() {

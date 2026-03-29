@@ -62,7 +62,7 @@ The project is a single Rust binary (`src/main.rs`) backed by a shared library (
 | `sdme exec` | Run a one-off command in a running container (`machinectl shell`). `--oci [APP]` enters the OCI app's PID, IPC, and mount namespaces via `nsenter` (discovers the app's host PID from its cgroup, then runs `nsenter -t <pid> --pid --ipc --mount`; optional app name for multi-container kube pods) |
 | `sdme stop` | Graceful shutdown via `SIGRTMIN+4` (default), `--term` for terminate, `--kill` for force-kill |
 | `sdme rm` | Remove containers (stops if running, deletes state + files) |
-| `sdme ps` | List containers with status, health, OS, pod/OCI-pod/kube/userns/binds (if any) |
+| `sdme ps` | List containers with status, health, OS, pod/OCI-pod/kube/userns/binds/addresses (if any). IP addresses queried via machined D-Bus for running containers with network interfaces |
 | `sdme logs` | View container logs (exec's `journalctl`). `--oci [APP]` shows the OCI app service logs (`journalctl -u sdme-oci-{name}.service` inside the container; optional app name for multi-container kube pods) |
 | `sdme fs import` | Import a rootfs from a directory, tarball, URL, OCI image, or QCOW2 disk image |
 | `sdme fs ls` | List imported root filesystems |

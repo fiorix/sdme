@@ -530,6 +530,76 @@ mod dbus {
         inner().unwrap_or_default()
     }
 
+    /// Query IP addresses assigned to a container via machined D-Bus.
+    ///
+    /// Calls `GetAddresses` on the `org.freedesktop.machine1.Machine`
+    /// interface. Returns human-readable IP strings. Link-local IPv6
+    /// addresses (`fe80::`) are filtered out. Returns an empty vector
+    /// if the machine is not registered or the call fails.
+    pub fn get_machine_addresses(name: &str) -> Vec<String> {
+        use std::net::{Ipv4Addr, Ipv6Addr};
+
+        fn inner(name: &str) -> Result<Vec<String>> {
+            let conn = connect()?;
+            let manager = machine1_manager(&conn)?;
+
+            let reply = match manager.call_method("GetMachine", &(name,)) {
+                Ok(r) => r,
+                Err(e) => {
+                    if is_machine_not_found(&e) {
+                        return Ok(Vec::new());
+                    }
+                    return Err(e).context("failed to call GetMachine");
+                }
+            };
+
+            let machine_path: zbus::zvariant::OwnedObjectPath = reply
+                .body()
+                .deserialize()
+                .context("failed to deserialize machine path")?;
+
+            let machine_proxy = Proxy::new(
+                &conn,
+                "org.freedesktop.machine1",
+                machine_path,
+                "org.freedesktop.machine1.Machine",
+            )
+            .context("failed to create machine proxy")?;
+
+            let reply = machine_proxy
+                .call_method("GetAddresses", &())
+                .context("failed to call GetAddresses")?;
+
+            // GetAddresses returns a(iay): address_family, address_bytes.
+            let addrs: Vec<(i32, Vec<u8>)> = reply
+                .body()
+                .deserialize()
+                .context("failed to deserialize addresses")?;
+
+            let mut result = Vec::new();
+            for (family, bytes) in addrs {
+                match family {
+                    2 if bytes.len() == 4 => {
+                        // AF_INET
+                        let ip = Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3]);
+                        result.push(ip.to_string());
+                    }
+                    10 if bytes.len() == 16 => {
+                        // AF_INET6 — skip link-local (fe80::/10)
+                        let octets: [u8; 16] = bytes.try_into().expect("length already checked");
+                        let ip = Ipv6Addr::from(octets);
+                        if (ip.segments()[0] & 0xffc0) != 0xfe80 {
+                            result.push(ip.to_string());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(result)
+        }
+        inner(name).unwrap_or_default()
+    }
+
     /// Read the ActiveState property of a systemd unit.
     ///
     /// Returns the state string (e.g. "active", "inactive", "failed",
@@ -812,6 +882,14 @@ pub fn has_foreign_userns(leader: u32) -> bool {
 /// Return the names of all registered machines from machined.
 pub fn list_machines() -> Vec<String> {
     dbus::list_machines()
+}
+
+/// Return IP addresses assigned to a container's network interface.
+///
+/// Returns an empty vector for stopped containers, machines not
+/// registered with machined, or on any D-Bus error.
+pub fn get_machine_addresses(name: &str) -> Vec<String> {
+    dbus::get_machine_addresses(name)
 }
 
 /// Return the systemd service unit name for a container.

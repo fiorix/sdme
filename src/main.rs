@@ -1656,9 +1656,7 @@ fn parse_security(args: SecurityArgs, cfg: &config::Config) -> Result<(SecurityC
 /// interface (veth, zone, bridge), retain CAP_NET_RAW so DHCP works.
 /// systemd-networkd needs raw sockets for the DHCP client.
 fn retain_net_raw_for_dhcp(sec: &mut SecurityConfig, network: &NetworkConfig) {
-    let has_interface =
-        network.network_veth || network.network_zone.is_some() || network.network_bridge.is_some();
-    if has_interface && sec.drop_caps.iter().any(|c| c == "CAP_NET_RAW") {
+    if network.has_interface() && sec.drop_caps.iter().any(|c| c == "CAP_NET_RAW") {
         sec.drop_caps.retain(|c| c != "CAP_NET_RAW");
         eprintln!("note: retaining CAP_NET_RAW for DHCP on network interface");
     }
@@ -2854,6 +2852,13 @@ fn run() -> Result<()> {
                 } else {
                     None
                 };
+                let addr_display: Vec<String> =
+                    entries.iter().map(|e| e.addresses_display()).collect();
+                let addr_w = if addr_display.iter().any(|a| !a.is_empty()) {
+                    Some(addr_display.iter().map(|a| a.len()).max().unwrap().max(9))
+                } else {
+                    None
+                };
                 // Header.
                 print!(
                     "{:<name_w$}  {:<status_w$}  {:<health_w$}  {:<os_w$}",
@@ -2876,6 +2881,9 @@ fn run() -> Result<()> {
                 }
                 if let Some(kw) = kube_w {
                     print!("  {:<kw$}", "KUBE");
+                }
+                if let Some(aw) = addr_w {
+                    print!("  {:<aw$}", "ADDRESSES");
                 }
                 println!();
                 // Rows.
@@ -2901,6 +2909,9 @@ fn run() -> Result<()> {
                     }
                     if let Some(kw) = kube_w {
                         print!("  {:<kw$}", e.kube);
+                    }
+                    if let Some(aw) = addr_w {
+                        print!("  {:<aw$}", addr_display[i]);
                     }
                     println!();
                 }

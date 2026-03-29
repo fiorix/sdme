@@ -270,9 +270,7 @@ fn do_create(
     // copy variant won't overwrite a symlink, leaving DNS broken. A regular
     // file in the overlayfs upper layer shadows the lower layer's symlink.
     let resolv_path = etc_dir.join("resolv.conf");
-    let has_interface = opts.network.network_veth
-        || opts.network.network_zone.is_some()
-        || opts.network.network_bridge.is_some();
+    let has_interface = opts.network.has_interface();
     let resolved_active = has_interface
         && !opts
             .masked_services
@@ -923,6 +921,11 @@ pub struct ContainerInfo {
     pub binds: String,
     /// Kube container names, if this is a kube container.
     pub kube: String,
+    /// IP addresses assigned to the container's network interface.
+    ///
+    /// Empty when the container is stopped, uses host networking, or
+    /// has no dedicated interface (veth, bridge, zone).
+    pub addresses: Vec<String>,
 }
 
 impl ContainerInfo {
@@ -951,6 +954,13 @@ impl ContainerInfo {
             })
             .collect::<Vec<_>>()
             .join(",")
+    }
+
+    /// Format addresses for display in `sdme ps`.
+    ///
+    /// Joins all addresses with commas. Example: `10.0.0.2,fd00::1`
+    pub fn addresses_display(&self) -> String {
+        self.addresses.join(",")
     }
 }
 
@@ -1114,6 +1124,22 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
             "stopped"
         };
 
+        // IP addresses (only for running containers with a network interface).
+        let addresses = if status == "running" {
+            if let Ok(ref s) = state {
+                let net = NetworkConfig::from_state(s);
+                if net.has_interface() {
+                    systemd::get_machine_addresses(name)
+                } else {
+                    Vec::new()
+                }
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
+
         result.push(ContainerInfo {
             name: name.clone(),
             status: status.to_string(),
@@ -1126,6 +1152,7 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
             enabled,
             binds,
             kube,
+            addresses,
         });
     }
     Ok(result)
