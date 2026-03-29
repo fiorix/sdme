@@ -1225,12 +1225,14 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
         SourceKind::Url(ref url) => import_url(url, &staging_dir, &rootfs_dir, name, verbose, http),
         SourceKind::RegistryImage(ref img) => {
             match crate::oci::registry::import_registry_image(
-                img,
-                &staging_dir,
-                docker_credentials,
-                cache,
-                verbose,
-                http,
+                &crate::oci::registry::RegistryImportOptions {
+                    image: img,
+                    staging_dir: &staging_dir,
+                    docker_credentials,
+                    cache,
+                    verbose,
+                    http,
+                },
             ) {
                 Ok(config) => {
                     oci_config = config;

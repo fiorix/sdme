@@ -824,14 +824,25 @@ fn save_cached_manifest(
 /// Manifest resolution is cached locally (15-minute TTL) to avoid
 /// repeated registry API calls when importing the same image multiple
 /// times (e.g. parallel test runs).
+/// Options for importing an OCI image from a registry.
+pub(crate) struct RegistryImportOptions<'a> {
+    pub(crate) image: &'a ImageReference,
+    pub(crate) staging_dir: &'a Path,
+    pub(crate) docker_credentials: Option<(&'a str, &'a str)>,
+    pub(crate) cache: &'a crate::oci::cache::BlobCache,
+    pub(crate) verbose: bool,
+    pub(crate) http: &'a crate::config::HttpConfig,
+}
+
 pub(crate) fn import_registry_image(
-    image: &ImageReference,
-    staging_dir: &Path,
-    docker_credentials: Option<(&str, &str)>,
-    cache: &crate::oci::cache::BlobCache,
-    verbose: bool,
-    http: &crate::config::HttpConfig,
+    opts: &RegistryImportOptions<'_>,
 ) -> Result<Option<OciContainerConfig>> {
+    let image = opts.image;
+    let staging_dir = opts.staging_dir;
+    let docker_credentials = opts.docker_credentials;
+    let cache = opts.cache;
+    let verbose = opts.verbose;
+    let http = opts.http;
     eprintln!("pulling {image}");
 
     // Check manifest cache first.
@@ -1309,7 +1320,15 @@ mod tests {
         let cfg = crate::config::Config::default();
         let cache = crate::oci::cache::BlobCache::from_config(&cfg).unwrap();
         let http = cfg.http_config().unwrap();
-        import_registry_image(&image, &dest, None, &cache, true, &http).unwrap();
+        import_registry_image(&RegistryImportOptions {
+            image: &image,
+            staging_dir: &dest,
+            docker_credentials: None,
+            cache: &cache,
+            verbose: true,
+            http: &http,
+        })
+        .unwrap();
 
         // Basic sanity checks.
         assert!(dest.is_dir());

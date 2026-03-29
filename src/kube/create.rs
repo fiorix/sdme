@@ -285,12 +285,14 @@ pub fn kube_create(datadir: &Path, opts: &KubeCreateOptions<'_>) -> Result<Strin
         // Pull the image.
         let oci_config = if should_pull {
             crate::oci::registry::import_registry_image(
-                &kc.image_ref,
-                &app_root,
-                opts.docker_credentials,
-                opts.cache,
-                opts.verbose,
-                opts.http,
+                &crate::oci::registry::RegistryImportOptions {
+                    image: &kc.image_ref,
+                    staging_dir: &app_root,
+                    docker_credentials: opts.docker_credentials,
+                    cache: opts.cache,
+                    verbose: opts.verbose,
+                    http: opts.http,
+                },
             )
             .with_context(|| format!("failed to pull image for container '{}'", kc.name))?
         } else {
