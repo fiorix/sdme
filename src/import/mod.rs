@@ -539,6 +539,7 @@ fn download_file(
     url: &str,
     dest: &Path,
     verbose: bool,
+    interactive: bool,
     http: &crate::config::HttpConfig,
 ) -> Result<Option<String>> {
     if verbose {
@@ -552,10 +553,12 @@ fn download_file(
         .with_context(|| format!("failed to download {url}"))?;
 
     let content_type = response.body().mime_type().map(|s| s.to_string());
+    let content_length = response.body().content_length();
     let mut reader = response.into_body().into_reader();
     let mut file =
         fs::File::create(dest).with_context(|| format!("failed to create {}", dest.display()))?;
 
+    let mut progress = crate::DownloadProgress::new(interactive, content_length);
     let mut buf = [0u8; 65536];
     let mut total: u64 = 0;
     loop {
@@ -575,7 +578,9 @@ fn download_file(
         }
         std::io::Write::write_all(&mut file, &buf[..n])
             .with_context(|| format!("failed to write download to {}", dest.display()))?;
+        progress.update(n as u64);
     }
+    progress.finish();
 
     if verbose {
         eprintln!("downloaded {} bytes to {}", total, dest.display());
@@ -594,12 +599,13 @@ fn import_url(
     rootfs_dir: &Path,
     name: &str,
     verbose: bool,
+    interactive: bool,
     http: &crate::config::HttpConfig,
 ) -> Result<()> {
     let temp_file = rootfs_dir.join(format!(".{name}.download-txn-{}", std::process::id()));
 
     let result = (|| -> Result<()> {
-        let content_type = download_file(url, &temp_file, verbose, http)?;
+        let content_type = download_file(url, &temp_file, verbose, interactive, http)?;
 
         // Tier 1: Content-Type header.
         let kind = content_type
@@ -617,6 +623,10 @@ fn import_url(
                 "detected file type: {:?} (content-type: {:?})",
                 kind, content_type
             );
+        }
+
+        if interactive {
+            eprintln!("unpacking...");
         }
 
         match kind {
@@ -1222,7 +1232,15 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
         }
         SourceKind::QcowImage(ref path) => img::import_qcow2(path, &staging_dir, verbose),
         SourceKind::RawImage(ref path) => img::import_raw(path, &staging_dir, verbose),
-        SourceKind::Url(ref url) => import_url(url, &staging_dir, &rootfs_dir, name, verbose, http),
+        SourceKind::Url(ref url) => import_url(
+            url,
+            &staging_dir,
+            &rootfs_dir,
+            name,
+            verbose,
+            interactive,
+            http,
+        ),
         SourceKind::RegistryImage(ref img) => {
             match crate::oci::registry::import_registry_image(
                 &crate::oci::registry::RegistryImportOptions {

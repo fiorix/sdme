@@ -1038,3 +1038,59 @@ pub(crate) mod testutil {
         }
     }
 }
+
+/// Download progress display for interactive terminals.
+///
+/// Shows a spinner with human-readable byte count and optional percentage
+/// when Content-Length is known. Output goes to stderr and overwrites the
+/// same line using `\r`.
+pub struct DownloadProgress {
+    total_size: Option<u64>,
+    downloaded: u64,
+    spinner_idx: usize,
+    enabled: bool,
+}
+
+impl DownloadProgress {
+    /// Create a new progress display.
+    ///
+    /// `enabled` controls whether anything is printed (set to `interactive`).
+    /// `total_size` is the Content-Length if known.
+    pub fn new(enabled: bool, total_size: Option<u64>) -> Self {
+        Self {
+            total_size,
+            downloaded: 0,
+            spinner_idx: 0,
+            enabled,
+        }
+    }
+
+    /// Update progress after reading `n` bytes.
+    pub fn update(&mut self, n: u64) {
+        if !self.enabled {
+            return;
+        }
+        self.downloaded += n;
+        self.spinner_idx = (self.spinner_idx + 1) % 4;
+        let spinner = ['-', '\\', '|', '/'][self.spinner_idx];
+        let size = crate::oci::cache::format_size(self.downloaded);
+        if let Some(total) = self.total_size {
+            let pct = if total > 0 {
+                (self.downloaded as f64 / total as f64 * 100.0) as u64
+            } else {
+                0
+            };
+            let total_s = crate::oci::cache::format_size(total);
+            eprint!("\rdownloading {spinner} {size} of {total_s} ({pct}%)    ");
+        } else {
+            eprint!("\rdownloading {spinner} {size}    ");
+        }
+    }
+
+    /// Finish the progress display with a newline.
+    pub fn finish(&self) {
+        if self.enabled && self.downloaded > 0 {
+            eprintln!();
+        }
+    }
+}
