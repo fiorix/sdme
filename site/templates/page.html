@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+
+{% block title %}{{ page.title }} — sdme tutorial{% endblock %}
+
+{% block content %}
+  <p class="breadcrumb"><a href="{{ get_url(path='/') }}">sdme</a> / <a href="{{ get_url(path='@/tutorial/_index.md') }}">tutorials</a> /</p>
+  <h1>{{ page.title }}</h1>
+  {% if page.description %}
+  <p class="subtitle">{{ page.description }}</p>
+  {% endif %}
+
+  {{ page.content | safe }}
+
+  <div class="nav-links">
+    {% if page.lower %}
+      <a href="{{ page.lower.permalink }}">&larr; Previous: {{ page.lower.title }}</a>
+    {% else %}
+      <a href="{{ get_url(path='@/tutorial/_index.md') }}">All tutorials</a>
+    {% endif %}
+    {% if page.higher %}
+      <a class="next" href="{{ page.higher.permalink }}">Next: {{ page.higher.title }} &rarr;</a>
+    {% else %}
+      <a class="next" href="{{ get_url(path='@/tutorial/_index.md') }}">All tutorials</a>
+    {% endif %}
+  </div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script src="{{ get_url(path='js/copy.js') }}"></script>
+{% endblock %}

@@ -1,0 +1,11 @@
+base_url = "https://fiorix.github.io/sdme"
+title = "sdme"
+description = "The systemd machine editor"
+compile_sass = false
+build_search_index = false
+minify_html = false
+
+[markdown]
+insert_anchor_links = "heading"
+
+[extra]
