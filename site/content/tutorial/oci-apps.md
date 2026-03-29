@@ -86,16 +86,20 @@ We recommend using `--network-zone` and `--hardened` as described
 in the [services tutorial](@/tutorial/services.md):
 
 ```sh
-sudo sdme new mycontainer -r nginx --network-zone=services --hardened --port 8080:80
+sudo sdme new mycontainer -r nginx --network-zone=services --hardened
 ```
 
-This gives the container its own network with DNS, user namespace
-isolation, and forwards host port 8080 to nginx on port 80.
-
-From the host:
+This gives the container its own network with DNS and user namespace
+isolation. Find the container's IP with `sdme ps`:
 
 ```sh
-curl http://localhost:8080
+sudo sdme ps
+```
+
+Then from the host, use the ADDRESSES column to reach nginx:
+
+```sh
+curl http://<container-ip>
 ```
 
 You should see the nginx welcome page.
