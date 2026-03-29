@@ -287,8 +287,8 @@ ROOT FILESYSTEMS:
     lower layer). Stop and restart affected containers to pick up changes.
 
 SAFETY:
-    When copying to the host, device nodes are refused by default (use
-    --force to override). Setuid/setgid files produce a warning.
+    When copying to the host, device nodes are refused by default.
+    --force skips all safety checks (device nodes and setuid/setgid warnings).
 
 NOTES:
     Copy behavior (path handling, file type preservation, directory

@@ -472,8 +472,8 @@ fn check_host_safety(src_path: &Path, opts: &CpOptions) -> Result<()> {
         }
     }
 
-    // Warn about setuid/setgid.
-    if mode & libc::S_ISUID != 0 || mode & libc::S_ISGID != 0 {
+    // Warn about setuid/setgid (suppressed by --force).
+    if !opts.force && (mode & libc::S_ISUID != 0 || mode & libc::S_ISGID != 0) {
         eprintln!(
             "warning: source has setuid/setgid bits: {}",
             src_path.display()
@@ -539,7 +539,7 @@ fn scan_dir_safety(dir: &Path, opts: &CpOptions) -> Result<()> {
         }
     }
 
-    if suid_count > 0 {
+    if suid_count > 0 && !opts.force {
         eprintln!("warning: source directory contains {suid_count} setuid/setgid file(s)");
     }
 
