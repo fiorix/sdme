@@ -66,6 +66,12 @@ This forwards host port 8080 to container port 80. Format:
 
 Multiple `--port` flags can be used. TCP is the default protocol.
 
+Port forwarding creates nftables DNAT rules for incoming traffic.
+It works for connections from other machines on the network and
+from the host via its external IP, but **not via localhost**
+(127.0.0.1). To reach a container from the host, use the
+container's IP directly — find it with `sdme ps`.
+
 ## Zones
 
 Zones are the easiest way to set up multi-container networking.
@@ -94,10 +100,12 @@ From inside `http-client`, you can reach `http-server` by name:
 curl http://http-server
 ```
 
-Port forwarding works with zones:
+Port forwarding works with zones. Use `sdme ps` to find the
+container's IP:
 
 ```sh
 sudo sdme new myweb -r nginx --network-zone=myzone --port 8080:80
+sudo sdme ps
 ```
 
 `--network-zone` implies `--private-network`.
@@ -188,4 +196,5 @@ Zone             --network-zone=X    Yes       Yes (auto DNS)   None
 Bridge           --network-bridge=X  Yes       Yes (manual IP)  Host bridge
 </pre>
 
-Port forwarding (`--port`) works with veth, zone, and bridge modes.
+Port forwarding (`--port`) works with veth, zone, and bridge modes
+for external access. From the host, use the container's IP directly.

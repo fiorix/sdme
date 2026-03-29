@@ -606,7 +606,11 @@ These flags are available on both `sdme create` and `sdme new`. They
 compose freely: you can combine `--network-zone` with `--port`, or use
 `--network-bridge` with `--network-veth`. Port forwarding requires a
 private network namespace because systemd-nspawn's `--port` flag only
-works when host and container have separate network stacks.
+works when host and container have separate network stacks. The
+forwarding rules use nftables DNAT and apply to incoming traffic from
+the network and from the host via its external IP, but not via
+localhost (127.0.0.1). To reach a container from the host, use the
+container's IP directly (shown by `sdme ps`).
 
 Under the hood, each flag translates directly to a systemd-nspawn
 argument. The network configuration is persisted in the container's

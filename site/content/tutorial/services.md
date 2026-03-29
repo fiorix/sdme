@@ -53,23 +53,16 @@ times to return to the host.
 ## Verify from the host
 
 Containers in a zone are reachable by IP from the host. Find the
-container's IP in the ADDRESSES column:
+container's IP with `sdme ps`:
 
 ```sh
-sudo machinectl list
+sudo sdme ps
 ```
 
-You can also use port forwarding to map a host port to the
-container. Create the container with `--port`:
+The ADDRESSES column shows the container's IP. Then from the host:
 
 ```sh
-sudo sdme new mywebserver -r fedora --network-zone=services --hardened --port 8080:80
-```
-
-Then from the host:
-
-```sh
-curl http://localhost:8080
+curl http://<container-ip>
 ```
 
 ## Inter-container communication

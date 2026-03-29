@@ -93,8 +93,8 @@ EXAMPLES:
     # Named container from imported rootfs
     sdme new mybox -r ubuntu
 
-    # OCI application image with port forwarding
-    sdme new web -r nginx -p 8080:80
+    # OCI application image with port forwarding (use 'sdme ps' for container IP)
+    sdme new web -r nginx --network-veth -p 8080:80
 
     # Private network with virtual ethernet and resource limits
     sdme new dev -r ubuntu --network-veth --memory 2G --cpus 2
@@ -120,6 +120,12 @@ EXAMPLES:
 
     # Specific shell or command
     sdme new -r ubuntu -- /bin/bash
+
+PORT FORWARDING:
+    --port creates nftables DNAT rules for incoming traffic from the
+    network and from the host via its external IP, but not via localhost
+    (127.0.0.1). To reach a container from the host, use the container's
+    IP shown by 'sdme ps'.
 
 OCI AUTO-BEHAVIORS:
     OCI images that declare ports get automatic --port rules when the
@@ -696,7 +702,8 @@ NETWORKING:
     Network flags (--network-veth, --network-zone, --network-bridge, --port)
     are available and merged with ports declared in the Pod YAML. The Pod
     spec hostNetwork field is supported: hostNetwork: true keeps the
-    container on the host network.
+    container on the host network. Port forwarding works for external
+    traffic; from the host use the container IP ('sdme ps').
 
 SUPPORTED FEATURES:
     - Multi-container pods (shared network namespace via localhost)
@@ -757,7 +764,8 @@ struct NetworkArgs {
     #[arg(long)]
     network_zone: Option<String>,
 
-    /// Forward port [PROTO:]HOST[:CONTAINER] (implies --private-network, repeatable)
+    /// Forward port [PROTO:]HOST[:CONTAINER] (implies --private-network, repeatable).
+    /// Works for external traffic; from the host use the container IP (sdme ps)
     #[arg(long = "port", short = 'p')]
     ports: Vec<String>,
 }
