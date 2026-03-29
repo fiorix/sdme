@@ -16,11 +16,14 @@ use anyhow::{bail, Context, Result};
 use crate::{validate_name, State};
 
 /// An entry returned by [`list`].
+#[derive(serde::Serialize)]
 pub struct RootfsEntry {
     /// Rootfs directory name.
     pub name: String,
     /// Detected distribution (from os-release), or empty if unknown.
     pub distro: String,
+    /// Container names using this rootfs as their base.
+    pub containers: Vec<String>,
 }
 
 /// Parse an `os-release` file into a key-value map.
@@ -189,7 +192,35 @@ pub fn list(datadir: &Path) -> Result<Vec<RootfsEntry>> {
             detect_distro(&entry.path())
         };
 
-        entries.push(RootfsEntry { name, distro });
+        entries.push(RootfsEntry {
+            name,
+            distro,
+            containers: Vec::new(),
+        });
+    }
+
+    // Scan state files once and group containers by rootfs name.
+    let state_dir = datadir.join("state");
+    if state_dir.is_dir() {
+        if let Ok(state_entries) = fs::read_dir(&state_dir) {
+            for se in state_entries.flatten() {
+                if let Ok(state) = State::read_from(&se.path()) {
+                    let rootfs_val = state.rootfs();
+                    if !rootfs_val.is_empty() {
+                        let cname = match state.get("NAME") {
+                            Some(n) => n.to_string(),
+                            None => se.file_name().to_string_lossy().into_owned(),
+                        };
+                        if let Some(entry) = entries.iter_mut().find(|e| e.name == rootfs_val) {
+                            entry.containers.push(cname);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for entry in &mut entries {
+        entry.containers.sort();
     }
 
     entries.sort_by(|a, b| a.name.cmp(&b.name));

@@ -904,6 +904,8 @@ pub struct ContainerInfo {
     pub health: String,
     /// OS name from os-release, if detected.
     pub os: String,
+    /// Root filesystem name (from ROOTFS state key).
+    pub rootfs: String,
     /// Pod name (nspawn-level), if any.
     pub pod: String,
     /// Pod name (OCI app-level), if any.
@@ -1112,6 +1114,7 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
             status: status.to_string(),
             health,
             os,
+            rootfs: rootfs_name,
             pod,
             oci_pod,
             userns,

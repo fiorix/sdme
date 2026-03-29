@@ -1,7 +1,7 @@
 +++
 title = "Running Kubernetes Pods"
 description = "Deploy multi-container applications using Kubernetes Pod YAML."
-weight = 9
+weight = 10
 
 [extra]
 status = "soon"

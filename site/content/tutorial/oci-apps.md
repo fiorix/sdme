@@ -1,7 +1,7 @@
 +++
 title = "Running OCI Applications"
 description = "Import and run OCI application images like nginx as systemd services inside sdme containers."
-weight = 5
+weight = 6
 +++
 
 This tutorial shows how to import an OCI application image (nginx) and

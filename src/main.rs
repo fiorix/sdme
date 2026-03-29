@@ -225,6 +225,18 @@ EXAMPLES:
     # Target a specific app in a multi-container kube pod
     sdme exec mypod --oci redis -- redis-cli ping";
 
+const PS_HELP: &str = "\
+List all containers with status, health, OS, rootfs, and configuration.
+
+Columns are shown dynamically based on whether any container uses them
+(e.g. POD, USERNS, BINDS). JSON output always includes all fields.
+
+EXAMPLES:
+    sdme ps
+    sdme ps --json
+    sdme ps --json-pretty
+    sdme ps --json | jq '.[] | select(.status == \"running\")'";
+
 const LOGS_HELP: &str = "\
 View container logs via journalctl inside the container. Extra arguments
 are passed through to journalctl.
@@ -330,6 +342,7 @@ EXAMPLES:
     sdme fs import ubuntu docker.io/ubuntu:24.04 -v --install-packages=yes
     sdme fs import debian /tmp/debootstrap-output
     sdme fs ls
+    sdme fs ls --json
     sdme fs rm ubuntu";
 
 const FS_IMPORT_HELP: &str = "\
@@ -982,6 +995,7 @@ enum Command {
     },
 
     /// List containers
+    #[command(after_long_help = PS_HELP)]
     Ps {
         /// Output as compact JSON
         #[arg(long)]
@@ -1116,7 +1130,15 @@ enum RootfsCommand {
         no_cache: bool,
     },
     /// List imported root filesystems
-    Ls,
+    Ls {
+        /// Output as compact JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Output as pretty-printed JSON
+        #[arg(long, conflicts_with = "json")]
+        json_pretty: bool,
+    },
     /// Remove one or more imported root filesystems
     Rm {
         /// Names of the rootfs entries to remove
@@ -3213,22 +3235,33 @@ fn run() -> Result<()> {
                 )?;
                 println!("{name}");
             }
-            RootfsCommand::Ls => {
+            RootfsCommand::Ls { json, json_pretty } => {
                 let entries = rootfs::list(&cfg.datadir)?;
-                if entries.is_empty() {
+                if json || json_pretty {
+                    let output = if json_pretty {
+                        serde_json::to_string_pretty(&entries)?
+                    } else {
+                        serde_json::to_string(&entries)?
+                    };
+                    println!("{output}");
+                } else if entries.is_empty() {
                     println!("no root filesystems found");
                 } else {
                     let name_w = entries.iter().map(|e| e.name.len()).max().unwrap().max(4);
                     let distro_w = entries.iter().map(|e| e.distro.len()).max().unwrap().max(6);
-                    println!("{:<name_w$}  {:<distro_w$}  PATH", "NAME", "DISTRO");
+                    let show_containers = entries.iter().any(|e| !e.containers.is_empty());
+                    print!("{:<name_w$}  {:<distro_w$}", "NAME", "DISTRO");
+                    if show_containers {
+                        print!("  CONTAINERS");
+                    }
+                    println!("  PATH");
                     for entry in &entries {
                         let path = cfg.datadir.join("fs").join(&entry.name);
-                        println!(
-                            "{:<name_w$}  {:<distro_w$}  {}",
-                            entry.name,
-                            entry.distro,
-                            path.display()
-                        );
+                        print!("{:<name_w$}  {:<distro_w$}", entry.name, entry.distro);
+                        if show_containers {
+                            print!("  {:<10}", entry.containers.len());
+                        }
+                        println!("  {}", path.display());
                     }
                 }
             }

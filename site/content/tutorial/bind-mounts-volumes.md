@@ -1,7 +1,7 @@
 +++
 title = "Bind Mounts and OCI Volumes"
 description = "Share files between host and containers using bind mounts and OCI volumes."
-weight = 6
+weight = 7
 +++
 
 Bind mounts let you share directories between the host and a container.
