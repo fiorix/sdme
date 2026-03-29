@@ -77,16 +77,22 @@ command runs `journalctl` inside the container:
 sudo sdme logs mycontainer
 ```
 
-Extra arguments are passed through to journalctl:
+Extra arguments are passed through to journalctl. Follow logs in
+real time:
 
 ```sh
-# Follow logs in real time
 sudo sdme logs mycontainer -- -f
+```
 
-# Last 50 lines
+Last 50 lines:
+
+```sh
 sudo sdme logs mycontainer -- -n 50
+```
 
-# Logs since a specific time
+Logs since a specific time:
+
+```sh
 sudo sdme logs mycontainer -- --since '5 min ago'
 ```
 
@@ -106,17 +112,27 @@ preserved.
 
 ### Path formats
 
+Host to container:
+
 ```sh
-# Host to container
 sudo sdme cp ./config.txt mycontainer:/etc/config.txt
+```
 
-# Container to host
+Container to host:
+
+```sh
 sudo sdme cp mycontainer:/etc/os-release .
+```
 
-# Host to root filesystem
+Host to root filesystem:
+
+```sh
 sudo sdme cp ./config.txt fs:ubuntu:/etc/config.txt
+```
 
-# Root filesystem to host
+Root filesystem to host:
+
+```sh
 sudo sdme cp fs:ubuntu:/etc/hostname .
 ```
 
@@ -149,8 +165,9 @@ setuid/setgid warnings).
 
 ## Troubleshooting boot failures
 
-When a container fails to start, sdme stops it but leaves the state
-on disk for debugging. You can check the journal for what went wrong.
+When a container fails to boot, sdme stops it but leaves the state
+on disk for debugging. This applies to both `sdme start` and
+`sdme new`. You can check the journal for what went wrong.
 
 ### Example: hardened host rootfs
 
@@ -166,16 +183,23 @@ isolation (`--userns`), which uses overlayfs idmapped mounts. If the
 host rootfs contains files with `security.capability` xattrs, the
 kernel refuses to create the idmapped mount.
 
-To debug, check the container's systemd unit status:
+When `sdme new` fails, break it into individual steps to isolate the
+problem. First create the container without starting it:
 
 ```sh
-sudo systemctl status sdme@mycontainer.service
+sudo sdme create mycontainer --hardened
 ```
 
-Or check the system journal for nspawn errors:
+Then start it separately:
 
 ```sh
-sudo journalctl -u sdme@mycontainer.service -n 50
+sudo sdme start mycontainer
+```
+
+If start fails, the container is preserved on disk. Check the logs:
+
+```sh
+sudo sdme logs mycontainer
 ```
 
 {% callout(type="tip", title="Tip") %}

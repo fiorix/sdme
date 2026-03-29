@@ -1,5 +1,5 @@
 +++
-title = "Running OCI Applications"
+title = "Intro to Running OCI Applications"
 description = "Import and run OCI application images like nginx as systemd services inside sdme containers."
 weight = 6
 +++
@@ -94,6 +94,32 @@ curl http://localhost
 ```
 
 You should see the nginx welcome page.
+
+If port 80 is already in use on the host, nginx will fail to start
+inside the container. Since this is an OCI app, you can modify its
+config through the chrooted rootfs. Enter the OCI app shell and
+change the listen port:
+
+Use `sdme cp` to copy the config out, edit it on the host, and copy
+it back:
+
+```sh
+sudo sdme cp mycontainer:/oci/apps/nginx/root/etc/nginx/conf.d/default.conf .
+```
+
+Edit `default.conf` to change `listen 80` to `listen 8080`, then
+copy it back:
+
+```sh
+sudo sdme cp default.conf mycontainer:/oci/apps/nginx/root/etc/nginx/conf.d/default.conf
+```
+
+Then restart the container:
+
+```sh
+sudo sdme stop mycontainer
+sudo sdme start mycontainer
+```
 
 ## View logs
 

@@ -32,6 +32,9 @@ dnf install -y nginx
 systemctl enable --now nginx
 ```
 
+Exit the container shell with `exit`, `Ctrl+D`, or `Ctrl+]` three
+times to return to the host.
+
 From the host, verify it's running:
 
 ```sh
@@ -46,11 +49,38 @@ Inside the container, you manage services with standard systemd commands:
 `journalctl -u nginx`, etc. Services enabled with `systemctl enable`
 start automatically when the container boots.
 
-## Persisting across restarts
+## Troubleshooting: port already in use
 
-Any packages you install and files you create are written to the
-container's overlayfs upper layer. They persist across `sdme stop`
-and `sdme start`. Only `sdme rm` deletes them.
+Because containers share the host network by default, nginx inside
+the container binds to the same port 80 as any service on the host.
+If something else is already listening on port 80, nginx will fail
+to start.
+
+Check from the host what's using the port:
+
+```sh
+ss -tlnp | grep :80
+```
+
+To work around this, enter the container and change the nginx listen
+port. On Fedora:
+
+```sh
+sudo sdme join mywebserver
+```
+
+Edit the nginx config to listen on a different port (e.g. 8080):
+
+```sh
+sed -i 's/listen\s*80/listen 8080/' /etc/nginx/nginx.conf
+systemctl restart nginx
+```
+
+Then verify from the host:
+
+```sh
+curl http://localhost:8080
+```
 
 ## Auto-starting the container on boot
 
