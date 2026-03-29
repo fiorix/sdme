@@ -68,6 +68,10 @@ pub struct Config {
     #[serde(default)]
     pub docker_token: String,
 
+    /// Default output format for ps and fs ls (empty = table, "json", "json-pretty").
+    #[serde(default)]
+    pub default_output_format: String,
+
     /// Default filesystem type for raw disk image export (ext4 or btrfs).
     #[serde(default = "default_export_fs")]
     pub default_export_fs: String,
@@ -225,6 +229,7 @@ impl Default for Config {
             host_rootfs_opaque_dirs: default_host_rootfs_opaque_dirs(),
             hardened_drop_caps: default_hardened_drop_caps(),
             default_base_fs: String::new(),
+            default_output_format: String::new(),
             default_export_fs: default_export_fs(),
             default_export_free_space: default_export_free_space(),
             tasks_max: default_tasks_max(),
@@ -281,6 +286,7 @@ impl Config {
         println!("host_rootfs_opaque_dirs = {}", self.host_rootfs_opaque_dirs);
         println!("hardened_drop_caps = {}", self.hardened_drop_caps);
         println!("default_base_fs = {}", self.default_base_fs);
+        println!("default_output_format = {}", self.default_output_format);
         println!("default_export_fs = {}", self.default_export_fs);
         println!(
             "default_export_free_space = {}",

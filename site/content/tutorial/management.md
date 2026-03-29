@@ -48,6 +48,12 @@ JSON output always includes all fields regardless of whether any
 container uses them, including the `rootfs` name that links each
 container to its base root filesystem.
 
+To make JSON the default format for both `ps` and `fs ls`:
+
+```sh
+sudo sdme config set default_output_format json-pretty
+```
+
 ## Listing root filesystems
 
 ```sh

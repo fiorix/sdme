@@ -231,11 +231,17 @@ List all containers with status, health, OS, rootfs, and configuration.
 Columns are shown dynamically based on whether any container uses them
 (e.g. POD, USERNS, BINDS). JSON output always includes all fields.
 
+The default output format can be set with:
+    sdme config set default_output_format json
+
+See also: sdme fs ls (list root filesystems and their containers).
+
 EXAMPLES:
     sdme ps
     sdme ps --json
     sdme ps --json-pretty
-    sdme ps --json | jq '.[] | select(.status == \"running\")'";
+    sdme ps --json | jq '.[] | select(.status == \"running\")'
+    sdme config set default_output_format json-pretty";
 
 const LOGS_HELP: &str = "\
 View container logs via journalctl inside the container. Extra arguments
@@ -337,6 +343,11 @@ SUBCOMMANDS:
     export   Export a container or rootfs to a directory, tarball, or disk image
     cache    Manage the OCI blob cache
     gc       Clean up stale staging directories from interrupted operations
+
+The default output format for fs ls can be set with:
+    sdme config set default_output_format json
+
+See also: sdme ps (list containers and their rootfs).
 
 EXAMPLES:
     sdme fs import ubuntu docker.io/ubuntu:24.04 -v --install-packages=yes
@@ -558,6 +569,7 @@ CONFIG KEYS:
     host_rootfs_opaque_dirs        string   /etc/systemd/system,/var/log
     hardened_drop_caps             string   CAP_SYS_PTRACE,CAP_NET_RAW,CAP_SYS_RAWIO,CAP_SYS_BOOT
     default_base_fs                string   (empty)   Default --base-fs for OCI app imports
+    default_output_format          string   (empty)   Default output for ps/fs ls (json, json-pretty)
     default_export_fs              string   ext4      Filesystem for raw image export
     default_export_free_space      string   256M      Extra free space in auto-sized images
     tasks_max                      u32      16384     Max tasks per container
@@ -2165,6 +2177,19 @@ fn run() -> Result<()> {
                         toml_key = key.clone();
                         toml_val = Some(V::String(value));
                     }
+                    "default_output_format" => {
+                        match value.as_str() {
+                            "" | "json" | "json-pretty" => {}
+                            other => {
+                                bail!(
+                                    "invalid default_output_format '{other}': \
+                                     expected json, json-pretty, or empty for table"
+                                )
+                            }
+                        }
+                        toml_key = key.clone();
+                        toml_val = Some(V::String(value));
+                    }
                     "default_export_fs" => {
                         match value.as_str() {
                             "ext4" | "btrfs" => {}
@@ -2736,6 +2761,8 @@ fn run() -> Result<()> {
             }
         }
         Command::Ps { json, json_pretty } => {
+            let json = json || (!json_pretty && cfg.default_output_format == "json");
+            let json_pretty = json_pretty || (!json && cfg.default_output_format == "json-pretty");
             let entries = containers::list(&cfg.datadir)?;
             if json || json_pretty {
                 let output = if json_pretty {
@@ -3236,6 +3263,9 @@ fn run() -> Result<()> {
                 println!("{name}");
             }
             RootfsCommand::Ls { json, json_pretty } => {
+                let json = json || (!json_pretty && cfg.default_output_format == "json");
+                let json_pretty =
+                    json_pretty || (!json && cfg.default_output_format == "json-pretty");
                 let entries = rootfs::list(&cfg.datadir)?;
                 if json || json_pretty {
                     let output = if json_pretty {
