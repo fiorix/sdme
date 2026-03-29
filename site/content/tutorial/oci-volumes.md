@@ -1,6 +1,6 @@
 +++
-title = "OCI Volumes with PostgreSQL"
-description = "Run a database with automatically managed OCI volumes that persist data across container restarts."
+title = "Running an OCI Database with Volumes"
+description = "Run PostgreSQL with automatically managed OCI volumes that persist data across container removal and re-creation."
 weight = 8
 +++
 

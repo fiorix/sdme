@@ -1,6 +1,6 @@
 +++
 title = "Running Long-Lived Services"
-description = "Install and run services like nginx or MariaDB inside sdme containers."
+description = "Install and run services like nginx inside sdme containers."
 weight = 5
 +++
 

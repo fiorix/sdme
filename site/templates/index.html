@@ -5,46 +5,14 @@
 {% block content %}
   <section>
     <p>The systemd machine editor: a command line tool for managing
-    systemd-nspawn booted containers on Linux.
-    New to sdme? Start with the <a href="{{ get_url(path='@/tutorial/_index.md') }}">tutorials</a>.</p>
+    systemd-nspawn booted containers on Linux.</p>
   </section>
 
   <section>
     <h2>Quick install</h2>
     <pre><code>curl -fsSL https://fiorix.github.io/sdme/install.sh | sudo sh</code></pre>
-    <p class="note">Auto-detects architecture (x86_64 / aarch64) and verifies SHA256 checksums.</p>
-  </section>
-
-  <section id="downloads"></section>
-
-  <section id="fallback">
-    <noscript>
-      <h2>Downloads</h2>
-      <p>Static binaries, .deb, .rpm, and .pkg.tar.zst packages are available on the
-        <a href="https://github.com/fiorix/sdme/releases/latest">releases page</a>.</p>
-      <p class="note">All artifacts are published with
-        <a href="https://github.com/fiorix/sdme/releases/latest/download/SHA256SUMS">SHA256 checksums</a>.</p>
-    </noscript>
-    <div id="fallback-content" style="display:none">
-      <h2>Downloads</h2>
-      <p>Static binaries, .deb, .rpm, and .pkg.tar.zst packages are available on the
-        <a href="https://github.com/fiorix/sdme/releases/latest">releases page</a>.</p>
-      <p class="note">All artifacts are published with
-        <a href="https://github.com/fiorix/sdme/releases/latest/download/SHA256SUMS">SHA256 checksums</a>.</p>
-    </div>
-  </section>
-
-  <hr>
-
-  {% set docs = get_section(path="docs/_index.md") %}
-  <section>
-    <h2>Documentation</h2>
-    {% for page in docs.pages %}
-    <div class="card">
-      <h3><a href="{{ page.permalink }}">{{ page.title }}</a></h3>
-      <p>{{ page.description }}</p>
-    </div>
-    {% endfor %}
+    <p class="note">Auto-detects architecture (x86_64 / aarch64) and verifies SHA256 checksums.
+      See <a href="#downloads">downloads</a> for packages and static binaries.</p>
   </section>
 
   <hr>
@@ -65,6 +33,40 @@
       <p>{{ page.description }}</p>
     </div>
     {% endfor %}
+  </section>
+
+  <hr>
+
+  {% set docs = get_section(path="docs/_index.md") %}
+  <section>
+    <h2>Documentation</h2>
+    {% for page in docs.pages %}
+    <div class="card">
+      <h3><a href="{{ page.permalink }}">{{ page.title }}</a></h3>
+      <p>{{ page.description }}</p>
+    </div>
+    {% endfor %}
+  </section>
+
+  <hr>
+
+  <section id="downloads"></section>
+
+  <section id="fallback">
+    <noscript>
+      <h2>Downloads</h2>
+      <p>Static binaries, .deb, .rpm, and .pkg.tar.zst packages are available on the
+        <a href="https://github.com/fiorix/sdme/releases/latest">releases page</a>.</p>
+      <p class="note">All artifacts are published with
+        <a href="https://github.com/fiorix/sdme/releases/latest/download/SHA256SUMS">SHA256 checksums</a>.</p>
+    </noscript>
+    <div id="fallback-content" style="display:none">
+      <h2>Downloads</h2>
+      <p>Static binaries, .deb, .rpm, and .pkg.tar.zst packages are available on the
+        <a href="https://github.com/fiorix/sdme/releases/latest">releases page</a>.</p>
+      <p class="note">All artifacts are published with
+        <a href="https://github.com/fiorix/sdme/releases/latest/download/SHA256SUMS">SHA256 checksums</a>.</p>
+    </div>
   </section>
 
   <footer>
