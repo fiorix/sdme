@@ -1652,6 +1652,18 @@ fn parse_security(args: SecurityArgs, cfg: &config::Config) -> Result<(SecurityC
     Ok((sec, hardened))
 }
 
+/// When hardened/strict mode drops CAP_NET_RAW but the container has a network
+/// interface (veth, zone, bridge), retain CAP_NET_RAW so DHCP works.
+/// systemd-networkd needs raw sockets for the DHCP client.
+fn retain_net_raw_for_dhcp(sec: &mut SecurityConfig, network: &NetworkConfig) {
+    let has_interface =
+        network.network_veth || network.network_zone.is_some() || network.network_bridge.is_some();
+    if has_interface && sec.drop_caps.iter().any(|c| c == "CAP_NET_RAW") {
+        sec.drop_caps.retain(|c| c != "CAP_NET_RAW");
+        eprintln!("note: retaining CAP_NET_RAW for DHCP on network interface");
+    }
+}
+
 /// Extract Docker Hub credentials from config, if both user and token are set.
 /// Display distro prehook configuration, showing effective commands
 /// (overrides or built-in defaults) for all configurable families.
@@ -2393,11 +2405,12 @@ fn run() -> Result<()> {
         } => {
             system_check::check_systemd_version(252)?;
             let limits = parse_limits(memory, cpus, cpu_weight)?;
-            let (sec, hardened) = parse_security(security, &cfg)?;
+            let (mut sec, hardened) = parse_security(security, &cfg)?;
             let mut network = parse_network(network)?;
             if hardened && !network.private_network {
                 network.private_network = true;
             }
+            retain_net_raw_for_dhcp(&mut sec, &network);
             validate_pod_args(&cfg.datadir, pod.as_deref(), sec.userns)?;
             validate_oci_pod_args(
                 &cfg.datadir,
@@ -2669,11 +2682,12 @@ fn run() -> Result<()> {
         } => {
             system_check::check_systemd_version(252)?;
             let limits = parse_limits(memory, cpus, cpu_weight)?;
-            let (sec, hardened) = parse_security(security, &cfg)?;
+            let (mut sec, hardened) = parse_security(security, &cfg)?;
             let mut network = parse_network(network)?;
             if hardened && !network.private_network {
                 network.private_network = true;
             }
+            retain_net_raw_for_dhcp(&mut sec, &network);
             validate_pod_args(&cfg.datadir, pod.as_deref(), sec.userns)?;
             validate_oci_pod_args(
                 &cfg.datadir,
@@ -3012,7 +3026,7 @@ fn run() -> Result<()> {
                 no_cache,
             } => {
                 system_check::check_systemd_version(252)?;
-                let (sec, hardened) = parse_security(security_args, &cfg)?;
+                let (mut sec, hardened) = parse_security(security_args, &cfg)?;
                 validate_pod_args(&cfg.datadir, pod.as_deref(), sec.userns)?;
                 validate_kube_oci_pod_args(&cfg.datadir, oci_pod.as_deref())?;
                 let yaml_content = std::fs::read_to_string(&file)
@@ -3028,6 +3042,7 @@ fn run() -> Result<()> {
                     .as_deref()
                     .context("--base-fs is required (or set default with: sdme config set default_base_fs <name>)")?;
                 let kube_network = parse_network(net_args)?;
+                retain_net_raw_for_dhcp(&mut sec, &kube_network);
                 let masked_services =
                     resolve_masked_services(masked_services, &kube_network, &cfg)?;
                 let docker_creds = docker_credentials(&cfg);
@@ -3099,7 +3114,7 @@ fn run() -> Result<()> {
                 no_cache,
             } => {
                 system_check::check_systemd_version(252)?;
-                let (sec, hardened) = parse_security(security_args, &cfg)?;
+                let (mut sec, hardened) = parse_security(security_args, &cfg)?;
                 validate_pod_args(&cfg.datadir, pod.as_deref(), sec.userns)?;
                 validate_kube_oci_pod_args(&cfg.datadir, oci_pod.as_deref())?;
                 let yaml_content = std::fs::read_to_string(&file)
@@ -3115,6 +3130,7 @@ fn run() -> Result<()> {
                     .as_deref()
                     .context("--base-fs is required (or set default with: sdme config set default_base_fs <name>)")?;
                 let kube_network = parse_network(net_args)?;
+                retain_net_raw_for_dhcp(&mut sec, &kube_network);
                 let masked_services =
                     resolve_masked_services(masked_services, &kube_network, &cfg)?;
                 let docker_creds = docker_credentials(&cfg);

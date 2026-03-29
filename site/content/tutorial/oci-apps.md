@@ -82,44 +82,23 @@ sudo sdme config set default_base_fs ubuntu
 
 ## Create and start the container
 
+We recommend using `--network-zone` and `--hardened` as described
+in the [services tutorial](@/tutorial/services.md):
+
 ```sh
-sudo sdme new mycontainer -r nginx
+sudo sdme new mycontainer -r nginx --network-zone=services --hardened --port 8080:80
 ```
 
-By default, sdme containers share the host network. This means nginx
-is immediately accessible from the host:
+This gives the container its own network with DNS, user namespace
+isolation, and forwards host port 8080 to nginx on port 80.
+
+From the host:
 
 ```sh
-curl http://localhost
+curl http://localhost:8080
 ```
 
 You should see the nginx welcome page.
-
-If port 80 is already in use on the host, nginx will fail to start
-inside the container. Since this is an OCI app, you can modify its
-config through the chrooted rootfs. Enter the OCI app shell and
-change the listen port:
-
-Use `sdme cp` to copy the config out, edit it on the host, and copy
-it back:
-
-```sh
-sudo sdme cp mycontainer:/oci/apps/nginx/root/etc/nginx/conf.d/default.conf .
-```
-
-Edit `default.conf` to change `listen 80` to `listen 8080`, then
-copy it back:
-
-```sh
-sudo sdme cp default.conf mycontainer:/oci/apps/nginx/root/etc/nginx/conf.d/default.conf
-```
-
-Then restart the container:
-
-```sh
-sudo sdme stop mycontainer
-sudo sdme start mycontainer
-```
 
 ## View logs
 

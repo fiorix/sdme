@@ -42,22 +42,21 @@ dnf install -y nginx
 systemctl enable --now nginx
 ```
 
+Inside the container, you manage services with standard systemd
+commands: `systemctl status nginx`, `systemctl restart nginx`,
+`journalctl -u nginx`, etc. Services enabled with `systemctl enable`
+start automatically when the container boots.
+
 Exit the container shell with `exit`, `Ctrl+D`, or `Ctrl+]` three
 times to return to the host.
 
 ## Verify from the host
 
 Containers in a zone are reachable by IP from the host. Find the
-container's IP:
+container's IP in the ADDRESSES column:
 
 ```sh
-sudo sdme exec mywebserver -- /bin/ip -4 addr show host0
-```
-
-Then curl it:
-
-```sh
-curl http://<container-ip>
+sudo machinectl list
 ```
 
 You can also use port forwarding to map a host port to the
@@ -91,11 +90,6 @@ curl http://mywebserver
 This works because zone containers use LLMNR for hostname discovery.
 The host cannot resolve container names (it is not part of the zone),
 but it can reach containers by IP.
-
-Inside the container, you manage services with standard systemd
-commands: `systemctl status nginx`, `systemctl restart nginx`,
-`journalctl -u nginx`, etc. Services enabled with `systemctl enable`
-start automatically when the container boots.
 
 ## Auto-starting the container on boot
 
