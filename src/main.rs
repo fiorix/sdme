@@ -982,7 +982,15 @@ enum Command {
     },
 
     /// List containers
-    Ps,
+    Ps {
+        /// Output as compact JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Output as pretty-printed JSON
+        #[arg(long, conflicts_with = "json")]
+        json_pretty: bool,
+    },
 
     /// Remove one or more containers
     Rm {
@@ -2705,9 +2713,16 @@ fn run() -> Result<()> {
                 std::process::exit(code);
             }
         }
-        Command::Ps => {
+        Command::Ps { json, json_pretty } => {
             let entries = containers::list(&cfg.datadir)?;
-            if entries.is_empty() {
+            if json || json_pretty {
+                let output = if json_pretty {
+                    serde_json::to_string_pretty(&entries)?
+                } else {
+                    serde_json::to_string(&entries)?
+                };
+                println!("{output}");
+            } else if entries.is_empty() {
                 println!("no containers found");
             } else {
                 let name_w = entries.iter().map(|e| e.name.len()).max().unwrap().max(4);

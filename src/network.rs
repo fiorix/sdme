@@ -138,6 +138,19 @@ impl NetworkConfig {
             validate_network_name(zone, "zone")?;
         }
 
+        // Port forwarding requires a network interface (veth, bridge, or zone)
+        // for nspawn to forward traffic. --private-network alone gives only loopback.
+        if !self.ports.is_empty()
+            && !self.network_veth
+            && self.network_bridge.is_none()
+            && self.network_zone.is_none()
+        {
+            bail!(
+                "--port requires --network-veth, --network-bridge, or --network-zone \
+                 for port forwarding to work"
+            );
+        }
+
         // Validate port forwarding rules
         for port in &self.ports {
             validate_port(port)?;
@@ -265,9 +278,28 @@ mod tests {
         };
         assert!(network.validate().is_ok());
 
-        // Private network with port
+        // Private network with port and veth
         let network = NetworkConfig {
             private_network: true,
+            network_veth: true,
+            ports: vec!["8080:80".to_string()],
+            ..Default::default()
+        };
+        assert!(network.validate().is_ok());
+
+        // Private network with port and bridge
+        let network = NetworkConfig {
+            private_network: true,
+            network_bridge: Some("br0".to_string()),
+            ports: vec!["8080:80".to_string()],
+            ..Default::default()
+        };
+        assert!(network.validate().is_ok());
+
+        // Private network with port and zone
+        let network = NetworkConfig {
+            private_network: true,
+            network_zone: Some("myzone".to_string()),
             ports: vec!["8080:80".to_string()],
             ..Default::default()
         };
@@ -303,12 +335,25 @@ mod tests {
             ..Default::default()
         };
         assert!(network.validate().is_err());
+
+        // port with private network but no interface (veth/bridge/zone)
+        let network = NetworkConfig {
+            private_network: true,
+            ports: vec!["8080:80".to_string()],
+            ..Default::default()
+        };
+        let err = network.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("--network-veth"),
+            "expected interface requirement error, got: {err}"
+        );
     }
 
     #[test]
     fn test_network_validate_port_formats() {
         let make_network = |port: &str| NetworkConfig {
             private_network: true,
+            network_veth: true,
             ports: vec![port.to_string()],
             ..Default::default()
         };

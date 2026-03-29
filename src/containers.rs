@@ -894,6 +894,7 @@ pub fn remove(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
 }
 
 /// Status information for a single container, as shown by `sdme ps`.
+#[derive(serde::Serialize)]
 pub struct ContainerInfo {
     /// Container name.
     pub name: String,
