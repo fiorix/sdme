@@ -1826,9 +1826,9 @@ nspawn container with one systemd service per OCI image. All services in
 the pod share localhost, just like in Kubernetes.
 
 The base OS is any imported rootfs — the same Pod YAML runs on Ubuntu,
-Fedora, Arch Linux, or any other supported distribution. Each OCI
-container becomes a separate systemd service chrooted into its own rootfs
-under `/oci/apps/{name}/root`.
+Fedora, Arch Linux, or any other supported distribution. Each OCI container becomes a separate systemd service isolated in its own
+PID/IPC namespaces and chrooted into its own rootfs under
+`/oci/apps/{name}/root`.
 
 For usage examples and CLI reference, see `sdme kube --help`.
 
