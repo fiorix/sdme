@@ -79,7 +79,9 @@ Short image names like `redis` or `nginx` are resolved using the `default_kube_r
 ## Reaching kube pods from other containers
 
 All containers on the same network zone can reach each other by
-hostname. Import an Arch Linux rootfs if you haven't already:
+hostname. You can use any
+[supported distribution](@/tutorial/different-rootfs.md#supported-distributions)
+here — Arch Linux for example:
 
 ```sh
 sudo sdme fs import archlinux docker.io/lopsided/archlinux
