@@ -98,34 +98,15 @@ hostname discovery between containers in the same zone. Any sdme
 container — kube or regular — can join the zone and communicate
 with the others.
 
-## Multi-service pod
+## Running a database with secrets
 
-A pod can run multiple OCI services that communicate over localhost.
-Create `web-pod.yaml`:
+This example deploys PostgreSQL and shows how to configure it using
+environment variables, secrets, and configmaps — the same way you
+would in Kubernetes.
 
-```yaml
-apiVersion: v1
-kind: Pod
-metadata:
-  name: my-web
-spec:
-  containers:
-  - name: nginx
-    image: nginx
-  - name: redis
-    image: redis
-```
+### Inline environment variables
 
-```sh
-sudo sdme kube apply -f web-pod.yaml --base-fs ubuntu --hardened --network-zone=kube
-```
-
-Inside the container, nginx runs on port 80 and redis on port 6379,
-both reachable via `127.0.0.1`.
-
-## Environment variables
-
-Pass configuration to OCI services via `env`:
+The simplest approach puts the password directly in the YAML:
 
 ```yaml
 apiVersion: v1
@@ -139,6 +120,95 @@ spec:
     env:
     - name: POSTGRES_PASSWORD
       value: "secret"
+```
+
+```sh
+sudo sdme kube apply -f db-pod.yaml --base-fs ubuntu --hardened --network-zone=kube
+```
+
+This works, but the password is visible in the YAML file.
+
+### Using a secret
+
+Create a secret to keep the password out of the YAML:
+
+```sh
+sudo sdme kube secret create db-credentials --from-literal=password=secret
+```
+
+Then reference it in the pod:
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: my-db
+spec:
+  containers:
+  - name: postgres
+    image: postgres
+    env:
+    - name: POSTGRES_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: db-credentials
+          key: password
+```
+
+### Using a configmap
+
+Configuration that isn't sensitive can go in a configmap. For
+example, to set the default database name:
+
+```sh
+sudo sdme kube configmap create db-config --from-literal=dbname=myapp
+```
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: my-db
+spec:
+  containers:
+  - name: postgres
+    image: postgres
+    env:
+    - name: POSTGRES_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: db-credentials
+          key: password
+    - name: POSTGRES_DB
+      valueFrom:
+        configMapKeyRef:
+          name: db-config
+          key: dbname
+```
+
+### Connecting from another container
+
+Since the database is on the `kube` zone, any other container on
+the same zone can reach it:
+
+```sh
+sudo sdme new dbclient -r archlinux --hardened --network-zone=kube
+```
+
+Inside the client container, connect to PostgreSQL by hostname:
+
+```sh
+pacman -Sy --noconfirm postgresql
+psql -h my-db -U postgres -d myapp
+```
+
+### Managing secrets and configmaps
+
+```sh
+sudo sdme kube secret ls
+sudo sdme kube secret rm db-credentials
+sudo sdme kube configmap ls
+sudo sdme kube configmap rm db-config
 ```
 
 ## Create without entering
