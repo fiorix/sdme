@@ -230,6 +230,7 @@ machines on the system.
     +-- write /etc/resolv.conf (placeholder for non-zone; resolved stub symlink for zone)
     +-- write LLMNR/mDNS drop-in (zone only)
     +-- enable systemd-networkd (veth/zone/bridge only)
+    +-- enable systemd-resolved (veth/zone/bridge, when not masked)
     +-- set opaque dirs (xattr)
     +-- write state file
 ```
@@ -619,16 +620,17 @@ state file (`PRIVATE_NETWORK`, `NETWORK_VETH`, `NETWORK_BRIDGE`,
 drop-in at start time.
 
 When `--network-veth`, `--network-zone`, or `--network-bridge` is
-used, sdme auto-enables `systemd-networkd` in the overlayfs upper
-layer (symlink into `multi-user.target.wants`) so the container-side
-interface (`host0`) gets an IP via DHCP. No manual enablement is
-needed.
+used, sdme auto-enables both `systemd-networkd` and
+`systemd-resolved` in the overlayfs upper layer (symlinks into
+`multi-user.target.wants`) so the container-side interface (`host0`)
+gets an IP via DHCP and DNS works out of the box. No manual
+enablement is needed.
 
 `--network-zone` additionally configures `systemd-resolved` for
-inter-container name resolution: resolved is left unmasked,
-`/etc/resolv.conf` is symlinked to the resolved stub, and an
-LLMNR/mDNS drop-in is written so containers on the same zone bridge
-can discover each other by hostname.
+inter-container name resolution: `/etc/resolv.conf` is symlinked to
+the resolved stub, and an LLMNR/mDNS drop-in is written so
+containers on the same zone bridge can discover each other by
+hostname.
 
 Bridge and zone names are validated (alphanumeric, hyphens,
 underscores). Port specs are validated for format

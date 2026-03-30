@@ -330,16 +330,18 @@ fn do_create(
 
     // When --network-veth, --network-zone, or --network-bridge is used,
     // enable systemd-networkd inside the container so the container-side
-    // veth interface (host0) gets an IP via DHCP.
+    // veth interface (host0) gets an IP via DHCP, and enable systemd-resolved
+    // so DNS works (and LLMNR for zone hostname discovery).
     if opts.network.network_veth
         || opts.network.network_zone.is_some()
         || opts.network.network_bridge.is_some()
     {
+        let wants_dir = systemd_unit_dir.join("multi-user.target.wants");
+        fs::create_dir_all(&wants_dir)
+            .with_context(|| format!("failed to create {}", wants_dir.display()))?;
+
         let networkd_unit = rootfs.join("usr/lib/systemd/system/systemd-networkd.service");
         if networkd_unit.exists() {
-            let wants_dir = systemd_unit_dir.join("multi-user.target.wants");
-            fs::create_dir_all(&wants_dir)
-                .with_context(|| format!("failed to create {}", wants_dir.display()))?;
             let link = wants_dir.join("systemd-networkd.service");
             if !link.exists() {
                 symlink("/usr/lib/systemd/system/systemd-networkd.service", &link).with_context(
@@ -347,6 +349,22 @@ fn do_create(
                 )?;
                 if verbose {
                     eprintln!("enabled systemd-networkd for private networking");
+                }
+            }
+        }
+
+        if resolved_active {
+            let resolved_unit = rootfs.join("usr/lib/systemd/system/systemd-resolved.service");
+            if resolved_unit.exists() {
+                let link = wants_dir.join("systemd-resolved.service");
+                if !link.exists() {
+                    symlink("/usr/lib/systemd/system/systemd-resolved.service", &link)
+                        .with_context(|| {
+                            format!("failed to enable systemd-resolved at {}", link.display())
+                        })?;
+                    if verbose {
+                        eprintln!("enabled systemd-resolved for DNS");
+                    }
                 }
             }
         }
