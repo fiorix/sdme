@@ -173,20 +173,14 @@ sudo sdme kube apply -f nginx-pod.yaml --hardened --network-zone=kube
 
 All examples in this tutorial use `--network-zone=kube`, which
 gives each container its own network namespace with automatic DNS
-between containers in the same zone. Ports declared in the Pod YAML
-are automatically forwarded from the host.
-
-To forward additional ports from the host:
-
-```sh
-sudo sdme kube apply -f nginx-pod.yaml --base-fs ubuntu --hardened --network-zone=kube --port 8080:80
-```
-
-See the [network configuration](@/tutorial/networking.md) tutorial
-for details on each mode.
+between containers in the same zone. Containers are reachable by
+IP from the host (use `sdme ps` to find the address).
 
 The Kubernetes `hostNetwork: true` field is supported and keeps the
 container on the host network.
+
+See the [network configuration](@/tutorial/networking.md) tutorial
+for details on each mode.
 
 ## What's supported
 
