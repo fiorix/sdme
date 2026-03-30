@@ -386,7 +386,7 @@ pub(crate) struct OciAppSetup<'a> {
 /// | Ports file | `/oci/apps/{name}/ports` |
 /// | Volumes file | `/oci/apps/{name}/volumes` |
 /// | Isolate binary | `/oci/apps/{name}/isolate` (static ELF for PID/IPC ns) |
-/// | devfd shim | `/oci/apps/{name}/devfd-shim.so` (LD_PRELOAD for /dev/fd) |
+/// | devfd shim | `/oci/apps/{name}/root/usr/lib/sdme-devfd-shim.so` (LD_PRELOAD) |
 /// | Probe binary | `/oci/.sdme-kube-probe` (kube pods only) |
 /// | Probe units | `/etc/systemd/system/sdme-probe-*-{name}.*` (kube pods) |
 /// | Volume mount svc | `/etc/systemd/system/sdme-kube-volumes.service` (kube) |
@@ -426,7 +426,12 @@ pub(crate) fn setup_oci_app(opts: &OciAppSetup) -> Result<()> {
         other => bail!("unsupported architecture: {other}"),
     };
     let shim_bytes = crate::devfd_shim::generate(arch);
-    let shim_path = opts.app_root.join(".sdme-devfd-shim.so");
+    // Place the shim under /usr/lib/ so AppArmor's base abstraction
+    // allows all confined processes (e.g. locale) to load it.
+    let shim_dir = opts.app_root.join("usr/lib");
+    fs::create_dir_all(&shim_dir)
+        .with_context(|| format!("failed to create {}", shim_dir.display()))?;
+    let shim_path = shim_dir.join("sdme-devfd-shim.so");
     fs::write(&shim_path, &shim_bytes)
         .with_context(|| format!("failed to write {}", shim_path.display()))?;
     use std::os::unix::fs::PermissionsExt;
@@ -546,7 +551,7 @@ pub(crate) fn setup_oci_app(opts: &OciAppSetup) -> Result<()> {
         "\
 RootDirectory=/oci/apps/{name}/root
 MountAPIVFS=yes
-Environment=LD_PRELOAD=/.sdme-devfd-shim.so
+Environment=LD_PRELOAD=/usr/lib/sdme-devfd-shim.so
 EnvironmentFile=-/oci/apps/{name}/env
 ExecStart={isolate_exec}
 {stop_signal_line}{bind_paths_section}",
