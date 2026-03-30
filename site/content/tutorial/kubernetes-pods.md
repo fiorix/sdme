@@ -109,9 +109,15 @@ with the others.
 
 ## Running a database with secrets
 
-This example deploys PostgreSQL and shows how to configure it using
-environment variables, secrets, and configmaps — the same way you
-would in Kubernetes.
+This example deploys PostgreSQL on a Fedora base and shows how to
+configure it using environment variables, secrets, and configmaps —
+the same way you would in Kubernetes.
+
+Import Fedora if you haven't already:
+
+```sh
+sudo sdme fs import fedora quay.io/fedora/fedora
+```
 
 ### Inline environment variables
 
@@ -132,7 +138,9 @@ spec:
 ```
 
 ```sh
-sudo sdme kube apply -f db-pod.yaml --base-fs ubuntu --hardened --network-zone=kube
+sudo sdme kube create -f db-pod.yaml --base-fs fedora --hardened --network-zone=kube
+sudo sdme start my-db
+sudo sdme logs my-db --oci postgres
 ```
 
 This works, but the password is visible in the YAML file.
@@ -198,17 +206,19 @@ spec:
 ### Connecting from another container
 
 Since the database is on the `kube` zone, any other container on
-the same zone can reach it:
+the same zone can reach it. Create a Debian client container:
 
 ```sh
-sudo sdme new dbclient -r archlinux --hardened --network-zone=kube
+sudo sdme fs import debian docker.io/debian:stable
+sudo sdme new dbclient -r debian --hardened --network-zone=kube
 ```
 
-Inside the client container, verify PostgreSQL is reachable by
-hostname (curl ships with the archlinux rootfs):
+Inside the client container, install the PostgreSQL client and
+connect by hostname:
 
 ```sh
-curl -v telnet://my-db:5432
+apt-get update && apt-get install -y postgresql-client
+psql -h my-db -U postgres -d myapp
 ```
 
 ### Managing secrets and configmaps
