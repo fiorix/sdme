@@ -41,7 +41,9 @@ spec:
     image: nginx
 ```
 
-Make sure you have a base rootfs imported. If not:
+The base rootfs can be any
+[supported distribution](@/tutorial/different-rootfs.md#supported-distributions).
+Import one if you haven't already — Ubuntu for example:
 
 ```sh
 sudo sdme fs import ubuntu docker.io/ubuntu
