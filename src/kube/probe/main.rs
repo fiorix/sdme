@@ -2,7 +2,7 @@
 //!
 //! Runs probe checks (exec, HTTP, TCP, gRPC) with failure counting and
 //! automatic actions (service restart, readiness state). Designed to be
-//! embedded into sdme and deployed at `/oci/.sdme-kube-probe` inside the
+//! embedded into sdme and deployed at `/usr/bin/sdme-kube-probe` inside the
 //! container rootfs.
 
 mod exec;

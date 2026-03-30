@@ -339,7 +339,10 @@ pub fn kube_create(datadir: &Path, opts: &KubeCreateOptions<'_>) -> Result<Strin
         if PROBE_BINARY.is_empty() {
             bail!("probe binary not available; rebuild sdme or check build.rs output");
         }
-        let probe_path = staging_dir.join("oci/.sdme-kube-probe");
+        let probe_dir = staging_dir.join("usr/bin");
+        fs::create_dir_all(&probe_dir)
+            .with_context(|| format!("failed to create {}", probe_dir.display()))?;
+        let probe_path = probe_dir.join("sdme-kube-probe");
         fs::write(&probe_path, PROBE_BINARY)
             .with_context(|| format!("failed to write {}", probe_path.display()))?;
         use std::os::unix::fs::PermissionsExt;

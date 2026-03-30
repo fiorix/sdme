@@ -31,7 +31,7 @@ TIMEOUT_BOOT=$(scale_timeout 120)
 # Check if the probe binary exists in the kube rootfs.
 probe_binary_exists() {
     local pod_name="$1"
-    test -x "$DATADIR/fs/kube-$pod_name/oci/.sdme-kube-probe"
+    test -x "$DATADIR/fs/kube-$pod_name/usr/bin/sdme-kube-probe"
 }
 
 # Read a unit file from the kube rootfs.
@@ -120,7 +120,7 @@ YAML
     # Static check: startup timer and service units exist.
     local startup_svc
     startup_svc=$(read_probe_unit "$pod_name" "sdme-probe-startup-app.service")
-    if echo "$startup_svc" | grep -q '/oci/.sdme-kube-probe.*--type startup'; then
+    if echo "$startup_svc" | grep -q '/usr/bin/sdme-kube-probe.*--type startup'; then
         record "${test_prefix}-probe-binary" PASS
     else
         record "${test_prefix}-probe-binary" FAIL "startup service should reference probe binary with --type startup"
@@ -244,7 +244,7 @@ YAML
     # Static: probe service references the probe binary with --type liveness.
     local probe_svc
     probe_svc=$(read_probe_unit "$pod_name" "sdme-probe-liveness-app.service")
-    if echo "$probe_svc" | grep -q '/oci/.sdme-kube-probe.*--type liveness'; then
+    if echo "$probe_svc" | grep -q '/usr/bin/sdme-kube-probe.*--type liveness'; then
         record "${test_prefix}-probe-binary" PASS
     else
         record "${test_prefix}-probe-binary" FAIL "liveness service should reference probe binary"
@@ -344,7 +344,7 @@ YAML
     # Static: readiness probe service references probe binary with --type readiness.
     local probe_svc
     probe_svc=$(read_probe_unit "$pod_name" "sdme-probe-readiness-app.service")
-    if echo "$probe_svc" | grep -q '/oci/.sdme-kube-probe.*--type readiness'; then
+    if echo "$probe_svc" | grep -q '/usr/bin/sdme-kube-probe.*--type readiness'; then
         record "${test_prefix}-probe-binary" PASS
     else
         record "${test_prefix}-probe-binary" FAIL "readiness service should reference probe binary"
@@ -439,7 +439,7 @@ YAML
     # Static: liveness probe service references probe binary with http check.
     local probe_svc
     probe_svc=$(read_probe_unit "$pod_name" "sdme-probe-liveness-app.service")
-    if echo "$probe_svc" | grep -q '/oci/.sdme-kube-probe.*http.*--port 8080.*--path /healthz'; then
+    if echo "$probe_svc" | grep -q '/usr/bin/sdme-kube-probe.*http.*--port 8080.*--path /healthz'; then
         record "${test_prefix}-http-probe" PASS
     else
         record "${test_prefix}-http-probe" FAIL "http probe with port 8080 and /healthz not found"
@@ -526,7 +526,7 @@ YAML
     # Static: readiness probe service references probe binary with tcp check.
     local probe_svc
     probe_svc=$(read_probe_unit "$pod_name" "sdme-probe-readiness-app.service")
-    if echo "$probe_svc" | grep -q '/oci/.sdme-kube-probe.*tcp.*--port 9090'; then
+    if echo "$probe_svc" | grep -q '/usr/bin/sdme-kube-probe.*tcp.*--port 9090'; then
         record "${test_prefix}-tcp-probe" PASS
     else
         record "${test_prefix}-tcp-probe" FAIL "tcp probe with port 9090 not found"
@@ -618,7 +618,7 @@ YAML
     # Static: verify all three probe timer+service pairs are present.
     local startup_svc
     startup_svc=$(read_probe_unit "$pod_name" "sdme-probe-startup-app.service")
-    if echo "$startup_svc" | grep -q '/oci/.sdme-kube-probe.*--type startup'; then
+    if echo "$startup_svc" | grep -q '/usr/bin/sdme-kube-probe.*--type startup'; then
         record "${test_prefix}-startup-unit" PASS
     else
         record "${test_prefix}-startup-unit" FAIL "startup probe service not found"
