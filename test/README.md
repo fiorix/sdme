@@ -44,7 +44,7 @@ Stage 2: Parallel tests (semaphore-bounded, default 8 jobs)
     Wave B: kube L2-L6 (only if L1 passed).
 
 Stage 3: Destructive (serial)
-    verify-usage.sh (batch ops: stop --all, rm --all).
+    verify-tutorial.sh (batch ops: stop --all, rm --all).
 ```
 
 Runner options: `--jobs N`, `--timeout-scale N`, `--stagger N`,
@@ -52,31 +52,33 @@ Runner options: `--jobs N`, `--timeout-scale N`, `--stagger N`,
 
 ## Test scripts
 
-| Script | Description |
-|--------|-------------|
-| preflight.sh | Environment validation (no containers) |
-| smoke.sh | Minimal container lifecycle gate test |
-| verify-interrupt.sh | SIGINT/SIGTERM abort handling |
-| verify-cp.sh | File copy between host, containers, rootfs, hard links |
-| verify-export.sh | Rootfs/container export (dir, tar, raw image, hard links, xattrs) |
-| verify-build.sh | `sdme fs build` hot COPY, source prefixes, locking, cache/resume |
-| verify-security.sh | Capabilities, seccomp, AppArmor, userns, hardened |
-| verify-pods.sh | Pod shared network namespace |
-| verify-network.sh | Zones, bridges, service masking, LLMNR |
-| verify-oci.sh | OCI port forwarding and volume mounting |
-| verify-distro-boot.sh | Boot + hardened boot across 7 distros |
-| verify-distro-oci.sh | OCI app matrix: 3 apps x 7 distros (+ hardened) |
-| verify-nixos.sh | NixOS container, OCI app, kube pod |
-| verify-usage.sh | CLI commands end-to-end across all features |
-| verify-kube-L1-basic.sh | Kube lifecycle, YAML validation, emptyDir |
-| verify-kube-L2-spec.sh | Pod spec compliance, initContainers, resources |
-| verify-kube-L2-probes.sh | Startup, liveness, readiness probes |
-| verify-kube-L2-security.sh | Kube securityContext, capabilities |
-| verify-kube-L3-secrets.sh | Secret create/ls/rm, volume mount, envFrom |
-| verify-kube-L3-volumes.sh | emptyDir, hostPath, PVC, configMap, secret |
-| verify-kube-L4-networking.sh | Inter-container localhost networking |
-| verify-kube-L5-redis-stack.sh | Redis multi-container pod |
-| verify-kube-L6-gitea-stack.sh | Gitea + MySQL + Nginx stack |
+```
+Script                       Description
+---------------------------  -------------------------------------------
+preflight.sh                 Environment validation (no containers)
+smoke.sh                     Container lifecycle gate test
+verify-interrupt.sh          SIGINT/SIGTERM abort handling
+verify-cp.sh                 File copy: host, containers, rootfs
+verify-export.sh             Export: dir, tar, raw image, xattrs
+verify-build.sh              sdme fs build, COPY, locking, resume
+verify-security.sh           Capabilities, seccomp, AppArmor, userns
+verify-pods.sh               Pod shared network namespace
+verify-network.sh            Zones, bridges, service masking, LLMNR
+verify-oci.sh                OCI port forwarding and volume mounting
+verify-distro-boot.sh        Boot + hardened boot across 7 distros
+verify-distro-oci.sh         OCI app matrix: 3 apps x 7 distros
+verify-nixos.sh              NixOS container, OCI app, kube pod
+verify-tutorial.sh           Tutorial walkthrough end-to-end
+verify-kube-L1-basic.sh      Kube lifecycle, YAML validation, emptyDir
+verify-kube-L2-spec.sh       Pod spec, initContainers, resources
+verify-kube-L2-probes.sh     Startup, liveness, readiness probes
+verify-kube-L2-security.sh   Kube securityContext, capabilities
+verify-kube-L3-secrets.sh    Secret create/ls/rm, volume, envFrom
+verify-kube-L3-volumes.sh    emptyDir, hostPath, PVC, configMap, secret
+verify-kube-L4-networking.sh Inter-container localhost networking
+verify-kube-L5-redis-stack.sh Redis multi-container pod
+verify-kube-L6-gitea-stack.sh Gitea + MySQL + Nginx stack
+```
 
 ## Prerequisites
 
@@ -122,42 +124,49 @@ automatically via `fix_redis_oci()` in lib.sh.
 
 ## Results
 
-Last verified: 2026-03-22
+Last verified: 2026-03-30
 
-System: Linux 6.19.6-2-cachyos (x86_64), systemd 259, sdme 0.5.3,
+System: Linux 6.17.0-19-generic (aarch64), systemd 257, sdme 0.5.4,
 AppArmor enabled
 
-| # | Test Suite | Status | Pass | Fail | Skip |
-|---|-----------|--------|------|------|------|
-| 1 | verify-build | PASS | 11 | 0 | 0 |
-| 2 | verify-cp | PASS | 17 | 0 | 0 |
-| 3 | verify-distro-boot | PASS | 63 | 0 | 0 |
-| 4 | verify-distro-oci | PASS | 175 | 0 | 0 |
-| 5 | verify-export | PASS | 23 | 0 | 0 |
-| 6 | verify-kube-L1-basic | PASS | 14 | 0 | 0 |
-| 7 | verify-kube-L2-probes | PASS | 41 | 0 | 0 |
-| 8 | verify-kube-L2-security | PASS | 17 | 0 | 0 |
-| 9 | verify-kube-L2-spec | PASS | 12 | 0 | 0 |
-| 10 | verify-kube-L3-secrets | PASS | 16 | 0 | 0 |
-| 11 | verify-kube-L3-volumes | PASS | 39 | 0 | 0 |
-| 12 | verify-kube-L4-networking | PASS | 6 | 0 | 0 |
-| 13 | verify-kube-L5-redis-stack | PASS | 6 | 0 | 0 |
-| 14 | verify-kube-L6-gitea-stack | PASS | 15 | 0 | 0 |
-| 15 | verify-network | FAIL | 7 | 2 | 0 |
-| 16 | verify-nixos | PASS | 26 | 0 | 0 |
-| 17 | verify-oci | PASS | 18 | 0 | 0 |
-| 18 | verify-pods | PASS | 9 | 0 | 0 |
-| 19 | verify-security | PASS | 31 | 0 | 0 |
-| 20 | verify-usage | PASS | 49 | 0 | 0 |
-
-**Totals: 595 passed, 2 failed, 0 skipped -- 20 suites**
-
-verify-network zone/http-via-ip and zone/llmnr-resolution fail with
-"Network is unreachable" between zone containers. Environment issue
-(systemd-networkd zone DHCP), not a code regression -- passed clean
-on 0.5.2 on the same host.
+```
+Test Suite                 Pass  Fail  Skip  Status
+-------------------------  ----  ----  ----  ------
+verify-build                 11     0     0  PASS
+verify-cp                    17     0     0  PASS
+verify-distro-boot           63     0     0  PASS
+verify-distro-oci           175     0     0  PASS
+verify-export                22     0     1  PASS
+verify-kube-L1-basic         14     0     0  PASS
+verify-kube-L2-probes        41     0     0  PASS
+verify-kube-L2-security      17     0     0  PASS
+verify-kube-L2-spec          12     0     0  PASS
+verify-kube-L3-secrets       16     0     0  PASS
+verify-kube-L3-volumes       39     0     0  PASS
+verify-kube-L4-networking     6     0     0  PASS
+verify-kube-L5-redis-stack    6     0     0  PASS
+verify-kube-L6-gitea-stack   15     0     0  PASS
+verify-network                9     0     0  PASS
+verify-nixos                 26     0     0  PASS
+verify-oci                   18     0     0  PASS
+verify-pods                   9     0     0  PASS
+verify-security              31     0     0  PASS
+verify-tutorial              79     0     0  PASS
+-------------------------  ----  ----  ----  ------
+Totals                      626     0     1  20 suites
+```
 
 ## Log
+
+### 0.5.4 -- tutorial test rewrite, website docs (2026-03-30, aarch64)
+
+626 passed, 0 failed, 1 skipped across 20 suites. Replaced
+verify-usage.sh with verify-tutorial.sh: each test section now maps
+1:1 to a website tutorial. New tests for management (help, ps --json,
+cp), services (fedora + zone + hardened), oci-volumes (postgres
+persistence across rm/recreate), and pod --oci-pod (redis). Dropped
+tests covered by verify-security.sh. verify-network zone issues from
+0.5.3 resolved on this system. Wall clock: 19m55s.
 
 ### 0.5.3 -- code cleanup, hard link/xattr test fixes (2026-03-22, x86_64)
 

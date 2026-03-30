@@ -11,7 +11,7 @@ set -uo pipefail
 #   2. Parallel tests:
 #      Wave A: core tests + kube-L1 (semaphore-bounded)
 #      Wave B: kube L2+ (launched after L1 completes, only if L1 passed)
-#   3. Destructive: verify-usage.sh (batch ops affect all containers)
+#   3. Destructive: verify-tutorial.sh (batch ops affect all containers)
 #
 # Usage:
 #   sudo ./test/scripts/run-parallel.sh [OPTIONS]
@@ -44,7 +44,7 @@ KNOWN_PREFIXES=(
     vfy-dboot-
     vfy-doci-
     vfy-oci-
-    vfy-usage-
+    vfy-tut-
     vfy-int-
     vfy-bld-
     vfy-exp-
@@ -150,7 +150,7 @@ test_args() {
     local script_name="$1"
     local args="--report-dir $REPORT_DIR"
     case "$script_name" in
-        verify-distro-boot.sh|verify-distro-oci.sh|verify-export.sh|verify-usage.sh|verify-oci.sh|verify-nixos.sh|verify-security.sh|verify-pods.sh)
+        verify-distro-boot.sh|verify-distro-oci.sh|verify-export.sh|verify-tutorial.sh|verify-oci.sh|verify-nixos.sh|verify-security.sh|verify-pods.sh)
             # These scripts don't accept --base-fs (custom or no arg parser).
             ;;
         *)
@@ -574,15 +574,15 @@ main() {
     done
 
     # ========================================================================
-    # Stage 3: Destructive (verify-usage.sh)
+    # Stage 3: Destructive (verify-tutorial.sh)
     # ========================================================================
     # Its batch tests (sdme stop --all, sdme rm --all) affect ALL containers
     # system-wide, so it must run after everything else finishes.
-    if should_run "verify-usage"; then
+    if should_run "verify-tutorial"; then
         echo ""
         log "Stage 3: Destructive tests"
         CHILD_PIDS=()
-        run_test "$SCRIPT_DIR/verify-usage.sh"
+        run_test "$SCRIPT_DIR/verify-tutorial.sh"
         for pid in "${CHILD_PIDS[@]}"; do
             wait "$pid" 2>/dev/null || overall_rc=1
         done

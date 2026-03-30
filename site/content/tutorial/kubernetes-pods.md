@@ -222,7 +222,7 @@ connect by hostname:
 
 ```sh
 apt-get update && apt-get install -y postgresql-client
-psql -h my-db -U postgres -d myapp
+PGPASSWORD=secret psql -h my-db -U postgres -d myapp
 ```
 
 ### Managing secrets and configmaps
