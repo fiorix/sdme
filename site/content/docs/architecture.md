@@ -1820,10 +1820,17 @@ does not have).
 
 ## 17. Kubernetes Pod Support
 
-sdme can run Kubernetes Pod YAML files as nspawn containers. Each pod maps
-to a single container where each workload runs as a separate systemd
-service chrooted into its own rootfs under `/oci/apps/{name}/root`. For
-usage examples and CLI reference, see `sdme kube --help`.
+`sdme kube apply` reads a Pod (or Deployment) YAML, pulls the specified
+OCI images, builds a combined rootfs on a base OS, and starts a single
+nspawn container with one systemd service per OCI image. All services in
+the pod share localhost, just like in Kubernetes.
+
+The base OS is any imported rootfs — the same Pod YAML runs on Ubuntu,
+Fedora, Arch Linux, or any other supported distribution. Each OCI
+container becomes a separate systemd service chrooted into its own rootfs
+under `/oci/apps/{name}/root`.
+
+For usage examples and CLI reference, see `sdme kube --help`.
 
 ### Pipeline
 
