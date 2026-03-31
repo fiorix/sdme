@@ -162,7 +162,7 @@ cat << EOF > ~/.picoclaw/config.json
     "telegram": {
       "enabled": false,
       "token": "send /newbot to @BotMaster on telegram, paste the token here",
-      "allowFrom": [
+      "allow_from": [
         "send /start to @userinfobot on telegram, paste the ID here"
       ]
     },
