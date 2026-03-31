@@ -14,6 +14,7 @@
 //! | Module | Purpose |
 //! |--------|---------|
 //! | [`containers`] | Create, remove, join, exec, stop, list |
+//! | [`devcontainer`] | Dev Container specification support |
 //! | [`systemd`] | D-Bus helpers and template unit management |
 //! | [`import`] | Rootfs import (dir, tar, URL, OCI, QCOW2) |
 //! | [`oci`] | OCI registry, layout, app setup, blob cache |
@@ -33,6 +34,7 @@
 pub mod build;
 pub mod config;
 pub mod containers;
+pub mod devcontainer;
 pub(crate) mod copy;
 pub mod cp;
 pub(crate) mod devfd_shim;
