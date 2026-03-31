@@ -3426,12 +3426,8 @@ fn run() -> Result<()> {
             }
             DevcontainerCommand::Exec { name, command } => {
                 let name = containers::resolve_name(&cfg.datadir, &name)?;
-                let status = devcontainer::devcontainer_exec(
-                    &cfg.datadir,
-                    &name,
-                    &command,
-                    cli.verbose,
-                )?;
+                let status =
+                    devcontainer::devcontainer_exec(&cfg.datadir, &name, &command, cli.verbose)?;
                 if !status.success() {
                     std::process::exit(status.code().unwrap_or(1));
                 }

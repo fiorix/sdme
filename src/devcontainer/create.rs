@@ -46,10 +46,12 @@ pub struct DevcontainerUpOptions<'a> {
 ///
 /// Returns the container name on success.
 pub fn devcontainer_up(datadir: &Path, opts: &DevcontainerUpOptions<'_>) -> Result<String> {
-    let workspace_folder = opts
-        .workspace_folder
-        .canonicalize()
-        .with_context(|| format!("workspace folder not found: {}", opts.workspace_folder.display()))?;
+    let workspace_folder = opts.workspace_folder.canonicalize().with_context(|| {
+        format!(
+            "workspace folder not found: {}",
+            opts.workspace_folder.display()
+        )
+    })?;
 
     // 1. Find and parse devcontainer.json.
     let config_path = match opts.config_path {
@@ -232,9 +234,7 @@ pub fn devcontainer_exec(
     }
 
     let remote_user = state.get("DEVCONTAINER_USER");
-    let workspace = state
-        .get("DEVCONTAINER_WORKSPACE")
-        .unwrap_or("/workspace");
+    let workspace = state.get("DEVCONTAINER_WORKSPACE").unwrap_or("/workspace");
 
     // Build machinectl shell command with user and working directory.
     exec_in_container(name, command, remote_user, Some(workspace), verbose)
@@ -386,13 +386,8 @@ fn run_lifecycle_commands(
         } else {
             eprintln!("running {hook_name}");
         }
-        let command = vec![
-            "/bin/sh".to_string(),
-            "-c".to_string(),
-            cmd_str.clone(),
-        ];
-        let status =
-            exec_in_container(name, &command, remote_user, None, verbose)?;
+        let command = vec!["/bin/sh".to_string(), "-c".to_string(), cmd_str.clone()];
+        let status = exec_in_container(name, &command, remote_user, None, verbose)?;
         if !status.success() {
             let code = status.code().unwrap_or(1);
             bail!("{hook_name} failed (exit code {code}): {cmd_str}");
@@ -444,11 +439,7 @@ fn exec_in_container(
 /// implementation, we support a simplified approach: download the feature
 /// layer, extract install.sh, and run it with the option values as environment
 /// variables.
-fn install_features(
-    name: &str,
-    plan: &DevcontainerPlan,
-    verbose: bool,
-) -> Result<()> {
+fn install_features(name: &str, plan: &DevcontainerPlan, verbose: bool) -> Result<()> {
     for (feature_ref, options) in &plan.features {
         check_interrupted()?;
         eprintln!("installing feature: {feature_ref}");
@@ -508,13 +499,11 @@ fn install_features(
                          dnf install -y python{version} python3-pip; fi"
                     )
                 }
-                "git" => {
-                    "if command -v apt-get >/dev/null 2>&1; then \
+                "git" => "if command -v apt-get >/dev/null 2>&1; then \
                      apt-get update && apt-get install -y git; \
                      elif command -v dnf >/dev/null 2>&1; then \
                      dnf install -y git; fi"
-                        .to_string()
-                }
+                    .to_string(),
                 _ => {
                     eprintln!(
                         "warning: feature '{feature_ref}' is not natively supported; \
@@ -524,11 +513,7 @@ fn install_features(
                 }
             };
 
-            let command = vec![
-                "/bin/sh".to_string(),
-                "-c".to_string(),
-                install_cmd,
-            ];
+            let command = vec!["/bin/sh".to_string(), "-c".to_string(), install_cmd];
             let status = exec_in_container(name, &command, None, None, verbose)?;
             if !status.success() {
                 eprintln!(
@@ -537,9 +522,7 @@ fn install_features(
                 );
             }
         } else {
-            eprintln!(
-                "warning: custom feature '{feature_ref}' is not yet supported; skipping"
-            );
+            eprintln!("warning: custom feature '{feature_ref}' is not yet supported; skipping");
         }
     }
     Ok(())

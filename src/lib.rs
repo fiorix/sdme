@@ -34,9 +34,9 @@
 pub mod build;
 pub mod config;
 pub mod containers;
-pub mod devcontainer;
 pub(crate) mod copy;
 pub mod cp;
+pub mod devcontainer;
 pub(crate) mod devfd_shim;
 pub(crate) mod elf;
 pub mod export;

@@ -89,8 +89,8 @@ fn substitute_vars(s: &str, workspace_folder: &Path, container_workspace: &str) 
             } else {
                 (var_spec, None)
             };
-            let value = std::env::var(var_name)
-                .unwrap_or_else(|_| default.unwrap_or("").to_string());
+            let value =
+                std::env::var(var_name).unwrap_or_else(|_| default.unwrap_or("").to_string());
             let full_pattern = format!("${{localEnv:{}}}", var_spec);
             result = result.replace(&full_pattern, &value);
         } else {
@@ -108,7 +108,10 @@ fn substitute_vars(s: &str, workspace_folder: &Path, container_workspace: &str) 
             break;
         };
         let var_spec = rest[..end].to_string();
-        let var_name = var_spec.split_once(':').map(|(n, _)| n).unwrap_or(&var_spec);
+        let var_name = var_spec
+            .split_once(':')
+            .map(|(n, _)| n)
+            .unwrap_or(&var_spec);
         let replacement = format!("${{{var_name}}}");
         let full_pattern = format!("${{containerEnv:{var_spec}}}");
         result = result.replace(&full_pattern, &replacement);
@@ -133,7 +136,7 @@ fn parse_mount_string(
             match key.trim() {
                 "source" | "src" => source = Some(value.to_string()),
                 "target" | "dst" | "destination" => target = Some(value.to_string()),
-                "type" => {} // we only support bind mounts in sdme
+                "type" => {}        // we only support bind mounts in sdme
                 "consistency" => {} // ignored (Docker-specific)
                 "readonly" | "ro" => {
                     readonly = value.eq_ignore_ascii_case("true") || value == "1";
@@ -200,9 +203,7 @@ fn normalize_port(entry: &PortEntry) -> Result<String> {
             if s.contains(':') {
                 Ok(s.clone())
             } else {
-                let p: u16 = s
-                    .parse()
-                    .with_context(|| format!("invalid port: {s}"))?;
+                let p: u16 = s.parse().with_context(|| format!("invalid port: {s}"))?;
                 Ok(format!("{p}:{p}"))
             }
         }
@@ -245,10 +246,7 @@ pub fn find_config(workspace_folder: &Path) -> Result<PathBuf> {
 }
 
 /// Parse and validate a devcontainer.json file into an executable plan.
-pub(crate) fn load_plan(
-    config_path: &Path,
-    workspace_folder: &Path,
-) -> Result<DevcontainerPlan> {
+pub(crate) fn load_plan(config_path: &Path, workspace_folder: &Path) -> Result<DevcontainerPlan> {
     let content = std::fs::read_to_string(config_path)
         .with_context(|| format!("failed to read {}", config_path.display()))?;
 
@@ -337,9 +335,7 @@ fn validate_and_plan(
         );
     }
 
-    let config_dir = config_path
-        .parent()
-        .unwrap_or(Path::new("."));
+    let config_dir = config_path.parent().unwrap_or(Path::new("."));
 
     // Resolve workspace folder inside container.
     let container_workspace = config
@@ -382,8 +378,7 @@ fn validate_and_plan(
     match workspace_mount {
         Some("") => {} // Explicitly disabled
         Some(custom) => {
-            let mount_str =
-                parse_mount_string(custom, workspace_folder, &container_workspace)?;
+            let mount_str = parse_mount_string(custom, workspace_folder, &container_workspace)?;
             binds.push(mount_str);
         }
         None => {
@@ -401,9 +396,7 @@ fn validate_and_plan(
                 binds.push(bind);
             }
             MountEntry::Object(m) => {
-                if let Some(bind) =
-                    parse_mount_object(m, workspace_folder, &container_workspace)?
-                {
+                if let Some(bind) = parse_mount_object(m, workspace_folder, &container_workspace)? {
                     binds.push(bind);
                 }
             }
@@ -518,9 +511,7 @@ fn sanitize_container_name(name: &str) -> String {
     result = result.trim_matches('-').to_string();
 
     // Ensure starts with a letter.
-    if result.is_empty()
-        || !result.as_bytes()[0].is_ascii_lowercase()
-    {
+    if result.is_empty() || !result.as_bytes()[0].is_ascii_lowercase() {
         result = format!("dc-{result}");
     }
 
@@ -539,7 +530,10 @@ mod tests {
 
     #[test]
     fn test_sanitize_container_name() {
-        assert_eq!(sanitize_container_name("My Dev Container"), "my-dev-container");
+        assert_eq!(
+            sanitize_container_name("My Dev Container"),
+            "my-dev-container"
+        );
         assert_eq!(sanitize_container_name("test_123"), "test-123");
         assert_eq!(sanitize_container_name("123-test"), "dc-123-test");
         assert_eq!(sanitize_container_name("---"), "dc-");
@@ -549,25 +543,13 @@ mod tests {
     #[test]
     fn test_substitute_vars() {
         let ws = Path::new("/home/user/myproject");
-        let result = substitute_vars(
-            "${localWorkspaceFolder}/src",
-            ws,
-            "/workspace",
-        );
+        let result = substitute_vars("${localWorkspaceFolder}/src", ws, "/workspace");
         assert_eq!(result, "/home/user/myproject/src");
 
-        let result = substitute_vars(
-            "${containerWorkspaceFolder}/app",
-            ws,
-            "/workspace",
-        );
+        let result = substitute_vars("${containerWorkspaceFolder}/app", ws, "/workspace");
         assert_eq!(result, "/workspace/app");
 
-        let result = substitute_vars(
-            "${localWorkspaceFolderBasename}",
-            ws,
-            "/workspace",
-        );
+        let result = substitute_vars("${localWorkspaceFolderBasename}", ws, "/workspace");
         assert_eq!(result, "myproject");
     }
 
@@ -597,7 +579,10 @@ mod tests {
 
     #[test]
     fn test_normalize_port() {
-        assert_eq!(normalize_port(&PortEntry::Number(3000)).unwrap(), "3000:3000");
+        assert_eq!(
+            normalize_port(&PortEntry::Number(3000)).unwrap(),
+            "3000:3000"
+        );
         assert_eq!(
             normalize_port(&PortEntry::String("8080:80".into())).unwrap(),
             "8080:80"
@@ -645,10 +630,7 @@ mod tests {
             "/workspace",
         )
         .unwrap();
-        assert_eq!(
-            result,
-            "/home/user/project/.config:/home/dev/.config:ro"
-        );
+        assert_eq!(result, "/home/user/project/.config:/home/dev/.config:ro");
     }
 
     #[test]
