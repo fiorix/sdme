@@ -33,11 +33,15 @@ Create `ollama.build`:
 ```
 FROM ubuntu
 RUN apt update
-RUN apt install -y curl zstd pciutils libnvidia-compute-535 nvidia-utils-535
+RUN apt install -y curl zstd pciutils libnvidia-compute-580 nvidia-utils-580
 RUN curl -fsSL https://ollama.com/install.sh | sh
 RUN mkdir -p /etc/systemd/system/ollama.service.d
 RUN printf '[Service]\nEnvironment="OLLAMA_HOST=0.0.0.0"\n' > /etc/systemd/system/ollama.service.d/override.conf
 ```
+
+The `libnvidia-compute` and `nvidia-utils` version must match the driver
+version installed on the host, otherwise `nvidia-smi` and GPU access may
+not work inside the container.
 
 The last two `RUN` steps configure Ollama to listen on all interfaces
 so that other containers on the same network zone can connect to it.
@@ -187,8 +191,7 @@ EOF
 
 Test the setup running the interactive agent:
 
-```
-root@pico-foobar:~# picoclaw agent
+<pre class="diagram">root@pico-foobar:~# picoclaw agent
 
 ██████╗ ██╗ ██████╗ ██████╗  ██████╗██╗      █████╗ ██╗    ██╗
 ██╔══██╗██║██╔════╝██╔═══██╗██╔════╝██║     ██╔══██╗██║    ██║
@@ -206,15 +209,14 @@ root@pico-foobar:~# picoclaw agent
 Nice to meet you! I'm PicoClaw, your practical AI assistant ready to help.
 
 What can I do for you today?
-```
+</pre>
 
 Run the gateway so that it connects to Telegram and WhatsApp.
 
 The WhatsApp integration will print a QRCode on the terminal to connect
 to the account. It's best to use a separate phone/number for this.
 
-```
-root@pico-foobar:~# picoclaw gateway
+<pre class="diagram">root@pico-foobar:~# picoclaw gateway
 
 ██████╗ ██╗ ██████╗ ██████╗  ██████╗██╗      █████╗ ██╗    ██╗
 ██╔══██╗██║██╔════╝██╔═══██╗██╔════╝██║     ██╔══██╗██║    ██║
@@ -233,7 +235,7 @@ root@pico-foobar:~# picoclaw gateway
 ✓ Health endpoints available at http://127.0.0.1:18790/health, /ready and /reload (POST)
 ✓ Gateway started on 127.0.0.1:18790
 Press Ctrl+C to stop
-```
+</pre>
 
 From here on, the agent should be ready to chat on the enabled channels.
 
