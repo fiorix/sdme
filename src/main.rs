@@ -11,8 +11,8 @@ use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 use sdme::import::{ImportOptions, InstallPackages, OciMode};
 use sdme::{
-    check_interrupted, config, confirm, containers, cp, export, kube, lock, oci, pod, rootfs,
-    security, system_check, systemd, BindConfig, EnvConfig, NetworkConfig, ResourceLimits,
+    check_interrupted, config, confirm, containers, cp, devcontainer, export, kube, lock, oci, pod,
+    rootfs, security, system_check, systemd, BindConfig, EnvConfig, NetworkConfig, ResourceLimits,
     SecurityConfig,
 };
 
@@ -724,6 +724,68 @@ SECURITY:
     Pod YAML securityContext applies at the OCI app service level. Both layers
     are complementary and can be used together.";
 
+const DEVCONTAINER_HELP: &str = "\
+Work with Dev Container configurations (.devcontainer/devcontainer.json).
+Implements the Dev Container specification (https://containers.dev/) to create
+reproducible development environments from devcontainer.json files.
+
+WORKFLOW:
+    # Bring up a devcontainer from the current directory
+    sdme devcontainer up
+
+    # Bring up from a specific workspace
+    sdme devcontainer up --workspace-folder /path/to/project
+
+    # Execute a command inside the devcontainer
+    sdme devcontainer exec dc-myproject -- npm test
+
+    # Stop the devcontainer
+    sdme devcontainer stop dc-myproject
+
+    # Remove the devcontainer and its rootfs
+    sdme devcontainer rm dc-myproject
+
+CONFIG FILE LOCATIONS:
+    .devcontainer/devcontainer.json    (primary)
+    .devcontainer.json                 (root)
+    .devcontainer/<subdir>/devcontainer.json
+
+SUPPORTED FEATURES:
+    - image: OCI image reference (pulled and imported as sdme rootfs)
+    - workspaceFolder / workspaceMount: workspace directory mapping
+    - remoteUser / containerUser: user configuration
+    - remoteEnv / containerEnv: environment variables
+    - mounts: additional bind mounts (bind type only)
+    - forwardPorts: port forwarding via systemd-nspawn
+    - Lifecycle hooks: onCreateCommand, updateContentCommand,
+      postCreateCommand, postStartCommand, postAttachCommand
+    - features: basic support for well-known Dev Container Features
+    - capAdd: Linux capability additions
+    - JSONC (JSON with comments) support
+
+CONTAINER NAMING:
+    Containers are named dc-<project>, derived from the devcontainer name
+    or the workspace folder basename. The dc- prefix prevents collisions
+    with regular sdme containers.
+
+ENVIRONMENT:
+    The following variable substitutions are supported in devcontainer.json:
+        ${localWorkspaceFolder}           Host workspace path
+        ${containerWorkspaceFolder}       Container workspace path
+        ${localWorkspaceFolderBasename}   Workspace directory name
+        ${localEnv:VAR}                   Host environment variable
+
+NOTES:
+    Dockerfile builds (the 'build' key) are not yet supported; use 'image'
+    instead, or build the image externally and reference it.
+
+    Only bind mounts are supported; volume and tmpfs mount types are skipped
+    with a warning.
+
+    Feature installation uses simplified package manager commands for
+    well-known features (node, python, git). Full OCI feature pulling is
+    planned for a future release.";
+
 // ---------------------------------------------------------------------------
 
 #[derive(Parser)]
@@ -1135,6 +1197,10 @@ enum Command {
     /// Manage Kubernetes-compatible pods (experimental)
     #[command(name = "kube", subcommand)]
     Kube(KubeCommand),
+
+    /// Work with Dev Container configurations
+    #[command(name = "devcontainer", subcommand, after_long_help = DEVCONTAINER_HELP)]
+    Devcontainer(DevcontainerCommand),
 }
 
 #[derive(Subcommand)]
@@ -1443,6 +1509,51 @@ enum KubeConfigmapCommand {
         /// ConfigMap names
         #[arg(required = true)]
         names: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum DevcontainerCommand {
+    /// Build and start a devcontainer from devcontainer.json
+    Up {
+        /// Path to the workspace folder (default: current directory)
+        #[arg(long, default_value = ".")]
+        workspace_folder: PathBuf,
+
+        /// Explicit path to devcontainer.json (overrides auto-detection)
+        #[arg(long = "config-path")]
+        config_path: Option<PathBuf>,
+
+        /// Boot timeout in seconds (overrides config, default: 60)
+        #[arg(short, long)]
+        timeout: Option<u64>,
+
+        /// Force rebuild even if container already exists
+        #[arg(long)]
+        rebuild: bool,
+
+        /// Skip the OCI manifest cache and re-fetch from the registry
+        #[arg(long)]
+        no_cache: bool,
+    },
+    /// Execute a command inside a running devcontainer
+    Exec {
+        /// Devcontainer name
+        name: String,
+
+        /// Command to execute
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
+    /// Stop a running devcontainer
+    Stop {
+        /// Devcontainer name
+        name: String,
+    },
+    /// Remove a devcontainer and its rootfs
+    Rm {
+        /// Devcontainer name
+        name: String,
     },
 }
 
@@ -3277,6 +3388,61 @@ fn run() -> Result<()> {
                     }
                 }
             },
+        },
+        Command::Devcontainer(cmd) => match cmd {
+            DevcontainerCommand::Up {
+                workspace_folder,
+                config_path,
+                timeout,
+                rebuild,
+                no_cache,
+            } => {
+                system_check::check_systemd_version(255)?;
+                let docker_creds = docker_credentials(&cfg);
+                let docker_creds_ref = docker_creds.as_ref().map(|(u, t)| (u.as_str(), t.as_str()));
+                let mut http = cfg.http_config()?;
+                if no_cache {
+                    http.manifest_cache_ttl = 0;
+                }
+                let name = devcontainer::devcontainer_up(
+                    &cfg.datadir,
+                    &devcontainer::DevcontainerUpOptions {
+                        workspace_folder: &workspace_folder,
+                        config_path: config_path.as_deref(),
+                        docker_credentials: docker_creds_ref,
+                        cache: &blob_cache,
+                        verbose: cli.verbose,
+                        http: &http,
+                        auto_gc: cfg.auto_fs_gc,
+                        distros: &cfg.distros,
+                        boot_timeout: timeout.unwrap_or(cfg.boot_timeout),
+                        tasks_max: cfg.tasks_max,
+                        stop_timeout_terminate: cfg.stop_timeout_terminate,
+                        rebuild,
+                        interactive,
+                    },
+                )?;
+                println!("{name}");
+            }
+            DevcontainerCommand::Exec { name, command } => {
+                let name = containers::resolve_name(&cfg.datadir, &name)?;
+                let status =
+                    devcontainer::devcontainer_exec(&cfg.datadir, &name, &command, cli.verbose)?;
+                if !status.success() {
+                    std::process::exit(status.code().unwrap_or(1));
+                }
+            }
+            DevcontainerCommand::Stop { name } => {
+                let name = containers::resolve_name(&cfg.datadir, &name)?;
+                devcontainer::devcontainer_stop(&cfg.datadir, &name, cli.verbose)?;
+                println!("{name}");
+            }
+            DevcontainerCommand::Rm { name } => {
+                let name = containers::resolve_name(&cfg.datadir, &name)?;
+                eprintln!("removing devcontainer '{name}'");
+                devcontainer::devcontainer_rm(&cfg.datadir, &name, cli.verbose)?;
+                println!("{name}");
+            }
         },
         Command::Fs(cmd) => match cmd {
             RootfsCommand::Import {

@@ -1,6 +1,6 @@
 +++
 title = "Architecture and Design"
-description = "How sdme works: overlayfs, systemd integration, OCI support, and Kubernetes pods."
+description = "How sdme works: overlayfs, systemd integration, OCI support, Kubernetes pods, and Dev Containers."
 weight = 1
 template = "doc.html"
 +++
@@ -29,8 +29,9 @@ container lifecycle through D-Bus.
 The name stands for *Systemd Machine Editor*, and its pronunciation is
 left as an exercise for the reader.
 
-Sections 1-15 cover the core container functionality. Sections 16-17
-cover experimental features: OCI app support and Kubernetes Pod YAML.
+Sections 1-15 cover the core container functionality. Sections 16-18
+cover higher-level features: OCI app support, Kubernetes Pod YAML, and
+Dev Container specification support.
 
 ## 2. Dev Mode: Cloning Your Host
 
@@ -2077,3 +2078,218 @@ Kube pods are tracked with additional state fields:
 
 - No idempotent re-apply: `kube apply` on an existing pod fails; delete
   first, then re-apply
+
+
+## 18. Dev Container Support
+
+sdme implements the [Dev Container specification](https://containers.dev/)
+to create reproducible development environments from
+`.devcontainer/devcontainer.json` files. This bridges the gap between
+sdme's container management and the editor-integrated workflows used by
+VS Code, GitHub Codespaces, and other tools that consume the spec.
+
+The implementation follows the same three-layer architecture as the
+Kubernetes module: raw serde types → validated plan → orchestration.
+
+### Config discovery
+
+`sdme devcontainer up` searches for the config file in standard
+locations, in order:
+
+1. `.devcontainer/devcontainer.json`
+2. `.devcontainer.json` (workspace root)
+3. `.devcontainer/<subdir>/devcontainer.json` (first match)
+
+An explicit path can be provided with `--config-path`.
+
+### JSONC support
+
+Dev Container configs conventionally use JSONC (JSON with comments).
+The parser strips both single-line (`//`) and multi-line (`/* */`)
+comments before passing the content to serde_json. The comment
+stripper is string-aware: it does not strip inside quoted strings,
+so URLs like `https://` in string values are preserved.
+
+### Variable substitution
+
+The following variables are resolved during plan validation:
+
+| Variable | Resolved to |
+|----------|-------------|
+| `${localWorkspaceFolder}` | Absolute host path of the workspace |
+| `${containerWorkspaceFolder}` | The `workspaceFolder` value |
+| `${localWorkspaceFolderBasename}` | Basename of the workspace path |
+| `${localEnv:VAR}` | Host environment variable `VAR` |
+| `${localEnv:VAR:default}` | Host env var with fallback |
+| `${containerEnv:VAR}` | Passed through as `${VAR}` for runtime resolution |
+
+Substitution happens in mount sources/targets, environment variable
+values, and the workspace mount string.
+
+### Container naming
+
+Containers are named `dc-<name>`, where `<name>` is derived from
+the `name` field in devcontainer.json, or the workspace folder
+basename if no name is set. The name is sanitized for sdme:
+
+- Lowercased
+- Non-alphanumeric characters replaced with hyphens
+- Consecutive hyphens collapsed
+- Leading/trailing hyphens stripped
+- Prefixed with `dc-` if it starts with a digit
+- Truncated to 64 characters
+
+The `dc-` prefix prevents collisions with regular sdme containers.
+
+### Image import
+
+When `image` is specified in the config, the OCI image is imported
+as an sdme rootfs named `dc-<name>` using the existing OCI registry
+machinery (`src/import/` and `src/oci/registry.rs`). The import uses
+`OciMode::Base` and `InstallPackages::Yes` so the rootfs includes
+systemd and can boot as an nspawn container.
+
+If the rootfs already exists (from a previous `up`), it is reused
+without re-importing. The `--rebuild` flag forces re-import and
+container recreation.
+
+Dockerfile builds (`build` key) are parsed but not yet implemented.
+The error message directs users to build the image externally and
+reference it via `image`.
+
+### Workspace mount
+
+By default, the host workspace folder is bind-mounted into the
+container at the `workspaceFolder` path (default: `/workspace`):
+
+```
+hostWorkspace:/workspace:rw
+```
+
+The `workspaceMount` key overrides this default. Setting it to an
+empty string disables the automatic workspace mount entirely.
+Additional mounts from the `mounts` array are appended after the
+workspace mount.
+
+### Mount support
+
+Both structured objects and Docker-style strings are supported:
+
+```json
+{
+  "mounts": [
+    { "type": "bind", "source": "/host", "target": "/container", "readonly": true },
+    "source=${localWorkspaceFolder}/.config,target=/home/dev/.config,type=bind"
+  ]
+}
+```
+
+Only bind mounts are supported. Volume and tmpfs mount types are
+skipped with a warning, since sdme's storage model is overlayfs-based,
+not Docker volume-based.
+
+### Port forwarding
+
+Ports from `forwardPorts` are mapped to systemd-nspawn `--port=`
+flags. When any ports are specified, the container is automatically
+given a private network with a virtual ethernet link (`--network-veth`),
+since port forwarding requires network isolation.
+
+Both numeric (`3000`) and string (`"8080:80"`) formats are supported.
+
+### Environment variables
+
+`containerEnv` and `remoteEnv` are merged and passed to the
+container via sdme's `EnvConfig` (which generates `--setenv=`
+nspawn arguments). Variable substitution is applied to values
+before they are stored.
+
+### Lifecycle hooks
+
+The spec defines five lifecycle hooks, executed in order after the
+container boots:
+
+1. **onCreateCommand** — runs once when the container is first created
+2. **updateContentCommand** — runs when created or source code changes
+3. **postCreateCommand** — runs after updateContentCommand
+4. **postStartCommand** — runs every time the container starts
+5. **postAttachCommand** — runs when a tool attaches
+
+Each hook supports three forms:
+
+- **String**: `"npm install"` — single command via `/bin/sh -c`
+- **Array**: `["npm install", "npm build"]` — sequential commands
+- **Object**: `{"install": "npm install", "build": "npm build"}` —
+  parallel commands in the spec, but run sequentially in sdme
+  (sorted by key for deterministic ordering)
+
+Commands are executed inside the running container via
+`machinectl shell`. If `remoteUser` is set, commands run as that
+user.
+
+### Feature installation
+
+The `features` key references Dev Container Features — OCI artifacts
+containing install scripts. The current implementation provides
+simplified support for well-known features from the official
+`ghcr.io/devcontainers/features/` namespace:
+
+| Feature | Implementation |
+|---------|---------------|
+| `node` | Installs Node.js via NodeSource apt repo or dnf |
+| `python` | Installs Python via apt or dnf |
+| `git` | Installs git via apt or dnf |
+
+Features are installed after the container boots and before lifecycle
+hooks run. Feature options (e.g. `"version": "20"`) are extracted
+and used in the install commands.
+
+Custom features and full OCI feature pulling (downloading the
+feature artifact from a registry, extracting `install.sh`, and
+running it with the correct environment) are planned for a future
+release.
+
+### Idempotent up
+
+`sdme devcontainer up` is idempotent:
+
+- If the container exists and is running: prints a message and runs
+  `postStartCommand` (re-entrant).
+- If the container exists but is stopped: starts it and runs
+  `postStartCommand`.
+- If the container does not exist: full creation flow (import image,
+  create container, start, run all lifecycle hooks).
+- With `--rebuild`: deletes the existing container and rootfs, then
+  runs the full creation flow.
+
+### State management
+
+Devcontainer pods are tracked with additional state fields in the
+container's KEY=VALUE state file:
+
+- `DEVCONTAINER=yes` — marks this as a devcontainer
+- `DEVCONTAINER_WORKSPACE=/workspace` — workspace path inside the
+  container (used by `devcontainer exec` for working directory)
+- `DEVCONTAINER_USER=vscode` — user for command execution (from
+  `remoteUser`)
+- `DEVCONTAINER_CONFIG_HASH={sha256}` — hash of the devcontainer.json
+  file (for future change detection)
+
+`sdme devcontainer exec` reads these fields to run commands as the
+correct user and verify the container is a devcontainer.
+
+`sdme devcontainer rm` removes both the container and its rootfs,
+unlike `sdme rm` which preserves the rootfs.
+
+### Limitations
+
+- **Dockerfile builds**: the `build` key is parsed but not executed;
+  use `image` instead
+- **Volume and tmpfs mounts**: only bind mounts are supported
+- **Features**: only well-known features from the official namespace
+  are supported; custom features are skipped
+- **Docker Compose**: the `dockerComposeFile` key is not supported
+- **Customizations**: `customizations.vscode` (extensions, settings)
+  is parsed but not acted on, since sdme is not an IDE
+- **postAttachCommand**: parsed but not automatically triggered (no
+  attach detection); can be run manually

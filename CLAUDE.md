@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Project Is
 
-sdme boots systemd-nspawn containers using overlayfs copy-on-write layers, with OCI registry integration and Kubernetes Pod YAML support for local development and testing. It produces a single binary `sdme` that manages containers from explicit root filesystems, keeping the base rootfs untouched.
+sdme boots systemd-nspawn containers using overlayfs copy-on-write layers, with OCI registry integration, Kubernetes Pod YAML support, and Dev Container specification support for local development and testing. It produces a single binary `sdme` that manages containers from explicit root filesystems, keeping the base rootfs untouched.
 
 Runs on Linux with systemd. Requires root for all operations. Uses kernel overlayfs for copy-on-write storage. By default, containers are overlayfs clones of `/`. Also supports importing rootfs from other distros (Ubuntu, Debian, Fedora, NixOS). Imported rootfs needs systemd and dbus.
 
@@ -83,6 +83,7 @@ The `dist/` directory contains both checked-in packaging files and generated bui
 | `src/mounts.rs` | Bind mount (`BindConfig`) and environment variable (`EnvConfig`) configuration |
 | `src/network.rs` | Network configuration validation and state serialization |
 | `src/security.rs` | Security hardening: `SecurityConfig` (capabilities, seccomp, no-new-privileges, read-only, AppArmor), state file roundtrip, nspawn arg generation, validation |
+| `src/devcontainer/` | Dev Container specification support: devcontainer.json parsing, plan validation, container lifecycle (up/exec/stop/rm), variable substitution, JSONC, lifecycle hooks |
 | `src/kube/` | Kubernetes Pod YAML support: types, plan validation, container creation, kube delete, shared store abstraction for secrets and configmaps |
 | `src/kube/probe/` | Embedded `sdme-kube-probe` binary: CLI entry point, probe runner (failure counting/actions), exec/http/tcp/grpc check implementations |
 | `src/pod.rs` | Pod (shared network namespace) lifecycle: create, list, remove, runtime netns management |
@@ -132,7 +133,7 @@ Dependencies are checked at runtime before use via `system_check::check_dependen
 ## Documentation
 
 - **CLI reference**: `sdme --help` and each subcommand's `--help`. There is no manpage. Each command includes manpage-style reference sections (examples, environment, files, exit status, notes). The help text lives in `*_HELP` constants at the top of `src/main.rs` and is wired to clap via `after_long_help`.
-- **Architecture and design**: `site/content/docs/architecture.md`: comprehensive coverage of overlayfs, systemd integration, networking, pods, OCI, Kubernetes, security hardening, reliability, and all design decisions.
+- **Architecture and design**: `site/content/docs/architecture.md`: comprehensive coverage of overlayfs, systemd integration, networking, pods, OCI, Kubernetes, Dev Containers, security hardening, reliability, and all design decisions.
 - **Security model**: `site/content/docs/security.md`: nspawn isolation compared to Docker/Podman, OCI workload security, Kubernetes pod security.
 - **Tutorials**: `site/content/tutorial/`: getting started, networking, OCI apps, Kubernetes pods, etc.
 
