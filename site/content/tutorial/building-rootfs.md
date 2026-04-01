@@ -74,7 +74,7 @@ mounts instead of chown, eliminating the first-boot delay entirely.
 Once the container is created and you land on a shell, pull a model:
 
 ```sh
-ollama pull glm-4.7-flash
+ollama pull devstral-small-2:24b
 ```
 
 Exit the shell to return to the host. The Ollama container keeps
@@ -100,7 +100,7 @@ Create `picoclaw-builder.build`:
 FROM ubuntu
 RUN apt-get update && apt-get install -y golang git make curl
 RUN git clone https://github.com/sipeed/picoclaw /usr/src/picoclaw
-RUN cd /usr/src/picoclaw && git checkout v1.2.4
+RUN cd /usr/src/picoclaw && git checkout v0.2.4
 RUN export HOME=/root GOPATH=/root/go && cd /usr/src/picoclaw && make deps
 RUN export HOME=/root GOPATH=/root/go && cd /usr/src/picoclaw && GO_BUILD_TAGS="goolm,stdjson,whatsapp_native" make build
 RUN cp /usr/src/picoclaw/build/picoclaw /usr/local/bin/picoclaw
@@ -177,7 +177,7 @@ cat << EOF > ~/.picoclaw/config.json
   "model_list": [
     {
       "model_name": "default",
-      "model": "ollama/glm-4.7-flash",
+      "model": "ollama/devstral-small-2:24b",
       "api_base": "http://ollama:11434/v1"
     }
   ]
