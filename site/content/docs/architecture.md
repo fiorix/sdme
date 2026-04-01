@@ -2294,3 +2294,57 @@ Kube pods are tracked with additional state fields:
 
 - No idempotent re-apply: `kube apply` on an existing pod fails; delete
   first, then re-apply
+
+## 18. Container Diff
+
+`sdme diff` shows filesystem changes in a container's overlayfs upper layer
+relative to its base rootfs (lower layer). It supports single-container diffs,
+range diffs between two containers, and path-scoped filtering.
+
+### How it works
+
+Each container's overlayfs has an upper layer that records all modifications
+since creation. The diff engine walks this upper layer and classifies entries:
+
+- **Added (A)**: file exists in the upper layer but not in the lower layer
+- **Modified (M)**: file exists in both layers (upper shadows the lower)
+- **Deleted (D)**: overlayfs whiteout marker (character device 0,0)
+
+Opaque directories (`trusted.overlay.opaque` xattr) hide all lower layer
+contents, so everything beneath them is classified as Added.
+
+Binary files are detected by scanning for NUL bytes in the first 8 KiB and
+labeled `(binary)` in the output instead of showing byte differences.
+
+### Target formats
+
+| Format | Meaning |
+|--------|---------|
+| `NAME` | Diff container against its base rootfs |
+| `FROM..TO` | Diff between two containers' upper layers |
+
+### Range diffs
+
+`sdme diff from..to` compares the upper layers of two containers and
+reports what changed going from one to the other:
+
+- Files only in `to`'s upper → Added
+- Files only in `from`'s upper → Deleted
+- Files in both but different content → Modified
+- Identical files in both → not shown
+
+### Path filtering
+
+Paths after `--` restrict output to specific subtrees:
+
+```
+sdme diff mybox -- /etc /var/log
+```
+
+### Output modes
+
+| Flag | Output |
+|------|--------|
+| *(default)* | `A/M/D<tab>path` with binary label |
+| `--stat` | Summary counts by change type |
+| `--name-only` | File paths only, for scripting |

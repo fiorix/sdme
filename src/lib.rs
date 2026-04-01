@@ -14,6 +14,7 @@
 //! | Module | Purpose |
 //! |--------|---------|
 //! | [`containers`] | Create, remove, join, exec, stop, list |
+//! | [`diff`] | Container filesystem diff (overlayfs upper vs lower) |
 //! | [`systemd`] | D-Bus helpers and template unit management |
 //! | [`import`] | Rootfs import (dir, tar, URL, OCI, QCOW2) |
 //! | [`oci`] | OCI registry, layout, app setup, blob cache |
@@ -39,6 +40,7 @@ pub mod containers;
 pub(crate) mod copy;
 pub mod cp;
 pub(crate) mod devfd_shim;
+pub mod diff;
 pub(crate) mod elf;
 pub mod export;
 pub mod import;
