@@ -206,12 +206,19 @@ fn do_create(
     if family != rootfs::DistroFamily::NixOS {
         for svc in &opts.masked_services {
             let mask_path = systemd_unit_dir.join(svc);
-            if !mask_path.exists() {
-                symlink("/dev/null", &mask_path).with_context(|| {
-                    format!("failed to mask {} at {}", svc, mask_path.display())
-                })?;
-                if verbose {
-                    eprintln!("masked service: {svc}");
+            // Use atomic symlink creation to avoid TOCTOU race between
+            // exists() check and symlink() call.
+            match symlink("/dev/null", &mask_path) {
+                Ok(()) => {
+                    if verbose {
+                        eprintln!("masked service: {svc}");
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => {
+                    return Err(e).with_context(|| {
+                        format!("failed to mask {} at {}", svc, mask_path.display())
+                    });
                 }
             }
         }
@@ -228,15 +235,28 @@ fn do_create(
     if opaque_dirs.iter().any(|d| d == "/etc/systemd/system") {
         let host_dbus = rootfs.join("etc/systemd/system/dbus.service");
         if let Ok(target) = fs::read_link(&host_dbus) {
-            let upper_dbus = systemd_unit_dir.join("dbus.service");
-            symlink(&target, &upper_dbus).with_context(|| {
-                format!(
-                    "failed to preserve dbus.service symlink at {}",
-                    upper_dbus.display()
-                )
-            })?;
-            if verbose {
-                eprintln!("preserved dbus.service -> {}", target.display());
+            // Validate the symlink target from the rootfs: reject absolute
+            // paths and path traversal to prevent a malicious imported rootfs
+            // from pointing outside the systemd unit directory.
+            let target_str = target.to_string_lossy();
+            if target.is_absolute() || target_str.contains("..") {
+                if verbose {
+                    eprintln!(
+                        "skipping dbus.service symlink with unsafe target: {}",
+                        target.display()
+                    );
+                }
+            } else {
+                let upper_dbus = systemd_unit_dir.join("dbus.service");
+                symlink(&target, &upper_dbus).with_context(|| {
+                    format!(
+                        "failed to preserve dbus.service symlink at {}",
+                        upper_dbus.display()
+                    )
+                })?;
+                if verbose {
+                    eprintln!("preserved dbus.service -> {}", target.display());
+                }
             }
         }
     }
