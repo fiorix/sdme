@@ -1213,17 +1213,8 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
         };
 
         // IP addresses (only for running containers with a network interface).
-        let addresses = if status == "running" {
-            if let Ok(ref s) = state {
-                let net = NetworkConfig::from_state(s);
-                if net.has_interface() {
-                    systemd::get_machine_addresses(name)
-                } else {
-                    Vec::new()
-                }
-            } else {
-                Vec::new()
-            }
+        let addresses = if status == "running" && network.has_interface() {
+            systemd::get_machine_addresses(name)
         } else {
             Vec::new()
         };

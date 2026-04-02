@@ -1,6 +1,6 @@
-// aarch64.rs: Machine code emitter for the devfd shim shared library (aarch64)
-//
-// Emits raw AArch64 machine code that intercepts open()/openat() libc calls.
+//! Machine code emitter for the devfd shim shared library (aarch64).
+//!
+//! Emits raw AArch64 machine code that intercepts open()/openat() libc calls.
 // Same logic as x86_64.rs but using the AArch64 calling convention and syscall ABI.
 //
 // If the real openat returns ENXIO, the shim uses readlinkat to resolve

@@ -46,6 +46,22 @@ pub fn detect_all_oci_app_names(rootfs: &Path) -> Vec<String> {
         .collect()
 }
 
+/// Parse a `PORT/PROTO` line, returning `(port, proto)` if valid.
+///
+/// Rejects lines without a `/` separator and port numbers that are
+/// zero or non-numeric.
+fn parse_port_line(line: &str) -> Option<(u16, &str)> {
+    let (port_str, proto) = line.split_once('/')?;
+    let port: u16 = port_str.parse().ok().filter(|&p| p > 0)?;
+    Some((port, proto))
+}
+
+/// Check whether a volume path line is a valid absolute path without `..`.
+fn is_valid_volume_path(line: &str) -> bool {
+    let path = Path::new(line);
+    path.is_absolute() && !path.components().any(|c| c == Component::ParentDir)
+}
+
 /// Read OCI ports from a rootfs and return port forwarding rules.
 ///
 /// Scans `/oci/apps/{name}/ports` for the OCI app. Each line in the
@@ -68,23 +84,10 @@ pub fn read_oci_ports(rootfs: &Path) -> Vec<String> {
         if line.is_empty() {
             continue;
         }
-        // Expect "PORT/PROTO" format
-        let (port_str, proto) = match line.split_once('/') {
-            Some((p, proto)) => (p, proto),
-            None => {
-                eprintln!("warning: invalid OCI port entry (no protocol): {line}");
-                continue;
-            }
-        };
-        let port: u16 = match port_str.parse() {
-            Ok(p) if p > 0 => p,
-            _ => {
-                eprintln!("warning: invalid OCI port number: {line}");
-                continue;
-            }
-        };
-        // Map same port on host and container: proto:host:container
-        result.push(format!("{proto}:{port}:{port}"));
+        match parse_port_line(line) {
+            Some((port, proto)) => result.push(format!("{proto}:{port}:{port}")),
+            None => eprintln!("warning: invalid OCI port entry: {line}"),
+        }
     }
     result
 }
@@ -110,16 +113,11 @@ pub fn read_oci_volumes(rootfs: &Path) -> Vec<String> {
         if line.is_empty() {
             continue;
         }
-        let path = Path::new(line);
-        if !path.is_absolute() {
-            eprintln!("warning: invalid OCI volume path (not absolute): {line}");
-            continue;
+        if is_valid_volume_path(line) {
+            result.push(line.to_string());
+        } else {
+            eprintln!("warning: invalid OCI volume path: {line}");
         }
-        if path.components().any(|c| c == Component::ParentDir) {
-            eprintln!("warning: invalid OCI volume path (contains ..): {line}");
-            continue;
-        }
-        result.push(line.to_string());
     }
     result
 }
@@ -145,7 +143,7 @@ pub fn read_oci_app_env(rootfs: &Path, app_name: &str) -> Vec<String> {
 /// Read exposed ports for a specific OCI app in raw `PORT/PROTO` format.
 ///
 /// Returns each valid line from `/oci/apps/{app_name}/ports`.
-/// Applies the same validation as [`read_oci_ports`] but returns the
+/// Uses the same validation as [`read_oci_ports`] but returns the
 /// original format instead of nspawn's `PROTO:PORT:PORT`.
 pub fn read_oci_app_ports_raw(rootfs: &Path, app_name: &str) -> Vec<String> {
     let ports_path = rootfs.join(format!("oci/apps/{app_name}/ports"));
@@ -153,50 +151,30 @@ pub fn read_oci_app_ports_raw(rootfs: &Path, app_name: &str) -> Vec<String> {
         Ok(c) => c,
         Err(_) => return Vec::new(),
     };
-    let mut result = Vec::new();
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let (port_str, _proto) = match line.split_once('/') {
-            Some(pair) => pair,
-            None => continue,
-        };
-        match port_str.parse::<u16>() {
-            Ok(p) if p > 0 => result.push(line.to_string()),
-            _ => continue,
-        }
-    }
-    result
+    content
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty() && parse_port_line(l).is_some())
+        .map(String::from)
+        .collect()
 }
 
 /// Read volume paths for a specific OCI app.
 ///
 /// Returns each valid absolute path from `/oci/apps/{app_name}/volumes`.
-/// Applies the same validation as [`read_oci_volumes`].
+/// Uses the same validation as [`read_oci_volumes`].
 pub fn read_oci_app_volumes(rootfs: &Path, app_name: &str) -> Vec<String> {
     let volumes_path = rootfs.join(format!("oci/apps/{app_name}/volumes"));
     let content = match fs::read_to_string(&volumes_path) {
         Ok(c) => c,
         Err(_) => return Vec::new(),
     };
-    let mut result = Vec::new();
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let path = Path::new(line);
-        if !path.is_absolute() {
-            continue;
-        }
-        if path.components().any(|c| c == Component::ParentDir) {
-            continue;
-        }
-        result.push(line.to_string());
-    }
-    result
+    content
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty() && is_valid_volume_path(l))
+        .map(String::from)
+        .collect()
 }
 
 /// Read all OCI apps from a rootfs, returning their metadata.

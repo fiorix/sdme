@@ -22,6 +22,7 @@
 //! | [`rootfs`] | Rootfs listing, removal, os-release parsing |
 //! | [`build`] | Build config parsing and rootfs build execution |
 //! | [`config`] | Configuration file loading and saving |
+//! | [`cp`] | File copy between host, containers, and rootfs |
 //! | [`lock`] | Advisory file locking for resource protection |
 //! | [`mounts`] | Bind mount and environment variable config |
 //! | [`network`] | Network configuration and state serialization |

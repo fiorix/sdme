@@ -1,6 +1,6 @@
-// elf.rs: Minimal ET_DYN ELF64 shared library builder
-//
-// Builds the smallest valid ELF64 shared library (.so): an ELF header,
+//! Minimal ET_DYN ELF64 shared library builder.
+//!
+//! Builds the smallest valid ELF64 shared library (.so): an ELF header,
 // three program headers (PT_LOAD RX, PT_LOAD RW, PT_DYNAMIC), a SysV
 // hash table, dynamic symbol table (.dynsym), dynamic string table
 // (.dynstr), RELA relocations, and a dynamic section. No section headers

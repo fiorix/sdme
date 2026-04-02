@@ -1,6 +1,6 @@
-// x86_64.rs: Machine code emitter for the devfd shim shared library (x86_64)
-//
-// Emits raw x86_64 machine code that intercepts open()/openat() libc calls.
+//! Machine code emitter for the devfd shim shared library (x86_64).
+//!
+//! Emits raw x86_64 machine code that intercepts open()/openat() libc calls.
 // When the path matches /dev/stdin, /dev/stdout, /dev/stderr, /dev/fd/{0,1,2},
 // or /proc/self/fd/{0,1,2}, the interceptor returns dup(N) for the
 // appropriate fd. All other paths fall through to the real openat syscall.
