@@ -25,7 +25,8 @@ The probe binary (`sdme-kube-probe`) is automatically built and embedded into sd
 by the `build.rs` script. A single `cargo build --release` handles everything.
 The inner probe build uses a separate target directory (`target/probe-build/`) to
 avoid cargo lock contention. Override with `SDME_KUBE_PROBE_PATH` env var or skip
-with `SDME_SKIP_PROBE_BUILD=1` (probe-less build).
+with `SDME_SKIP_PROBE_BUILD=1` (probe-less build). During `cargo test`, the probe
+build is skipped by default; set `SDME_BUILD_PROBE=1` to force it.
 
 ### Release
 

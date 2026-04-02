@@ -7,6 +7,10 @@
 /// Override the probe binary path with the `SDME_KUBE_PROBE_PATH` env var
 /// (e.g. for cross-compiled CI builds). Set `SDME_SKIP_PROBE_BUILD=1` to
 /// skip the automatic build and fall back to discovery or an empty placeholder.
+///
+/// During `cargo test`, the probe build is skipped by default since it is
+/// only needed at runtime. Set `SDME_BUILD_PROBE=1` to force building
+/// the probe during tests.
 fn main() {
     let out_dir = std::env::var("OUT_DIR").unwrap();
     let probe_dst = format!("{out_dir}/sdme-kube-probe");
@@ -16,6 +20,16 @@ fn main() {
     // placeholder since the probe binary doesn't embed itself.
     if cfg!(feature = "probe") {
         std::fs::write(&probe_dst, b"").unwrap();
+        return;
+    }
+
+    // Skip probe build during cargo test unless SDME_BUILD_PROBE=1 is set.
+    // The probe binary is only needed at runtime, not for unit tests.
+    if std::env::var("CARGO_CFG_TEST").is_ok()
+        && std::env::var("SDME_BUILD_PROBE").unwrap_or_default() != "1"
+    {
+        std::fs::write(&probe_dst, b"").unwrap();
+        println!("cargo:rerun-if-changed=src/kube/probe/");
         return;
     }
 
