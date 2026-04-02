@@ -50,14 +50,29 @@ pub fn unit_active_state(name: &str) -> Option<String> {
     dbus::pub_get_unit_active_state(&service_name(name))
 }
 
+/// Shared configuration for container service operations (enable, start).
+pub struct ServiceConfig<'a> {
+    /// Data directory containing container state.
+    pub datadir: &'a Path,
+    /// Container name.
+    pub name: &'a str,
+    /// Maximum number of tasks (PIDs) for the container unit.
+    pub tasks_max: u32,
+    /// Boot timeout in seconds for the template unit.
+    pub boot_timeout: u64,
+    /// Enable verbose output.
+    pub verbose: bool,
+}
+
 /// Enable a container to auto-start on boot.
-pub fn enable(
-    datadir: &Path,
-    name: &str,
-    tasks_max: u32,
-    boot_timeout: u64,
-    verbose: bool,
-) -> Result<()> {
+pub fn enable(cfg: &ServiceConfig) -> Result<()> {
+    let ServiceConfig {
+        datadir,
+        name,
+        tasks_max,
+        boot_timeout,
+        verbose,
+    } = *cfg;
     units::ensure_template_unit(tasks_max, boot_timeout, verbose)?;
     let unit = service_name(name);
     if verbose {
@@ -160,13 +175,14 @@ pub fn get_machine_addresses(name: &str) -> Vec<String> {
 }
 
 /// Install the template unit, write the drop-in, and start a container via D-Bus.
-pub fn start(
-    datadir: &Path,
-    name: &str,
-    tasks_max: u32,
-    boot_timeout: u64,
-    verbose: bool,
-) -> Result<()> {
+pub fn start(cfg: &ServiceConfig) -> Result<()> {
+    let ServiceConfig {
+        datadir,
+        name,
+        tasks_max,
+        boot_timeout,
+        verbose,
+    } = *cfg;
     units::ensure_template_unit(tasks_max, boot_timeout, verbose)?;
 
     crate::containers::ensure_permissions(datadir, name)?;

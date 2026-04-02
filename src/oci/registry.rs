@@ -472,25 +472,32 @@ pub(crate) struct OciImageConfig {
     pub(crate) config: Option<OciContainerConfig>,
 }
 
+/// Shared context for OCI registry pull operations.
+struct PullContext<'a> {
+    agent: &'a ureq::Agent,
+    token: Option<&'a str>,
+    cache: &'a crate::oci::cache::BlobCache,
+    verbose: bool,
+    max_download_size: u64,
+}
+
 /// Fetch the config blob from a registry and parse it.
 fn fetch_config_blob(
-    agent: &ureq::Agent,
+    ctx: &PullContext<'_>,
     registry: &str,
     repository: &str,
     digest: &str,
-    token: Option<&str>,
-    verbose: bool,
 ) -> Result<OciImageConfig> {
     let url = format!("https://{registry}/v2/{repository}/blobs/{digest}");
-    if verbose {
+    if ctx.verbose {
         eprintln!("fetching config blob: {digest}");
     }
 
-    let mut request = agent.get(&url).header(
+    let mut request = ctx.agent.get(&url).header(
         "Accept",
         "application/vnd.oci.image.config.v1+json, application/vnd.docker.container.image.v1+json",
     );
-    if let Some(token) = token {
+    if let Some(token) = ctx.token {
         request = request.header("Authorization", &format!("Bearer {token}"));
     }
 
@@ -516,21 +523,19 @@ fn fetch_config_blob(
 
 /// Fetch a manifest (or manifest list) from a registry.
 fn fetch_manifest(
-    agent: &ureq::Agent,
+    ctx: &PullContext<'_>,
     registry: &str,
     repository: &str,
     reference: &str,
-    token: Option<&str>,
-    verbose: bool,
 ) -> Result<serde_json::Value> {
     let url = format!("https://{registry}/v2/{repository}/manifests/{reference}");
-    if verbose {
+    if ctx.verbose {
         eprintln!("fetching manifest: {url}");
     }
 
-    let mut request = agent.get(&url).header("Accept", MANIFEST_ACCEPT);
+    let mut request = ctx.agent.get(&url).header("Accept", MANIFEST_ACCEPT);
 
-    if let Some(token) = token {
+    if let Some(token) = ctx.token {
         request = request.header("Authorization", &format!("Bearer {token}"));
     }
 
@@ -567,14 +572,12 @@ fn fetch_manifest(
 
 /// Resolve a manifest to an image manifest, following manifest list indirection.
 fn resolve_manifest(
-    agent: &ureq::Agent,
+    ctx: &PullContext<'_>,
     registry: &str,
     repository: &str,
     reference: &str,
-    token: Option<&str>,
-    verbose: bool,
 ) -> Result<ImageManifest> {
-    let manifest = fetch_manifest(agent, registry, repository, reference, token, verbose)?;
+    let manifest = fetch_manifest(ctx, registry, repository, reference)?;
 
     // Check if this is a direct image manifest (has "layers").
     if manifest.get("layers").is_some() {
@@ -587,7 +590,7 @@ fn resolve_manifest(
             serde_json::from_value(manifest).context("failed to parse manifest list")?;
 
         let arch = host_arch();
-        if verbose {
+        if ctx.verbose {
             eprintln!(
                 "manifest list with {} entries, selecting linux/{arch}",
                 list.manifests.len()
@@ -619,13 +622,12 @@ fn resolve_manifest(
                 )
             })?;
 
-        if verbose {
+        if ctx.verbose {
             eprintln!("selected platform manifest: {}", entry.digest);
         }
 
         // Fetch the platform-specific manifest by digest.
-        let platform_manifest =
-            fetch_manifest(agent, registry, repository, &entry.digest, token, verbose)?;
+        let platform_manifest = fetch_manifest(ctx, registry, repository, &entry.digest)?;
 
         return serde_json::from_value(platform_manifest)
             .context("failed to parse platform-specific image manifest");
@@ -638,26 +640,23 @@ fn resolve_manifest(
 
 /// Options for downloading a blob from an OCI registry.
 struct DownloadBlobOptions<'a> {
-    agent: &'a ureq::Agent,
+    ctx: &'a PullContext<'a>,
     registry: &'a str,
     repository: &'a str,
     digest: &'a str,
     dest: &'a Path,
-    token: Option<&'a str>,
-    cache: &'a crate::oci::cache::BlobCache,
-    verbose: bool,
-    max_download_size: u64,
 }
 
 /// Download a blob to a file while verifying its SHA-256 digest.
 /// If a cache is provided and the blob is already cached, copies from cache instead.
 fn download_blob(opts: &DownloadBlobOptions<'_>) -> Result<()> {
+    let ctx = opts.ctx;
     let digest = opts.digest;
     let dest = opts.dest;
-    let verbose = opts.verbose;
+    let verbose = ctx.verbose;
     let registry = opts.registry;
     // Check cache first.
-    if let Some(cached_path) = opts.cache.get(digest, verbose) {
+    if let Some(cached_path) = ctx.cache.get(digest, verbose) {
         fs::copy(&cached_path, dest)
             .with_context(|| format!("failed to copy cached blob to {}", dest.display()))?;
         return Ok(());
@@ -667,8 +666,8 @@ fn download_blob(opts: &DownloadBlobOptions<'_>) -> Result<()> {
         eprintln!("downloading blob: {digest}");
     }
 
-    let mut request = opts.agent.get(&url);
-    if let Some(token) = opts.token {
+    let mut request = ctx.agent.get(&url);
+    if let Some(token) = ctx.token {
         request = request.header("Authorization", &format!("Bearer {token}"));
     }
 
@@ -714,10 +713,10 @@ fn download_blob(opts: &DownloadBlobOptions<'_>) -> Result<()> {
             .with_context(|| format!("failed to write blob to {}", dest.display()))?;
         hasher.update(&buf[..n]);
         total += n as u64;
-        if opts.max_download_size > 0 && total > opts.max_download_size {
+        if ctx.max_download_size > 0 && total > ctx.max_download_size {
             bail!(
                 "blob {digest} exceeds maximum download size of {} bytes",
-                opts.max_download_size
+                ctx.max_download_size
             );
         }
     }
@@ -733,7 +732,7 @@ fn download_blob(opts: &DownloadBlobOptions<'_>) -> Result<()> {
     }
 
     // Store in cache (best-effort).
-    if let Err(e) = opts.cache.put(digest, dest, verbose) {
+    if let Err(e) = ctx.cache.put(digest, dest, verbose) {
         if verbose {
             eprintln!("cache: failed to store {digest}: {e:#}");
         }
@@ -866,17 +865,14 @@ pub(crate) fn import_registry_image(
                 http.connect_timeout,
                 http.body_timeout,
             )?;
-            let token_ref = token.as_deref();
-            download_layers(
-                &agent,
-                image,
-                &manifest,
-                staging_dir,
-                token_ref,
+            let ctx = PullContext {
+                agent: &agent,
+                token: token.as_deref(),
                 cache,
                 verbose,
-                http.max_download_size,
-            )?;
+                max_download_size: http.max_download_size,
+            };
+            download_layers(&ctx, image, &manifest, staging_dir)?;
             return Ok(cached.container_config);
         }
     }
@@ -891,16 +887,15 @@ pub(crate) fn import_registry_image(
         http.connect_timeout,
         http.body_timeout,
     )?;
-    let token_ref = token.as_deref();
-
-    let manifest = resolve_manifest(
-        &agent,
-        &image.registry,
-        &image.repository,
-        &image.reference,
-        token_ref,
+    let ctx = PullContext {
+        agent: &agent,
+        token: token.as_deref(),
+        cache,
         verbose,
-    )?;
+        max_download_size: http.max_download_size,
+    };
+
+    let manifest = resolve_manifest(&ctx, &image.registry, &image.repository, &image.reference)?;
 
     if manifest.layers.is_empty() {
         bail!("image manifest contains no layers");
@@ -913,12 +908,10 @@ pub(crate) fn import_registry_image(
     // Fetch the config blob if present in the manifest.
     let container_config = if let Some(ref config_desc) = manifest.config {
         match fetch_config_blob(
-            &agent,
+            &ctx,
             &image.registry,
             &image.repository,
             &config_desc.digest,
-            token_ref,
-            verbose,
         ) {
             Ok(image_config) => {
                 if verbose {
@@ -962,37 +955,23 @@ pub(crate) fn import_registry_image(
     // Save manifest + config to cache.
     save_cached_manifest(cache_dir, image, &manifest, &container_config);
 
-    download_layers(
-        &agent,
-        image,
-        &manifest,
-        staging_dir,
-        token_ref,
-        cache,
-        verbose,
-        http.max_download_size,
-    )?;
+    download_layers(&ctx, image, &manifest, staging_dir)?;
 
     Ok(container_config)
 }
 
 /// Download and extract all layers from a resolved manifest.
-#[allow(clippy::too_many_arguments)]
 fn download_layers(
-    agent: &ureq::Agent,
+    ctx: &PullContext<'_>,
     image: &ImageReference,
     manifest: &ImageManifest,
     staging_dir: &Path,
-    token: Option<&str>,
-    cache: &crate::oci::cache::BlobCache,
-    verbose: bool,
-    max_download_size: u64,
 ) -> Result<()> {
     fs::create_dir_all(staging_dir)
         .with_context(|| format!("failed to create staging dir {}", staging_dir.display()))?;
 
     // Share a decompression size limit across all layers.
-    let limit = DecompressLimit::new(max_download_size);
+    let limit = DecompressLimit::new(ctx.max_download_size);
 
     for (i, layer) in manifest.layers.iter().enumerate() {
         check_interrupted()?;
@@ -1008,15 +987,11 @@ fn download_layers(
             );
 
             download_blob(&DownloadBlobOptions {
-                agent,
+                ctx,
                 registry: &image.registry,
                 repository: &image.repository,
                 digest: &layer.digest,
                 dest: &temp_path,
-                token,
-                cache,
-                verbose,
-                max_download_size,
             })?;
 
             let decoder = open_decoder_limited(&temp_path, &limit)?;

@@ -199,15 +199,15 @@ fn main() -> ExitCode {
                 );
             }
 
-            runner::handle_result(
-                &args.probe_type,
-                &args.name,
-                &args.service,
-                args.threshold,
-                args.success_threshold,
-                success,
+            let ctx = runner::ProbeContext {
+                probe_type: &args.probe_type,
+                name: &args.name,
+                service: &args.service,
+                failure_threshold: args.threshold,
+                success_threshold: args.success_threshold,
                 verbose,
-            )
+            };
+            runner::handle_result(&ctx, success)
         }
     }
 }

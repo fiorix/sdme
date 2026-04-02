@@ -1772,13 +1772,13 @@ fn run() -> Result<()> {
 
             eprintln!("creating '{name}'");
             if enable {
-                systemd::enable(
-                    &cfg.datadir,
-                    &name,
-                    cfg.tasks_max,
-                    cfg.boot_timeout,
-                    cli.verbose,
-                )?;
+                systemd::enable(&systemd::ServiceConfig {
+                    datadir: &cfg.datadir,
+                    name: &name,
+                    tasks_max: cfg.tasks_max,
+                    boot_timeout: cfg.boot_timeout,
+                    verbose: cli.verbose,
+                })?;
                 eprintln!("enabled '{name}' for auto-start on boot");
             }
             println!("{name}");
@@ -1849,7 +1849,13 @@ fn run() -> Result<()> {
             let verbose = cli.verbose;
             for_each_container(datadir, &names, "enabling", "enabled", |name| {
                 containers::ensure_exists(datadir, name)?;
-                systemd::enable(datadir, name, cfg.tasks_max, cfg.boot_timeout, verbose)
+                systemd::enable(&systemd::ServiceConfig {
+                    datadir,
+                    name,
+                    tasks_max: cfg.tasks_max,
+                    boot_timeout: cfg.boot_timeout,
+                    verbose,
+                })
             })?;
         }
         Command::Disable { names } => {
@@ -2050,13 +2056,13 @@ fn run() -> Result<()> {
             eprintln!("creating '{name}'");
 
             if enable {
-                systemd::enable(
-                    &cfg.datadir,
-                    &name,
-                    cfg.tasks_max,
-                    cfg.boot_timeout,
-                    cli.verbose,
-                )?;
+                systemd::enable(&systemd::ServiceConfig {
+                    datadir: &cfg.datadir,
+                    name: &name,
+                    tasks_max: cfg.tasks_max,
+                    boot_timeout: cfg.boot_timeout,
+                    verbose: cli.verbose,
+                })?;
                 eprintln!("enabled '{name}' for auto-start on boot");
             }
 

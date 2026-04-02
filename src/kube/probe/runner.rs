@@ -5,19 +5,29 @@ use std::process::{Command, ExitCode};
 
 use super::ProbeType;
 
+/// Configuration for a probe execution cycle.
+pub struct ProbeContext<'a> {
+    pub probe_type: &'a ProbeType,
+    pub name: &'a str,
+    pub service: &'a str,
+    pub failure_threshold: u32,
+    pub success_threshold: u32,
+    pub verbose: bool,
+}
+
 /// Handle the result of a probe check.
 ///
 /// On success: reset fail counter, increment success counter, act on threshold.
 /// On failure: reset success counter, increment fail counter, act on threshold.
-pub fn handle_result(
-    probe_type: &ProbeType,
-    name: &str,
-    service: &str,
-    threshold: u32,
-    success_threshold: u32,
-    success: bool,
-    verbose: bool,
-) -> ExitCode {
+pub fn handle_result(ctx: &ProbeContext, success: bool) -> ExitCode {
+    let ProbeContext {
+        probe_type,
+        name,
+        service,
+        failure_threshold,
+        success_threshold,
+        verbose,
+    } = ctx;
     let fail_file = format!("/run/sdme-probe-{probe_type}-{name}.fail");
     let success_file = format!("/run/sdme-probe-{probe_type}-{name}.success");
 
@@ -27,11 +37,11 @@ pub fn handle_result(
         let success_count = read_counter(&success_file) + 1;
         let _ = fs::write(&success_file, success_count.to_string());
 
-        if verbose {
+        if *verbose {
             eprintln!("probe {probe_type}/{name}: ok {success_count}/{success_threshold}");
         }
 
-        if success_count >= success_threshold {
+        if success_count >= *success_threshold {
             let _ = fs::remove_file(&success_file);
 
             match probe_type {
@@ -39,7 +49,7 @@ pub fn handle_result(
                     let done_file = format!("/run/sdme-probe-startup-{name}.done");
                     if let Err(e) = fs::write(&done_file, "done") {
                         eprintln!("probe {probe_type}/{name}: failed to write {done_file}: {e}");
-                    } else if verbose {
+                    } else if *verbose {
                         eprintln!("probe {probe_type}/{name}: wrote {done_file}");
                     }
                 }
@@ -47,12 +57,12 @@ pub fn handle_result(
                     let ready_file = format!("/oci/apps/{name}/probe-ready");
                     if let Err(e) = fs::write(&ready_file, "ready") {
                         eprintln!("probe {probe_type}/{name}: failed to write {ready_file}: {e}");
-                    } else if verbose {
+                    } else if *verbose {
                         eprintln!("probe {probe_type}/{name}: ready");
                     }
                 }
                 ProbeType::Liveness => {
-                    if verbose {
+                    if *verbose {
                         eprintln!("probe {probe_type}/{name}: ok");
                     }
                 }
@@ -65,16 +75,16 @@ pub fn handle_result(
         let count = read_counter(&fail_file) + 1;
         let _ = fs::write(&fail_file, count.to_string());
 
-        if verbose {
-            eprintln!("probe {probe_type}/{name}: fail {count}/{threshold}");
+        if *verbose {
+            eprintln!("probe {probe_type}/{name}: fail {count}/{failure_threshold}");
         }
 
-        if count >= threshold {
+        if count >= *failure_threshold {
             let _ = fs::remove_file(&fail_file);
 
             match probe_type {
                 ProbeType::Startup | ProbeType::Liveness => {
-                    if verbose {
+                    if *verbose {
                         eprintln!(
                             "probe {probe_type}/{name}: threshold reached, restarting {service}"
                         );
@@ -101,7 +111,7 @@ pub fn handle_result(
                     let ready_file = format!("/oci/apps/{name}/probe-ready");
                     if let Err(e) = fs::write(&ready_file, "not-ready") {
                         eprintln!("probe {probe_type}/{name}: failed to write {ready_file}: {e}");
-                    } else if verbose {
+                    } else if *verbose {
                         eprintln!("probe {probe_type}/{name}: not-ready");
                     }
                 }

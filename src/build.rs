@@ -362,27 +362,28 @@ fn check_shadowed_dest(dst: &Path, shadowed: &[&str], opaque_dirs: &[String]) ->
     Ok(())
 }
 
-fn do_copy(
-    upper_dir: &Path,
-    check_dir: &Path,
-    src: &Path,
-    dst: &Path,
-    shadowed: &[&str],
-    opaque_dirs: &[String],
+/// Context for COPY operations during a build, shared across all copy steps.
+struct CopyContext<'a> {
+    upper_dir: &'a Path,
+    check_dir: &'a Path,
+    shadowed: &'a [&'a str],
+    opaque_dirs: &'a [String],
     verbose: bool,
-) -> Result<()> {
-    check_shadowed_dest(dst, shadowed, opaque_dirs)?;
+}
+
+fn do_copy(ctx: &CopyContext, src: &Path, dst: &Path) -> Result<()> {
+    check_shadowed_dest(dst, ctx.shadowed, ctx.opaque_dirs)?;
     let rel_dst = sanitize_dest_path(dst)?;
-    let mut target = upper_dir.join(&rel_dst);
+    let mut target = ctx.upper_dir.join(&rel_dst);
 
     let meta =
         fs::symlink_metadata(src).with_context(|| format!("failed to stat {}", src.display()))?;
 
     // Check whether dst resolves to a directory in either layer.
-    let dst_is_dir = target.is_dir() || check_dir.join(&rel_dst).is_dir();
+    let dst_is_dir = target.is_dir() || ctx.check_dir.join(&rel_dst).is_dir();
 
     // Check whether dst resolves to a file in either layer.
-    let dst_is_file = (!dst_is_dir) && (target.is_file() || check_dir.join(&rel_dst).is_file());
+    let dst_is_file = (!dst_is_dir) && (target.is_file() || ctx.check_dir.join(&rel_dst).is_file());
 
     // Cannot copy a directory onto an existing file.
     if meta.is_dir() && dst_is_file {
@@ -402,7 +403,7 @@ fn do_copy(
         }
     }
 
-    if verbose {
+    if ctx.verbose {
         eprintln!("copy: {} -> {}", src.display(), target.display());
     }
 
@@ -415,10 +416,10 @@ fn do_copy(
     if meta.is_dir() {
         fs::create_dir_all(&target)
             .with_context(|| format!("failed to create {}", target.display()))?;
-        copy::copy_tree(src, &target, verbose)
+        copy::copy_tree(src, &target, ctx.verbose)
             .with_context(|| format!("failed to copy directory {}", src.display()))?;
     } else {
-        copy::copy_entry(src, &target, verbose)
+        copy::copy_entry(src, &target, ctx.verbose)
             .with_context(|| format!("failed to copy {}", src.display()))?;
     }
 
@@ -450,13 +451,13 @@ fn execute_build(datadir: &Path, ctx: &ExecuteBuildContext<'_>) -> Result<()> {
     // deletes the file.
     if !ctx.config.ops.is_empty() {
         eprintln!("starting build container '{}'", ctx.container_name);
-        systemd::start(
+        systemd::start(&systemd::ServiceConfig {
             datadir,
-            ctx.container_name,
-            ctx.tasks_max,
-            ctx.boot_timeout,
-            ctx.verbose,
-        )?;
+            name: ctx.container_name,
+            tasks_max: ctx.tasks_max,
+            boot_timeout: ctx.boot_timeout,
+            verbose: ctx.verbose,
+        })?;
         systemd::await_boot(ctx.container_name, timeout, ctx.verbose)?;
         container_running = true;
     }
@@ -498,16 +499,15 @@ fn execute_build(datadir: &Path, ctx: &ExecuteBuildContext<'_>) -> Result<()> {
                         datadir.join("fs").join(&ctx.config.rootfs),
                     )
                 };
-                do_copy(
-                    &write_dir,
-                    &check_dir,
-                    &resolved.path,
-                    dst,
-                    BUILD_SHADOWED_DIRS,
-                    ctx.opaque_dirs,
-                    ctx.verbose,
-                )
-                .with_context(|| format!("{}:{}", ctx.config.path.display(), lineno))?;
+                let copy_ctx = CopyContext {
+                    upper_dir: &write_dir,
+                    check_dir: &check_dir,
+                    shadowed: BUILD_SHADOWED_DIRS,
+                    opaque_dirs: ctx.opaque_dirs,
+                    verbose: ctx.verbose,
+                };
+                do_copy(&copy_ctx, &resolved.path, dst)
+                    .with_context(|| format!("{}:{}", ctx.config.path.display(), lineno))?;
             }
         }
 
@@ -1077,16 +1077,14 @@ mod tests {
         let src_file = src_dir.join("sdme");
         fs::write(&src_file, "binary").unwrap();
 
-        do_copy(
-            &upper,
-            &lower,
-            &src_file,
-            Path::new("/usr/local/bin"),
-            SHADOWED_DIRS,
-            &[],
-            false,
-        )
-        .unwrap();
+        let ctx = CopyContext {
+            upper_dir: &upper,
+            check_dir: &lower,
+            shadowed: SHADOWED_DIRS,
+            opaque_dirs: &[],
+            verbose: false,
+        };
+        do_copy(&ctx, &src_file, Path::new("/usr/local/bin")).unwrap();
         assert!(upper.join("usr/local/bin/sdme").is_file());
         assert_eq!(
             fs::read_to_string(upper.join("usr/local/bin/sdme")).unwrap(),
@@ -1105,16 +1103,14 @@ mod tests {
         let src_file = src_dir.join("sdme");
         fs::write(&src_file, "binary").unwrap();
 
-        do_copy(
-            &upper,
-            &lower,
-            &src_file,
-            Path::new("/usr/local/bin"),
-            SHADOWED_DIRS,
-            &[],
-            false,
-        )
-        .unwrap();
+        let ctx = CopyContext {
+            upper_dir: &upper,
+            check_dir: &lower,
+            shadowed: SHADOWED_DIRS,
+            opaque_dirs: &[],
+            verbose: false,
+        };
+        do_copy(&ctx, &src_file, Path::new("/usr/local/bin")).unwrap();
         assert!(upper.join("usr/local/bin/sdme").is_file());
         assert_eq!(
             fs::read_to_string(upper.join("usr/local/bin/sdme")).unwrap(),
@@ -1132,16 +1128,14 @@ mod tests {
         fs::write(&src_file, "content").unwrap();
 
         // dst doesn't exist in either layer; file created at exact path.
-        do_copy(
-            &upper,
-            &lower,
-            &src_file,
-            Path::new("/opt/mybin"),
-            SHADOWED_DIRS,
-            &[],
-            false,
-        )
-        .unwrap();
+        let ctx = CopyContext {
+            upper_dir: &upper,
+            check_dir: &lower,
+            shadowed: SHADOWED_DIRS,
+            opaque_dirs: &[],
+            verbose: false,
+        };
+        do_copy(&ctx, &src_file, Path::new("/opt/mybin")).unwrap();
         assert!(upper.join("opt/mybin").is_file());
     }
 
@@ -1157,16 +1151,14 @@ mod tests {
         fs::write(&src_file, "binary").unwrap();
 
         // Trailing slash on dst.
-        do_copy(
-            &upper,
-            &lower,
-            &src_file,
-            Path::new("/usr/local/bin/"),
-            SHADOWED_DIRS,
-            &[],
-            false,
-        )
-        .unwrap();
+        let ctx = CopyContext {
+            upper_dir: &upper,
+            check_dir: &lower,
+            shadowed: SHADOWED_DIRS,
+            opaque_dirs: &[],
+            verbose: false,
+        };
+        do_copy(&ctx, &src_file, Path::new("/usr/local/bin/")).unwrap();
         assert!(upper.join("usr/local/bin/sdme").is_file());
     }
 
@@ -1180,16 +1172,14 @@ mod tests {
         fs::create_dir_all(&src_dir).unwrap();
         fs::write(src_dir.join("app.bin"), "app").unwrap();
 
-        do_copy(
-            &upper,
-            &lower,
-            &src_dir,
-            Path::new("/opt"),
-            SHADOWED_DIRS,
-            &[],
-            false,
-        )
-        .unwrap();
+        let ctx = CopyContext {
+            upper_dir: &upper,
+            check_dir: &lower,
+            shadowed: SHADOWED_DIRS,
+            opaque_dirs: &[],
+            verbose: false,
+        };
+        do_copy(&ctx, &src_dir, Path::new("/opt")).unwrap();
         // Named dir should be placed inside: /opt/myapp/app.bin
         assert!(upper.join("opt/myapp").is_dir());
         assert!(upper.join("opt/myapp/app.bin").is_file());
@@ -1212,15 +1202,14 @@ mod tests {
         let orig_dir = std::env::current_dir().unwrap();
         std::env::set_current_dir(&src_dir).unwrap();
 
-        let result = do_copy(
-            &upper,
-            &lower,
-            &dot_path,
-            Path::new("/srv"),
-            SHADOWED_DIRS,
-            &[],
-            false,
-        );
+        let ctx = CopyContext {
+            upper_dir: &upper,
+            check_dir: &lower,
+            shadowed: SHADOWED_DIRS,
+            opaque_dirs: &[],
+            verbose: false,
+        };
+        let result = do_copy(&ctx, &dot_path, Path::new("/srv"));
         std::env::set_current_dir(&orig_dir).unwrap();
         result.unwrap();
 
@@ -1242,15 +1231,14 @@ mod tests {
         let orig_dir = std::env::current_dir().unwrap();
         std::env::set_current_dir(&src_dir).unwrap();
 
-        let result = do_copy(
-            &upper,
-            &lower,
-            &dot_path,
-            Path::new("/newdir"),
-            SHADOWED_DIRS,
-            &[],
-            false,
-        );
+        let ctx = CopyContext {
+            upper_dir: &upper,
+            check_dir: &lower,
+            shadowed: SHADOWED_DIRS,
+            opaque_dirs: &[],
+            verbose: false,
+        };
+        let result = do_copy(&ctx, &dot_path, Path::new("/newdir"));
         std::env::set_current_dir(&orig_dir).unwrap();
         result.unwrap();
 
@@ -1270,16 +1258,14 @@ mod tests {
         fs::create_dir_all(&src_dir).unwrap();
         fs::write(src_dir.join("a.txt"), "a").unwrap();
 
-        let err = do_copy(
-            &upper,
-            &lower,
-            &src_dir,
-            Path::new("/opt/target"),
-            SHADOWED_DIRS,
-            &[],
-            false,
-        )
-        .unwrap_err();
+        let ctx = CopyContext {
+            upper_dir: &upper,
+            check_dir: &lower,
+            shadowed: SHADOWED_DIRS,
+            opaque_dirs: &[],
+            verbose: false,
+        };
+        let err = do_copy(&ctx, &src_dir, Path::new("/opt/target")).unwrap_err();
         assert!(
             err.to_string().contains("cannot copy directory"),
             "got: {err}"
@@ -1294,49 +1280,30 @@ mod tests {
         let src_file = src_dir.join("evil");
         fs::write(&src_file, "payload").unwrap();
 
+        let ctx = CopyContext {
+            upper_dir: &upper,
+            check_dir: &lower,
+            shadowed: SHADOWED_DIRS,
+            opaque_dirs: &[],
+            verbose: false,
+        };
+
         // Absolute path with .. components.
-        let err = do_copy(
-            &upper,
-            &lower,
-            &src_file,
-            Path::new("/opt/../../etc/shadow"),
-            SHADOWED_DIRS,
-            &[],
-            false,
-        )
-        .unwrap_err();
+        let err = do_copy(&ctx, &src_file, Path::new("/opt/../../etc/shadow")).unwrap_err();
         assert!(
             err.to_string().contains(".."),
             "should reject '..' in dst path, got: {err}"
         );
 
         // Relative path with .. components.
-        let err = do_copy(
-            &upper,
-            &lower,
-            &src_file,
-            Path::new("../escape"),
-            SHADOWED_DIRS,
-            &[],
-            false,
-        )
-        .unwrap_err();
+        let err = do_copy(&ctx, &src_file, Path::new("../escape")).unwrap_err();
         assert!(
             err.to_string().contains(".."),
             "should reject '..' in dst path, got: {err}"
         );
 
         // Valid paths should still work.
-        do_copy(
-            &upper,
-            &lower,
-            &src_file,
-            Path::new("/opt/safe"),
-            SHADOWED_DIRS,
-            &[],
-            false,
-        )
-        .unwrap();
+        do_copy(&ctx, &src_file, Path::new("/opt/safe")).unwrap();
         assert!(upper.join("opt/safe").is_file());
     }
 
@@ -1348,65 +1315,37 @@ mod tests {
         let src_file = src_dir.join("data");
         fs::write(&src_file, "payload").unwrap();
 
+        let ctx = CopyContext {
+            upper_dir: &upper,
+            check_dir: &lower,
+            shadowed: SHADOWED_DIRS,
+            opaque_dirs: &[],
+            verbose: false,
+        };
+
         // /tmp is shadowed by systemd tmpfs at boot.
-        let err = do_copy(
-            &upper,
-            &lower,
-            &src_file,
-            Path::new("/tmp/data"),
-            SHADOWED_DIRS,
-            &[],
-            false,
-        )
-        .unwrap_err();
+        let err = do_copy(&ctx, &src_file, Path::new("/tmp/data")).unwrap_err();
         assert!(
             err.to_string().contains("tmpfs"),
             "should reject /tmp as shadowed, got: {err}"
         );
 
         // /run is also shadowed.
-        let err = do_copy(
-            &upper,
-            &lower,
-            &src_file,
-            Path::new("/run/foo"),
-            SHADOWED_DIRS,
-            &[],
-            false,
-        )
-        .unwrap_err();
+        let err = do_copy(&ctx, &src_file, Path::new("/run/foo")).unwrap_err();
         assert!(
             err.to_string().contains("tmpfs"),
             "should reject /run as shadowed, got: {err}"
         );
 
         // /dev/shm is also shadowed.
-        let err = do_copy(
-            &upper,
-            &lower,
-            &src_file,
-            Path::new("/dev/shm/bar"),
-            SHADOWED_DIRS,
-            &[],
-            false,
-        )
-        .unwrap_err();
+        let err = do_copy(&ctx, &src_file, Path::new("/dev/shm/bar")).unwrap_err();
         assert!(
             err.to_string().contains("tmpfs"),
             "should reject /dev/shm as shadowed, got: {err}"
         );
 
         // Exact match on shadowed dir.
-        let err = do_copy(
-            &upper,
-            &lower,
-            &src_file,
-            Path::new("/tmp"),
-            SHADOWED_DIRS,
-            &[],
-            false,
-        )
-        .unwrap_err();
+        let err = do_copy(&ctx, &src_file, Path::new("/tmp")).unwrap_err();
         assert!(
             err.to_string().contains("tmpfs"),
             "should reject /tmp exact match, got: {err}"
@@ -1423,14 +1362,18 @@ mod tests {
 
         let opaque = vec!["/etc/systemd/system".to_string()];
 
+        let ctx = CopyContext {
+            upper_dir: &upper,
+            check_dir: &lower,
+            shadowed: SHADOWED_DIRS,
+            opaque_dirs: &opaque,
+            verbose: false,
+        };
+
         let err = do_copy(
-            &upper,
-            &lower,
+            &ctx,
             &src_file,
             Path::new("/etc/systemd/system/foo.service"),
-            SHADOWED_DIRS,
-            &opaque,
-            false,
         )
         .unwrap_err();
         assert!(
@@ -1439,16 +1382,7 @@ mod tests {
         );
 
         // Non-opaque path should still work.
-        do_copy(
-            &upper,
-            &lower,
-            &src_file,
-            Path::new("/etc/foo.conf"),
-            SHADOWED_DIRS,
-            &opaque,
-            false,
-        )
-        .unwrap();
+        do_copy(&ctx, &src_file, Path::new("/etc/foo.conf")).unwrap();
         assert!(upper.join("etc/foo.conf").is_file());
     }
 
@@ -1462,46 +1396,27 @@ mod tests {
         let src_file = src_dir.join("data");
         fs::write(&src_file, "payload").unwrap();
 
+        let ctx = CopyContext {
+            upper_dir: &upper,
+            check_dir: &lower,
+            shadowed: BUILD_SHADOWED_DIRS,
+            opaque_dirs: &[],
+            verbose: false,
+        };
+
         // In build context, /tmp is allowed.
-        do_copy(
-            &upper,
-            &lower,
-            &src_file,
-            Path::new("/tmp/data"),
-            BUILD_SHADOWED_DIRS,
-            &[],
-            false,
-        )
-        .unwrap();
+        do_copy(&ctx, &src_file, Path::new("/tmp/data")).unwrap();
         assert!(upper.join("tmp/data").is_file());
 
         // /run is still rejected.
-        let err = do_copy(
-            &upper,
-            &lower,
-            &src_file,
-            Path::new("/run/foo"),
-            BUILD_SHADOWED_DIRS,
-            &[],
-            false,
-        )
-        .unwrap_err();
+        let err = do_copy(&ctx, &src_file, Path::new("/run/foo")).unwrap_err();
         assert!(
             err.to_string().contains("tmpfs"),
             "should reject /run in build context, got: {err}"
         );
 
         // /dev/shm is still rejected.
-        let err = do_copy(
-            &upper,
-            &lower,
-            &src_file,
-            Path::new("/dev/shm/bar"),
-            BUILD_SHADOWED_DIRS,
-            &[],
-            false,
-        )
-        .unwrap_err();
+        let err = do_copy(&ctx, &src_file, Path::new("/dev/shm/bar")).unwrap_err();
         assert!(
             err.to_string().contains("tmpfs"),
             "should reject /dev/shm in build context, got: {err}"

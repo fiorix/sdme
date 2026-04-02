@@ -151,7 +151,13 @@ pub(crate) fn start_and_await_boot(
     // Hold shared lock to prevent `sdme rm` during start+boot window.
     let _lock = lock::lock_shared(datadir, "containers", name)
         .with_context(|| format!("cannot lock container '{name}' for starting"))?;
-    systemd::start(datadir, name, tasks_max, boot_timeout.as_secs(), verbose)?;
+    systemd::start(&systemd::ServiceConfig {
+        datadir,
+        name,
+        tasks_max,
+        boot_timeout: boot_timeout.as_secs(),
+        verbose,
+    })?;
     if let Err(e) = systemd::await_boot(name, boot_timeout, verbose) {
         // Check whether the container is still alive (active or still
         // activating). If it is, the boot didn't fail: sdme just timed
