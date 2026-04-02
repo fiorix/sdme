@@ -1001,6 +1001,12 @@ pub struct ContainerInfo {
     pub enabled: bool,
     /// Bind mount specs from the state file.
     pub binds: Vec<String>,
+    /// OCI image volume paths (container-side).
+    pub oci_volumes: Vec<String>,
+    /// Per-submount overlayfs paths (relative, e.g. "home", "opt").
+    ///
+    /// Detected from the container's submounts directory on disk.
+    pub submounts: Vec<String>,
     /// Kube container names, if this is a kube container.
     pub kube: Vec<String>,
     /// IP addresses assigned to the container's network interface.
@@ -1011,45 +1017,6 @@ pub struct ContainerInfo {
 }
 
 impl ContainerInfo {
-    /// Format bind mounts for display in `sdme ps`.
-    ///
-    /// Shows container-side mount points with `(ro)` suffix for read-only binds.
-    /// Example: `/mnt/data,/etc/app(ro)`
-    pub fn binds_display(&self) -> String {
-        if self.binds.is_empty() {
-            return String::new();
-        }
-        self.binds
-            .iter()
-            .filter_map(|spec| {
-                let parts: Vec<&str> = spec.split(':').collect();
-                if parts.len() < 3 {
-                    return None;
-                }
-                let container = parts[1];
-                let mode = parts[2];
-                if mode == "ro" {
-                    Some(format!("{container}(ro)"))
-                } else {
-                    Some(container.to_string())
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(",")
-    }
-
-    /// Format kube container names for display in `sdme ps`.
-    ///
-    /// Shows the `kube:` prefix followed by comma-separated app names.
-    /// Example: `kube:app1,app2,app3`
-    pub fn kube_display(&self) -> String {
-        if self.kube.is_empty() {
-            String::new()
-        } else {
-            format!("kube:{}", self.kube.join(","))
-        }
-    }
-
     /// Format addresses for display in `sdme ps`.
     ///
     /// Joins all addresses with commas. Example: `10.0.0.2,fd00::1`
@@ -1134,7 +1101,7 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
         let state = State::read_from(&state_path);
 
         // Extract all state-dependent fields at once.
-        let (rootfs_name, pod, oci_pod, userns, enabled, binds, kube) = match &state {
+        let (rootfs_name, pod, oci_pod, userns, enabled, binds, oci_volumes, kube) = match &state {
             Ok(s) => {
                 let kube = if s.is_yes("KUBE") {
                     s.get_list("KUBE_CONTAINERS", ',')
@@ -1148,6 +1115,7 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
                     s.is_yes("USERNS"),
                     s.is_yes("ENABLED"),
                     s.get_list("BINDS", '|'),
+                    s.get_list("OCI_VOLUMES", ','),
                     kube,
                 )
             }
@@ -1159,6 +1127,7 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
                     String::new(),
                     false,
                     false,
+                    Vec::new(),
                     Vec::new(),
                     Vec::new(),
                 )
@@ -1240,6 +1209,30 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
             Vec::new()
         };
 
+        // Detect per-submount overlays from the container directory.
+        let submounts = {
+            let sub_dir = container_dir.join("submounts");
+            if sub_dir.is_dir() {
+                let mut subs: Vec<String> = fs::read_dir(&sub_dir)
+                    .ok()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|e| {
+                        let e = e.ok()?;
+                        if e.file_type().ok()?.is_dir() {
+                            e.file_name().to_str().map(String::from)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                subs.sort();
+                subs
+            } else {
+                Vec::new()
+            }
+        };
+
         result.push(ContainerInfo {
             name: name.clone(),
             status: status.to_string(),
@@ -1251,6 +1244,8 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
             userns,
             enabled,
             binds,
+            oci_volumes,
+            submounts,
             kube,
             addresses,
         });

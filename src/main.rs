@@ -234,10 +234,12 @@ EXAMPLES:
     sdme exec mypod --oci redis -- redis-cli ping";
 
 const PS_HELP: &str = "\
-List all containers with status, health, OS, rootfs, and configuration.
+List all containers with status, health, and configuration summary.
 
-Columns are shown dynamically based on whether any container uses them
-(e.g. POD, USERNS, BINDS). JSON output always includes all fields.
+The text table shows fixed columns: NAME, STATUS, HEALTH, USERNS,
+ENABLED, MOUNTS, ADDRESSES, and OS. For full details (bind mount specs,
+OCI volumes, submounts, kube container names, pod membership, rootfs),
+use --json or --json-pretty.
 
 The default output format can be set with:
     sdme config set default_output_format json
@@ -2835,101 +2837,39 @@ fn run() -> Result<()> {
                 let name_w = entries.iter().map(|e| e.name.len()).max().unwrap().max(4);
                 let status_w = entries.iter().map(|e| e.status.len()).max().unwrap().max(6);
                 let health_w = entries.iter().map(|e| e.health.len()).max().unwrap().max(6);
+                let addr_display: Vec<String> = entries
+                    .iter()
+                    .map(|e| {
+                        let s = e.addresses_display();
+                        if s.is_empty() {
+                            "-".to_string()
+                        } else {
+                            s
+                        }
+                    })
+                    .collect();
+                let addr_w = addr_display.iter().map(|a| a.len()).max().unwrap().max(9);
                 let os_w = entries.iter().map(|e| e.os.len()).max().unwrap().max(2);
-                let pod_w = if entries.iter().any(|e| !e.pod.is_empty()) {
-                    Some(entries.iter().map(|e| e.pod.len()).max().unwrap().max(3))
-                } else {
-                    None
-                };
-                let oci_pod_w = if entries.iter().any(|e| !e.oci_pod.is_empty()) {
-                    Some(
-                        entries
-                            .iter()
-                            .map(|e| e.oci_pod.len())
-                            .max()
-                            .unwrap()
-                            .max(7),
-                    )
-                } else {
-                    None
-                };
-                let show_userns = entries.iter().any(|e| e.userns);
-                let show_enabled = entries.iter().any(|e| e.enabled);
-                let binds_display: Vec<String> =
-                    entries.iter().map(|e| e.binds_display()).collect();
-                let binds_w = if binds_display.iter().any(|b| !b.is_empty()) {
-                    Some(binds_display.iter().map(|b| b.len()).max().unwrap().max(5))
-                } else {
-                    None
-                };
-                let kube_display: Vec<String> = entries.iter().map(|e| e.kube_display()).collect();
-                let kube_w = if kube_display.iter().any(|k| !k.is_empty()) {
-                    Some(kube_display.iter().map(|k| k.len()).max().unwrap().max(4))
-                } else {
-                    None
-                };
-                let addr_display: Vec<String> =
-                    entries.iter().map(|e| e.addresses_display()).collect();
-                let addr_w = if addr_display.iter().any(|a| !a.is_empty()) {
-                    Some(addr_display.iter().map(|a| a.len()).max().unwrap().max(9))
-                } else {
-                    None
-                };
                 // Header.
-                print!(
-                    "{:<name_w$}  {:<status_w$}  {:<health_w$}  {:<os_w$}",
-                    "NAME", "STATUS", "HEALTH", "OS"
+                println!(
+                    "{:<name_w$}  {:<status_w$}  {:<health_w$}  {:<6}  {:<7}  {:<6}  {:<addr_w$}  {}",
+                    "NAME", "STATUS", "HEALTH", "USERNS", "ENABLED", "MOUNTS", "ADDRESSES", "OS"
                 );
-                if let Some(pw) = pod_w {
-                    print!("  {:<pw$}", "POD");
-                }
-                if let Some(pw) = oci_pod_w {
-                    print!("  {:<pw$}", "OCI-POD");
-                }
-                if show_userns {
-                    print!("  USERNS");
-                }
-                if show_enabled {
-                    print!("  ENABLED");
-                }
-                if let Some(bw) = binds_w {
-                    print!("  {:<bw$}", "BINDS");
-                }
-                if let Some(kw) = kube_w {
-                    print!("  {:<kw$}", "KUBE");
-                }
-                if let Some(aw) = addr_w {
-                    print!("  {:<aw$}", "ADDRESSES");
-                }
-                println!();
                 // Rows.
                 for (i, e) in entries.iter().enumerate() {
-                    print!(
-                        "{:<name_w$}  {:<status_w$}  {:<health_w$}  {:<os_w$}",
-                        e.name, e.status, e.health, e.os
+                    let has_mounts =
+                        !e.binds.is_empty() || !e.oci_volumes.is_empty() || !e.submounts.is_empty();
+                    println!(
+                        "{:<name_w$}  {:<status_w$}  {:<health_w$}  {:<6}  {:<7}  {:<6}  {:<addr_w$}  {}",
+                        e.name,
+                        e.status,
+                        e.health,
+                        if e.userns { "yes" } else { "no" },
+                        if e.enabled { "yes" } else { "no" },
+                        if has_mounts { "yes" } else { "no" },
+                        addr_display[i],
+                        e.os,
                     );
-                    if let Some(pw) = pod_w {
-                        print!("  {:<pw$}", e.pod);
-                    }
-                    if let Some(pw) = oci_pod_w {
-                        print!("  {:<pw$}", e.oci_pod);
-                    }
-                    if show_userns {
-                        print!("  {:<6}", if e.userns { "yes" } else { "" });
-                    }
-                    if show_enabled {
-                        print!("  {:<7}", if e.enabled { "yes" } else { "" });
-                    }
-                    if let Some(bw) = binds_w {
-                        print!("  {:<bw$}", binds_display[i]);
-                    }
-                    if let Some(kw) = kube_w {
-                        print!("  {:<kw$}", kube_display[i]);
-                    }
-                    if let Some(aw) = addr_w {
-                        print!("  {:<aw$}", addr_display[i]);
-                    }
-                    println!();
                 }
             }
         }
