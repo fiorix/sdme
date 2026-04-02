@@ -31,10 +31,11 @@ Each item is a self-contained session: split one file, run tests, commit.
   - `cli.rs` — 3 Args structs + 21 helper functions (753 lines)
   - `main.rs` reduced to 2,981 lines (clap defs, help text, dispatch)
 
-- [ ] **P5: `systemd.rs` (1,669 lines) → `systemd/`**
-  - `mod.rs` — re-exports, unit state queries
-  - `dbus.rs` — D-Bus module (already exists as inner mod dbus)
-  - `units.rs` — unit template generation, nspawn dropin, escape helpers
+- [x] **P5: `systemd.rs` (1,669 lines) → `systemd/`**
+  - `mod.rs` — public API wrappers, orchestration (192 lines)
+  - `dbus.rs` — D-Bus communication layer (757 lines)
+  - `units.rs` — unit templates, dropins, escape helpers (389 lines)
+  - `tests.rs` — all tests (346 lines)
 
 ## Function Signature Cleanups (7+ params)
 
