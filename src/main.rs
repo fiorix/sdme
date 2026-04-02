@@ -2851,8 +2851,8 @@ fn run() -> Result<()> {
                 let addr_w = addr_display.iter().map(|a| a.len()).max().unwrap().max(9);
                 // Header.
                 println!(
-                    "{:<name_w$}  {:<status_w$}  {:<health_w$}  {:<6}  {:<7}  {:<6}  {:<addr_w$}  {}",
-                    "NAME", "STATUS", "HEALTH", "USERNS", "ENABLED", "MOUNTS", "ADDRESSES", "OS"
+                    "{:<name_w$}  {:<status_w$}  {:<health_w$}  {:<6}  {:<7}  {:<6}  {:<addr_w$}  OS",
+                    "NAME", "STATUS", "HEALTH", "USERNS", "ENABLED", "MOUNTS", "ADDRESSES"
                 );
                 // Rows.
                 for (i, e) in entries.iter().enumerate() {

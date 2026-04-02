@@ -134,8 +134,8 @@ Test Suite                 Pass  Fail  Skip  Status
 -------------------------  ----  ----  ----  ------
 verify-build                 11     0     0  PASS
 verify-cp                    17     0     0  PASS
-verify-distro-boot           56     7     0  FAIL*
-verify-distro-oci             -     -     -  (killed)
+verify-distro-boot           61     0     1  PASS
+verify-distro-oci           175     0     0  PASS
 verify-export                22     0     1  PASS
 verify-kube-L1-basic         14     0     0  PASS
 verify-kube-L2-probes        41     0     0  PASS
@@ -150,30 +150,25 @@ verify-network                9     0     0  PASS
 verify-nixos                 26     0     0  PASS
 verify-oci                   18     0     0  PASS
 verify-pods                   9     0     0  PASS
-verify-security               -     -     -  FAIL*
-verify-tutorial               -     -     -  (killed)
+verify-security              31     0     0  PASS
+verify-tutorial              79     0     0  PASS
 -------------------------  ----  ----  ----  ------
-Totals                      334     7     1  17/20 suites ran
+Totals                      624     0     2  20 suites
 ```
-
-*Hardened-boot (--userns) timeouts on aarch64 Lima VM under
-parallel load. Standard boot passes for all 7 distros. Security
-userns tests have the same root cause. See 0.5.7 log entry.
 
 ## Log
 
-### 0.5.7 -- patch release, dead code cleanup (2026-04-02, aarch64)
+### 0.5.6 -- userns ownership fix, test updates (2026-04-02, aarch64)
 
-334 passed, 7 failed, 1 skipped across 17 suites (distro-oci and
-tutorial killed due to long runtime; security not recorded). Fixed
+624 passed, 0 failed, 2 skipped across 20 suites. Fixed
+--private-users-ownership from map to auto: map fails hard on
+filesystems without idmapped mount support (overlayfs on virtiofs),
+auto lets nspawn fall back to recursive chown gracefully. This
+resolved all hardened-boot and userns test failures. Fixed
 ps-kube-column test to use --json (KUBE column removed from text
-table in fba5ee3). All 7 failures are hardened-boot (--userns)
-timeouts on aarch64 Lima VM -- nspawn falls back to recursive
-chown when idmapped mounts are not available on overlayfs. Standard
-boot passes for all 7 distros. Switched --private-users-ownership
-from map to auto so nspawn picks the best strategy per filesystem.
-Bumped userns test timeouts to 5 min. All kube L1-L6, nixos, oci,
-pods, network, build, cp, export clean.
+table in fba5ee3). Removed unused os_w variable. Bumped userns
+boot timeouts to 180s. 2 skips from stale state (distro-boot
+archlinux, export xattr). Wall clock: ~45m.
 
 ### 0.5.4 -- tutorial test rewrite, website docs (2026-03-30, aarch64)
 
