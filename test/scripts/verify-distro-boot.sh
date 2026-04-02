@@ -18,7 +18,7 @@ REPORT_DIR="."
 FILTER_DISTROS=()
 
 TIMEOUT_IMPORT=$(scale_timeout 600)
-TIMEOUT_BOOT=$(scale_timeout 120)
+TIMEOUT_BOOT=$(scale_timeout 200)
 TIMEOUT_TEST=$(scale_timeout 300)
 
 usage() {
@@ -217,7 +217,7 @@ phase3_hardened_boot() {
         record "hardened-boot/$distro/create" PASS
 
         # Start
-        if ! output=$(timeout "$TIMEOUT_BOOT" sdme start "$ct_name" -t 120 2>&1); then
+        if ! output=$(timeout "$TIMEOUT_BOOT" sdme start "$ct_name" -t 180 2>&1); then
             record "hardened-boot/$distro/systemd" FAIL "start failed: $output"
             sdme rm -f "$ct_name" 2>/dev/null || true
             continue

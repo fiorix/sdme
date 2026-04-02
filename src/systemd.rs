@@ -1168,16 +1168,9 @@ pub fn write_nspawn_dropin(datadir: &Path, name: &str, verbose: bool) -> Result<
     }
 
     // Security: userns, capabilities, seccomp, no-new-privileges, read-only.
-    // Pass systemd version so userns can pick map (>= 256) vs auto.
     let sd_version = crate::system_check::parse_systemd_version(&systemd_version()?).unwrap_or(0);
     let security = SecurityConfig::from_state(&state);
     nspawn_args.extend(security.to_nspawn_args(sd_version));
-    if security.userns && sd_version < 256 && verbose {
-        eprintln!(
-            "note: systemd >= 256 supports --private-users-ownership=map \
-             (no first-boot chown); current version is {sd_version}"
-        );
-    }
 
     // Pod: entire container runs in the pod's network namespace.
     let pod = state.get("POD").filter(|s| !s.is_empty()).map(String::from);

@@ -148,23 +148,20 @@ impl SecurityConfig {
 
     /// Generate systemd-nspawn arguments for security options.
     ///
-    /// `systemd_version` controls which `--private-users-ownership` mode
-    /// is used: systemd >= 256 supports `map` (idmapped rootfs mount,
-    /// zero-overhead), older versions fall back to `auto` (recursive
-    /// chown on first boot).
+    /// Uses `--private-users-ownership=auto` which lets nspawn pick the
+    /// best strategy: idmapped mounts when the kernel and filesystem
+    /// support them, recursive chown otherwise. We avoid forcing `map`
+    /// because it fails hard on filesystems that don't support idmapped
+    /// mounts (e.g. overlayfs on some kernels/VM backends).
     ///
     /// Does NOT include AppArmor: that goes into the systemd unit drop-in
     /// as `AppArmorProfile=`, not as an nspawn flag.
-    pub fn to_nspawn_args(&self, systemd_version: u32) -> Vec<String> {
+    pub fn to_nspawn_args(&self, _systemd_version: u32) -> Vec<String> {
         let mut args = Vec::new();
 
         if self.userns {
             args.push("--private-users=pick".to_string());
-            if systemd_version >= 256 {
-                args.push("--private-users-ownership=map".to_string());
-            } else {
-                args.push("--private-users-ownership=auto".to_string());
-            }
+            args.push("--private-users-ownership=auto".to_string());
         }
 
         for cap in &self.drop_caps {
@@ -602,28 +599,30 @@ mod tests {
             system_call_filter: vec!["@system-service".to_string(), "~@mount".to_string()],
             apparmor_profile: Some("sdme-container".to_string()),
         };
-        // systemd < 256: uses --private-users-ownership=auto
-        let args = sec.to_nspawn_args(255);
-        assert_eq!(
-            args,
-            vec![
-                "--private-users=pick",
-                "--private-users-ownership=auto",
-                "--drop-capability=CAP_SYS_PTRACE",
-                "--drop-capability=CAP_NET_RAW",
-                "--capability=CAP_NET_ADMIN",
-                "--no-new-privileges=yes",
-                "--read-only",
-                "--system-call-filter=@system-service",
-                "--system-call-filter=~@mount",
-            ]
-        );
-        // systemd >= 256: uses --private-users-ownership=map
-        let args = sec.to_nspawn_args(256);
-        assert!(args.contains(&"--private-users-ownership=map".to_string()));
-        assert!(!args.contains(&"--private-users-ownership=auto".to_string()));
+        // Always uses --private-users-ownership=auto (lets nspawn pick
+        // idmapped mounts or recursive chown based on kernel support).
+        for ver in [255, 256, 257] {
+            let args = sec.to_nspawn_args(ver);
+            assert_eq!(
+                args,
+                vec![
+                    "--private-users=pick",
+                    "--private-users-ownership=auto",
+                    "--drop-capability=CAP_SYS_PTRACE",
+                    "--drop-capability=CAP_NET_RAW",
+                    "--capability=CAP_NET_ADMIN",
+                    "--no-new-privileges=yes",
+                    "--read-only",
+                    "--system-call-filter=@system-service",
+                    "--system-call-filter=~@mount",
+                ]
+            );
+        }
         // AppArmor should NOT be in nspawn args.
-        assert!(!args.iter().any(|a| a.contains("apparmor")));
+        assert!(!sec
+            .to_nspawn_args(257)
+            .iter()
+            .any(|a| a.contains("apparmor")));
     }
 
     #[test]

@@ -2849,7 +2849,6 @@ fn run() -> Result<()> {
                     })
                     .collect();
                 let addr_w = addr_display.iter().map(|a| a.len()).max().unwrap().max(9);
-                let os_w = entries.iter().map(|e| e.os.len()).max().unwrap().max(2);
                 // Header.
                 println!(
                     "{:<name_w$}  {:<status_w$}  {:<health_w$}  {:<6}  {:<7}  {:<6}  {:<addr_w$}  {}",

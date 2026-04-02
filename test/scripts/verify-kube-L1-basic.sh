@@ -334,14 +334,15 @@ YAML
     fi
     rm -f "$yaml_file"
 
-    echo "--- $test_name: checking sdme ps output ---"
-    local ps_output
-    ps_output=$("$SDME" ps 2>/dev/null)
-    if echo "$ps_output" | grep -q "kube:web,sidecar"; then
+    echo "--- $test_name: checking sdme ps --json output ---"
+    local ps_json kube_names
+    ps_json=$("$SDME" ps --json 2>/dev/null)
+    kube_names=$(echo "$ps_json" | jq -r '.[] | select(.name == "'"$pod_name"'") | .kube | sort | join(",")')
+    if [[ "$kube_names" == "sidecar,web" ]]; then
         record "$test_name" PASS
     else
-        echo "expected 'kube:web,sidecar' in ps output:"
-        echo "$ps_output"
+        echo "expected kube=['sidecar','web'], got: '$kube_names'"
+        echo "$ps_json" | jq '.[] | select(.name == "'"$pod_name"'")'
         record "$test_name" FAIL
     fi
 

@@ -30,7 +30,7 @@ if [[ -n "$VERBOSE" ]]; then
     VFLAG=("-v")
 fi
 
-TIMEOUT_BOOT=$(scale_timeout 120)
+TIMEOUT_BOOT=$(scale_timeout 200)
 TIMEOUT_TEST=$(scale_timeout 60)
 DATADIR="/var/lib/sdme"
 
@@ -628,7 +628,7 @@ for distro in "${USERNS_DISTROS[@]}"; do
         continue
     fi
 
-    if ! output=$(timeout "$TIMEOUT_BOOT" "$SDME" start "$ct_name" -t 120 "${VFLAG[@]}" 2>&1); then
+    if ! output=$(timeout "$TIMEOUT_BOOT" "$SDME" start "$ct_name" -t 180 "${VFLAG[@]}" 2>&1); then
         fail "$distro userns: start failed: $output"
         cleanup_container "$ct_name"
         continue
@@ -681,7 +681,7 @@ else
         if ! output=$(timeout "$TIMEOUT_BOOT" "$SDME" create -r "$fs_name" --userns "$ct_name" "${VFLAG[@]}" 2>&1); then
             fail "nginx userns OCI: create failed: $output"
         else
-            if ! output=$(timeout "$TIMEOUT_BOOT" "$SDME" start "$ct_name" -t 120 "${VFLAG[@]}" 2>&1); then
+            if ! output=$(timeout "$TIMEOUT_BOOT" "$SDME" start "$ct_name" -t 180 "${VFLAG[@]}" 2>&1); then
                 fail "nginx userns OCI: start failed: $output"
             else
                 sleep 3
