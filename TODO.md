@@ -19,11 +19,13 @@ Each item is a self-contained session: split one file, run tests, commit.
   - `vm.rs` — VM rootfs preparation (808 lines)
   - `tests.rs` — all tests (1,310 lines)
 
-- [ ] **P3: `containers.rs` (2,402 lines) → `containers/`**
-  - `mod.rs` — re-exports, CreateOptions, create flow
-  - `list.rs` — ContainerInfo, KubeInfo, list(), probe_readiness_health
-  - `exec.rs` — join, exec, exec_oci, machinectl_shell
-  - `manage.rs` — stop, remove, set_limits, enable/disable
+- [x] **P3: `containers.rs` (2,402 lines) → `containers/`**
+  - `mod.rs` — re-exports, shared utilities, overlay management (278 lines)
+  - `create.rs` — CreateOptions, create, do_create (659 lines)
+  - `list.rs` — ContainerInfo, KubeInfo, list (312 lines)
+  - `exec.rs` — join, exec, exec_oci, machinectl_shell (253 lines)
+  - `manage.rs` — stop, remove, set_limits (170 lines)
+  - `tests.rs` — all tests (788 lines)
 
 - [ ] **P4: `main.rs` (3,710 lines) — extract `src/cli.rs`**
   - Move helper functions out: parse_network, parse_security, parse_mounts,
