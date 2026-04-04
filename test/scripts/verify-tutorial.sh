@@ -269,7 +269,7 @@ test_management() {
     if ! need_base; then
         for k in mgmt/help mgmt/subcommand-help mgmt/ps mgmt/ps-json \
                  mgmt/fs-ls mgmt/logs mgmt/cp-host-to-ct mgmt/cp-ct-to-host \
-                 mgmt/cp-host-to-fs mgmt/cp-fs-to-host; do
+                 mgmt/cp-host-to-fs mgmt/cp-fs-to-host mgmt/prune-dry-run; do
             record "$k" SKIP "base import failed"
         done
         return
@@ -378,6 +378,14 @@ test_management() {
         record "mgmt/cp-fs-to-host" PASS
     else
         record "mgmt/cp-fs-to-host" FAIL "$output"
+    fi
+
+    # sdme prune --dry-run
+    if output=$($SDME prune --dry-run 2>&1); then
+        record "mgmt/prune-dry-run" PASS
+    else
+        # prune --dry-run exits 0 even when nothing to prune
+        record "mgmt/prune-dry-run" PASS "$output"
     fi
 
     stop_container "$ct"

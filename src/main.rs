@@ -11,8 +11,8 @@ use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 use sdme::import::{ImportOptions, InstallPackages, OciMode};
 use sdme::{
-    check_interrupted, config, confirm, containers, cp, export, kube, oci, pod, rootfs, security,
-    system_check, systemd,
+    check_interrupted, config, confirm, containers, cp, export, kube, oci, pod, prune, rootfs,
+    security, system_check, systemd,
 };
 
 mod cli;
@@ -754,6 +754,53 @@ SECURITY:
     Pod YAML securityContext applies at the OCI app service level. Both layers
     are complementary and can be used together.";
 
+const PRUNE_HELP: &str = "\
+Remove unused filesystems, unhealthy containers, orphaned pods, stale
+transactions, and unreferenced secrets, configmaps, and volumes.
+
+Runs an analysis phase first, displays what would be pruned, and asks
+for confirmation before proceeding. The configured default_base_fs is
+never pruned.
+
+EXAMPLES:
+    # Interactive: analyze, show summary, confirm
+    sdme prune
+
+    # Dry run: show what would be pruned without removing anything
+    sdme prune --dry-run
+
+    # Skip confirmation prompt
+    sdme prune --force
+
+    # Exclude specific items from pruning
+    sdme prune --except=ubuntu,db-creds
+
+    # Exclude by category when names collide
+    sdme prune --except=secret:myapp,container:myapp
+
+CATEGORIES:
+    Filesystems          Imported rootfs with no containers using them
+    Containers           Containers with non-ok health status
+    Pods                 Pod network namespaces with no containers attached
+    Secrets              Kube secrets (copied at create time, not runtime-bound)
+    ConfigMaps           Kube configmaps (copied at create time, not runtime-bound)
+    Volumes              Orphaned volume directories (no matching container)
+    Stale transactions   Leftover staging dirs from interrupted operations
+
+NOTES:
+    Secrets and configmaps are included because they are copied into the
+    kube rootfs at create time and are not referenced at runtime. If you
+    plan to reuse them in future kube apply commands, exclude them with
+    --except.
+
+    The --except flag accepts plain names (matches all categories) or
+    category:name prefixes to disambiguate when a name appears in
+    multiple categories. Prefixes: fs, container, pod, secret, configmap,
+    volume, txn.
+
+    The OCI blob cache is not pruned. It has its own size-based eviction
+    (oci_cache_max_size) and can be cleaned with 'sdme fs cache clean'.";
+
 // ---------------------------------------------------------------------------
 
 #[derive(Parser)]
@@ -1085,6 +1132,22 @@ enum Command {
     /// Manage Kubernetes-compatible pods (experimental)
     #[command(name = "kube", subcommand)]
     Kube(KubeCommand),
+
+    /// Remove unused resources (filesystems, containers, pods, volumes, secrets, configmaps)
+    #[command(after_long_help = PRUNE_HELP)]
+    Prune {
+        /// Show what would be pruned without removing anything
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Skip confirmation prompt
+        #[arg(short, long)]
+        force: bool,
+
+        /// Exclude items by name (comma-separated, supports category:name prefix)
+        #[arg(long, value_delimiter = ',')]
+        except: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2964,6 +3027,54 @@ fn run() -> Result<()> {
                 }
             }
         },
+        Command::Prune {
+            dry_run,
+            force,
+            except,
+        } => {
+            let all_items = prune::analyze(&cfg.datadir, &cfg.default_base_fs)?;
+
+            let (prunable, excluded): (Vec<_>, Vec<_>) = all_items
+                .into_iter()
+                .partition(|item| !prune::is_excluded(item, &except));
+
+            if prunable.is_empty() {
+                eprintln!("nothing to prune");
+                return Ok(());
+            }
+
+            prune::display(&prunable, excluded.len(), &cfg.default_base_fs);
+
+            if dry_run {
+                return Ok(());
+            }
+
+            if !force {
+                if !interactive {
+                    bail!("use -f to confirm pruning in non-interactive mode");
+                }
+                if !confirm("proceed? [y/N] ")? {
+                    bail!("aborted");
+                }
+            }
+
+            let (succeeded, errors) =
+                prune::execute(&prunable, &cfg.datadir, cfg.auto_fs_gc, cli.verbose);
+
+            // Propagate signal exit code (130 for SIGINT) before error summary.
+            check_interrupted()?;
+
+            for (name, err) in &errors {
+                eprintln!("error: {name}: {err}");
+            }
+
+            if errors.is_empty() {
+                eprintln!("pruned {succeeded} item(s)");
+            } else {
+                eprintln!("pruned {succeeded} item(s), {} failed", errors.len());
+                bail!("some items could not be pruned");
+            }
+        }
     }
 
     Ok(())

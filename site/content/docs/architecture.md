@@ -1450,6 +1450,47 @@ root) to resolve the distro name.
 If you find a way to leave sdme's state inconsistent (a container that
 can't be listed, removed, or recovered), please open an issue.
 
+### Pruning unused resources
+
+`sdme prune` provides a single command to find and remove all unused
+resources. It runs in two phases: analyze, then execute.
+
+The analysis phase is read-only. It scans every resource type and
+collects items that can be safely removed:
+
+  - Filesystems with no containers using them (except the configured
+    `default_base_fs`)
+  - Containers with non-ok health status (missing dirs, broken state,
+    failed, not-ready)
+  - Pods with no containers attached
+  - Kube secrets and configmaps (all are candidates because they are
+    copied into the container rootfs at `kube create` time, not
+    referenced at runtime)
+  - Orphaned volume directories under `{datadir}/volumes/` that no
+    container binds reference
+  - Stale transaction staging directories (same as `sdme fs gc`)
+
+After displaying a categorized summary, prune asks for confirmation
+in interactive mode. `--dry-run` shows the analysis without removing
+anything. `--except` excludes items by name, with optional
+`category:name` prefixes to disambiguate when a name appears in
+multiple categories.
+
+The execution phase removes items in lock order (fs, containers, pods,
+secrets, configmaps) to prevent deadlocks. Each item's existing remove
+function is called, which acquires its own exclusive lock. Errors are
+collected rather than aborting; a final summary reports successes and
+failures.
+
+The OCI blob cache is intentionally excluded from pruning. It has its
+own size-based management: LRU eviction when exceeding
+`oci_cache_max_size` (see [Configuration](#13-configuration)) and
+explicit cleanup via `sdme fs cache clean`. Blobs in the cache may be
+reused by future imports, so aggressive pruning would just force
+re-downloads.
+
+Implementation: `src/prune.rs`.
+
 ---
 
 # Experimental Features

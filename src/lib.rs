@@ -29,6 +29,7 @@
 //! | [`security`] | Capability, seccomp, AppArmor config |
 //! | [`system_check`] | Version and dependency checks |
 //! | [`pod`] | Shared network namespace management |
+//! | [`prune`] | Unused resource analysis and cleanup |
 //! | [`txn`] | Enumerated transaction staging and gc |
 
 pub mod build;
@@ -48,6 +49,7 @@ pub(crate) mod names;
 pub mod network;
 pub mod oci;
 pub mod pod;
+pub mod prune;
 pub mod rootfs;
 pub mod security;
 pub(crate) mod submounts;

@@ -205,3 +205,46 @@ sudo sdme logs mycontainer
 {% callout(type="tip", title="Tip") %}
 Use `--hardened` and `--strict` with imported rootfs (e.g. `-r ubuntu`) rather than host rootfs clones. Imported rootfs are clean and don't carry host-specific xattrs that can interfere with user namespace isolation.
 {% end %}
+
+## Pruning unused resources
+
+Over time, sdme accumulates unused filesystems, orphaned pods, broken
+containers, and leftover secrets or volumes. The `prune` command finds
+and removes them all in one step.
+
+See what would be pruned without removing anything:
+
+```sh
+sudo sdme prune --dry-run
+```
+
+Run interactively (analyze, confirm, then remove):
+
+```sh
+sudo sdme prune
+```
+
+Skip the confirmation prompt:
+
+```sh
+sudo sdme prune -f
+```
+
+Exclude specific items from pruning by name:
+
+```sh
+sudo sdme prune --except=ubuntu,db-creds
+```
+
+When a name appears in multiple categories (e.g. a container and a
+secret both named `myapp`), use the `category:name` prefix:
+
+```sh
+sudo sdme prune --except=secret:myapp,container:myapp
+```
+
+The configured `default_base_fs` is always excluded from pruning.
+
+{% callout(type="tip", title="Tip") %}
+Kube secrets and configmaps are always listed for pruning because they are copied into the container at create time and not referenced at runtime. Use `--except` to keep any you plan to reuse in future `kube apply` commands.
+{% end %}
