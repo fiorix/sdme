@@ -94,10 +94,9 @@ systemd-networkd handles DHCP and NAT automatically. See the
 Without external networking, install any software you need before
 joining the pod, or use pre-built OCI rootfs images.
 
-`--pod` is also incompatible with `--userns`, `--hardened`, and
-`--strict`. The kernel blocks `setns(CLONE_NEWNET)` across user
-namespace boundaries. Use `--oci-pod` instead for hardened
-containers.
+`--pod` works with `--userns`, `--hardened`, and `--strict`. The
+container is launched via `nsenter --net=` so the pod's network
+namespace is entered before nspawn creates the user namespace.
 
 ## Example: redis via --oci-pod
 

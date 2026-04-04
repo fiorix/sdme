@@ -305,10 +305,13 @@ details and lifecycle management).
 
 Two mechanisms for joining a pod:
 
-**`--pod` (whole-container):** The entire nspawn container runs in the pod's
-network namespace via `--network-namespace-path=`. All processes, including
-the container's systemd init, share the pod's network stack. This is the
-general-purpose option.
+**`--pod` (whole-container):** The entire nspawn container runs in the
+pod's network namespace. The container is launched via
+`nsenter --net=<netns> -- systemd-nspawn ...` so the netns is entered
+before nspawn creates the user namespace. All processes, including the
+container's systemd init, share the pod's network stack. Works with
+`--userns`, `--hardened`, and `--strict`. This is the general-purpose
+option.
 
 **`--oci-pod` (OCI app process only):** The pod's netns is bind-mounted into
 the container at `/run/sdme/oci-pod-netns`, and a systemd drop-in sets
