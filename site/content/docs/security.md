@@ -321,8 +321,10 @@ journal remote, D-Bus) to remain independent.
 **Comparison with Podman pods.** Podman uses an "infra container" (a pause
 process) to hold the pod's network namespace. Podman pods support full
 external connectivity through slirp4netns/pasta or CNI/Netavark plugins.
-sdme pods are loopback-only by default with no built-in external
-connectivity mechanism.
+sdme pods are loopback-only by default. External connectivity can be added
+with `sdme pod net attach`, which creates a veth pair and delegates DHCP
+and NAT to the host's systemd-networkd (see
+[Architecture, Section 10](@/docs/architecture.md#10-pods) for details).
 
 **Comparison with Docker Compose.** Docker Compose creates shared bridge
 networks, not true pod semantics. Containers in a Compose service

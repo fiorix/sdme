@@ -655,6 +655,22 @@ Two ways to join a pod:
 
 Both flags can be combined on the same container.
 
+EXTERNAL NETWORKING:
+    Pods start with loopback-only networking. Use 'pod net attach' to give
+    containers in a pod external connectivity via a veth pair. The host's
+    systemd-networkd handles DHCP, NAT, and IP forwarding automatically.
+
+    Two modes:
+
+      veth             Point-to-point veth between pod and host.
+      zone <name>      Connect to a named zone bridge for inter-pod and
+                       inter-container networking (same as --network-zone).
+
+    Attach and detach are live: running containers immediately see the
+    interface appear or disappear. Works with both --pod and --oci-pod.
+
+    Requires: iproute2 (ip), dhcpcd.
+
 EXAMPLES:
     # Create a pod and add containers
     sdme pod new mypod
@@ -664,6 +680,15 @@ EXAMPLES:
     # OCI pod with hardened security
     sdme pod new mypod
     sdme new app -r nginx --oci-pod mypod --hardened
+
+    # Attach external networking (veth)
+    sdme pod net attach mypod veth
+
+    # Attach external networking (zone)
+    sdme pod net attach mypod zone myzone
+
+    # Detach external networking
+    sdme pod net detach mypod
 
     # List and remove
     sdme pod ls
@@ -1230,6 +1255,37 @@ enum PodCommand {
         /// Force removal even if containers reference the pod
         #[arg(short, long)]
         force: bool,
+    },
+    /// Manage pod external networking
+    #[command(subcommand)]
+    Net(PodNetCommand),
+}
+
+/// Network attach mode for the CLI.
+#[derive(Clone, clap::ValueEnum)]
+enum PodNetMode {
+    /// Point-to-point veth between pod and host
+    Veth,
+    /// Connect to a named zone bridge
+    Zone,
+}
+
+#[derive(Subcommand)]
+enum PodNetCommand {
+    /// Attach external networking to a pod
+    Attach {
+        /// Pod name
+        name: String,
+        /// Network mode: veth or zone
+        #[arg(value_enum)]
+        mode: PodNetMode,
+        /// Zone name (required for zone mode)
+        zone: Option<String>,
+    },
+    /// Detach external networking from a pod
+    Detach {
+        /// Pod name
+        name: String,
     },
 }
 
@@ -2230,10 +2286,17 @@ fn run() -> Result<()> {
                     println!("no pods found");
                 } else {
                     let name_w = pods.iter().map(|p| p.name.len()).max().unwrap().max(4);
-                    println!("{:<name_w$}  ACTIVE  CREATED", "NAME");
+                    println!("{:<name_w$}  ACTIVE  NET   CREATED", "NAME");
                     for p in &pods {
                         let active = if p.active { "yes" } else { "no" };
-                        println!("{:<name_w$}  {:<6}  {}", p.name, active, p.created);
+                        let net = match &p.net_mode {
+                            Some(m) => m.to_string(),
+                            None => String::new(),
+                        };
+                        println!(
+                            "{:<name_w$}  {:<6}  {:<4}  {}",
+                            p.name, active, net, p.created
+                        );
                     }
                 }
             }
@@ -2257,6 +2320,31 @@ fn run() -> Result<()> {
                     bail!("some pods could not be removed");
                 }
             }
+            PodCommand::Net(cmd) => match cmd {
+                PodNetCommand::Attach { name, mode, zone } => {
+                    let net_mode = match mode {
+                        PodNetMode::Veth => pod::NetMode::Veth,
+                        PodNetMode::Zone => pod::NetMode::Zone,
+                    };
+                    if net_mode == pod::NetMode::Zone && zone.is_none() {
+                        bail!(
+                            "zone mode requires a zone name: sdme pod net attach <pod> zone <name>"
+                        );
+                    }
+                    pod::net_attach(&cfg.datadir, &name, net_mode, zone.as_deref(), cli.verbose)?;
+                    let mode_str = match net_mode {
+                        pod::NetMode::Veth => "veth".to_string(),
+                        pod::NetMode::Zone => format!("zone {}", zone.as_deref().unwrap_or("")),
+                    };
+                    eprintln!("attached {mode_str} networking to pod '{name}'");
+                    println!("{name}");
+                }
+                PodNetCommand::Detach { name } => {
+                    pod::net_detach(&cfg.datadir, &name, cli.verbose)?;
+                    eprintln!("detached networking from pod '{name}'");
+                    println!("{name}");
+                }
+            },
         },
         Command::Kube(cmd) => match cmd {
             KubeCommand::Apply {

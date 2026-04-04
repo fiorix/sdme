@@ -796,6 +796,95 @@ change routes in the shared netns. `CAP_SYS_ADMIN` is present
 prevents access to host process netns references. The OCI app process
 itself (running as a non-root UID) has zero effective capabilities.
 
+### External connectivity
+
+Pods start with loopback-only networking. `sdme pod net attach` adds
+external connectivity by creating a veth pair between the pod's netns
+and the host. Attach and detach are live operations: running containers
+immediately see the interface appear or disappear. Both `--pod` and
+`--oci-pod` containers work with pod networking because they share the
+same netns.
+
+Two modes are available:
+
+- **veth**: point-to-point virtual ethernet between the pod and the
+  host. The host-side interface is named `ve-{pod}` (following the
+  nspawn convention), and the pod-side interface is `host0`.
+
+- **zone**: connects the pod to a shared zone bridge. The host-side
+  interface is `vb-{pod}`, connected to bridge `vz-{zone}`. Multiple
+  pods and regular containers on the same zone can reach each other
+  directly.
+
+```
+  veth mode:                         zone mode:
+
+  +-- host --------------------+     +-- host ----------------+
+  | ve-{pod}                   |     | vz-{zone} (bridge)     |
+  |   IPMasquerade (networkd)  |     |   IPMasquerade (networkd)
+  +----+-----------------------+     |   +-- vb-pod1          |
+       | (veth pair)                 |   +-- vb-pod2          |
+  +----+-----------------------+     +---+--+--+--------------+
+  | host0                      |         |     |
+  | pod netns (lo + host0)     |     +---+--+  +---+--+
+  +----------------------------+     | pod1 |  | pod2 |
+                                     +------+  +------+
+```
+
+**How it works.** sdme creates the veth pair and moves the pod end
+into the netns using `ip link set host0 netns /run/sdme/pods/{name}/netns`.
+Interface names follow systemd-nspawn conventions so that
+systemd-networkd on the host auto-configures via its default
+`.network` files:
+
+```
+Mode   Host-side iface   networkd config
+-----  ----------------  -------------------------
+veth   ve-{pod}          80-container-ve.network
+zone   vb-{pod}          80-container-vb.network
+zone   vz-{zone} bridge  80-container-vz.network
+```
+
+The host's networkd handles DHCP serving, NAT (`IPMasquerade=both`),
+and IP forwarding. sdme does not manage IP addresses, iptables, or
+sysctl settings.
+
+**DHCP client.** A host-managed systemd template service
+(`sdme-pod-net@.service`) runs `dhcpcd` inside the pod's netns using
+`NetworkNamespacePath=`. The host's systemd manages the process
+lifecycle (start, stop, lease renewal). The template unit lives under
+`/run/systemd/system/` (volatile, recreated after reboot).
+
+**DNS.** Each container gets its own `/etc/resolv.conf` via nspawn's
+`--resolv-conf=auto`, independently of pod networking. Once the pod
+has a default route through the veth, DNS queries may work because of
+the netns network config with default route and nspawn's masquerade.
+
+**State.** The pod state file tracks the network configuration:
+`NET_MODE` (veth or zone), `NET_HOST_IFACE` (host-side interface
+name), and `NET_ZONE` (zone name, for zone mode). These keys persist
+across reboots so `ensure_runtime` can restore the networking.
+
+**Interrupt safety.** The attach sequence (create veth, move into
+netns, bring up interfaces, start DHCP service) completes in under a
+second. It runs as an atomic block without interrupt checks between
+commands. If any command fails mid-sequence, sdme cleans up by
+deleting the host-side veth and stopping the DHCP service. Detach is
+inherently interrupt-safe because each step (systemctl stop, ip link
+del, state file write) is independently atomic.
+
+**Concurrency.** Both attach and detach acquire an exclusive flock on
+the pod name, serializing all operations on the same pod. Zone bridge
+creation is a cross-pod concern: concurrent attach operations on
+different pods with the same zone handle `EEXIST` gracefully (the
+bridge already exists from the first operation).
+
+**Reboot recovery.** On reboot, the netns, veth, and bridge are all
+gone. When the first container referencing the pod starts,
+`ensure_runtime` recreates the netns and, if `NET_MODE` is set in the
+persistent state, also recreates the veth pair and restarts the DHCP
+service. The pod resumes with the same networking mode.
+
 ## 11. Bind Mounts and Environment Variables
 
 Custom bind mounts and environment variables are set at creation time

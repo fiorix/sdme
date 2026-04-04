@@ -77,11 +77,22 @@ The POD column shows which pod each container belongs to.
 
 ### Limitations of --pod
 
-Pod network namespaces only have a loopback interface. Containers
-in a pod have no external connectivity: they cannot reach the
-internet, download packages, or communicate with anything outside
-the pod. Install any software you need before joining the pod, or
-use pre-built OCI rootfs images.
+Pod network namespaces start with only a loopback interface. Without
+external networking, containers in a pod cannot reach the internet,
+download packages, or communicate with anything outside the pod.
+
+To add external connectivity, use `sdme pod net attach`:
+
+```sh
+sudo sdme pod net attach webpod veth
+```
+
+This creates a veth pair between the pod and the host. The host's
+systemd-networkd handles DHCP and NAT automatically. See the
+[external connectivity](#external-connectivity) section below.
+
+Without external networking, install any software you need before
+joining the pod, or use pre-built OCI rootfs images.
 
 `--pod` is also incompatible with `--userns`, `--hardened`, and
 `--strict`. The kernel blocks `setns(CLONE_NEWNET)` across user
@@ -155,3 +166,75 @@ Use case           General-purpose pods   Security-hardened apps
 Both flags can be used on different containers in the same pod.
 The pod's network namespace is shared regardless of which flag
 each container uses to join it.
+
+## External connectivity
+
+Pods start with loopback-only networking. Use `pod net attach` to
+give containers in a pod internet access.
+
+Requires: iproute2 (`ip`), dhcpcd.
+
+### Veth mode
+
+Creates a point-to-point veth between the pod and the host:
+
+```sh
+sudo sdme pod new mypod
+sudo sdme new mybox --pod mypod
+sudo sdme start mybox
+sudo sdme pod net attach mypod veth
+```
+
+Test connectivity from inside the container:
+
+```sh
+sudo sdme exec mybox -- ping -c1 8.8.8.8
+```
+
+Detach when no longer needed:
+
+```sh
+sudo sdme pod net detach mypod
+```
+
+### Zone mode
+
+Connects the pod to a named zone bridge. Multiple pods and regular
+containers on the same zone can reach each other directly:
+
+```sh
+sudo sdme pod new pod1
+sudo sdme pod new pod2
+sudo sdme pod net attach pod1 zone myzone
+sudo sdme pod net attach pod2 zone myzone
+```
+
+Containers in pod1 and pod2 can now communicate through the
+`vz-myzone` bridge, and both have internet access.
+
+### How it works
+
+The host's systemd-networkd handles everything: DHCP serving, NAT
+(IPMasquerade), and IP forwarding. sdme creates the veth pair with
+interface names that match nspawn conventions (`ve-*`, `vb-*`,
+`vz-*`), so networkd's default configs apply automatically.
+
+A host-managed systemd service (`sdme-pod-net@{pod}.service`) runs
+dhcpcd inside the pod's netns using `NetworkNamespacePath=`. The
+host's systemd manages the DHCP client lifecycle.
+
+Attach and detach are live operations: running containers see the
+interface appear or disappear immediately. Both `--pod` and
+`--oci-pod` containers work because they share the same netns.
+
+After a reboot, networking is automatically restored when the first
+container referencing the pod starts.
+
+### Listing pod networking
+
+```sh
+sudo sdme pod ls
+```
+
+The NET column shows the networking mode (veth, zone) or is empty
+for loopback-only pods.
