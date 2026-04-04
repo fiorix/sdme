@@ -29,6 +29,8 @@ sudo sdme pod ls
 
 ```sh
 sudo sdme pod rm mypod
+sudo sdme pod rm -a       # remove all pods
+sudo sdme pod rm -a -f    # force: also stop and remove attached containers
 ```
 
 ## Example: nginx and curl via --pod
@@ -156,7 +158,7 @@ Feature            --pod                  --oci-pod
 -----------------  ---------------------  -------------------------
 Scope              Entire container       OCI app service only
 Container types    Any                    OCI app rootfs required
-Userns/hardened    Incompatible           Compatible
+Userns/hardened    Compatible             Compatible
 Requires           (nothing extra)        --private-network or
                                           --hardened/--strict
 Use case           General-purpose pods   Security-hardened apps
@@ -221,6 +223,11 @@ interface names that match nspawn conventions (`ve-*`, `vb-*`,
 A host-managed systemd service (`sdme-pod-net@{pod}.service`) runs
 dhcpcd inside the pod's netns using `NetworkNamespacePath=`. The
 host's systemd manages the DHCP client lifecycle.
+
+DNS servers from the DHCP lease are extracted and written to each
+container's `/etc/resolv.conf` (for `--pod`) or each OCI app's
+chroot resolv.conf (for `--oci-pod`). Running containers are
+updated immediately on attach and detach.
 
 Attach and detach are live operations: running containers see the
 interface appear or disappear immediately. Both `--pod` and

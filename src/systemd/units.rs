@@ -288,6 +288,8 @@ pub fn write_nspawn_dropin(datadir: &Path, name: &str, verbose: bool) -> Result<
 
     // OCI pod: bind-mount the pod's netns into the container so the
     // sdme-oci-{name}.service can use NetworkNamespacePath= to enter it.
+    // Also write DNS resolv.conf into each OCI app's chroot if the pod
+    // has external networking (same mechanism as --pod DNS).
     let oci_pod = state
         .get("OCI_POD")
         .filter(|s| !s.is_empty())
@@ -298,6 +300,19 @@ pub fn write_nspawn_dropin(datadir: &Path, name: &str, verbose: bool) -> Result<
         nspawn_args.push(format!("--bind-ro={netns_path}:/run/sdme/oci-pod-netns"));
         if verbose {
             eprintln!("oci-pod '{pod_name}': bind-mounting netns {netns_path} into container");
+        }
+        // Write DNS if the pod has it and this isn't already handled by --pod above.
+        if pod.is_none() && !state.is_yes("KUBE") {
+            let pod_state_path = datadir.join("pods").join(pod_name).join("state");
+            if let Ok(ps) = crate::State::read_from(&pod_state_path) {
+                if let Some(dns) = ps.get("NET_DNS") {
+                    let search = ps.get("NET_SEARCH").unwrap_or("");
+                    let content = crate::pod::generate_resolv_conf(dns, search);
+                    crate::pod::write_container_resolv_conf(
+                        datadir, name, "upper", &content, verbose,
+                    )?;
+                }
+            }
         }
     }
 
