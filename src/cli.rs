@@ -187,6 +187,34 @@ pub(crate) fn start_and_await_boot(
     Ok(())
 }
 
+/// Start a newly created container and remove it if the start fails.
+///
+/// Called by `create --started` and `new`. On boot failure the container
+/// is removed because the caller asked for a running container.
+pub(crate) fn create_and_start(
+    datadir: &Path,
+    name: &str,
+    tasks_max: u32,
+    boot_timeout: std::time::Duration,
+    stop_timeout: u64,
+    verbose: bool,
+) -> Result<()> {
+    eprintln!("starting '{name}'");
+    if let Err(e) = start_and_await_boot(
+        datadir,
+        name,
+        tasks_max,
+        boot_timeout,
+        stop_timeout,
+        verbose,
+    ) {
+        eprintln!("start failed, removing '{name}'");
+        let _ = containers::remove(datadir, name, verbose);
+        return Err(e);
+    }
+    Ok(())
+}
+
 /// Build a `ResourceLimits` from CLI flags (for `create` / `new`).
 ///
 /// `None` means the flag was not provided; the limit is left unset.

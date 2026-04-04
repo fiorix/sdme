@@ -48,6 +48,7 @@ COMMON COMMANDS:
     sdme exec <name> CMD    Run a command in a running container
     sdme cp SRC DST         Copy files between host and containers
     sdme stop <name>        Stop a container
+    sdme restart <name>     Restart a running container
     sdme rm <name>          Remove a container
     sdme logs <name>        View container logs
     sdme fs ls              List imported root filesystems
@@ -82,7 +83,11 @@ NOTES:
 
     Ctrl+C during 'new' or 'start' stops the container but preserves it
     on disk for debugging. Batch operations (rm -a, start --all, stop)
-    abort immediately; remaining items are not processed.";
+    abort immediately; remaining items are not processed.
+
+    Container names support prefix matching: 'sdme stop my' will match
+    'mybox' if it is the only container whose name starts with 'my'. An
+    exact match always takes priority. Ambiguous prefixes produce an error.";
 
 const NEW_HELP: &str = "\
 Create a new container, start it, and open a shell. Accepts the same flags as
@@ -143,7 +148,8 @@ OCI AUTO-BEHAVIORS:
     -e/--env sets env vars for the container's systemd init (via --setenv).";
 
 const CREATE_HELP: &str = "\
-Create a new container without starting it. Use 'sdme start' to start it later.
+Create a new container without starting it. Use 'sdme start' to start it later,
+or pass --started to start immediately.
 
 EXAMPLES:
     # Create from imported rootfs
@@ -151,6 +157,12 @@ EXAMPLES:
 
     # Create with auto-start on boot
     sdme create mybox -r ubuntu --enable
+
+    # Create and start immediately (removes on start failure)
+    sdme create mybox -r ubuntu --started
+
+    # Create and start with custom boot timeout
+    sdme create mybox -r ubuntu --started -t 120
 
     # Join a pod network namespace
     sdme pod new mypod
@@ -201,6 +213,16 @@ EXAMPLES:
     sdme stop mybox --term
     sdme stop mybox --kill
     sdme stop --all";
+
+const RESTART_HELP: &str = "\
+Stop and then start one or more containers. Combines the flags from
+'stop' (--term, --kill) and 'start' (--timeout).
+
+EXAMPLES:
+    sdme restart mybox
+    sdme restart mybox --term
+    sdme restart --all
+    sdme restart mybox -t 120";
 
 const JOIN_HELP: &str = "\
 Open an interactive shell inside a running container via machinectl.
@@ -897,6 +919,14 @@ enum Command {
         /// Systemd services to mask in the overlayfs upper layer (comma-separated, overrides config default)
         #[arg(long, value_delimiter = ',')]
         masked_services: Option<Vec<String>>,
+
+        /// Start the container after creating it (remove on start failure)
+        #[arg(long)]
+        started: bool,
+
+        /// Boot timeout in seconds (overrides config, default: 60; requires --started)
+        #[arg(short, long, requires = "started")]
+        timeout: Option<u64>,
     },
 
     /// Copy files between host, containers, and root filesystems
@@ -1120,6 +1150,30 @@ enum Command {
         /// Start all stopped containers
         #[arg(short, long, conflicts_with = "names")]
         all: bool,
+
+        /// Boot timeout in seconds (overrides config, default: 60)
+        #[arg(short, long)]
+        timeout: Option<u64>,
+    },
+
+    /// Restart one or more containers (stop then start)
+    #[command(after_long_help = RESTART_HELP)]
+    Restart {
+        /// Container names
+        #[arg(required_unless_present = "all")]
+        names: Vec<String>,
+
+        /// Restart all running containers
+        #[arg(short, long, conflicts_with = "names")]
+        all: bool,
+
+        /// Terminate (SIGTERM to nspawn leader, 30s timeout)
+        #[arg(long, conflicts_with = "kill")]
+        term: bool,
+
+        /// Force-kill all processes (SIGKILL, 15s timeout)
+        #[arg(long, conflicts_with = "term")]
+        kill: bool,
 
         /// Boot timeout in seconds (overrides config, default: 60)
         #[arg(short, long)]
@@ -1837,6 +1891,8 @@ fn run() -> Result<()> {
             oci_env,
             enable,
             masked_services,
+            started,
+            timeout,
         } => {
             system_check::check_systemd_version(255)?;
             let limits = parse_limits(memory, cpus, cpu_weight)?;
@@ -1911,6 +1967,18 @@ fn run() -> Result<()> {
                     verbose: cli.verbose,
                 })?;
                 eprintln!("enabled '{name}' for auto-start on boot");
+            }
+            if started {
+                let boot_timeout =
+                    std::time::Duration::from_secs(timeout.unwrap_or(cfg.boot_timeout));
+                create_and_start(
+                    &cfg.datadir,
+                    &name,
+                    cfg.tasks_max,
+                    boot_timeout,
+                    cfg.stop_timeout_terminate,
+                    cli.verbose,
+                )?;
             }
             println!("{name}");
         }
@@ -2204,9 +2272,8 @@ fn run() -> Result<()> {
                 eprintln!("note: --no-new-privileges is active; sudo/su will not work inside");
             }
 
-            eprintln!("starting '{name}'");
             let boot_timeout = std::time::Duration::from_secs(timeout.unwrap_or(cfg.boot_timeout));
-            start_and_await_boot(
+            create_and_start(
                 &cfg.datadir,
                 &name,
                 cfg.tasks_max,
@@ -2348,6 +2415,77 @@ fn run() -> Result<()> {
                 containers::ensure_exists(datadir, name)?;
                 containers::stop(name, mode, timeout_secs, verbose)
             })?;
+        }
+        Command::Restart {
+            names,
+            all,
+            term,
+            kill,
+            timeout,
+        } => {
+            system_check::check_systemd_version(255)?;
+            let (mode, stop_timeout_secs) = if kill {
+                (containers::StopMode::Kill, cfg.stop_timeout_kill)
+            } else if term {
+                (containers::StopMode::Terminate, cfg.stop_timeout_terminate)
+            } else {
+                (containers::StopMode::Graceful, cfg.stop_timeout_graceful)
+            };
+            let targets: Vec<String> = if all {
+                containers::list(&cfg.datadir)?
+                    .into_iter()
+                    .filter(|e| e.status != "stopped")
+                    .map(|e| e.name)
+                    .collect()
+            } else {
+                names
+            };
+            if targets.is_empty() {
+                eprintln!("no running containers to restart");
+                return Ok(());
+            }
+            let boot_timeout = std::time::Duration::from_secs(timeout.unwrap_or(cfg.boot_timeout));
+            let datadir = &cfg.datadir;
+            let verbose = cli.verbose;
+            let mut failed = false;
+            for input in &targets {
+                check_interrupted()?;
+                let name = match containers::resolve_name(datadir, input) {
+                    Ok(n) => n,
+                    Err(e) => {
+                        eprintln!("error: {input}: {e}");
+                        failed = true;
+                        continue;
+                    }
+                };
+                containers::ensure_exists(datadir, &name)?;
+                eprintln!("restarting '{name}'");
+                if let Err(e) = containers::stop(&name, mode, stop_timeout_secs, verbose) {
+                    eprintln!("error: {name}: stop failed: {e}");
+                    failed = true;
+                    continue;
+                }
+                if let Err(e) = start_and_await_boot(
+                    datadir,
+                    &name,
+                    cfg.tasks_max,
+                    boot_timeout,
+                    cfg.stop_timeout_terminate,
+                    verbose,
+                ) {
+                    eprintln!("error: {name}: start failed: {e}");
+                    failed = true;
+                } else {
+                    println!("{name}");
+                }
+                if sdme::INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+            }
+            check_interrupted()?;
+            if failed {
+                bail!("some containers could not be restarted");
+            }
         }
         Command::Pod(cmd) => match cmd {
             PodCommand::New { name, attach, zone } => {
