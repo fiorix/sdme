@@ -49,8 +49,7 @@ sudo sdme pod new webpod
 Start an nginx server in the pod:
 
 ```sh
-sudo sdme create http-server -r nginx --pod webpod
-sudo sdme start http-server
+sudo sdme create http-server -r nginx --pod webpod --started
 ```
 
 Start a client in the same pod and drop into a shell. The client
@@ -122,8 +121,7 @@ sudo sdme fs import redis docker.io/redis --base-fs ubuntu
 Start redis in the pod with hardened security:
 
 ```sh
-sudo sdme create redis-server -r redis --oci-pod dbpod --hardened
-sudo sdme start redis-server
+sudo sdme create redis-server -r redis --oci-pod dbpod --hardened --started
 ```
 
 Verify redis is running:
@@ -137,8 +135,7 @@ rootfs, so `redis-cli` is available. Both containers use
 `--oci-pod` with `--hardened`:
 
 ```sh
-sudo sdme create redis-client -r redis --oci-pod dbpod --hardened
-sudo sdme start redis-client
+sudo sdme create redis-client -r redis --oci-pod dbpod --hardened --started
 ```
 
 Test the connection from the client:

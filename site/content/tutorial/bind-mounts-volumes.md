@@ -69,8 +69,7 @@ Following the [OCI tutorial](/tutorial/oci-apps/), after importing nginx with
 can bind-mount a host directory to the nginx HTML root:
 
 ```sh
-sudo sdme create mywebserver -r nginx -b /tmp/mysite:/oci/apps/nginx/root/usr/share/nginx/html
-sudo sdme start mywebserver
+sudo sdme create mywebserver -r nginx -b /tmp/mysite:/oci/apps/nginx/root/usr/share/nginx/html --started
 sudo sdme ps
 ```
 
@@ -82,9 +81,10 @@ curl http://localhost
 
 The same content from `/tmp/mysite` is served by nginx.
 
-Here we use `create` and `start` separately to show the two-step
-process. You can also use `sdme new` which combines both and drops
-you into a shell.
+`--started` tells sdme to start the container immediately after
+creating it. Without it, you would need a separate `sdme start`
+command. `sdme new` combines create, start, and drops you into
+a shell.
 
 ## OCI auto-volumes
 

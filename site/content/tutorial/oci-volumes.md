@@ -36,8 +36,7 @@ PostgreSQL requires a password to be set via the `POSTGRES_PASSWORD`
 environment variable. Use `--oci-env` to pass it:
 
 ```sh
-sudo sdme create mydb -r postgres --network-zone=services --hardened --oci-env POSTGRES_PASSWORD=secret
-sudo sdme start mydb
+sudo sdme create mydb -r postgres --network-zone=services --hardened --oci-env POSTGRES_PASSWORD=secret --started
 ```
 
 sdme automatically creates a host directory at
@@ -96,8 +95,7 @@ sudo ls -la /var/lib/sdme/volumes/mydb/
 Create a new container from the same rootfs:
 
 ```sh
-sudo sdme create mydb -r postgres --network-zone=services --hardened --oci-env POSTGRES_PASSWORD=secret
-sudo sdme start mydb
+sudo sdme create mydb -r postgres --network-zone=services --hardened --oci-env POSTGRES_PASSWORD=secret --started
 ```
 
 Verify the data survived:

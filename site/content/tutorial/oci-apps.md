@@ -86,8 +86,7 @@ We recommend using `--network-zone` and `--hardened` as described
 in the [services tutorial](@/tutorial/services.md):
 
 ```sh
-sudo sdme create mycontainer -r nginx --network-zone=services --hardened
-sudo sdme start mycontainer
+sudo sdme create mycontainer -r nginx --network-zone=services --hardened --started
 ```
 
 This gives the container its own network with DNS and user namespace

@@ -257,12 +257,12 @@ machines on the system.
 
 ```
   create --> start --> join/exec --> stop --> rm
-    |           |                     |       |
-    |     install/update         graceful: KillMachine SIGRTMIN+4
-    |     template unit          --term:   TerminateMachine
-    |     StartUnit (D-Bus)      --kill:   KillMachine SIGKILL
-    |     wait for boot
-    |
+    |           |         ^           |       |
+    |     install/update  |      graceful: KillMachine SIGRTMIN+4
+    |     template unit   |      --term:   TerminateMachine
+    |     StartUnit       |      --kill:   KillMachine SIGKILL
+    |     wait for boot   |
+    |                     +--- restart (stop then start)
     +-- mkdir upper/ work/ merged/
     +-- mask services (conditional; resolved masked for non-zone, unmasked for zone)
     +-- write /etc/resolv.conf (placeholder for non-zone; resolved stub symlink for zone)
@@ -277,7 +277,8 @@ machines on the system.
 applies opaque directories, validates the umask (a restrictive umask
 would make overlayfs files inaccessible to non-root services like
 dbus-daemon), and writes the state file. It does not start the
-container.
+container. Pass `--started` to create and start in one step (the
+container is removed on start failure, same as `sdme new`).
 
 **start** installs (or updates) a systemd template unit and
 per-container drop-in, then calls `StartUnit` over D-Bus. After the
@@ -301,6 +302,10 @@ container leader via `KillMachine` (90s timeout), `--term` calls
 `TerminateMachine` which sends SIGTERM to the nspawn process (30s
 timeout), and `--kill` sends SIGKILL to all processes via `KillMachine`
 (15s timeout). Multiple containers can be stopped in one invocation.
+
+**restart** stops and then starts a container. It combines flags from
+stop (`--term`, `--kill`) and start (`--timeout`). Supports `--all`
+to restart every running container.
 
 **rm** stops the container if running, removes the state file, and
 deletes the container's directories via `safe_remove_dir()`. This
