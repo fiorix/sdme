@@ -28,6 +28,32 @@ sudo sdme new --help
 The help text is designed to be useful both for humans on a terminal
 and for AI assistants that need to understand available options.
 
+## Starting, stopping, and restarting
+
+Stop a running container:
+
+```sh
+sudo sdme stop mycontainer
+```
+
+Start a stopped container:
+
+```sh
+sudo sdme start mycontainer
+```
+
+Restart (stop then start) in one command:
+
+```sh
+sudo sdme restart mycontainer
+```
+
+Restart all running containers:
+
+```sh
+sudo sdme restart --all
+```
+
 ## Listing containers
 
 ```sh
@@ -205,32 +231,6 @@ sudo sdme logs mycontainer
 {% callout(type="tip", title="Tip") %}
 Use `--hardened` and `--strict` with imported rootfs (e.g. `-r ubuntu`) rather than host rootfs clones. Imported rootfs are clean and don't carry host-specific xattrs that can interfere with user namespace isolation.
 {% end %}
-
-## Starting, stopping, and restarting
-
-Stop a running container:
-
-```sh
-sudo sdme stop mycontainer
-```
-
-Start a stopped container:
-
-```sh
-sudo sdme start mycontainer
-```
-
-Restart (stop then start) in one command:
-
-```sh
-sudo sdme restart mycontainer
-```
-
-Restart all running containers:
-
-```sh
-sudo sdme restart --all
-```
 
 ## Pruning unused resources
 

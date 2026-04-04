@@ -239,10 +239,11 @@ container referencing the pod starts.
 sudo sdme pod ls
 ```
 
-The NET column shows the networking mode and IP addresses, e.g.
-`veth (10.0.0.2)` or `zone (10.0.0.3)`, or is empty for
-loopback-only pods. Use `--json` or `--json-pretty` for structured
-output including container membership.
+The table shows each pod's name, whether its netns is active,
+networking mode (NET), zone name, IP addresses, and creation time.
+Pods without external networking show `-` in the NET and ADDRESSES
+columns. Use `--json` or `--json-pretty` for structured output
+including DNS servers and container membership.
 
 ### Zone interop with regular containers
 
