@@ -1753,7 +1753,7 @@ File                         Purpose
 ---------------------------  --------------------------------------
 src/elf.rs                   Shared Arch enum + ELF builder
 src/isolate/mod.rs           Public API: generate(Arch)
-src/isolate/x86_64.rs       x86_64 emitter (PID/IPC ns + privs)
+src/isolate/x86_64.rs        x86_64 emitter (PID/IPC ns + privs)
 src/isolate/aarch64.rs       AArch64 emitter (PID/IPC ns + privs)
 src/devfd_shim/mod.rs        Public API: generate(Arch)
 src/devfd_shim/elf.rs        ET_DYN ELF builder (SysV hash)

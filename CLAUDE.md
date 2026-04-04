@@ -23,7 +23,7 @@ The probe binary (`sdme-kube-probe`) is built and embedded by `build.rs`. Overri
 
 ### E2E Tests
 
-Staged parallel test suite in `test/scripts/`. Run with `sudo ./test/scripts/run-parallel.sh`. Covers core operations, distro boot/OCI, networking, security, pods, and Kubernetes L1-L6. Tested distros: Debian, Ubuntu, Fedora, CentOS, AlmaLinux, Arch Linux, openSUSE, NixOS. E2E tests must pass before version bumps. When adding new functionality, add E2E tests and verify they pass across supported distros.
+Staged parallel test suite in `test/scripts/`. Run with `sudo ./test/scripts/run-parallel.sh`. Covers core operations, distro boot/OCI, networking, security, pods, and Kubernetes L1-L6. Tested distros: Debian, Ubuntu, Fedora, CentOS, AlmaLinux, Arch Linux, openSUSE, NixOS. E2E tests must pass before version bumps. When adding new functionality, add E2E tests and verify they pass across supported distros. Record test results in [`test/README.md`](test/README.md).
 
 ### Release
 
@@ -72,15 +72,12 @@ Static musl binaries (x86_64 + aarch64) built with `cargo-zigbuild`: `./dist/bui
 
 ## Contributor Patterns
 
-These rules apply when adding or modifying code:
+These rules apply when adding or modifying code, on top of the Project Principles above:
 
 - **CLI help**: update the relevant `*_HELP` constant in `src/main.rs` so `--help` stays in sync. This is the only CLI documentation.
-- **Interrupt handling**: follow the three-step pattern in `for_each_container` (`src/cli.rs`). See the Reliability principle above.
-- **Resource locking**: shared flock for reads, exclusive for mutations. Lock ordering: fs, containers, pods, secrets, configmaps. See `src/lock.rs`.
-- **Input sanitization**: validate paths (no `..`, absolute only), OCI digests for safe characters, cap download sizes. See `sanitize_dest_path()` in `src/copy.rs` and `validate_name()` in `src/lib.rs`.
 - **cp/build COPY sync**: `sdme cp` and `sdme fs build` COPY share the same copy engine and path validation. When modifying one, keep both in sync.
 - **Doc comments**: all public items need `///` doc comments. New modules need a `//!` header describing purpose and a row in the `src/lib.rs` module table.
-- **No host validation**: never validate rootfs data against host system state. The rootfs is a foreign filesystem; do not check if its users, groups, or paths exist on the host.
+- **Tutorial sync**: when changing or creating tutorials, update `verify-tutorial.sh` accordingly.
 
 ## Documentation
 
