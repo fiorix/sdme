@@ -484,6 +484,8 @@ BUILD CONFIG FORMAT:
         COPY <src> <dst>    Copy a file or directory into the rootfs.
 
     Lines starting with # and blank lines are ignored.
+    A trailing backslash (\\) continues a directive on the next line.
+    Leading whitespace on continuation lines is trimmed.
     RUN commands execute via /bin/sh -c and support pipes, &&, etc.
     COPY writes through the merged overlayfs mount while the container
     stays running, so copied files are immediately visible inside.
@@ -513,8 +515,10 @@ EXAMPLE:
     # Create a build config
     cat << EOF > examplefs.conf
     FROM ubuntu
-    RUN apt-get update
-    RUN apt-get install -y systemd-container
+    RUN apt-get update && \\
+        apt-get install -y \\
+        systemd-container \\
+        curl
     COPY ./target/release/sdme /usr/local/bin/sdme
     EOF
 

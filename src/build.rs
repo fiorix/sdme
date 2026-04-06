@@ -115,7 +115,34 @@ fn parse_build_config(path: &Path) -> Result<BuildConfig> {
     let mut rootfs: Option<String> = None;
     let mut ops = Vec::new();
 
-    for (lineno, raw) in content.lines().enumerate() {
+    // Join backslash-continued lines into logical lines, tracking
+    // the starting line number (1-based) of each logical line.
+    let mut logical_lines: Vec<(usize, String)> = Vec::new();
+    let mut current: Option<(usize, String)> = None;
+
+    for (i, raw) in content.lines().enumerate() {
+        let trimmed = raw.trim_end();
+        let (text, continues) = match trimmed.strip_suffix('\\') {
+            Some(before) => (before.trim_end(), true),
+            None => (trimmed, false),
+        };
+        if let Some((_, ref mut buf)) = current {
+            buf.push(' ');
+            buf.push_str(text.trim_start());
+            if !continues {
+                logical_lines.push(current.take().unwrap());
+            }
+        } else if continues {
+            current = Some((i + 1, text.to_string()));
+        } else {
+            logical_lines.push((i + 1, text.to_string()));
+        }
+    }
+    if let Some(pending) = current {
+        logical_lines.push(pending);
+    }
+
+    for &(lineno, ref raw) in &logical_lines {
         let line = raw.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
@@ -129,27 +156,15 @@ fn parse_build_config(path: &Path) -> Result<BuildConfig> {
         match directive {
             "FROM" => {
                 if rootfs.is_some() {
-                    bail!(
-                        "{}:{}: duplicate FROM directive",
-                        path.display(),
-                        lineno + 1
-                    );
+                    bail!("{}:{}: duplicate FROM directive", path.display(), lineno);
                 }
                 if rest.is_empty() {
-                    bail!(
-                        "{}:{}: FROM requires a rootfs name",
-                        path.display(),
-                        lineno + 1
-                    );
+                    bail!("{}:{}: FROM requires a rootfs name", path.display(), lineno);
                 }
                 // Support both `FROM ubuntu` and `FROM fs:ubuntu`.
                 let rootfs_name = rest.strip_prefix("fs:").unwrap_or(rest);
                 validate_name(rootfs_name).with_context(|| {
-                    format!(
-                        "{}:{}: invalid FROM rootfs name",
-                        path.display(),
-                        lineno + 1
-                    )
+                    format!("{}:{}: invalid FROM rootfs name", path.display(), lineno)
                 })?;
                 rootfs = Some(rootfs_name.to_string());
             }
@@ -158,14 +173,14 @@ fn parse_build_config(path: &Path) -> Result<BuildConfig> {
                     bail!(
                         "{}:{}: FROM must be the first directive",
                         path.display(),
-                        lineno + 1
+                        lineno
                     );
                 }
                 let (src, dst) = rest.split_once(char::is_whitespace).ok_or_else(|| {
                     anyhow::anyhow!(
                         "{}:{}: COPY requires two arguments: COPY <src> <dst>",
                         path.display(),
-                        lineno + 1
+                        lineno
                     )
                 })?;
                 let dst = dst.trim();
@@ -173,14 +188,14 @@ fn parse_build_config(path: &Path) -> Result<BuildConfig> {
                     bail!(
                         "{}:{}: COPY requires two arguments: COPY <src> <dst>",
                         path.display(),
-                        lineno + 1
+                        lineno
                     );
                 }
-                let copy_src = parse_copy_source(src, path, lineno + 1)?;
+                let copy_src = parse_copy_source(src, path, lineno)?;
                 ops.push(BuildOp::Copy {
                     src: copy_src,
                     dst: PathBuf::from(dst),
-                    lineno: lineno + 1,
+                    lineno,
                 });
             }
             "RUN" => {
@@ -188,22 +203,22 @@ fn parse_build_config(path: &Path) -> Result<BuildConfig> {
                     bail!(
                         "{}:{}: FROM must be the first directive",
                         path.display(),
-                        lineno + 1
+                        lineno
                     );
                 }
                 if rest.is_empty() {
-                    bail!("{}:{}: RUN requires a command", path.display(), lineno + 1);
+                    bail!("{}:{}: RUN requires a command", path.display(), lineno);
                 }
                 ops.push(BuildOp::Run {
                     command: rest.to_string(),
-                    lineno: lineno + 1,
+                    lineno,
                 });
             }
             _ => {
                 bail!(
                     "{}:{}: unknown directive: {directive}",
                     path.display(),
-                    lineno + 1
+                    lineno
                 );
             }
         }
@@ -959,6 +974,80 @@ mod tests {
         match &config.ops[0] {
             BuildOp::Run { command, .. } => {
                 assert_eq!(command, "echo hello | grep hello && echo done");
+            }
+            _ => panic!("expected Run"),
+        }
+    }
+
+    // --- Backslash continuation tests ---
+
+    #[test]
+    fn test_parse_run_continuation() {
+        let tmp = TempDir::new("run-continuation");
+        let path = write_config(
+            tmp.path(),
+            "FROM ubuntu\nRUN apt-get update && \\\n    apt-get install -y curl\n",
+        );
+        let config = parse_build_config(&path).unwrap();
+        assert_eq!(config.ops.len(), 1);
+        match &config.ops[0] {
+            BuildOp::Run { command, .. } => {
+                assert_eq!(command, "apt-get update && apt-get install -y curl");
+            }
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn test_parse_run_multi_continuation() {
+        let tmp = TempDir::new("run-multi-cont");
+        let path = write_config(
+            tmp.path(),
+            "FROM ubuntu\nRUN apt-get install -y \\\n    curl \\\n    wget \\\n    git\n",
+        );
+        let config = parse_build_config(&path).unwrap();
+        assert_eq!(config.ops.len(), 1);
+        match &config.ops[0] {
+            BuildOp::Run { command, .. } => {
+                assert_eq!(command, "apt-get install -y curl wget git");
+            }
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn test_parse_run_continuation_lineno() {
+        let tmp = TempDir::new("run-cont-lineno");
+        let path = write_config(
+            tmp.path(),
+            "FROM ubuntu\n# comment\nRUN echo \\\n    hello\nCOPY ./a /b\n",
+        );
+        let config = parse_build_config(&path).unwrap();
+        assert_eq!(config.ops.len(), 2);
+        match &config.ops[0] {
+            BuildOp::Run { lineno, .. } => {
+                // RUN starts on line 3 (after FROM on 1 and comment on 2).
+                assert_eq!(*lineno, 3);
+            }
+            _ => panic!("expected Run"),
+        }
+        match &config.ops[1] {
+            BuildOp::Copy { lineno, .. } => {
+                assert_eq!(*lineno, 5);
+            }
+            _ => panic!("expected Copy"),
+        }
+    }
+
+    #[test]
+    fn test_parse_trailing_backslash_last_line() {
+        let tmp = TempDir::new("trailing-backslash");
+        let path = write_config(tmp.path(), "FROM ubuntu\nRUN echo hello\\");
+        let config = parse_build_config(&path).unwrap();
+        assert_eq!(config.ops.len(), 1);
+        match &config.ops[0] {
+            BuildOp::Run { command, .. } => {
+                assert_eq!(command, "echo hello");
             }
             _ => panic!("expected Run"),
         }
