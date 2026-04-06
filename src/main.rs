@@ -148,9 +148,10 @@ OCI AUTO-BEHAVIORS:
     -e/--env sets env vars for the container's systemd init (via --setenv).
 
 DEBUGGING:
-    --systemd-log-level=debug sets SYSTEMD_LOG_LEVEL for the nspawn host
-    process (not the container). Useful for diagnosing boot issues. Use
-    -e SYSTEMD_LOG_LEVEL=debug for the container's internal systemd.";
+    --systemd-log-level sets SYSTEMD_LOG_LEVEL for the nspawn host
+    process (not the container). Useful for diagnosing boot issues.
+    Valid values: emerg, alert, crit, err, warning, notice, info, debug.
+    Use -e SYSTEMD_LOG_LEVEL=debug for the container's internal systemd.";
 
 const CREATE_HELP: &str = "\
 Create a new container without starting it. Use 'sdme start' to start it later,
@@ -1902,6 +1903,9 @@ fn run() -> Result<()> {
             system_check::check_systemd_version(255)?;
             let limits = parse_limits(memory, cpus, cpu_weight)?;
             let systemd_log_level = security.systemd_log_level.clone();
+            if let Some(ref level) = systemd_log_level {
+                validate_systemd_log_level(level)?;
+            }
             let (mut sec, hardened) = parse_security(security, &cfg)?;
             let mut network = parse_network(network)?;
             if hardened && !network.private_network {
@@ -1967,28 +1971,15 @@ fn run() -> Result<()> {
             };
             let name = containers::create(&cfg.datadir, &opts, cli.verbose)?;
 
-            // Store OCI_APP and SYSTEMD_LOG_LEVEL in state.
-            {
-                let state_path = cfg.datadir.join("state").join(&name);
-                let mut state = sdme::State::read_from(&state_path)?;
-                let mut changed = false;
-                if let Some(ref app_name) = oci_app_name {
-                    state.set("OCI_APP", app_name);
-                    changed = true;
-                }
-                if let Some(ref level) = systemd_log_level {
-                    state.set("SYSTEMD_LOG_LEVEL", level);
-                    changed = true;
-                }
-                if changed {
-                    state.write_to(&state_path)?;
-                }
-            }
-
-            // Probe overlayfs idmap and pre-chown if needed.
-            if userns_enabled {
-                probe_and_prechown(&cfg.datadir, &name, &lowerdir, cli.verbose)?;
-            }
+            post_create_setup(
+                &cfg.datadir,
+                &name,
+                &lowerdir,
+                oci_app_name.as_deref(),
+                systemd_log_level.as_deref(),
+                userns_enabled,
+                cli.verbose,
+            )?;
 
             eprintln!("creating '{name}'");
             if enable {
@@ -2225,6 +2216,9 @@ fn run() -> Result<()> {
             system_check::check_systemd_version(255)?;
             let limits = parse_limits(memory, cpus, cpu_weight)?;
             let systemd_log_level = security.systemd_log_level.clone();
+            if let Some(ref level) = systemd_log_level {
+                validate_systemd_log_level(level)?;
+            }
             let (mut sec, hardened) = parse_security(security, &cfg)?;
             let mut network = parse_network(network)?;
             if hardened && !network.private_network {
@@ -2291,28 +2285,15 @@ fn run() -> Result<()> {
             let is_host_rootfs = opts.rootfs.is_none();
             let name = containers::create(&cfg.datadir, &opts, cli.verbose)?;
 
-            // Store OCI_APP and SYSTEMD_LOG_LEVEL in state.
-            {
-                let state_path = cfg.datadir.join("state").join(&name);
-                let mut state = sdme::State::read_from(&state_path)?;
-                let mut changed = false;
-                if let Some(ref app_name) = oci_app_name {
-                    state.set("OCI_APP", app_name);
-                    changed = true;
-                }
-                if let Some(ref level) = systemd_log_level {
-                    state.set("SYSTEMD_LOG_LEVEL", level);
-                    changed = true;
-                }
-                if changed {
-                    state.write_to(&state_path)?;
-                }
-            }
-
-            // Probe overlayfs idmap and pre-chown if needed.
-            if userns_enabled {
-                probe_and_prechown(&cfg.datadir, &name, &lowerdir, cli.verbose)?;
-            }
+            post_create_setup(
+                &cfg.datadir,
+                &name,
+                &lowerdir,
+                oci_app_name.as_deref(),
+                systemd_log_level.as_deref(),
+                userns_enabled,
+                cli.verbose,
+            )?;
 
             eprintln!("creating '{name}'");
 

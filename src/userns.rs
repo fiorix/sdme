@@ -17,7 +17,7 @@
 use std::collections::HashSet;
 use std::fs;
 use std::os::unix::fs::MetadataExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{bail, Context, Result};
@@ -68,31 +68,25 @@ pub fn allocate_uid_shift(datadir: &Path, name: &str) -> Result<u64> {
     let hash = siphash24(name.as_bytes(), &SIPHASH_KEY);
     let mut candidate = hash_to_shift(hash);
 
-    for attempt in 0..MAX_RETRIES {
-        if candidate >= UID_BASE_MIN
-            && candidate <= UID_BASE_MAX
+    for _ in 0..MAX_RETRIES {
+        if (UID_BASE_MIN..=UID_BASE_MAX).contains(&candidate)
             && candidate & 0xFFFF == 0
             && !used.contains(&candidate)
         {
             return Ok(candidate);
         }
 
-        // On first retry, the hash-based candidate failed. Use a simple
-        // linear probe to find the next free slot (nspawn uses random_bytes
-        // for retries, but linear is deterministic and avoids needing a CSPRNG).
+        // Linear probe for the next free slot (nspawn uses random_bytes
+        // for retries, but linear is deterministic and avoids a CSPRNG).
         candidate =
             UID_BASE_MIN + ((candidate - UID_BASE_MIN + UID_RANGE) % (UID_BASE_MAX - UID_BASE_MIN));
         candidate &= !0xFFFF;
-
-        if attempt == MAX_RETRIES - 1 {
-            bail!(
-                "failed to allocate UID shift after {MAX_RETRIES} attempts \
-                 (all slots in use)"
-            );
-        }
     }
 
-    unreachable!()
+    bail!(
+        "failed to allocate UID shift after {MAX_RETRIES} attempts \
+         (all slots in use)"
+    )
 }
 
 /// Check whether a stored UID shift conflicts with any currently running machine.
@@ -113,13 +107,7 @@ pub fn check_shift_conflict(name: &str, shift: u64) -> Option<String> {
 /// shifts all UIDs/GIDs in range 0..65535 by `shift`. This triggers copy-ups
 /// to the upper layer (intended). After unmounting, the upper layer retains
 /// the shifted ownership so nspawn's boot-time chown is a no-op.
-pub fn prechown_overlayfs(
-    datadir: &Path,
-    name: &str,
-    lowerdir: &str,
-    shift: u64,
-    verbose: bool,
-) -> Result<()> {
+pub fn prechown_overlayfs(datadir: &Path, name: &str, lowerdir: &str, shift: u64) -> Result<()> {
     let container_dir = datadir.join("containers").join(name);
     let upper = container_dir.join("upper");
     let work = container_dir.join("work");
@@ -133,15 +121,20 @@ pub fn prechown_overlayfs(
     crate::system_check::mount_overlay(&merged, &opts)
         .context("failed to mount overlayfs for pre-chown")?;
 
-    let result = do_prechown(&merged, shift, verbose);
+    let result = do_prechown(&merged, shift);
 
-    crate::system_check::umount(&merged).context("failed to unmount overlayfs after pre-chown")?;
+    if let Err(e) = crate::system_check::umount(&merged) {
+        if result.is_ok() {
+            return Err(e).context("failed to unmount overlayfs after pre-chown");
+        }
+        eprintln!("warning: failed to unmount overlayfs after pre-chown: {e:#}");
+    }
 
     result
 }
 
 /// Walk a directory tree and shift UIDs/GIDs in parallel.
-fn do_prechown(root: &Path, shift: u64, verbose: bool) -> Result<()> {
+fn do_prechown(root: &Path, shift: u64) -> Result<()> {
     let shift_uid = shift as u32;
     let counter = AtomicU64::new(0);
     let errors = std::sync::Mutex::new(Vec::<String>::new());
@@ -172,7 +165,7 @@ fn do_prechown(root: &Path, shift: u64, verbose: bool) -> Result<()> {
             }
         }
         let count = counter.fetch_add(1, Ordering::Relaxed) + 1;
-        if count % 10_000 == 0 {
+        if count.is_multiple_of(10_000) {
             eprintln!("shifted {count}/{total} files...");
         }
     });
@@ -191,13 +184,13 @@ fn do_prechown(root: &Path, shift: u64, verbose: bool) -> Result<()> {
 }
 
 /// Recursively collect all filesystem entries under `root`.
-fn collect_entries(root: &Path) -> Result<Vec<std::path::PathBuf>> {
+fn collect_entries(root: &Path) -> Result<Vec<PathBuf>> {
     let mut entries = Vec::new();
     collect_entries_recursive(root, &mut entries)?;
     Ok(entries)
 }
 
-fn collect_entries_recursive(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> Result<()> {
+fn collect_entries_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     crate::check_interrupted()?;
     let read_dir =
         fs::read_dir(dir).with_context(|| format!("failed to read directory {}", dir.display()))?;
@@ -228,7 +221,8 @@ fn shift_ownership(path: &Path, shift: u32) -> Result<()> {
     let gid = meta.gid();
 
     // Only shift UIDs/GIDs in the unprivileged range (0..65535).
-    // Already-shifted UIDs (>= shift) are left alone.
+    // UIDs >= 65536 are left alone (they may belong to other
+    // namespaces or already be shifted).
     let new_uid = if uid < UID_RANGE as u32 {
         uid + shift
     } else {

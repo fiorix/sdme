@@ -78,7 +78,6 @@ const SYS_MOUNT_SETATTR: libc::c_long = 442;
 
 const OPEN_TREE_CLONE: libc::c_uint = 1;
 const OPEN_TREE_CLOEXEC: libc::c_uint = libc::O_CLOEXEC as libc::c_uint;
-const AT_RECURSIVE: libc::c_uint = 0x8000;
 const MOUNT_ATTR_IDMAP: u64 = 0x0010_0000;
 
 /// Argument struct for `mount_setattr(2)`, matching the kernel's `struct mount_attr`.
@@ -237,12 +236,9 @@ fn probe_idmap_on_mount(mount_path: &Path) -> Result<()> {
 
         // Open the child's user namespace.
         let userns_path = format!("/proc/{child_pid}/ns/user");
-        let userns_fd = unsafe {
-            libc::open(
-                std::ffi::CString::new(userns_path.as_str())?.as_ptr(),
-                libc::O_RDONLY | libc::O_CLOEXEC,
-            )
-        };
+        let c_userns_path = std::ffi::CString::new(userns_path.as_str())?;
+        let userns_fd =
+            unsafe { libc::open(c_userns_path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
         if userns_fd < 0 {
             bail!(
                 "failed to open {userns_path}: {}",

@@ -252,6 +252,58 @@ pub(crate) fn create_and_start(cfg: &BootConfig) -> Result<()> {
     Ok(())
 }
 
+/// Post-create setup: store extra state and pre-chown if needed.
+///
+/// Called after `containers::create()` for both `create` and `new`.
+/// Stores OCI_APP and SYSTEMD_LOG_LEVEL in the state file, then probes
+/// overlayfs idmap support and pre-chowns if the kernel lacks it.
+pub(crate) fn post_create_setup(
+    datadir: &Path,
+    name: &str,
+    lowerdir: &str,
+    oci_app_name: Option<&str>,
+    systemd_log_level: Option<&str>,
+    userns_enabled: bool,
+    verbose: bool,
+) -> Result<()> {
+    let state_path = datadir.join("state").join(name);
+    let mut state = sdme::State::read_from(&state_path)?;
+    let mut changed = false;
+    if let Some(app_name) = oci_app_name {
+        state.set("OCI_APP", app_name);
+        changed = true;
+    }
+    if let Some(level) = systemd_log_level {
+        state.set("SYSTEMD_LOG_LEVEL", level);
+        changed = true;
+    }
+    if changed {
+        state.write_to(&state_path)?;
+    }
+
+    if userns_enabled {
+        probe_and_prechown(datadir, name, lowerdir, verbose)?;
+    }
+    Ok(())
+}
+
+/// Validate a systemd log level string.
+///
+/// Accepts the standard systemd log levels. Rejects values containing
+/// newlines or control characters to prevent injection into unit files.
+pub(crate) fn validate_systemd_log_level(level: &str) -> Result<()> {
+    const VALID: &[&str] = &[
+        "emerg", "alert", "crit", "err", "warning", "notice", "info", "debug",
+    ];
+    if !VALID.contains(&level) {
+        bail!(
+            "invalid systemd log level '{level}'; \
+             valid values: emerg, alert, crit, err, warning, notice, info, debug"
+        );
+    }
+    Ok(())
+}
+
 /// Probe overlayfs idmap support and pre-chown if needed.
 ///
 /// Called after container creation when userns is enabled. If the kernel
@@ -289,12 +341,12 @@ pub(crate) fn probe_and_prechown(
             if verbose {
                 eprintln!("allocated UID shift: {shift}");
             }
-            userns::prechown_overlayfs(datadir, name, lowerdir, shift, verbose)?;
+            userns::prechown_overlayfs(datadir, name, lowerdir, shift)?;
 
             // Store the shift in the state file so to_nspawn_args uses it.
             let state_path = datadir.join("state").join(name);
             let mut state = sdme::State::read_from(&state_path)?;
-            state.set("USERNS_SHIFT", &shift.to_string());
+            state.set("USERNS_SHIFT", shift.to_string());
             state.write_to(&state_path)?;
         }
     }

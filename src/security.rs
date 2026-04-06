@@ -153,7 +153,7 @@ impl SecurityConfig {
         }
 
         match self.userns_shift {
-            Some(shift) => state.set("USERNS_SHIFT", &shift.to_string()),
+            Some(shift) => state.set("USERNS_SHIFT", shift.to_string()),
             None => state.remove("USERNS_SHIFT"),
         }
     }

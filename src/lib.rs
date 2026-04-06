@@ -1114,7 +1114,7 @@ impl DownloadProgress {
                 let size = crate::oci::cache::format_size(total);
                 eprint!("downloading {size} ");
             }
-            let pct = (self.downloaded as f64 / total as f64 * 100.0) as u64;
+            let pct = ((self.downloaded as f64 / total as f64 * 100.0) as u64).min(100);
             while self.last_milestone + 10 <= pct {
                 self.last_milestone += 10;
                 if self.last_milestone == 100 {
