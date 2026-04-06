@@ -1069,14 +1069,18 @@ pub(crate) mod testutil {
 
 /// Download progress display for interactive terminals.
 ///
-/// Shows a spinner with human-readable byte count and optional percentage
-/// when Content-Length is known. Output goes to stderr and overwrites the
-/// same line using `\r`.
+/// When Content-Length is known, prints Xcode-style percentage ticks:
+/// `downloading 10....20....30....40....50....60....70....80....90....100`
+///
+/// When Content-Length is unknown, shows a spinner with byte count.
+/// Output goes to stderr.
 pub struct DownloadProgress {
     total_size: Option<u64>,
     downloaded: u64,
+    last_milestone: u64,
     spinner_idx: usize,
     enabled: bool,
+    started: bool,
 }
 
 impl DownloadProgress {
@@ -1088,8 +1092,10 @@ impl DownloadProgress {
         Self {
             total_size,
             downloaded: 0,
+            last_milestone: 0,
             spinner_idx: 0,
             enabled,
+            started: false,
         }
     }
 
@@ -1099,18 +1105,28 @@ impl DownloadProgress {
             return;
         }
         self.downloaded += n;
-        self.spinner_idx = (self.spinner_idx + 1) % 4;
-        let spinner = ['-', '\\', '|', '/'][self.spinner_idx];
-        let size = crate::oci::cache::format_size(self.downloaded);
         if let Some(total) = self.total_size {
-            let pct = if total > 0 {
-                (self.downloaded as f64 / total as f64 * 100.0) as u64
-            } else {
-                0
-            };
-            let total_s = crate::oci::cache::format_size(total);
-            eprint!("\rdownloading {spinner} {size} of {total_s} ({pct}%)    ");
+            if total == 0 {
+                return;
+            }
+            if !self.started {
+                self.started = true;
+                let size = crate::oci::cache::format_size(total);
+                eprint!("downloading {size} ");
+            }
+            let pct = (self.downloaded as f64 / total as f64 * 100.0) as u64;
+            while self.last_milestone + 10 <= pct {
+                self.last_milestone += 10;
+                if self.last_milestone == 100 {
+                    eprint!("100");
+                } else {
+                    eprint!("{}....", self.last_milestone);
+                }
+            }
         } else {
+            self.spinner_idx = (self.spinner_idx + 1) % 4;
+            let spinner = ['-', '\\', '|', '/'][self.spinner_idx];
+            let size = crate::oci::cache::format_size(self.downloaded);
             eprint!("\rdownloading {spinner} {size}    ");
         }
     }
