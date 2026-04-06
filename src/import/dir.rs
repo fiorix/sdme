@@ -13,8 +13,9 @@ pub(super) fn do_import(source: &Path, staging: &Path, verbose: bool) -> Result<
         .with_context(|| format!("failed to copy metadata for {}", source.display()))?;
     copy_xattrs(source, staging)?;
 
+    eprintln!("copying rootfs...");
     if verbose {
-        eprintln!("copying {} -> {}", source.display(), staging.display());
+        eprintln!("  {} -> {}", source.display(), staging.display());
     }
 
     copy_tree(source, staging, verbose)

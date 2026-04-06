@@ -1,5 +1,7 @@
 # sdme
 
+The systemd machine editor: a command line tool for managing systemd-nspawn booted containers on Linux.
+
 sdme boots Linux containers using systemd-nspawn with overlayfs
 copy-on-write layers. Each container runs a real systemd init, so
 services, journalctl, systemctl, timers, and everything else work

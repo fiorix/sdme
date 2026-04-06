@@ -630,10 +630,6 @@ fn import_url(
             );
         }
 
-        if ctx.interactive {
-            eprintln!("unpacking...");
-        }
-
         match kind {
             DownloadedFileKind::QcowImage => img::import_qcow2(&temp_file, staging_dir, verbose),
             DownloadedFileKind::RawImage => img::import_raw(&temp_file, staging_dir, verbose),
@@ -1348,6 +1344,7 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
     // --- Systemd detection and optional package installation ---
     // At this point, staging_dir contains the imported rootfs.
 
+    eprintln!("configuring rootfs...");
     let family = crate::rootfs::detect_distro_family(&staging_dir);
     let distro_name = crate::rootfs::detect_distro(&staging_dir);
 

@@ -47,12 +47,9 @@ pub(super) fn import_tarball(
     fs::create_dir_all(staging_dir)
         .with_context(|| format!("failed to create staging dir {}", staging_dir.display()))?;
 
+    eprintln!("extracting tarball...");
     if verbose {
-        eprintln!(
-            "extracting {} -> {}",
-            tarball.display(),
-            staging_dir.display()
-        );
+        eprintln!("  {} -> {}", tarball.display(), staging_dir.display());
     }
 
     let limit = DecompressLimit::new(max_decompressed);
