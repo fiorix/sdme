@@ -157,6 +157,14 @@ the machine name). An escape lands in an unprivileged context. On kernel
 stay UID 0 on disk). On older kernels, `auto` falls back to recursive chown
 on first boot.
 
+sdme probes idmap support at container creation time. When the kernel does
+not support idmapped mounts on overlayfs, sdme pre-shifts UIDs in parallel
+during `create` so the first boot is fast. The UID shift is computed using
+the same SipHash-2-4 algorithm as nspawn's `--private-users=pick`, avoiding
+conflicts between sdme containers and plain nspawn containers with the same
+machine name. At boot time, sdme checks for UID range conflicts with
+running machines and falls back to nspawn's `pick` if a collision is found.
+
 Podman rootless gets user namespace remapping by default; the entire
 container runtime runs as an unprivileged user.
 

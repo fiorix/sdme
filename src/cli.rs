@@ -92,6 +92,11 @@ pub(crate) struct SecurityArgs {
     /// profile to be loaded (see: sdme config apparmor-profile --help)
     #[arg(long)]
     pub strict: bool,
+
+    /// Set SYSTEMD_LOG_LEVEL for the nspawn host process (e.g. debug, info).
+    /// Useful for diagnosing boot issues. Persisted in the container state.
+    #[arg(long = "systemd-log-level")]
+    pub systemd_log_level: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -168,6 +173,29 @@ pub(crate) fn start_and_await_boot(cfg: &BootConfig) -> Result<()> {
     // Hold shared lock to prevent `sdme rm` during start+boot window.
     let _lock = lock::lock_shared(datadir, "containers", name)
         .with_context(|| format!("cannot lock container '{name}' for starting"))?;
+
+    // Check for UID range conflicts with running machines when using
+    // a pre-allocated shift. If a conflict is detected, clear it so
+    // nspawn falls back to --private-users=pick (slower but safe).
+    {
+        let state_path = datadir.join("state").join(name);
+        if let Ok(state) = sdme::State::read_from(&state_path) {
+            if let Some(shift_str) = state.get_nonempty("USERNS_SHIFT") {
+                if let Ok(shift) = shift_str.parse::<u64>() {
+                    if let Some(conflict) = sdme::userns::check_shift_conflict(name, shift) {
+                        eprintln!(
+                            "warning: UID range {shift} conflicts with running container '{conflict}'"
+                        );
+                        eprintln!("falling back to nspawn pick (first boot may be slow)");
+                        let mut state = state;
+                        state.remove("USERNS_SHIFT");
+                        let _ = state.write_to(&state_path);
+                    }
+                }
+            }
+        }
+    }
+
     systemd::start(&systemd::ServiceConfig {
         datadir,
         name,
@@ -220,6 +248,55 @@ pub(crate) fn create_and_start(cfg: &BootConfig) -> Result<()> {
         eprintln!("start failed, removing '{name}'");
         let _ = containers::remove(datadir, name, verbose);
         return Err(e);
+    }
+    Ok(())
+}
+
+/// Probe overlayfs idmap support and pre-chown if needed.
+///
+/// Called after container creation when userns is enabled. If the kernel
+/// does not support idmapped mounts on overlayfs, allocates a UID shift
+/// and pre-chowns the overlayfs in parallel so that nspawn's boot-time
+/// chown is a fast no-op.
+///
+/// Writes `USERNS_SHIFT` to the container's state file on success.
+pub(crate) fn probe_and_prechown(
+    datadir: &Path,
+    name: &str,
+    lowerdir: &str,
+    verbose: bool,
+) -> Result<()> {
+    use sdme::{system_check, userns};
+
+    match system_check::probe_idmap_on_overlayfs(datadir) {
+        Ok(()) => {
+            if verbose {
+                eprintln!("overlayfs idmap: supported");
+            }
+        }
+        Err(e) => {
+            eprintln!("note: overlayfs idmap not available ({e:#})");
+            eprintln!(
+                "pre-shifting UIDs for '{name}' (this runs once and can be \
+                 slow for large filesystems)..."
+            );
+            eprintln!(
+                "hint: upgrading to a kernel with overlayfs idmap support \
+                 eliminates this step"
+            );
+
+            let shift = userns::allocate_uid_shift(datadir, name)?;
+            if verbose {
+                eprintln!("allocated UID shift: {shift}");
+            }
+            userns::prechown_overlayfs(datadir, name, lowerdir, shift, verbose)?;
+
+            // Store the shift in the state file so to_nspawn_args uses it.
+            let state_path = datadir.join("state").join(name);
+            let mut state = sdme::State::read_from(&state_path)?;
+            state.set("USERNS_SHIFT", &shift.to_string());
+            state.write_to(&state_path)?;
+        }
     }
     Ok(())
 }
@@ -362,6 +439,7 @@ pub(crate) fn parse_security(
         read_only: args.read_only,
         system_call_filter,
         apparmor_profile,
+        userns_shift: None,
     };
     sec.validate()?;
     Ok((sec, hardened))

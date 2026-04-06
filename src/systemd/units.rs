@@ -353,6 +353,15 @@ pub fn write_nspawn_dropin(datadir: &Path, name: &str, verbose: bool) -> Result<
 
     // Service-level directives (not nspawn flags).
     let mut service_directives = Vec::new();
+
+    // Set SYSTEMD_LOG_LEVEL for the nspawn host process (not the container).
+    if let Some(level) = state.get_nonempty("SYSTEMD_LOG_LEVEL") {
+        service_directives.push(format!("Environment=SYSTEMD_LOG_LEVEL={level}"));
+        if verbose {
+            eprintln!("nspawn host log level: {level}");
+        }
+    }
+
     if let Some(profile) = &security.apparmor_profile {
         crate::security::check_apparmor_loaded(profile)?;
         service_directives.push(format!("AppArmorProfile={profile}"));

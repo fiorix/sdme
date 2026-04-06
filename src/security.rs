@@ -88,6 +88,9 @@ pub struct SecurityConfig {
     pub system_call_filter: Vec<String>,
     /// AppArmor profile name (applied as systemd unit directive).
     pub apparmor_profile: Option<String>,
+    /// Pre-allocated UID shift for user namespace (bypasses nspawn `pick`).
+    /// When set, uses `--private-users=<shift>:65536` instead of `pick`.
+    pub userns_shift: Option<u64>,
 }
 
 impl SecurityConfig {
@@ -100,6 +103,7 @@ impl SecurityConfig {
             && !self.read_only
             && self.system_call_filter.is_empty()
             && self.apparmor_profile.is_none()
+            && self.userns_shift.is_none()
     }
 
     /// Read security config from a container's state file.
@@ -112,6 +116,9 @@ impl SecurityConfig {
             read_only: state.is_yes("READ_ONLY"),
             system_call_filter: state.get_list("SYSCALL_FILTER", ','),
             apparmor_profile: state.get_nonempty("APPARMOR_PROFILE").map(String::from),
+            userns_shift: state
+                .get_nonempty("USERNS_SHIFT")
+                .and_then(|s| s.parse().ok()),
         }
     }
 
@@ -144,15 +151,23 @@ impl SecurityConfig {
             Some(p) => state.set("APPARMOR_PROFILE", p.as_str()),
             None => state.remove("APPARMOR_PROFILE"),
         }
+
+        match self.userns_shift {
+            Some(shift) => state.set("USERNS_SHIFT", &shift.to_string()),
+            None => state.remove("USERNS_SHIFT"),
+        }
     }
 
     /// Generate systemd-nspawn arguments for security options.
     ///
     /// Uses `--private-users-ownership=auto` which lets nspawn pick the
     /// best strategy: idmapped mounts when the kernel and filesystem
-    /// support them, recursive chown otherwise. We avoid forcing `map`
-    /// because it fails hard on filesystems that don't support idmapped
-    /// mounts (e.g. overlayfs on some kernels/VM backends).
+    /// support them, recursive chown otherwise.
+    ///
+    /// When `userns_shift` is set (pre-chown was done at create time),
+    /// uses an explicit `--private-users=<shift>:65536` instead of `pick`.
+    /// nspawn's `auto` ownership mode then walks the tree and finds
+    /// everything already shifted, making the chown a fast no-op.
     ///
     /// Does NOT include AppArmor: that goes into the systemd unit drop-in
     /// as `AppArmorProfile=`, not as an nspawn flag.
@@ -160,7 +175,10 @@ impl SecurityConfig {
         let mut args = Vec::new();
 
         if self.userns {
-            args.push("--private-users=pick".to_string());
+            match self.userns_shift {
+                Some(shift) => args.push(format!("--private-users={shift}:65536")),
+                None => args.push("--private-users=pick".to_string()),
+            }
             args.push("--private-users-ownership=auto".to_string());
         }
 
@@ -598,6 +616,7 @@ mod tests {
             read_only: true,
             system_call_filter: vec!["@system-service".to_string(), "~@mount".to_string()],
             apparmor_profile: Some("sdme-container".to_string()),
+            userns_shift: None,
         };
         // Always uses --private-users-ownership=auto (lets nspawn pick
         // idmapped mounts or recursive chown based on kernel support).
@@ -626,6 +645,18 @@ mod tests {
     }
 
     #[test]
+    fn test_to_nspawn_args_with_explicit_shift() {
+        let sec = SecurityConfig {
+            userns: true,
+            userns_shift: Some(1678049280),
+            ..Default::default()
+        };
+        let args = sec.to_nspawn_args(255);
+        assert_eq!(args[0], "--private-users=1678049280:65536");
+        assert_eq!(args[1], "--private-users-ownership=auto");
+    }
+
+    #[test]
     fn test_state_roundtrip() {
         let sec = SecurityConfig {
             userns: true,
@@ -635,6 +666,7 @@ mod tests {
             read_only: true,
             system_call_filter: vec!["~@mount".to_string()],
             apparmor_profile: Some("sdme-default".to_string()),
+            userns_shift: Some(1678049280),
         };
 
         let mut state = State::new();

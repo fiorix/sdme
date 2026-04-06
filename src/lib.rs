@@ -28,6 +28,7 @@
 //! | [`network`] | Network configuration and state serialization |
 //! | [`security`] | Capability, seccomp, AppArmor config |
 //! | [`system_check`] | Version and dependency checks |
+//! | [`userns`] | User namespace UID shift allocation and pre-chown |
 //! | [`pod`] | Shared network namespace management |
 //! | [`prune`] | Unused resource analysis and cleanup |
 //! | [`txn`] | Enumerated transaction staging and gc |
@@ -56,6 +57,7 @@ pub(crate) mod submounts;
 pub mod system_check;
 pub mod systemd;
 pub mod txn;
+pub mod userns;
 
 pub use mounts::{BindConfig, EnvConfig};
 pub use network::NetworkConfig;

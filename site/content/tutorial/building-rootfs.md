@@ -68,13 +68,12 @@ sudo sdme new ollama -r ollama \
     -b /dev/nvidia-uvm-tools:/dev/nvidia-uvm-tools
 ```
 
-The `-t 180` increases the boot timeout to 180 seconds. This is
-needed because `--hardened` enables user namespace isolation, which
-causes systemd-nspawn to recursively chown the entire rootfs on
-first boot to remap UIDs. Subsequent boots are fast since the
-ownership is already set. When the kernel and filesystem support
-idmapped mounts, nspawn uses those instead of chown, eliminating
-the first-boot delay entirely.
+The `-t 180` increases the boot timeout to 180 seconds as a safety
+margin. The `--hardened` flag enables user namespace isolation. sdme
+probes idmap support at create time and, when the kernel does not
+support idmapped mounts on overlayfs, pre-shifts UIDs in parallel
+so the first boot is fast. On kernels that do support idmapped
+mounts (6.6+), this step is skipped entirely.
 
 Once the container is created and you land on a shell, pull a model:
 

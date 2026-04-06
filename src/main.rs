@@ -145,7 +145,12 @@ OCI AUTO-BEHAVIORS:
     Use --no-oci-volumes to suppress. Volume data survives 'sdme rm'.
 
     --oci-env sets env vars for the OCI app service (via EnvironmentFile).
-    -e/--env sets env vars for the container's systemd init (via --setenv).";
+    -e/--env sets env vars for the container's systemd init (via --setenv).
+
+DEBUGGING:
+    --systemd-log-level=debug sets SYSTEMD_LOG_LEVEL for the nspawn host
+    process (not the container). Useful for diagnosing boot issues. Use
+    -e SYSTEMD_LOG_LEVEL=debug for the container's internal systemd.";
 
 const CREATE_HELP: &str = "\
 Create a new container without starting it. Use 'sdme start' to start it later,
@@ -1896,6 +1901,7 @@ fn run() -> Result<()> {
         } => {
             system_check::check_systemd_version(255)?;
             let limits = parse_limits(memory, cpus, cpu_weight)?;
+            let systemd_log_level = security.systemd_log_level.clone();
             let (mut sec, hardened) = parse_security(security, &cfg)?;
             let mut network = parse_network(network)?;
             if hardened && !network.private_network {
@@ -1932,6 +1938,18 @@ fn run() -> Result<()> {
                 oci::rootfs::detect_oci_app_name(&rootfs_path)
             });
 
+            // Compute lowerdir before fs is moved into opts.
+            let lowerdir = match &fs {
+                Some(rootfs_name) => cfg
+                    .datadir
+                    .join("fs")
+                    .join(rootfs_name)
+                    .to_string_lossy()
+                    .to_string(),
+                None => "/".to_string(),
+            };
+            let userns_enabled = sec.userns;
+
             let opts = containers::CreateOptions {
                 name,
                 rootfs: fs,
@@ -1949,12 +1967,27 @@ fn run() -> Result<()> {
             };
             let name = containers::create(&cfg.datadir, &opts, cli.verbose)?;
 
-            // Store OCI_APP in state for exec --oci and logs --oci.
-            if let Some(ref app_name) = oci_app_name {
+            // Store OCI_APP and SYSTEMD_LOG_LEVEL in state.
+            {
                 let state_path = cfg.datadir.join("state").join(&name);
                 let mut state = sdme::State::read_from(&state_path)?;
-                state.set("OCI_APP", app_name);
-                state.write_to(&state_path)?;
+                let mut changed = false;
+                if let Some(ref app_name) = oci_app_name {
+                    state.set("OCI_APP", app_name);
+                    changed = true;
+                }
+                if let Some(ref level) = systemd_log_level {
+                    state.set("SYSTEMD_LOG_LEVEL", level);
+                    changed = true;
+                }
+                if changed {
+                    state.write_to(&state_path)?;
+                }
+            }
+
+            // Probe overlayfs idmap and pre-chown if needed.
+            if userns_enabled {
+                probe_and_prechown(&cfg.datadir, &name, &lowerdir, cli.verbose)?;
             }
 
             eprintln!("creating '{name}'");
@@ -2191,6 +2224,7 @@ fn run() -> Result<()> {
         } => {
             system_check::check_systemd_version(255)?;
             let limits = parse_limits(memory, cpus, cpu_weight)?;
+            let systemd_log_level = security.systemd_log_level.clone();
             let (mut sec, hardened) = parse_security(security, &cfg)?;
             let mut network = parse_network(network)?;
             if hardened && !network.private_network {
@@ -2227,6 +2261,18 @@ fn run() -> Result<()> {
                 oci::rootfs::detect_oci_app_name(&rootfs_path)
             });
 
+            // Compute lowerdir before fs is moved into opts.
+            let lowerdir = match &fs {
+                Some(rootfs_name) => cfg
+                    .datadir
+                    .join("fs")
+                    .join(rootfs_name)
+                    .to_string_lossy()
+                    .to_string(),
+                None => "/".to_string(),
+            };
+            let userns_enabled = sec.userns;
+
             let opts = containers::CreateOptions {
                 name,
                 rootfs: fs,
@@ -2245,12 +2291,27 @@ fn run() -> Result<()> {
             let is_host_rootfs = opts.rootfs.is_none();
             let name = containers::create(&cfg.datadir, &opts, cli.verbose)?;
 
-            // Store OCI_APP in state for exec --oci and logs --oci.
-            if let Some(ref app_name) = oci_app_name {
+            // Store OCI_APP and SYSTEMD_LOG_LEVEL in state.
+            {
                 let state_path = cfg.datadir.join("state").join(&name);
                 let mut state = sdme::State::read_from(&state_path)?;
-                state.set("OCI_APP", app_name);
-                state.write_to(&state_path)?;
+                let mut changed = false;
+                if let Some(ref app_name) = oci_app_name {
+                    state.set("OCI_APP", app_name);
+                    changed = true;
+                }
+                if let Some(ref level) = systemd_log_level {
+                    state.set("SYSTEMD_LOG_LEVEL", level);
+                    changed = true;
+                }
+                if changed {
+                    state.write_to(&state_path)?;
+                }
+            }
+
+            // Probe overlayfs idmap and pre-chown if needed.
+            if userns_enabled {
+                probe_and_prechown(&cfg.datadir, &name, &lowerdir, cli.verbose)?;
             }
 
             eprintln!("creating '{name}'");
