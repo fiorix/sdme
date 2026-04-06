@@ -117,10 +117,7 @@ test_first_container() {
     if ! output=$(timeout "$TIMEOUT_BOOT" $SDME create "$ct" 2>&1); then
         record "first/create" FAIL "$output"
         record "first/start" SKIP "create failed"
-        record "first/ps" SKIP "create failed"
         record "first/exec" SKIP "create failed"
-        record "first/stop" SKIP "create failed"
-        record "first/start-again" SKIP "create failed"
         record "first/rm" SKIP "create failed"
         return
     fi
@@ -129,43 +126,18 @@ test_first_container() {
     # sdme start
     if ! output=$(timeout "$TIMEOUT_BOOT" $SDME start "$ct" -t 120 2>&1); then
         record "first/start" FAIL "$output"
-        record "first/ps" SKIP "start failed"
         record "first/exec" SKIP "start failed"
-        record "first/stop" SKIP "start failed"
-        record "first/start-again" SKIP "start failed"
         $SDME rm -f "$ct" 2>/dev/null || true
         record "first/rm" SKIP "start failed"
         return
     fi
     record "first/start" PASS
 
-    # sdme ps
-    if output=$($SDME ps 2>&1) && echo "$output" | grep -q "$ct"; then
-        record "first/ps" PASS
-    else
-        record "first/ps" FAIL "$output"
-    fi
-
     # sdme exec <name> -- /bin/cat /etc/os-release
     if output=$(timeout "$TIMEOUT_TEST" $SDME exec "$ct" -- /bin/cat /etc/os-release 2>&1); then
         record "first/exec" PASS
     else
         record "first/exec" FAIL "$output"
-    fi
-
-    # sdme stop
-    if output=$(timeout 30 $SDME stop "$ct" 2>&1); then
-        record "first/stop" PASS
-    else
-        record "first/stop" FAIL "$output"
-    fi
-
-    # sdme start (again, tutorial shows stop then start)
-    if output=$(timeout "$TIMEOUT_BOOT" $SDME start "$ct" -t 120 2>&1); then
-        record "first/start-again" PASS
-        stop_container "$ct"
-    else
-        record "first/start-again" FAIL "$output"
     fi
 
     # sdme rm
@@ -269,7 +241,8 @@ test_management() {
     if ! need_base; then
         for k in mgmt/help mgmt/subcommand-help mgmt/ps mgmt/ps-json \
                  mgmt/fs-ls mgmt/logs mgmt/cp-host-to-ct mgmt/cp-ct-to-host \
-                 mgmt/cp-host-to-fs mgmt/cp-fs-to-host mgmt/prune-dry-run; do
+                 mgmt/cp-host-to-fs mgmt/cp-fs-to-host mgmt/prune-dry-run \
+                 mgmt/set-limits mgmt/clear-limits; do
             record "$k" SKIP "base import failed"
         done
         return
@@ -296,7 +269,8 @@ test_management() {
     if ! output=$(timeout "$TIMEOUT_BOOT" $SDME create -r "$BASE_FS" "$ct" 2>&1) || \
        ! output=$(timeout "$TIMEOUT_BOOT" $SDME start "$ct" -t 120 2>&1); then
         for k in mgmt/ps mgmt/ps-json mgmt/logs \
-                 mgmt/cp-host-to-ct mgmt/cp-ct-to-host; do
+                 mgmt/cp-host-to-ct mgmt/cp-ct-to-host \
+                 mgmt/set-limits mgmt/clear-limits; do
             record "$k" SKIP "container setup failed"
         done
         # fs-ls and fs-to-host/host-to-fs don't need a running container
@@ -386,6 +360,20 @@ test_management() {
     else
         # prune --dry-run exits 0 even when nothing to prune
         record "mgmt/prune-dry-run" PASS "$output"
+    fi
+
+    # sdme set <name> --memory 1G --cpus 0.5
+    if output=$($SDME set "$ct" --memory 1G --cpus 0.5 2>&1); then
+        record "mgmt/set-limits" PASS
+    else
+        record "mgmt/set-limits" FAIL "$output"
+    fi
+
+    # sdme set <name> (clear all limits)
+    if output=$($SDME set "$ct" 2>&1); then
+        record "mgmt/clear-limits" PASS
+    else
+        record "mgmt/clear-limits" FAIL "$output"
     fi
 
     stop_container "$ct"

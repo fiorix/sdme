@@ -25,10 +25,8 @@ By default, sdme creates an overlayfs clone of your host root filesystem.
 The base rootfs stays untouched; any changes you make inside the container
 are written to the overlay's upper layer.
 
-sdme assigns a random name to the container. You can also choose your own
-name by passing it as an argument, e.g. `sudo sdme new mycontainer`.
-
-You'll see output similar to:
+When no name is given, sdme generates a random one. You'll see output
+similar to:
 
 ```
 $ sudo sdme new
@@ -48,35 +46,46 @@ but any changes are isolated to this container.
 Type `exit` or press `Ctrl+]` three times quickly. This detaches from the
 container shell; the container keeps running in the background.
 
-## Basic container management
-
-Back on the host, you can manage your container with these commands.
-
 {% callout(type="tip", title="Tip") %}
-You don't have to type the full name: sdme does prefix matching, so `sudo sdme join ara` would work if no other container name starts with `ara`.
+All sdme commands support name prefix matching. If your container is called `araciubaia`, typing `sudo sdme join ara` is enough, as long as no other container name starts with `ara`.
 {% end %}
 
+## Naming your containers
+
+Random names work for quick experiments, but named containers are easier
+to script and remember. Delete the auto-named container and create a
+named one:
+
 ```sh
-# List running containers
-sudo sdme ps
-
-# Re-enter the container
-sudo sdme join araciubaia
-
-# Run a command without entering (requires full command paths)
-sudo sdme exec araciubaia -- /bin/cat /etc/os-release
-
-# Stop the container
-sudo sdme stop araciubaia
-
-# Start it again
-sudo sdme start araciubaia
-
-# Stop and delete the container
 sudo sdme rm araciubaia
+sudo sdme new foobar
 ```
 
-Replace `araciubaia` with whatever name sdme assigned to your container.
+The rest of this tutorial uses `foobar` so every command is
+copy-paste ready.
+
+## Re-entering and running commands
+
+Re-enter the container shell:
+
+```sh
+sudo sdme join foobar
+```
+
+Run a command without entering (no $PATH set, requires full path):
+
+```sh
+sudo sdme exec foobar -- /bin/cat /etc/os-release
+```
+
+Stop and delete the container when you're done:
+
+```sh
+sudo sdme rm foobar
+```
+
+For listing, stopping, starting, restarting, and other daily operations,
+see [Day-to-Day Management](@/tutorial/management.md).
 
 ## Running tmux (and other background processes)
 

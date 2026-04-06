@@ -54,6 +54,36 @@ Restart all running containers:
 sudo sdme restart --all
 ```
 
+## Resource limits
+
+Containers can have CPU and memory limits. Set them at creation time:
+
+```sh
+sudo sdme new dev -r ubuntu --memory 2G --cpus 2
+```
+
+Or on an existing container with `sdme set`:
+
+```sh
+sudo sdme set mycontainer --memory 1G --cpus 0.5
+```
+
+The available flags are:
+
+- `--memory` sets a hard memory limit (e.g. `512M`, `2G`). Maps to systemd `MemoryMax`.
+- `--cpus` limits CPU time as a number of CPUs (e.g. `2`, `0.5`). Maps to systemd `CPUQuota`.
+- `--cpu-weight` sets scheduling weight from 1 to 10000 (default: 100). Higher values get more CPU time relative to other containers. Maps to systemd `CPUWeight`.
+
+`sdme set` replaces all limits on the container. To remove limits,
+run `sdme set` without any limit flags:
+
+```sh
+sudo sdme set mycontainer
+```
+
+Limits take effect immediately on running containers (no restart needed)
+and persist across restarts via a systemd drop-in file.
+
 ## Listing containers
 
 ```sh
