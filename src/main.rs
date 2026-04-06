@@ -710,6 +710,10 @@ EXAMPLES:
     sdme new app1 -r nginx --pod mypod
     sdme new app2 -r redis --pod mypod
 
+    # Create pod with immediate external networking
+    sdme pod new mypod --attach veth
+    sdme pod new mypod --attach zone --zone myzone
+
     # OCI pod with hardened security
     sdme pod new mypod
     sdme new app -r nginx --oci-pod mypod --hardened
@@ -723,8 +727,12 @@ EXAMPLES:
     # Detach external networking
     sdme pod net detach mypod
 
-    # List and remove
+    # List pods (table, JSON, or pretty JSON)
     sdme pod ls
+    sdme pod ls --json
+    sdme pod ls --json-pretty
+
+    # Remove a pod
     sdme pod rm mypod";
 
 const KUBE_HELP: &str = "\
