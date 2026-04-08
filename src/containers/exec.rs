@@ -262,9 +262,7 @@ fn machinectl_shell(
         eprint!("machinectl stderr: {}", stderr);
     }
     eprintln!("warning: machinectl shell failed (PTY access denied), falling back to nsenter");
-    eprintln!(
-        "note: nsenter does not allocate a new PTY; terminal resize and job control may not work"
-    );
+    eprintln!("note: using nsenter with script(1) for PTY allocation");
     nsenter_shell(name, command, verbose)
 }
 
@@ -300,8 +298,9 @@ fn nsenter_shell(name: &str, command: &[String], verbose: bool) -> Result<ExitSt
     }
     cmd.arg("--");
     if interactive {
-        cmd.arg("/bin/bash");
-        cmd.arg("-l");
+        // Wrap in `script` to allocate a PTY so the shell has
+        // proper line editing, carriage returns, and job control.
+        cmd.args(["script", "-qc", "/bin/bash -l", "/dev/null"]);
     } else {
         cmd.args(command);
     }

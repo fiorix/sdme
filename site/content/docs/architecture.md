@@ -300,8 +300,9 @@ When the container uses user namespace isolation (`--hardened`,
 `--userns`), nsenter also enters the user (`-U`) and cgroup (`-C`)
 namespaces so that `systemctl`, `journalctl`, and other tools that
 communicate over D-Bus can authenticate with the container's systemd
-instance. The nsenter fallback does not allocate a new PTY, so
-terminal resize and job control may not work as expected.
+instance. For interactive sessions, the nsenter fallback uses
+`script(1)` to allocate a PTY so the shell has proper line
+editing and job control.
 
 The balance struck is: use D-Bus where it gives us programmatic
 control (start, stop, status queries), shell out where the existing
