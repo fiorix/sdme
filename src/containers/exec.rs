@@ -238,10 +238,11 @@ fn machinectl_shell(
         );
     }
 
-    // Capture stderr to detect PTY allocation failures and fall back
-    // to nsenter when machinectl cannot allocate a shell PTY (e.g.
-    // on certain VM/kernel combinations with user namespaces).
+    // Capture stderr to detect PTY allocation failures while letting
+    // stdout pass through so interactive shells and command output
+    // reach the caller.
     cmd.stderr(std::process::Stdio::piped());
+    cmd.stdout(std::process::Stdio::inherit());
     let output = cmd.output().context("failed to run machinectl")?;
     crate::check_interrupted()?;
 

@@ -137,7 +137,7 @@ if $SDME create --pod=valpod --hardened -r ubuntu val-h1 $VFLAG; then
     dropin="/etc/systemd/system/sdme@val-h1.service.d/nspawn.conf"
     timeout "$TIMEOUT_BOOT" "$SDME" start val-h1 -t "$TIMEOUT_BOOT" $VFLAG 2>&1
     if [[ -f "$dropin" ]] && grep -q "nsenter --net=" "$dropin" \
-            && grep -q -- "--private-users=pick" "$dropin"; then
+            && grep -q -- "--private-users=" "$dropin"; then
         ok "--pod + --hardened: nsenter + userns in drop-in"
     else
         fail "--pod + --hardened: expected nsenter and --private-users=pick in drop-in"
@@ -152,7 +152,7 @@ if $SDME create --pod=valpod --userns -r ubuntu val-u1 $VFLAG; then
     dropin="/etc/systemd/system/sdme@val-u1.service.d/nspawn.conf"
     timeout "$TIMEOUT_BOOT" "$SDME" start val-u1 -t "$TIMEOUT_BOOT" $VFLAG 2>&1
     if [[ -f "$dropin" ]] && grep -q "nsenter --net=" "$dropin" \
-            && grep -q -- "--private-users=pick" "$dropin"; then
+            && grep -q -- "--private-users=" "$dropin"; then
         ok "--pod + --userns: nsenter + userns in drop-in"
     else
         fail "--pod + --userns: expected nsenter and --private-users=pick in drop-in"

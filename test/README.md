@@ -132,9 +132,9 @@ automatically via `fix_redis_oci()` in lib.sh.
 
 ## Results
 
-Last verified: 2026-04-03
+Last verified: 2026-04-08
 
-System: Linux 6.17.0-19-generic (aarch64), systemd 257, sdme 0.6.0,
+System: Linux 6.17.0-19-generic (aarch64), systemd 257, sdme 0.6.5,
 AppArmor enabled
 
 ```
@@ -165,6 +165,15 @@ Totals                      626     0     1  20 suites
 ```
 
 ## Log
+
+### 0.6.5 -- nsenter fallback, tutorial restructure (2026-04-08, aarch64)
+
+626 passed, 0 failed, 1 skipped across 20 suites. Fixed
+verify-pods assertion: check for `--private-users=` instead of
+`--private-users=pick` since sdme uses explicit UID ranges. Fixed
+machinectl stderr capture swallowing stdout by inheriting stdout
+while only piping stderr. 1 skip: export xattr. Wall clock: ~23m.
+
 
 ### 0.6.0 -- test infra fixes, CLAUDE.md rewrite (2026-04-03, aarch64)
 
