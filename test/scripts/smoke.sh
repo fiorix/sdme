@@ -127,6 +127,23 @@ else
     fail "rm: $output"
 fi
 
+# -- New with command (join path) ----------------------------------------------
+
+# Test the full create -> start -> join path with a command.
+# This catches bugs where machinectl_shell swallows stdout.
+log "Testing new with command (join path)"
+NEW_CT="smoke-new-cmd"
+if output=$(timeout "$TIMEOUT_BOOT" "$SDME" new -r "$BASE_FS" "$NEW_CT" -- /usr/bin/echo join-ok 2>&1); then
+    if [[ "$output" == *"join-ok"* ]]; then
+        ok "new with command"
+    else
+        fail "new with command: output missing 'join-ok': $output"
+    fi
+else
+    fail "new with command: $output"
+fi
+"$SDME" rm -f "$NEW_CT" 2>/dev/null || true
+
 # -- Gate + Summary ------------------------------------------------------------
 
 if [[ $_fail -eq 0 ]]; then
