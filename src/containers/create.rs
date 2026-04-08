@@ -65,7 +65,8 @@ pub fn create(datadir: &Path, opts: &CreateOptions, verbose: bool) -> Result<Str
     if uses_private_networking && !systemd::is_unit_active("systemd-networkd.service") {
         eprintln!(
             "warning: systemd-networkd is not running on the host; \
-             containers may not get network connectivity\n\
+             the zone bridge, veth, and DHCP will not work, \
+             and containers will not get network connectivity\n\
              hint: sudo systemctl enable --now systemd-networkd"
         );
     }

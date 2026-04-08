@@ -257,6 +257,9 @@ fn machinectl_shell(
     }
 
     // PTY allocation failed; fall back to nsenter.
+    if verbose {
+        eprint!("machinectl stderr: {}", stderr);
+    }
     eprintln!("warning: machinectl shell failed (PTY access denied), falling back to nsenter");
     eprintln!(
         "note: nsenter does not allocate a new PTY; terminal resize and job control may not work"
@@ -280,9 +283,21 @@ fn nsenter_shell(name: &str, command: &[String], verbose: bool) -> Result<ExitSt
 
     let interactive = command.is_empty();
 
+    let uses_userns = systemd::has_foreign_userns(leader);
+
+    if verbose {
+        eprintln!("nsenter: leader PID {leader}, userns={uses_userns}");
+    }
+
     let pid_str = leader.to_string();
     let mut cmd = std::process::Command::new("nsenter");
-    cmd.args(["-t", &pid_str, "-m", "-u", "-i", "-n", "-p", "--"]);
+    cmd.args(["-t", &pid_str, "-m", "-u", "-i", "-n", "-p"]);
+    if uses_userns {
+        // Enter the user and cgroup namespaces so systemctl and other
+        // tools that talk to the container's D-Bus can authenticate.
+        cmd.args(["-C", "-U"]);
+    }
+    cmd.arg("--");
     if interactive {
         cmd.arg("/bin/bash");
         cmd.arg("-l");
