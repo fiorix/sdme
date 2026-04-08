@@ -143,10 +143,11 @@ fn do_prechown(root: &Path, shift: u64) -> Result<()> {
     // than walk in parallel because readdir order matters for overlayfs
     // copy-up consistency (parent dirs must exist in upper before children).
     let entries = collect_entries(root)?;
-    let total = entries.len();
+    let total = entries.len() as u64;
 
-    eprintln!("pre-chown: shifting {total} files...");
+    eprint!("pre-chown: shifting {total} files ");
 
+    let last_milestone = AtomicU64::new(0);
     let interrupted = std::sync::atomic::AtomicBool::new(false);
 
     entries.par_iter().for_each(|path| {
@@ -165,10 +166,42 @@ fn do_prechown(root: &Path, shift: u64) -> Result<()> {
             }
         }
         let count = counter.fetch_add(1, Ordering::Relaxed) + 1;
-        if count.is_multiple_of(10_000) {
-            eprintln!("shifted {count}/{total} files...");
+        if total > 0 {
+            let pct = (count * 100 / total).min(100);
+            let target = (pct / 10) * 10;
+            loop {
+                let prev = last_milestone.load(Ordering::Relaxed);
+                if target <= prev {
+                    break;
+                }
+                match last_milestone.compare_exchange_weak(
+                    prev,
+                    target,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => {
+                        use std::io::Write;
+                        let stderr = std::io::stderr();
+                        let mut lock = stderr.lock();
+                        let mut m = prev + 10;
+                        while m <= target {
+                            if m == 100 {
+                                let _ = write!(lock, "100");
+                            } else {
+                                let _ = write!(lock, "{m}....");
+                            }
+                            m += 10;
+                        }
+                        break;
+                    }
+                    Err(_) => continue,
+                }
+            }
         }
     });
+
+    eprintln!();
 
     crate::check_interrupted()?;
 
@@ -178,8 +211,6 @@ fn do_prechown(root: &Path, shift: u64) -> Result<()> {
         bail!("pre-chown failed on {n} files: {first_few}", n = errs.len());
     }
 
-    let final_count = counter.load(Ordering::Relaxed);
-    eprintln!("shifted {final_count} files");
     Ok(())
 }
 

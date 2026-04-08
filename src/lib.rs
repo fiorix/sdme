@@ -1069,16 +1069,18 @@ pub(crate) mod testutil {
 
 /// Download progress display for interactive terminals.
 ///
-/// When Content-Length is known, prints Xcode-style percentage ticks:
-/// `downloading 10....20....30....40....50....60....70....80....90....100`
+/// When Content-Length is known, prints percentage ticks on a single line:
+/// `downloading 1.5M 10....20....30....40....50....60....70....80....90....100`
 ///
-/// When Content-Length is unknown, shows a spinner with byte count.
+/// When Content-Length is unknown, prints the downloaded size every 5 seconds:
+/// `downloading 256K`
+///
 /// Output goes to stderr.
 pub struct DownloadProgress {
     total_size: Option<u64>,
     downloaded: u64,
     last_milestone: u64,
-    spinner_idx: usize,
+    last_print: std::time::Instant,
     enabled: bool,
     started: bool,
 }
@@ -1093,7 +1095,7 @@ impl DownloadProgress {
             total_size,
             downloaded: 0,
             last_milestone: 0,
-            spinner_idx: 0,
+            last_print: std::time::Instant::now(),
             enabled,
             started: false,
         }
@@ -1124,16 +1126,18 @@ impl DownloadProgress {
                 }
             }
         } else {
-            self.spinner_idx = (self.spinner_idx + 1) % 4;
-            let spinner = ['-', '\\', '|', '/'][self.spinner_idx];
-            let size = crate::oci::cache::format_size(self.downloaded);
-            eprint!("\rdownloading {spinner} {size}    ");
+            let now = std::time::Instant::now();
+            if now.duration_since(self.last_print).as_secs() >= 5 {
+                self.last_print = now;
+                let size = crate::oci::cache::format_size(self.downloaded);
+                eprintln!("downloading {size}");
+            }
         }
     }
 
     /// Finish the progress display with a newline.
     pub fn finish(&self) {
-        if self.enabled && self.downloaded > 0 {
+        if self.enabled && self.total_size.is_some() && self.downloaded > 0 {
             eprintln!();
         }
     }
