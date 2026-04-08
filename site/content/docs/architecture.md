@@ -292,10 +292,22 @@ handles the namespace entry, PAM session setup, and environment
 correctly, and reimplementing that logic in Rust would buy nothing.
 Spawning (rather than exec'ing) keeps sdme alive so it can inspect the
 exit code and clean up on failure (particularly important for `sdme
-new`, which removes the container if the join fails). The balance struck
-is: use D-Bus where it gives us programmatic control (start, stop,
-status queries), shell out where the existing tool already does the job
-well (interactive shell sessions, running commands).
+new`, which removes the container if the join fails). If machinectl
+fails to allocate a PTY (which can happen on certain VM or kernel
+configurations with user namespaces), sdme falls back to `nsenter`,
+entering the container's namespaces directly via the leader PID.
+When the container uses user namespace isolation (`--hardened`,
+`--userns`), nsenter also enters the user (`-U`) and cgroup (`-C`)
+namespaces so that `systemctl`, `journalctl`, and other tools that
+communicate over D-Bus can authenticate with the container's systemd
+instance. The nsenter fallback does not allocate a new PTY, so
+terminal resize and job control may not work as expected.
+
+The balance struck is: use D-Bus where it gives us programmatic
+control (start, stop, status queries), shell out where the existing
+tool already does the job well (interactive shell sessions, running
+commands), and fall back to lower-level tools when the higher-level
+ones are unavailable.
 
 **stop** has three tiers: graceful (default) sends `SIGRTMIN+4` to the
 container leader via `KillMachine` (90s timeout), `--term` calls

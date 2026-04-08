@@ -255,7 +255,7 @@ sudo sdme pod new mypod
 sudo sdme pod net attach mypod zone myzone
 sudo sdme new mybox --pod mypod
 
-sudo sdme new standalone -r ubuntu --network-zone myzone
+sudo sdme new standalone -r ubuntu --network-zone=myzone
 ```
 
 Both `mybox` (in the pod) and `standalone` (regular container) are

@@ -75,8 +75,8 @@ container's IP directly; find it with `sdme ps`.
 ## Zones
 
 Zones are the easiest way to set up multi-container networking.
-Containers on the same zone share a bridge and can communicate
-with each other by IP or hostname.
+Zone names are arbitrary strings. Containers on the same zone share
+a bridge and can communicate with each other by IP or hostname.
 
 ```sh
 sudo sdme new http-server -r nginx --network-zone=myzone
@@ -91,8 +91,10 @@ automatically:
 
 - Creates the zone bridge (no host setup needed)
 - Enables `systemd-networkd` inside each container
-- Unmasks `systemd-resolved` and configures LLMNR/mDNS so
-  containers can discover each other by hostname
+- Unmasks `systemd-resolved` and configures
+  [LLMNR](https://en.wikipedia.org/wiki/Link-Local_Multicast_Name_Resolution)/mDNS
+  (local hostname discovery) so containers can discover each other
+  by name
 
 From inside `http-client`, you can reach `http-server` by name:
 

@@ -25,9 +25,6 @@ sudo sdme fs import --help
 sudo sdme new --help
 ```
 
-The help text is designed to be useful both for humans on a terminal
-and for AI assistants that need to understand available options.
-
 ## Starting, stopping, and restarting
 
 Stop a running container:
@@ -81,8 +78,8 @@ run `sdme set` without any limit flags:
 sudo sdme set mycontainer
 ```
 
-Limits take effect immediately on running containers (no restart needed)
-and persist across restarts via a systemd drop-in file.
+Limits persist across restarts via a systemd drop-in file. Running
+containers need a restart for the new limits to take effect.
 
 ## Listing containers
 

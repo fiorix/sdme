@@ -89,6 +89,10 @@ in the [services tutorial](@/tutorial/services.md):
 sudo sdme create mycontainer -r nginx --network-zone=services --hardened --started
 ```
 
+Unlike `sdme new` which drops you into a shell, `create --started`
+starts the container in the background. OCI application containers
+run headless services, so there is no need for an interactive shell.
+
 This gives the container its own network with DNS and user namespace
 isolation. Find the container's IP with `sdme ps`:
 

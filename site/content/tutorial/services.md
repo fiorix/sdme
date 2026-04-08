@@ -27,7 +27,9 @@ containers:
   containers can later join the same zone and reach each other by
   hostname.
 - `--hardened` enables user namespace isolation so root inside the
-  container is not root on the host.
+  container is not root on the host. See the
+  [security architecture](/docs/security/#10-hardening-tiers) for
+  details on what this enables.
 
 ```sh
 sudo sdme new mywebserver -r fedora --network-zone=services --hardened
@@ -80,7 +82,8 @@ Inside the client:
 curl http://mywebserver
 ```
 
-This works because zone containers use LLMNR for hostname discovery.
+This works because zone containers use LLMNR (local hostname discovery
+built into systemd-resolved) for name resolution.
 The host cannot resolve container names (it is not part of the zone),
 but it can reach containers by IP.
 

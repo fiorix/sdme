@@ -186,11 +186,19 @@ p code, li code {
   padding: 1rem 1.25rem;
   margin-bottom: 1rem;
   transition: background 0.2s, border-color 0.2s;
+  position: relative;
+  cursor: pointer;
 }
 .card:hover { border-color: var(--link); }
 .card h3 { font-size: 1rem; color: var(--text); margin: 0 0 0.15rem; }
 .card h3 a { color: var(--text); }
 .card h3 a:hover { color: var(--link); text-decoration: none; }
+.card h3 a::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 8px;
+}
 .card p { color: var(--text-secondary); font-size: 0.9rem; margin-bottom: 0; }
 .card .distros { color: var(--text-secondary); font-size: 0.8rem; margin-bottom: 0.75rem; }
 .card .deps { color: var(--text-secondary); font-size: 0.8rem; margin-bottom: 0.75rem; }
