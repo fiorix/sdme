@@ -237,9 +237,77 @@ fn machinectl_shell(
                 .join(" ")
         );
     }
-    let status = cmd.status().context("failed to run machinectl")?;
+
+    // Capture stderr to detect PTY allocation failures and fall back
+    // to nsenter when machinectl cannot allocate a shell PTY (e.g.
+    // on certain VM/kernel combinations with user namespaces).
+    cmd.stderr(std::process::Stdio::piped());
+    let output = cmd.output().context("failed to run machinectl")?;
     crate::check_interrupted()?;
-    Ok(status)
+
+    if output.status.success() {
+        return Ok(output.status);
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !stderr.contains("Failed to get shell PTY") && !stderr.contains("Access denied") {
+        // Not a PTY failure; print stderr and return the error status.
+        eprint!("{}", stderr);
+        return Ok(output.status);
+    }
+
+    // PTY allocation failed; fall back to nsenter.
+    eprintln!("warning: machinectl shell failed (PTY access denied), falling back to nsenter");
+    eprintln!(
+        "note: nsenter does not allocate a new PTY; terminal resize and job control may not work"
+    );
+    nsenter_shell(name, command, verbose)
+}
+
+/// Fall back to nsenter when machinectl shell cannot allocate a PTY.
+///
+/// For interactive sessions (no explicit command), returns success
+/// regardless of the shell's exit code. nsenter forwards the child's
+/// raw exit code, but a non-zero exit from a login shell (e.g. a
+/// failing profile script) does not mean the session failed.
+/// machinectl shell returns 0 on normal logout; this matches that
+/// behavior.
+fn nsenter_shell(name: &str, command: &[String], verbose: bool) -> Result<ExitStatus> {
+    use std::os::unix::process::ExitStatusExt;
+
+    let leader = systemd::get_machine_leader(name)?
+        .ok_or_else(|| anyhow::anyhow!("container '{}' is not registered with machined", name))?;
+
+    let interactive = command.is_empty();
+
+    let pid_str = leader.to_string();
+    let mut cmd = std::process::Command::new("nsenter");
+    cmd.args(["-t", &pid_str, "-m", "-u", "-i", "-n", "-p", "--"]);
+    if interactive {
+        cmd.arg("/bin/bash");
+        cmd.arg("-l");
+    } else {
+        cmd.args(command);
+    }
+
+    if verbose {
+        eprintln!(
+            "exec: nsenter {}",
+            cmd.get_args()
+                .map(|a| a.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+    }
+
+    let status = cmd.status().context("failed to run nsenter")?;
+    crate::check_interrupted()?;
+
+    if interactive {
+        Ok(ExitStatus::from_raw(0))
+    } else {
+        Ok(status)
+    }
 }
 
 #[cfg(test)]

@@ -42,6 +42,12 @@ pub fn is_active(name: &str) -> Result<bool> {
     }
 }
 
+/// Check whether an arbitrary systemd unit is currently active.
+/// Returns false if the unit does not exist or if the D-Bus query fails.
+pub fn is_unit_active(unit: &str) -> bool {
+    dbus::is_unit_active(unit).unwrap_or(false)
+}
+
 /// Return the ActiveState of a container's systemd unit.
 ///
 /// Returns `None` if the unit does not exist. Possible values include

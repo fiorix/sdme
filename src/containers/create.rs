@@ -8,7 +8,7 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::{bail, Context, Result};
 
 use crate::{
-    names, rootfs, validate_name, BindConfig, EnvConfig, NetworkConfig, ResourceLimits,
+    names, rootfs, systemd, validate_name, BindConfig, EnvConfig, NetworkConfig, ResourceLimits,
     SecurityConfig, State,
 };
 
@@ -54,6 +54,19 @@ pub fn create(datadir: &Path, opts: &CreateOptions, verbose: bool) -> Result<Str
              prevent services inside the container from accessing the filesystem. \
              Set a more permissive umask (e.g. umask 022) before running this command.",
             umask
+        );
+    }
+
+    // Warn if systemd-networkd is not running on the host when using
+    // networking modes that depend on it for bridge management and DHCP.
+    let uses_private_networking = opts.network.network_veth
+        || opts.network.network_zone.is_some()
+        || opts.network.network_bridge.is_some();
+    if uses_private_networking && !systemd::is_unit_active("systemd-networkd.service") {
+        eprintln!(
+            "warning: systemd-networkd is not running on the host; \
+             containers may not get network connectivity\n\
+             hint: sudo systemctl enable --now systemd-networkd"
         );
     }
 

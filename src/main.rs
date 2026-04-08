@@ -513,7 +513,7 @@ EXAMPLE:
     sudo sdme fs import ubuntu /tmp/ubuntu
 
     # Create a build config
-    cat << EOF > examplefs.conf
+    cat << EOF > examplefs.sdme
     FROM ubuntu
     RUN apt-get update && \\
         apt-get install -y \\
@@ -523,7 +523,7 @@ EXAMPLE:
     EOF
 
     # Build and use
-    sudo sdme fs build examplefs examplefs.conf
+    sudo sdme fs build examplefs examplefs.sdme
     sudo sdme new -r examplefs";
 
 const FS_EXPORT_HELP: &str = "\
