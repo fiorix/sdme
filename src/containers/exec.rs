@@ -238,23 +238,30 @@ fn machinectl_shell(
         );
     }
 
-    // Capture stderr to detect PTY allocation failures while letting
-    // stdout pass through so interactive shells and command output
-    // reach the caller.
-    cmd.stderr(std::process::Stdio::piped());
-    cmd.stdout(std::process::Stdio::inherit());
-    let output = cmd.output().context("failed to run machinectl")?;
+    // Run machinectl with inherited stdio so interactive PTY sessions
+    // work correctly. If it fails, probe stderr separately to decide
+    // whether to fall back to nsenter.
+    let status = cmd.status().context("failed to run machinectl")?;
     crate::check_interrupted()?;
 
-    if output.status.success() {
-        return Ok(output.status);
+    if status.success() {
+        return Ok(status);
     }
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    // machinectl failed. Probe with a trivial command to capture
+    // stderr and check if this is a PTY allocation failure.
+    let mut probe = std::process::Command::new("machinectl");
+    probe.args(["shell", name, "/bin/true"]);
+    probe.stdout(std::process::Stdio::null());
+    probe.stderr(std::process::Stdio::piped());
+    let probe_out = probe.output().unwrap_or_else(|_| std::process::Output {
+        status,
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+    });
+    let stderr = String::from_utf8_lossy(&probe_out.stderr);
     if !stderr.contains("Failed to get shell PTY") && !stderr.contains("Access denied") {
-        // Not a PTY failure; print stderr and return the error status.
-        eprint!("{}", stderr);
-        return Ok(output.status);
+        return Ok(status);
     }
 
     // PTY allocation failed; fall back to nsenter.
