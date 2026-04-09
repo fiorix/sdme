@@ -1121,7 +1121,7 @@ impl DownloadProgress {
                 self.last_tick += 2;
                 if self.last_tick == 100 {
                     eprint!("100%");
-                } else if self.last_tick % 10 == 0 {
+                } else if self.last_tick.is_multiple_of(10) {
                     eprint!("{}", self.last_tick);
                 } else {
                     eprint!(".");
