@@ -1,7 +1,7 @@
 +++
 title = "Running OpenClaw"
 description = "Build and run OpenClaw AI agent inside an sdme container with Telegram and WhatsApp support."
-weight = 103
+weight = 101
 
 [extra]
 category = "apps"
@@ -25,8 +25,7 @@ See [Using a Different Root Filesystem](/tutorial/different-rootfs/)
 for other supported distributions.
 
 You also need an inference server running on the `inference` network
-zone. See [Serving Inference: vLLM on NVIDIA](/tutorial/serving-inference-vllm/)
-or [Serving Inference: Ollama on NVIDIA](/tutorial/serving-inference-ollama/).
+zone. See [Serving Inference: vLLM on NVIDIA](/tutorial/serving-inference-vllm/).
 
 ## The build config
 

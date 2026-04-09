@@ -1,7 +1,7 @@
 +++
 title = "Serving Inference: vLLM on NVIDIA"
 description = "Build and run vLLM inside an sdme container with NVIDIA GPU passthrough for high-throughput LLM serving."
-weight = 101
+weight = 100
 
 [extra]
 category = "apps"
@@ -171,5 +171,4 @@ sudo sdme rm client
 ## Next steps
 
 With an inference server running, you can connect an AI agent to
-it. See [Running PicoClaw](/tutorial/running-agents-picoclaw/) or
-[Running OpenClaw](/tutorial/running-agents-openclaw/).
+it. See [Running OpenClaw](/tutorial/running-agents-openclaw/).
