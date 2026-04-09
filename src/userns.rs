@@ -145,7 +145,7 @@ fn do_prechown(root: &Path, shift: u64) -> Result<()> {
     let entries = collect_entries(root)?;
     let total = entries.len() as u64;
 
-    eprint!("pre-chown: shifting {total} files ");
+    eprint!("pre-chown: shifting {total} files 1");
 
     let last_milestone = AtomicU64::new(0);
     let interrupted = std::sync::atomic::AtomicBool::new(false);
@@ -168,7 +168,7 @@ fn do_prechown(root: &Path, shift: u64) -> Result<()> {
         let count = counter.fetch_add(1, Ordering::Relaxed) + 1;
         if total > 0 {
             let pct = (count * 100 / total).min(100);
-            let target = (pct / 10) * 10;
+            let target = (pct / 2) * 2;
             loop {
                 let prev = last_milestone.load(Ordering::Relaxed);
                 if target <= prev {
@@ -184,15 +184,18 @@ fn do_prechown(root: &Path, shift: u64) -> Result<()> {
                         use std::io::Write;
                         let stderr = std::io::stderr();
                         let mut lock = stderr.lock();
-                        let mut m = prev + 10;
+                        let mut m = prev + 2;
                         while m <= target {
                             if m == 100 {
-                                let _ = write!(lock, "100");
+                                let _ = write!(lock, "100%");
+                            } else if m.is_multiple_of(10) {
+                                let _ = write!(lock, "{m}");
                             } else {
-                                let _ = write!(lock, "{m}....");
+                                let _ = write!(lock, ".");
                             }
-                            m += 10;
+                            m += 2;
                         }
+                        let _ = lock.flush();
                         break;
                     }
                     Err(_) => continue,

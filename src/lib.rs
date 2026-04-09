@@ -1070,7 +1070,7 @@ pub(crate) mod testutil {
 /// Download progress display for interactive terminals.
 ///
 /// When Content-Length is known, prints percentage ticks on a single line:
-/// `downloading 1.5M 10....20....30....40....50....60....70....80....90....100%`
+/// `downloading 1.5M 1....10....20....30....40....50....60....70....80....90....100%`
 ///
 /// When Content-Length is unknown, prints the downloaded size every 5 seconds:
 /// `downloading 256K`
@@ -1094,7 +1094,7 @@ impl DownloadProgress {
         Self {
             total_size,
             downloaded: 0,
-            last_tick: 8,
+            last_tick: 0,
             last_print: std::time::Instant::now(),
             enabled,
             started: false,
@@ -1114,7 +1114,7 @@ impl DownloadProgress {
             if !self.started {
                 self.started = true;
                 let size = crate::oci::cache::format_size(total);
-                eprint!("downloading {size} ");
+                eprint!("downloading {size} 1");
             }
             let pct = ((self.downloaded as f64 / total as f64 * 100.0) as u64).min(100);
             while self.last_tick + 2 <= pct {
