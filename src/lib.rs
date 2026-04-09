@@ -1070,7 +1070,7 @@ pub(crate) mod testutil {
 /// Download progress display for interactive terminals.
 ///
 /// When Content-Length is known, prints percentage ticks on a single line:
-/// `downloading 1.5M 10....20....30....40....50....60....70....80....90....100`
+/// `downloading 1.5M 10....20....30....40....50....60....70....80....90....100%`
 ///
 /// When Content-Length is unknown, prints the downloaded size every 5 seconds:
 /// `downloading 256K`
@@ -1079,7 +1079,7 @@ pub(crate) mod testutil {
 pub struct DownloadProgress {
     total_size: Option<u64>,
     downloaded: u64,
-    last_milestone: u64,
+    last_tick: u64,
     last_print: std::time::Instant,
     enabled: bool,
     started: bool,
@@ -1094,7 +1094,7 @@ impl DownloadProgress {
         Self {
             total_size,
             downloaded: 0,
-            last_milestone: 0,
+            last_tick: 8,
             last_print: std::time::Instant::now(),
             enabled,
             started: false,
@@ -1117,12 +1117,14 @@ impl DownloadProgress {
                 eprint!("downloading {size} ");
             }
             let pct = ((self.downloaded as f64 / total as f64 * 100.0) as u64).min(100);
-            while self.last_milestone + 10 <= pct {
-                self.last_milestone += 10;
-                if self.last_milestone == 100 {
-                    eprint!("100");
+            while self.last_tick + 2 <= pct {
+                self.last_tick += 2;
+                if self.last_tick == 100 {
+                    eprint!("100%");
+                } else if self.last_tick % 10 == 0 {
+                    eprint!("{}", self.last_tick);
                 } else {
-                    eprint!("{}....", self.last_milestone);
+                    eprint!(".");
                 }
             }
         } else {
