@@ -21,7 +21,6 @@
   <section>
     <h2>Tutorials</h2>
     {% for page in tutorials.pages %}
-      {% if not page.extra.category or page.extra.category != "apps" %}
       <div class="card">
         <h3>
           {% if page.extra.status is defined and page.extra.status == "soon" %}
@@ -33,28 +32,6 @@
         </h3>
         <p>{{ page.description }}</p>
       </div>
-      {% endif %}
-    {% endfor %}
-  </section>
-
-  <hr>
-
-  <section>
-    <h2>Applications</h2>
-    {% for page in tutorials.pages %}
-      {% if page.extra.category is defined and page.extra.category == "apps" %}
-      <div class="card">
-        <h3>
-          {% if page.extra.status is defined and page.extra.status == "soon" %}
-            <a href="{{ page.permalink }}">{{ page.title }}</a>
-            <span class="badge badge-soon">coming soon</span>
-          {% else %}
-            <a href="{{ page.permalink }}">{{ page.title }}</a>
-          {% endif %}
-        </h3>
-        <p>{{ page.description }}</p>
-      </div>
-      {% endif %}
     {% endfor %}
   </section>
 

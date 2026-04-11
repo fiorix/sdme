@@ -9,7 +9,6 @@
 
   <section style="margin-top: 1.5rem;">
     {% for page in section.pages %}
-      {% if not page.extra.category or page.extra.category != "apps" %}
       <div class="card">
         <h3>
           {% if page.extra.status is defined and page.extra.status == "soon" %}
@@ -21,28 +20,6 @@
         </h3>
         <p>{{ page.description }}</p>
       </div>
-      {% endif %}
-    {% endfor %}
-  </section>
-
-  <hr>
-
-  <h2>Applications</h2>
-  <section style="margin-top: 1rem;">
-    {% for page in section.pages %}
-      {% if page.extra.category is defined and page.extra.category == "apps" %}
-      <div class="card">
-        <h3>
-          {% if page.extra.status is defined and page.extra.status == "soon" %}
-            <a href="{{ page.permalink }}">{{ page.title }}</a>
-            <span class="badge badge-soon">coming soon</span>
-          {% else %}
-            <a href="{{ page.permalink }}">{{ page.title }}</a>
-          {% endif %}
-        </h3>
-        <p>{{ page.description }}</p>
-      </div>
-      {% endif %}
     {% endfor %}
   </section>
 
