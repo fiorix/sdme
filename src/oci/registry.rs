@@ -421,6 +421,17 @@ fn host_arch() -> &'static str {
     }
 }
 
+/// Bail if the image architecture does not match the host.
+fn check_image_architecture(image_arch: Option<&str>) -> Result<()> {
+    let host = host_arch();
+    if let Some(arch) = image_arch {
+        if arch != host {
+            bail!("image architecture {arch} does not match host {host}");
+        }
+    }
+    Ok(())
+}
+
 /// The `config` object inside an OCI image config blob.
 #[derive(serde::Deserialize, serde::Serialize, Debug, Default, Clone)]
 pub(crate) struct OciContainerConfig {
@@ -469,6 +480,7 @@ impl OciContainerConfig {
 /// Top-level OCI image config blob.
 #[derive(serde::Deserialize, Debug)]
 pub(crate) struct OciImageConfig {
+    pub(crate) architecture: Option<String>,
     pub(crate) config: Option<OciContainerConfig>,
 }
 
@@ -752,6 +764,9 @@ struct CachedManifest {
     manifest: serde_json::Value,
     /// The container config blob (if available).
     container_config: Option<OciContainerConfig>,
+    /// Image architecture from the config blob (e.g. "amd64", "arm64").
+    #[serde(default)]
+    image_architecture: Option<String>,
 }
 
 /// Build a cache key path for a manifest.
@@ -795,6 +810,7 @@ fn save_cached_manifest(
     image: &ImageReference,
     manifest: &ImageManifest,
     container_config: &Option<OciContainerConfig>,
+    image_architecture: Option<&str>,
 ) {
     let path = manifest_cache_path(cache_dir, image);
     if let Some(parent) = path.parent() {
@@ -808,6 +824,7 @@ fn save_cached_manifest(
         timestamp: now,
         manifest: serde_json::to_value(manifest).unwrap_or_default(),
         container_config: container_config.clone(),
+        image_architecture: image_architecture.map(String::from),
     };
     if let Ok(json) = serde_json::to_string(&cached) {
         let _ = fs::write(&path, json);
@@ -851,6 +868,7 @@ pub(crate) fn import_registry_image(
             serde_json::from_value(cached.manifest).context("failed to parse cached manifest")?;
         if !manifest.layers.is_empty() {
             eprintln!("manifest cache hit");
+            check_image_architecture(cached.image_architecture.as_deref())?;
             if verbose {
                 eprintln!("image has {} layer(s) (cached)", manifest.layers.len());
             }
@@ -906,7 +924,7 @@ pub(crate) fn import_registry_image(
     }
 
     // Fetch the config blob if present in the manifest.
-    let container_config = if let Some(ref config_desc) = manifest.config {
+    let (container_config, image_architecture) = if let Some(ref config_desc) = manifest.config {
         match fetch_config_blob(
             &ctx,
             &image.registry,
@@ -914,6 +932,8 @@ pub(crate) fn import_registry_image(
             &config_desc.digest,
         ) {
             Ok(image_config) => {
+                check_image_architecture(image_config.architecture.as_deref())?;
+                let arch = image_config.architecture.clone();
                 if verbose {
                     if let Some(ref cc) = image_config.config {
                         eprintln!(
@@ -941,19 +961,25 @@ pub(crate) fn import_registry_image(
                         }
                     }
                 }
-                image_config.config
+                (image_config.config, arch)
             }
             Err(e) => {
                 eprintln!("warning: failed to fetch image config: {e:#}");
-                None
+                (None, None)
             }
         }
     } else {
-        None
+        (None, None)
     };
 
     // Save manifest + config to cache.
-    save_cached_manifest(cache_dir, image, &manifest, &container_config);
+    save_cached_manifest(
+        cache_dir,
+        image,
+        &manifest,
+        &container_config,
+        image_architecture.as_deref(),
+    );
 
     download_layers(&ctx, image, &manifest, staging_dir)?;
 
