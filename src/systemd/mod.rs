@@ -125,19 +125,48 @@ pub fn wait_for_dbus(name: &str, timeout: std::time::Duration, verbose: bool) ->
     dbus::wait_for_dbus(name, timeout, verbose)
 }
 
+/// Outcome of waiting for a container to boot.
+pub enum BootOutcome {
+    /// Container booted and D-Bus is ready.
+    Ready,
+    /// Boot timed out but the container is likely still alive (e.g.
+    /// slow first-boot userns chown). Caller should not kill it.
+    TimedOut(anyhow::Error),
+    /// Container exited or failed during boot. Caller should clean up.
+    Exited(anyhow::Error),
+}
+
 /// Wait for a container to complete boot and D-Bus readiness.
 ///
 /// Combines `wait_for_boot` and `wait_for_dbus` with shared timeout tracking.
+/// Returns a `BootOutcome` that distinguishes timeout (container alive)
+/// from exit (container dead) so callers don't need to re-derive liveness.
 ///
 /// Known limitation: for OCI app containers, we do not wait for the
 /// `sdme-oci-{name}.service` to reach active state. A failing OCI app service
 /// (e.g. port conflict) goes unnoticed until the user checks `sdme logs --oci`.
-pub fn await_boot(name: &str, timeout: std::time::Duration, verbose: bool) -> Result<()> {
+pub fn await_boot(name: &str, timeout: std::time::Duration, verbose: bool) -> BootOutcome {
     let boot_start = std::time::Instant::now();
-    wait_for_boot(name, timeout, verbose)?;
+    if let Err(e) = wait_for_boot(name, timeout, verbose) {
+        return classify_boot_error(e);
+    }
     let remaining = timeout.saturating_sub(boot_start.elapsed());
-    wait_for_dbus(name, remaining, verbose)?;
-    Ok(())
+    if let Err(e) = wait_for_dbus(name, remaining, verbose) {
+        return classify_boot_error(e);
+    }
+    BootOutcome::Ready
+}
+
+/// Classify a boot/dbus error as timeout or exit based on the error
+/// chain. Timeout errors carry a `BootTimeout` marker; everything else
+/// (container exited, signal watcher died, interrupted) is treated as
+/// an exit.
+fn classify_boot_error(e: anyhow::Error) -> BootOutcome {
+    if e.downcast_ref::<dbus::BootTimeout>().is_some() {
+        BootOutcome::TimedOut(e)
+    } else {
+        BootOutcome::Exited(e)
+    }
 }
 
 /// Terminate a container via the machined D-Bus API.

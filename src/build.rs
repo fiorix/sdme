@@ -473,7 +473,10 @@ fn execute_build(datadir: &Path, ctx: &ExecuteBuildContext<'_>) -> Result<()> {
             boot_timeout: ctx.boot_timeout,
             verbose: ctx.verbose,
         })?;
-        systemd::await_boot(ctx.container_name, timeout, ctx.verbose)?;
+        match systemd::await_boot(ctx.container_name, timeout, ctx.verbose) {
+            systemd::BootOutcome::Ready => {}
+            systemd::BootOutcome::TimedOut(e) | systemd::BootOutcome::Exited(e) => return Err(e),
+        }
         container_running = true;
     }
 

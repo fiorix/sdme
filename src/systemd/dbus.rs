@@ -1,6 +1,20 @@
 //! D-Bus communication with systemd and machined.
 
 use anyhow::{bail, Context, Result};
+
+/// Marker error indicating a boot/dbus wait timed out (container may still
+/// be alive). Attached via `context()` so `await_boot` can downcast to
+/// distinguish timeout from container exit.
+#[derive(Debug)]
+pub(super) struct BootTimeout;
+
+impl std::fmt::Display for BootTimeout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("boot timeout")
+    }
+}
+
+impl std::error::Error for BootTimeout {}
 use zbus::blocking::proxy::Proxy;
 use zbus::blocking::{Connection, MessageIterator};
 use zbus::MatchRule;
@@ -264,10 +278,11 @@ pub(super) fn wait_for_boot(name: &str, timeout: std::time::Duration, verbose: b
 
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         if remaining.is_zero() {
-            bail!(
+            return Err(anyhow::anyhow!(
                 "timed out waiting for container '{name}' to boot ({}s)",
                 timeout.as_secs()
-            );
+            )
+            .context(BootTimeout));
         }
 
         let wait = poll_interval.min(remaining);
@@ -442,12 +457,18 @@ pub(super) fn wait_for_dbus(name: &str, timeout: std::time::Duration, verbose: b
             eprintln!("container D-Bus not ready");
         }
 
+        // Detect early container exit so we don't poll until timeout.
+        if !std::path::Path::new(&format!("/proc/{leader}")).exists() {
+            bail!("container '{name}' exited during boot");
+        }
+
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         if remaining.is_zero() {
-            bail!(
+            return Err(anyhow::anyhow!(
                 "timed out waiting for D-Bus in container '{name}' ({}s)",
                 timeout.as_secs()
-            );
+            )
+            .context(BootTimeout));
         }
 
         std::thread::sleep(poll_interval.min(remaining));

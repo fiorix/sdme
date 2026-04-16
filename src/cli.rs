@@ -203,16 +203,9 @@ pub(crate) fn start_and_await_boot(cfg: &BootConfig) -> Result<()> {
         boot_timeout: boot_timeout.as_secs(),
         verbose,
     })?;
-    if let Err(e) = systemd::await_boot(name, boot_timeout, verbose) {
-        // Check whether the container is still alive (active or still
-        // activating). If it is, the boot didn't fail: sdme just timed
-        // out waiting for the readiness signal (e.g. slow first-boot
-        // userns chown). Don't kill it.
-        let still_alive = matches!(
-            systemd::unit_active_state(name).as_deref(),
-            Some("active" | "activating")
-        );
-        if still_alive {
+    match systemd::await_boot(name, boot_timeout, verbose) {
+        systemd::BootOutcome::Ready => Ok(()),
+        systemd::BootOutcome::TimedOut(e) => {
             eprintln!(
                 "container '{name}' is still starting but sdme timed out \
                  waiting for boot readiness ({}s)",
@@ -222,14 +215,45 @@ pub(crate) fn start_and_await_boot(cfg: &BootConfig) -> Result<()> {
                 "hint: check logs with 'sdme logs {name}', or try \
                  'sdme stop {name}' then 'sdme start -t <seconds> {name}'"
             );
-            return Err(e);
+            Err(e)
         }
-        let _guard = sdme::InterruptGuard::save_and_reset();
-        eprintln!("boot failed, stopping '{name}'");
-        let _ = containers::stop(name, containers::StopMode::Terminate, stop_timeout, verbose);
-        return Err(e);
+        systemd::BootOutcome::Exited(e) => {
+            let _guard = sdme::InterruptGuard::save_and_reset();
+            eprintln!("boot failed, stopping '{name}'");
+            let _ = containers::stop(name, containers::StopMode::Terminate, stop_timeout, verbose);
+            Err(e)
+        }
     }
-    Ok(())
+}
+
+/// Print recent journal entries for a container whose boot failed.
+///
+/// Runs `journalctl` on the host to show the nspawn unit's output so the
+/// user can diagnose why the container failed to start. Errors are
+/// silently ignored because this is best-effort diagnostics.
+fn dump_boot_journal(name: &str) {
+    let unit = systemd::service_name(name);
+    let output = std::process::Command::new("journalctl")
+        .args([
+            "-u",
+            &unit,
+            "-n",
+            "50",
+            "--no-pager",
+            "-o",
+            "short-monotonic",
+        ])
+        .output();
+    match output {
+        Ok(out) if !out.stdout.is_empty() => {
+            eprintln!("\n--- journal for {unit} (last 50 lines) ---");
+            // journalctl writes to stdout; forward it to stderr so it
+            // stays together with the rest of the diagnostic output.
+            let _ = std::io::Write::write_all(&mut std::io::stderr(), &out.stdout);
+            eprintln!("--- end journal ---\n");
+        }
+        _ => {}
+    }
 }
 
 /// Start a newly created container and remove it if the start fails.
@@ -245,6 +269,7 @@ pub(crate) fn create_and_start(cfg: &BootConfig) -> Result<()> {
     } = *cfg;
     eprintln!("starting '{name}'");
     if let Err(e) = start_and_await_boot(cfg) {
+        dump_boot_journal(name);
         eprintln!("start failed, removing '{name}'");
         let _ = containers::remove(datadir, name, verbose);
         return Err(e);
