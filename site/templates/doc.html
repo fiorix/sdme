@@ -3,7 +3,7 @@
 {% block title %}{{ page.title }} — sdme{% endblock %}
 
 {% block content %}
-  <p class="breadcrumb"><a href="{{ get_url(path='/') }}">sdme</a> / <a href="{{ get_url(path='@/docs/_index.md') }}">docs</a> /</p>
+  <p class="breadcrumb"><a href="{{ get_url(path='/') }}">sdme</a> / <a href="{{ get_url(path='/') }}#documentation">docs</a> /</p>
   <h1>{{ page.title }}</h1>
   {% if page.description %}
   <p class="subtitle">{{ page.description }}</p>
@@ -15,7 +15,7 @@
     {% if page.lower %}
       <a href="{{ page.lower.permalink }}">&larr; {{ page.lower.title }}</a>
     {% else %}
-      <a href="{{ get_url(path='@/docs/_index.md') }}">All docs</a>
+      <a href="{{ get_url(path='/') }}#documentation">All docs</a>
     {% endif %}
     {% if page.higher %}
       <a class="next" href="{{ page.higher.permalink }}">{{ page.higher.title }} &rarr;</a>

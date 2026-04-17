@@ -11,13 +11,25 @@ supports `systemctl`, `journalctl`, and everything you would
 expect on a real machine. If you are coming from Docker or Podman,
 think of it as a lightweight VM without the hypervisor overhead.
 
-This tutorial assumes sdme is already installed (see the
-[downloads page](/)) and that `systemd-container` is installed on
-your system so
+## Install sdme
+
+If you haven't installed sdme yet:
+
+```sh
+curl -fsSL https://fiorix.github.io/sdme/install.sh | sudo sh
+```
+
+This installs a single static binary to `/usr/local/bin/sdme`. Your system
+also needs `systemd-container` so that
 [systemd-nspawn](https://www.freedesktop.org/software/systemd/man/latest/systemd-nspawn.html)
 and
 [machinectl](https://www.freedesktop.org/software/systemd/man/latest/machinectl.html)
-are available.
+are available. On Debian/Ubuntu: `sudo apt install systemd-container`.
+On Fedora/CentOS: `sudo dnf install systemd-container`. Arch Linux
+includes it in the base `systemd` package.
+
+For other installation methods, see the
+[installation page](@/_index.md#installation).
 
 {% callout(type="warn", title="Note") %}
 sdme requires root for all operations. Every `sdme` command in this tutorial must be run as root or with `sudo`.

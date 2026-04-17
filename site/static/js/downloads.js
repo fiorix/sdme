@@ -1,32 +1,11 @@
 (function() {
-  function formatSize(bytes) {
-    if (bytes >= 1048576) return (bytes / 1048576).toFixed(1) + ' MB';
-    if (bytes >= 1024) return (bytes / 1024).toFixed(0) + ' KB';
-    return bytes + ' B';
-  }
-
-  function archLabel(filename) {
-    if (/x86_64|amd64/.test(filename)) return 'x86_64';
-    if (/aarch64|arm64/.test(filename)) return 'aarch64';
-    return '';
-  }
-
-  function classify(name) {
-    if (/^sdme-(x86_64|aarch64)-linux$/.test(name)) return 'binary';
-    if (/\.deb$/.test(name)) return 'deb';
-    if (/\.rpm$/.test(name)) return 'rpm';
-    if (/\.pkg\.tar\.zst$/.test(name)) return 'pkg';
-    if (name === 'SHA256SUMS') return 'checksum';
-    return null;
-  }
-
   var categories = [
     {
       type: 'binary',
       title: 'Static Binaries',
       distros: 'Any Linux distro',
       deps: 'Requires <strong>systemd &ge; 255</strong> and <strong>systemd-container</strong> at runtime',
-      cmdTemplate: function(url, filename) {
+      cmdTemplate: function(url) {
         return 'curl -fSL -o /usr/local/bin/sdme ' + url + ' && chmod +x /usr/local/bin/sdme';
       }
     },
@@ -58,6 +37,27 @@
       }
     }
   ];
+
+  function formatSize(bytes) {
+    if (bytes >= 1048576) return (bytes / 1048576).toFixed(1) + ' MB';
+    if (bytes >= 1024) return (bytes / 1024).toFixed(0) + ' KB';
+    return bytes + ' B';
+  }
+
+  function archLabel(filename) {
+    if (/x86_64|amd64/.test(filename)) return 'x86_64';
+    if (/aarch64|arm64/.test(filename)) return 'aarch64';
+    return '';
+  }
+
+  function classify(name) {
+    if (/^sdme-(x86_64|aarch64)-linux$/.test(name)) return 'binary';
+    if (/\.deb$/.test(name)) return 'deb';
+    if (/\.rpm$/.test(name)) return 'rpm';
+    if (/\.pkg\.tar\.zst$/.test(name)) return 'pkg';
+    if (name === 'SHA256SUMS') return 'checksum';
+    return null;
+  }
 
   function escapeHtml(str) {
     return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -129,17 +129,11 @@
     if (fb) fb.style.display = 'block';
   }
 
-  // Use cached data from version-badge.js if available
-  var helpers = window._sdmeRelease;
-  if (helpers) {
-    var cached = helpers.getCached();
-    if (cached) {
-      renderDownloads(cached);
-      return;
-    }
+  // Reuse the fetch from version-badge.js (loaded in base.html before this script)
+  var release = window._sdmeRelease;
+  if (release && release.fetched) {
+    release.fetched.then(renderDownloads).catch(showFallback);
+  } else {
+    showFallback();
   }
-
-  // Otherwise wait for the fetch callback
-  window._sdmeOnRelease = renderDownloads;
-  window._sdmeOnReleaseFail = showFallback;
 })();

@@ -8,17 +8,18 @@
     systemd-nspawn booted containers on Linux.</p>
   </section>
 
-  <section>
-    <h2>Quick install</h2>
+  <section id="installation">
+    <h2>Installation</h2>
     <pre><code>curl -fsSL https://fiorix.github.io/sdme/install.sh | sudo sh</code></pre>
-    <p class="note">Auto-detects architecture (x86_64 / aarch64) and verifies SHA256 checksums.
-      See <a href="#downloads">downloads</a> for packages and static binaries.</p>
+    <p class="note">Installs a single static binary to <code>/usr/local/bin/sdme</code>.
+      Auto-detects architecture (x86_64 / aarch64) and verifies SHA256 checksums.
+      For .deb, .rpm, and .pkg packages, see <a href="#downloads">downloads</a> below.</p>
   </section>
 
   <hr>
 
   {% set tutorials = get_section(path="tutorial/_index.md") %}
-  <section>
+  <section id="tutorials">
     <h2>Tutorials</h2>
     {% for page in tutorials.pages %}
       <div class="card">
@@ -38,7 +39,7 @@
   <hr>
 
   {% set docs = get_section(path="docs/_index.md") %}
-  <section>
+  <section id="documentation">
     <h2>Documentation</h2>
     {% for page in docs.pages %}
     <div class="card">

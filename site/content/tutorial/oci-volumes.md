@@ -15,7 +15,7 @@ which declares `/var/lib/postgresql` as a volume.
 ## Import PostgreSQL
 
 Make sure you have a base rootfs imported (see the
-[different rootfs](/tutorial/different-rootfs/) tutorial). Then
+[different rootfs](@/tutorial/different-rootfs.md) tutorial). Then
 import PostgreSQL as an OCI application:
 
 ```sh
@@ -139,5 +139,5 @@ config:
 
 Not all images declare volumes. For example, redis and nginx do not.
 Use `--bind` to manage data directories for those images manually.
-See the [bind mounts](/tutorial/bind-mounts-volumes/) tutorial for
+See the [bind mounts](@/tutorial/bind-mounts-volumes.md) tutorial for
 details.

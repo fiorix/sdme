@@ -10,7 +10,7 @@ services the same way you would on a regular Linux system.
 ## Import a rootfs
 
 Import a rootfs to use as a container template. This example uses
-Fedora, but any [supported distribution](/tutorial/different-rootfs/#supported-distributions)
+Fedora, but any [supported distribution](@/tutorial/different-rootfs.md#supported-distributions)
 works:
 
 ```sh
@@ -28,7 +28,7 @@ containers:
   hostname.
 - `--hardened` enables user namespace isolation so root inside the
   container is not root on the host. See the
-  [security architecture](/docs/security/#10-hardening-tiers) for
+  [security architecture](@/docs/security.md#10-hardening-tiers) for
   details on what this enables.
 
 ```sh
@@ -108,12 +108,12 @@ systemd-run --scope tmux
 
 Without `systemd-run --scope`, systemd terminates all processes in
 your login session when you exit. See the
-[your first container](/tutorial/first-container/#running-tmux-and-other-background-processes)
+[your first container](@/tutorial/first-container.md#running-tmux-and-other-background-processes)
 tutorial for more details.
 
 ## Sharing files with the host
 
 You can bind-mount host directories into the container at creation
 time using the `-b` flag. See the
-[bind mounts and OCI volumes](/tutorial/bind-mounts-volumes/) tutorial
+[bind mounts and OCI volumes](@/tutorial/bind-mounts-volumes.md) tutorial
 for examples.

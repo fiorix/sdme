@@ -1,22 +1,9 @@
-{% extends "base.html" %}
-
-{% block title %}{{ section.title }} — sdme{% endblock %}
-
-{% block content %}
-  <p class="breadcrumb"><a href="{{ get_url(path='/') }}">sdme</a> /</p>
-  <h1>{{ section.title }}</h1>
-  <p>{{ section.description }}</p>
-
-  <section style="margin-top: 1.5rem;">
-    {% for page in section.pages %}
-    <div class="card">
-      <h3><a href="{{ page.permalink }}">{{ page.title }}</a></h3>
-      <p>{{ page.description }}</p>
-    </div>
-    {% endfor %}
-  </section>
-
-  <footer>
-    <a href="{{ get_url(path='/') }}">Back to sdme home</a>
-  </footer>
-{% endblock %}
+<!DOCTYPE html>
+<html>
+<head>
+  <meta http-equiv="refresh" content="0; url={{ get_url(path='/') }}#documentation">
+</head>
+<body>
+  <p>Redirecting to <a href="{{ get_url(path='/') }}#documentation">documentation</a>...</p>
+</body>
+</html>

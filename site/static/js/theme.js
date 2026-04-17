@@ -25,14 +25,11 @@
 
   if (window.matchMedia) {
     try {
-      var mq = window.matchMedia('(prefers-color-scheme: light)');
-      var handler = function(e) {
+      window.matchMedia('(prefers-color-scheme: light)').addEventListener('change', function(e) {
         var stored = null;
         try { stored = localStorage.getItem(THEME_KEY); } catch(ex) {}
         if (!stored) applyTheme(e.matches ? 'light' : 'dark');
-      };
-      if (mq.addEventListener) mq.addEventListener('change', handler);
-      else if (mq.addListener) mq.addListener(handler);
+      });
     } catch(e) {}
   }
 })();

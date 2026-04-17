@@ -11,7 +11,7 @@ also the [architecture documentation](@/docs/architecture.md#11-bind-mounts-and-
 
 ## Bind mounts with a regular service
 
-Building on the [running long-lived services](/tutorial/services/)
+Building on the [running long-lived services](@/tutorial/services.md)
 tutorial, create a directory on the host with some content:
 
 ```sh
@@ -64,7 +64,7 @@ When using an OCI application, the app runs chrooted under
 `/oci/apps/{name}/root` inside the container. Bind mount paths need
 to target that prefix.
 
-Following the [OCI tutorial](/tutorial/oci-apps/), after importing nginx with
+Following the [OCI tutorial](@/tutorial/oci-apps.md), after importing nginx with
 `sudo sdme fs import nginx docker.io/nginx --base-fs ubuntu`, you
 can bind-mount a host directory to the nginx HTML root:
 
@@ -91,5 +91,5 @@ a shell.
 Some OCI images declare volumes for data directories that should
 persist independently from the container. sdme detects these and
 manages them automatically. See the
-[OCI volumes with PostgreSQL](/tutorial/oci-volumes/) tutorial for
+[OCI volumes with PostgreSQL](@/tutorial/oci-volumes.md) tutorial for
 a complete walkthrough.

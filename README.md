@@ -23,6 +23,26 @@ from Kubernetes Pod YAML manifests.
 - **OCI application images**: run Docker Hub images (nginx, redis, postgres) as systemd services.
 - **Kubernetes Pod YAML**: deploy multi-container pods with volumes, secrets, configmaps, and health probes.
 
-## Downloads, tutorials, and documentation
+## Installation
+
+sdme is a single static binary with no configuration files or background
+services. The install script downloads the latest release, verifies
+SHA256 checksums, and places the binary in `/usr/local/bin`:
+
+```sh
+curl -fsSL https://fiorix.github.io/sdme/install.sh | sudo sh
+```
+
+Your system also needs `systemd-container` installed so that
+systemd-nspawn and machinectl are available:
+
+- Debian/Ubuntu: `sudo apt install systemd-container`
+- Fedora/CentOS: `sudo dnf install systemd-container`
+- Arch Linux: included in the base `systemd` package
+
+For .deb, .rpm, and .pkg packages, see the
+[downloads page](https://fiorix.github.io/sdme/#downloads).
+
+## Tutorials and documentation
 
 **[fiorix.github.io/sdme](https://fiorix.github.io/sdme/)**

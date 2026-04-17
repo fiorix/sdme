@@ -1,6 +1,7 @@
 (function() {
   var CACHE_KEY = 'sdme_release';
   var CACHE_TTL = 5 * 60 * 1000;
+  var API_URL = 'https://api.github.com/repos/fiorix/sdme/releases/latest';
 
   function getCached() {
     try {
@@ -27,31 +28,24 @@
     badge.style.display = 'inline-block';
   }
 
-  // Expose cache helpers for downloads.js
-  window._sdmeRelease = { getCached: getCached, setCache: setCache };
-
   var cached = getCached();
   if (cached) {
     showVersion(cached);
-  } else {
-    var xhr = new XMLHttpRequest();
-    xhr.open('GET', 'https://api.github.com/repos/fiorix/sdme/releases/latest');
-    xhr.setRequestHeader('Accept', 'application/vnd.github.v3+json');
-    xhr.onload = function() {
-      if (xhr.status === 200) {
-        try {
-          var data = JSON.parse(xhr.responseText);
-          setCache(data);
-          showVersion(data);
-          if (window._sdmeOnRelease) window._sdmeOnRelease(data);
-        } catch(e) {}
-      } else {
-        if (window._sdmeOnReleaseFail) window._sdmeOnReleaseFail();
-      }
-    };
-    xhr.onerror = function() {
-      if (window._sdmeOnReleaseFail) window._sdmeOnReleaseFail();
-    };
-    xhr.send();
+    window._sdmeRelease = { getCached: getCached, fetched: Promise.resolve(cached) };
+    return;
   }
+
+  var fetched = fetch(API_URL, { headers: { 'Accept': 'application/vnd.github.v3+json' } })
+    .then(function(res) {
+      if (!res.ok) throw new Error(res.status);
+      return res.json();
+    })
+    .then(function(data) {
+      setCache(data);
+      showVersion(data);
+      return data;
+    });
+
+  // Expose cache + in-flight promise so other scripts reuse the same request
+  window._sdmeRelease = { getCached: getCached, fetched: fetched };
 })();
