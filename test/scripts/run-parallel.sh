@@ -463,6 +463,7 @@ main() {
 
     local wave_a_tests=(
         verify-cp.sh
+        verify-diff.sh
         verify-export.sh
         verify-build.sh
         verify-security.sh

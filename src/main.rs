@@ -372,6 +372,50 @@ EXIT STATUS:
     130     Interrupted by Ctrl+C (SIGINT)
     143     Interrupted by SIGTERM";
 
+const DIFF_HELP: &str = "\
+Show filesystem changes in a container's overlayfs upper layer relative to
+its base rootfs, or compare changes between two containers.
+
+TARGET FORMATS:
+    NAME                Diff container against its base rootfs
+    FROM..TO            Diff between two containers' upper layers
+
+PATH FILTERING:
+    Paths after '--' restrict output to specific subtrees.
+
+OUTPUT MODES:
+    Default             A/M/D status with file path (binary files labeled)
+    --stat              Summary statistics (counts by change type)
+    --name-only         File paths only, no status prefix
+
+OVERLAYFS DETAILS:
+    Each container's upper layer records files that were added, modified,
+    or deleted relative to the base rootfs (lower layer). Deleted files
+    appear as overlayfs whiteout markers (character devices 0,0). Opaque
+    directories (trusted.overlay.opaque xattr) hide all lower content.
+
+EXAMPLES:
+    # Show all changes in container 'mybox'
+    sdme diff mybox
+
+    # Show only /etc changes
+    sdme diff mybox -- /etc
+
+    # Compare two containers
+    sdme diff dev..staging
+
+    # Summary statistics
+    sdme diff mybox --stat
+
+    # File paths only (for scripting)
+    sdme diff mybox --name-only
+
+EXIT STATUS:
+    0       Success (or no changes)
+    1       Error
+    130     Interrupted by Ctrl+C (SIGINT)
+    143     Interrupted by SIGTERM";
+
 const FS_HELP: &str = "\
 Manage root filesystems used as base layers for containers. Each rootfs is
 stored under {datadir}/fs/{name} and used as the lower layer in overlayfs.
@@ -957,6 +1001,25 @@ enum Command {
         /// Allow device nodes and skip safety prompts
         #[arg(short, long)]
         force: bool,
+    },
+
+    /// Show filesystem changes in a container
+    #[command(after_long_help = DIFF_HELP)]
+    Diff {
+        /// Target: container name or FROM..TO (range)
+        target: String,
+
+        /// Show summary statistics only
+        #[arg(long)]
+        stat: bool,
+
+        /// Show only file paths (no status prefix)
+        #[arg(long, conflicts_with = "stat")]
+        name_only: bool,
+
+        /// Paths to filter (only show changes under these paths)
+        #[arg(last = true)]
+        paths: Vec<String>,
     },
 
     /// Run a command in a running container
@@ -1890,6 +1953,19 @@ fn run() -> Result<()> {
                     verbose: cli.verbose,
                     interactive,
                 },
+            )?;
+        }
+        Command::Diff {
+            target,
+            stat,
+            name_only,
+            paths,
+        } => {
+            sdme::diff::diff(
+                &cfg.datadir,
+                &target,
+                &paths,
+                &sdme::diff::DiffOptions { stat, name_only },
             )?;
         }
         Command::Create {

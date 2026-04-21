@@ -722,20 +722,20 @@ mod tests {
     #[test]
     fn test_parse_host_absolute() {
         let ep = parse_endpoint("/tmp/file").unwrap();
-        assert!(matches!(ep, CpEndpoint::Host(p) if p == PathBuf::from("/tmp/file")));
+        assert!(matches!(ep, CpEndpoint::Host(p) if p == Path::new("/tmp/file")));
     }
 
     #[test]
     fn test_parse_host_relative() {
         let ep = parse_endpoint("./file").unwrap();
-        assert!(matches!(ep, CpEndpoint::Host(p) if p == PathBuf::from("./file")));
+        assert!(matches!(ep, CpEndpoint::Host(p) if p == Path::new("./file")));
     }
 
     #[test]
     fn test_parse_host_bare_name() {
         // A bare filename without colons is a host path.
         let ep = parse_endpoint("file.txt").unwrap();
-        assert!(matches!(ep, CpEndpoint::Host(p) if p == PathBuf::from("file.txt")));
+        assert!(matches!(ep, CpEndpoint::Host(p) if p == Path::new("file.txt")));
     }
 
     #[test]
@@ -807,7 +807,7 @@ mod tests {
     fn test_parse_invalid_container_name_is_host() {
         // Names starting with uppercase or containing invalid chars are treated as host paths.
         let ep = parse_endpoint("UPPER:/etc/file").unwrap();
-        assert!(matches!(ep, CpEndpoint::Host(p) if p == PathBuf::from("UPPER:/etc/file")));
+        assert!(matches!(ep, CpEndpoint::Host(p) if p == Path::new("UPPER:/etc/file")));
     }
 
     #[test]
