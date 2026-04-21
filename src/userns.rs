@@ -166,8 +166,8 @@ fn do_prechown(root: &Path, shift: u64) -> Result<()> {
             }
         }
         let count = counter.fetch_add(1, Ordering::Relaxed) + 1;
-        if total > 0 {
-            let pct = (count * 100 / total).min(100);
+        if let Some(pct) = (count * 100).checked_div(total) {
+            let pct = pct.min(100);
             let target = (pct / 2) * 2;
             loop {
                 let prev = last_milestone.load(Ordering::Relaxed);

@@ -247,7 +247,7 @@ fn find_root_partition(block_dev: &Path, verbose: bool) -> Result<PathBuf> {
     }
 
     // Pick the largest partition (usually the root filesystem).
-    partitions.sort_by(|a, b| b.1.cmp(&a.1));
+    partitions.sort_by_key(|p| std::cmp::Reverse(p.1));
     Ok(partitions[0].0.clone())
 }
 
