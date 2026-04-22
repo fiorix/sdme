@@ -1,6 +1,9 @@
 //! D-Bus communication with systemd and machined.
 
 use anyhow::{bail, Context, Result};
+use zbus::blocking::proxy::Proxy;
+use zbus::blocking::{Connection, MessageIterator};
+use zbus::MatchRule;
 
 /// Marker error indicating a boot/dbus wait timed out (container may still
 /// be alive). Attached via `context()` so `await_boot` can downcast to
@@ -15,9 +18,6 @@ impl std::fmt::Display for BootTimeout {
 }
 
 impl std::error::Error for BootTimeout {}
-use zbus::blocking::proxy::Proxy;
-use zbus::blocking::{Connection, MessageIterator};
-use zbus::MatchRule;
 
 pub(super) fn connect() -> Result<Connection> {
     Connection::system().context("failed to connect to system dbus")

@@ -126,6 +126,30 @@ pub fn wait_for_dbus(name: &str, timeout: std::time::Duration, verbose: bool) ->
 }
 
 /// Outcome of waiting for a container to boot.
+///
+/// [`await_boot`] returns this instead of a plain `Result` so callers can
+/// decide whether the container is worth keeping when boot didn't finish
+/// in time.
+///
+/// # Examples
+///
+/// ```ignore
+/// use sdme::systemd::{await_boot, BootOutcome};
+///
+/// match await_boot(name, timeout, verbose) {
+///     BootOutcome::Ready => { /* success */ }
+///     BootOutcome::TimedOut(e) => {
+///         // Still alive; a slow first-boot chown is common. Leave it
+///         // running and ask the user to re-check with `sdme logs`.
+///         return Err(e);
+///     }
+///     BootOutcome::Exited(e) => {
+///         // Dead; stop + clean up before propagating.
+///         cleanup();
+///         return Err(e);
+///     }
+/// }
+/// ```
 pub enum BootOutcome {
     /// Container booted and D-Bus is ready.
     Ready,

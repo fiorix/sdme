@@ -1,14 +1,38 @@
 //! Container filesystem diff: show changes in overlayfs upper layers.
 //!
-//! Walks the overlayfs upper layer to identify Added, Modified, and Deleted
-//! files relative to the base rootfs (lower layer). Supports single-container
-//! diffs against the base rootfs and range diffs between two containers.
-//! Handles overlayfs whiteout files (deletion markers) and opaque directories.
+//! Each sdme container mounts a copy-on-write overlay on top of an
+//! immutable base rootfs. Files created, modified, or deleted inside the
+//! container are recorded in the overlay's upper layer, so the difference
+//! between the upper layer and the base rootfs is exactly what the user
+//! changed at runtime. [`diff`] walks that upper layer and reports each
+//! path with a single-character status:
+//!
+//! - `A` — file exists only in the upper (Added)
+//! - `M` — file exists in both and differs (Modified)
+//! - `D` — file was removed via an overlayfs whiteout (Deleted)
+//!
+//! Whiteouts are character devices with `rdev == 0`; opaque directories
+//! carry the `trusted.overlay.opaque=y` xattr and hide every lower-layer
+//! entry underneath them. Both are handled transparently.
+//!
+//! Range diffs between two containers (`sdme diff from..to`) compare the
+//! two upper layers directly; files that exist in both but differ are
+//! reported as Modified, everything else is Added/Deleted as one-sided.
+//!
+//! # CLI examples
+//!
+//! ```text
+//! sdme diff mybox                 # against the base rootfs
+//! sdme diff mybox -- /etc         # filter to /etc and below
+//! sdme diff dev..prod --stat      # counts only
+//! sdme diff mybox --name-only     # paths only, for scripting
+//! ```
 
 use std::collections::BTreeSet;
-use std::ffi::CString;
+use std::ffi::{CString, OsStr};
 use std::fmt;
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 
@@ -131,26 +155,59 @@ fn is_binary_file(path: &Path) -> bool {
     buf[..n].contains(&0)
 }
 
-/// Check whether `abs_path` matches the filter. If `filter_paths` is empty,
-/// everything matches. Otherwise the path must be under (or equal to) one of
-/// the filter paths, OR a filter path must be under this path (so that
-/// directories on the way down are traversed).
-fn matches_filter(abs_path: &str, filter_paths: &[PathBuf]) -> bool {
-    if filter_paths.is_empty() {
+/// Check whether `abs_path` matches the filter. If `filters` is empty,
+/// everything matches. Otherwise the path must be under (or equal to) one
+/// of the filter paths, OR a filter path must be under this path (so the
+/// traversal descends into directories on the way to a filter target).
+///
+/// Filters are compared as absolute path strings (e.g. `/etc`); the caller
+/// is expected to pass normalized absolute paths. No string conversion
+/// happens per entry — the input slice is consumed as-is.
+fn matches_filter(abs_path: &str, filters: &[String]) -> bool {
+    if filters.is_empty() {
         return true;
     }
-    filter_paths.iter().any(|f| {
-        let f_str = f.to_string_lossy();
-        let f = f_str.as_ref();
-        let path_under_filter = abs_path == f
-            || abs_path
-                .strip_prefix(f)
-                .is_some_and(|rest| rest.starts_with('/'));
-        let filter_under_path = f == abs_path
-            || f.strip_prefix(abs_path)
-                .is_some_and(|rest| rest.starts_with('/'));
-        path_under_filter || filter_under_path
-    })
+    filters.iter().any(|f| path_relation_matches(abs_path, f))
+}
+
+/// Return true if `abs_path` is under `filter`, equal to it, or an ancestor
+/// of it. Used by [`matches_filter`] and tested directly.
+///
+/// The trailing-slash check handles the root filter `/` correctly:
+/// `"/etc".strip_prefix("/") = "etc"` has no leading slash, but the filter
+/// itself ends in `/`, so the match still stands.
+fn path_relation_matches(abs_path: &str, filter: &str) -> bool {
+    if abs_path == filter {
+        return true;
+    }
+    let path_under_filter = abs_path
+        .strip_prefix(filter)
+        .is_some_and(|rest| rest.starts_with('/') || filter.ends_with('/'));
+    let filter_under_path = filter
+        .strip_prefix(abs_path)
+        .is_some_and(|rest| rest.starts_with('/') || abs_path.ends_with('/'));
+    path_under_filter || filter_under_path
+}
+
+/// Read a directory and return its entries sorted by file name. Returns
+/// errors from `read_dir` only; unreadable individual entries are dropped
+/// silently (same policy as the original walkers).
+fn sorted_dir_entries(dir: &Path) -> Result<Vec<fs::DirEntry>> {
+    let mut items: Vec<_> = fs::read_dir(dir)
+        .with_context(|| format!("failed to read {}", dir.display()))?
+        .filter_map(|e| e.ok())
+        .collect();
+    items.sort_by_key(|e| e.file_name());
+    Ok(items)
+}
+
+/// Build the relative path and the display-friendly absolute path string
+/// for an entry under `prefix`.
+fn rel_and_abs(prefix: &Path, name: &OsStr) -> (PathBuf, String) {
+    let name_str = name.to_string_lossy();
+    let rel = prefix.join(&*name_str);
+    let abs_path = format!("/{}", rel.display());
+    (rel, abs_path)
 }
 
 /// Walk the upper layer and collect diff entries against the lower layer.
@@ -158,7 +215,7 @@ fn collect_upper_diff(
     upper: &Path,
     lower: &Path,
     prefix: &Path,
-    filter_paths: &[PathBuf],
+    filters: &[String],
     entries: &mut Vec<DiffEntry>,
 ) -> Result<()> {
     let dir = upper.join(prefix);
@@ -166,27 +223,14 @@ fn collect_upper_diff(
         return Ok(());
     }
 
-    let mut items: Vec<_> = fs::read_dir(&dir)
-        .with_context(|| format!("failed to read {}", dir.display()))?
-        .filter_map(|e| e.ok())
-        .collect();
-    items.sort_by_key(|e| e.file_name());
-
-    for entry in items {
+    for entry in sorted_dir_entries(&dir)? {
         check_interrupted()?;
-
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        let rel = prefix.join(&*name_str);
-        let abs_path = format!("/{}", rel.display());
-
-        if !matches_filter(&abs_path, filter_paths) {
+        let (rel, abs_path) = rel_and_abs(prefix, &entry.file_name());
+        if !matches_filter(&abs_path, filters) {
             continue;
         }
-
-        let metadata = match entry.path().symlink_metadata() {
-            Ok(m) => m,
-            Err(_) => continue,
+        let Ok(metadata) = entry.path().symlink_metadata() else {
+            continue;
         };
 
         if is_whiteout(&metadata) {
@@ -199,35 +243,30 @@ fn collect_upper_diff(
         }
 
         let upper_path = entry.path();
-
         if metadata.is_dir() {
             if is_opaque_dir(&upper_path) {
                 // Opaque directory: lower layer is hidden, everything is Added.
-                collect_all_as(&upper_path, &rel, ChangeKind::Added, filter_paths, entries)?;
+                collect_all_as(&upper_path, &rel, ChangeKind::Added, filters, entries)?;
             } else {
                 // Regular directory: recurse.
-                collect_upper_diff(upper, lower, &rel, filter_paths, entries)?;
+                collect_upper_diff(upper, lower, &rel, filters, entries)?;
             }
             continue;
         }
 
         // Regular file or symlink.
-        let lower_path = lower.join(&rel);
-        let kind = if lower_path.symlink_metadata().is_ok() {
+        let kind = if lower.join(&rel).symlink_metadata().is_ok() {
             ChangeKind::Modified
         } else {
             ChangeKind::Added
         };
-
         let is_binary = metadata.is_file() && is_binary_file(&upper_path);
-
         entries.push(DiffEntry {
             kind,
             path: abs_path,
             is_binary,
         });
     }
-
     Ok(())
 }
 
@@ -238,34 +277,21 @@ fn collect_all_as(
     dir: &Path,
     prefix: &Path,
     kind: ChangeKind,
-    filter_paths: &[PathBuf],
+    filters: &[String],
     entries: &mut Vec<DiffEntry>,
 ) -> Result<()> {
-    let mut items: Vec<_> = fs::read_dir(dir)
-        .with_context(|| format!("failed to read {}", dir.display()))?
-        .filter_map(|e| e.ok())
-        .collect();
-    items.sort_by_key(|e| e.file_name());
-
-    for entry in items {
+    for entry in sorted_dir_entries(dir)? {
         check_interrupted()?;
-
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        let rel = prefix.join(&*name_str);
-        let abs_path = format!("/{}", rel.display());
-
-        if !matches_filter(&abs_path, filter_paths) {
+        let (rel, abs_path) = rel_and_abs(prefix, &entry.file_name());
+        if !matches_filter(&abs_path, filters) {
             continue;
         }
-
-        let metadata = match entry.path().symlink_metadata() {
-            Ok(m) => m,
-            Err(_) => continue,
+        let Ok(metadata) = entry.path().symlink_metadata() else {
+            continue;
         };
 
         if metadata.is_dir() {
-            collect_all_as(&entry.path(), &rel, kind, filter_paths, entries)?;
+            collect_all_as(&entry.path(), &rel, kind, filters, entries)?;
         } else {
             let is_binary = metadata.is_file() && is_binary_file(&entry.path());
             entries.push(DiffEntry {
@@ -275,7 +301,6 @@ fn collect_all_as(
             });
         }
     }
-
     Ok(())
 }
 
@@ -289,7 +314,7 @@ fn collect_range_diff(
     from_upper: &Path,
     to_upper: &Path,
     prefix: &Path,
-    filter_paths: &[PathBuf],
+    filters: &[String],
     entries: &mut Vec<DiffEntry>,
 ) -> Result<()> {
     let from_dir = from_upper.join(prefix);
@@ -306,7 +331,7 @@ fn collect_range_diff(
         let rel = prefix.join(name);
         let abs_path = format!("/{}", rel.display());
 
-        if !matches_filter(&abs_path, filter_paths) {
+        if !matches_filter(&abs_path, filters) {
             continue;
         }
 
@@ -323,10 +348,10 @@ fn collect_range_diff(
 
                 if from_is_dir && to_is_dir {
                     // Both directories: recurse.
-                    collect_range_diff(from_upper, to_upper, &rel, filter_paths, entries)?;
+                    collect_range_diff(from_upper, to_upper, &rel, filters, entries)?;
                 } else if from_is_dir {
                     // Was a dir, now a file (or whiteout).
-                    collect_all_as(&from_path, &rel, ChangeKind::Deleted, filter_paths, entries)?;
+                    collect_all_as(&from_path, &rel, ChangeKind::Deleted, filters, entries)?;
                     if !is_whiteout(&tm) {
                         let is_binary = tm.is_file() && is_binary_file(&to_path);
                         entries.push(DiffEntry {
@@ -344,7 +369,7 @@ fn collect_range_diff(
                             is_binary: false,
                         });
                     }
-                    collect_all_as(&to_path, &rel, ChangeKind::Added, filter_paths, entries)?;
+                    collect_all_as(&to_path, &rel, ChangeKind::Added, filters, entries)?;
                 } else {
                     // Both are files (or whiteouts).
                     let from_whiteout = is_whiteout(&fm);
@@ -385,7 +410,7 @@ fn collect_range_diff(
                 if is_whiteout(&tm) {
                     // Deleted in to but never existed in from: skip.
                 } else if tm.is_dir() {
-                    collect_all_as(&to_path, &rel, ChangeKind::Added, filter_paths, entries)?;
+                    collect_all_as(&to_path, &rel, ChangeKind::Added, filters, entries)?;
                 } else {
                     let is_binary = tm.is_file() && is_binary_file(&to_path);
                     entries.push(DiffEntry {
@@ -400,7 +425,7 @@ fn collect_range_diff(
                 if is_whiteout(&fm) {
                     // Deleted in from but never existed in to: skip.
                 } else if fm.is_dir() {
-                    collect_all_as(&from_path, &rel, ChangeKind::Deleted, filter_paths, entries)?;
+                    collect_all_as(&from_path, &rel, ChangeKind::Deleted, filters, entries)?;
                 } else {
                     entries.push(DiffEntry {
                         kind: ChangeKind::Deleted,
@@ -449,39 +474,63 @@ fn files_differ(a: &Path, b: &Path) -> bool {
         return a_target != b_target;
     }
 
-    // Regular files: compare size first, then content in chunks.
+    // Regular files: compare size first, then content chunk by chunk.
     if a_meta.is_file() {
-        if a_meta.len() != b_meta.len() {
-            return true;
-        }
-        let Ok(mut fa) = fs::File::open(a) else {
-            return true;
-        };
-        let Ok(mut fb) = fs::File::open(b) else {
-            return true;
-        };
-        let mut buf_a = [0u8; 65536];
-        let mut buf_b = [0u8; 65536];
-        loop {
-            let na = match std::io::Read::read(&mut fa, &mut buf_a) {
-                Ok(n) => n,
-                Err(_) => return true,
-            };
-            let nb = match std::io::Read::read(&mut fb, &mut buf_b) {
-                Ok(n) => n,
-                Err(_) => return true,
-            };
-            if na != nb || buf_a[..na] != buf_b[..nb] {
-                return true;
-            }
-            if na == 0 {
-                return false;
-            }
-        }
+        return files_bytes_differ(a, b, a_meta.len(), b_meta.len());
     }
 
     // Directories, devices, etc: compare metadata.
     a_meta.mode() != b_meta.mode()
+}
+
+/// Byte-wise compare two regular files whose sizes are already known.
+///
+/// Uses buffered readers and advances both sides by the min of the two
+/// buffered slice lengths so unequal `read(2)` chunk sizes never produce
+/// a false-positive "differ" result. Any I/O error or early EOF on one
+/// side is treated as "differ" — the caller can't rely on partial data.
+fn files_bytes_differ(a: &Path, b: &Path, a_len: u64, b_len: u64) -> bool {
+    if a_len != b_len {
+        return true;
+    }
+    if a_len == 0 {
+        return false;
+    }
+    let (Ok(fa), Ok(fb)) = (fs::File::open(a), fs::File::open(b)) else {
+        return true;
+    };
+    let mut ra = BufReader::with_capacity(65536, fa);
+    let mut rb = BufReader::with_capacity(65536, fb);
+    let mut remaining = a_len;
+    while remaining > 0 {
+        // Inner scope so the borrowed slices from `fill_buf` drop before
+        // we call `consume` on the same readers.
+        let step = {
+            let ba = match ra.fill_buf() {
+                Ok(s) => s,
+                Err(_) => return true,
+            };
+            if ba.is_empty() {
+                return true; // file shrunk under us
+            }
+            let bb = match rb.fill_buf() {
+                Ok(s) => s,
+                Err(_) => return true,
+            };
+            if bb.is_empty() {
+                return true;
+            }
+            let n = ba.len().min(bb.len()).min(remaining as usize);
+            if ba[..n] != bb[..n] {
+                return true;
+            }
+            n
+        };
+        ra.consume(step);
+        rb.consume(step);
+        remaining -= step as u64;
+    }
+    false
 }
 
 /// Show the diff for a container target.
@@ -491,7 +540,9 @@ fn files_differ(a: &Path, b: &Path) -> bool {
 /// output to specific subtrees.
 pub fn diff(datadir: &Path, target: &str, paths: &[String], opts: &DiffOptions) -> Result<()> {
     let parsed = parse_target(target)?;
-    let filter_paths: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+    // Filters are compared directly as absolute path strings (e.g. "/etc").
+    // The caller's &[String] already has exactly the right representation,
+    // so walkers borrow it verbatim and do no per-entry allocation.
 
     let entries = match parsed {
         DiffTarget::Single { name } => {
@@ -523,7 +574,7 @@ pub fn diff(datadir: &Path, target: &str, paths: &[String], opts: &DiffOptions) 
             }
 
             let mut entries = Vec::new();
-            collect_upper_diff(&upper, &rootfs, Path::new(""), &filter_paths, &mut entries)?;
+            collect_upper_diff(&upper, &rootfs, Path::new(""), paths, &mut entries)?;
             entries
         }
         DiffTarget::Range { from, to } => {
@@ -557,13 +608,7 @@ pub fn diff(datadir: &Path, target: &str, paths: &[String], opts: &DiffOptions) 
             }
 
             let mut entries = Vec::new();
-            collect_range_diff(
-                &from_upper,
-                &to_upper,
-                Path::new(""),
-                &filter_paths,
-                &mut entries,
-            )?;
+            collect_range_diff(&from_upper, &to_upper, Path::new(""), paths, &mut entries)?;
             entries
         }
     };
@@ -726,7 +771,7 @@ mod tests {
         fs::create_dir_all(upper.join("var/log")).unwrap();
         fs::write(upper.join("var/log/test.log"), "log").unwrap();
 
-        let filter = vec![PathBuf::from("/etc")];
+        let filter = vec!["/etc".to_string()];
         let mut entries = Vec::new();
         collect_upper_diff(&upper, &lower, Path::new(""), &filter, &mut entries).unwrap();
 
@@ -804,7 +849,7 @@ mod tests {
 
     #[test]
     fn test_matches_filter_match() {
-        let filters = vec![PathBuf::from("/etc")];
+        let filters = vec!["/etc".to_string()];
         assert!(matches_filter("/etc/hostname", &filters));
         assert!(matches_filter("/etc", &filters));
         assert!(!matches_filter("/var/log", &filters));
@@ -812,7 +857,7 @@ mod tests {
 
     #[test]
     fn test_matches_filter_boundary() {
-        let filters = vec![PathBuf::from("/etc")];
+        let filters = vec!["/etc".to_string()];
         assert!(!matches_filter("/etcpasswd", &filters));
         assert!(!matches_filter("/etcpasswd/foo", &filters));
     }
@@ -820,10 +865,74 @@ mod tests {
     #[test]
     fn test_matches_filter_parent_traversal() {
         // A directory "/etc" should match filter "/etc/hostname" so we traverse into it.
-        let filters = vec![PathBuf::from("/etc/hostname")];
+        let filters = vec!["/etc/hostname".to_string()];
         assert!(matches_filter("/etc", &filters));
         assert!(matches_filter("/etc/hostname", &filters));
         assert!(!matches_filter("/var", &filters));
+    }
+
+    #[test]
+    fn test_matches_filter_multiple() {
+        // Any single filter matching is enough.
+        let filters = vec!["/etc".to_string(), "/usr/bin".to_string()];
+        assert!(matches_filter("/etc/hosts", &filters));
+        assert!(matches_filter("/usr/bin/ls", &filters));
+        assert!(!matches_filter("/var/log", &filters));
+    }
+
+    #[test]
+    fn test_path_relation_matches_root_like() {
+        // "/" has special semantics: every path is under "/".
+        assert!(path_relation_matches("/etc", "/"));
+        assert!(path_relation_matches("/", "/etc"));
+        // Identical roots still match.
+        assert!(path_relation_matches("/", "/"));
+    }
+
+    #[test]
+    fn test_parse_target_edge_cases() {
+        // A bare ".." is not a range (empty on both sides).
+        assert!(parse_target("..").is_err());
+        // A name containing ".." later is still a range.
+        let DiffTarget::Range { from, to } = parse_target("dev..prod-1.2").unwrap() else {
+            panic!("expected Range");
+        };
+        assert_eq!(from, "dev");
+        assert_eq!(to, "prod-1.2");
+        // Empty input: a Single with an empty name. resolve_name() catches it later.
+        let DiffTarget::Single { name } = parse_target("").unwrap() else {
+            panic!("expected Single");
+        };
+        assert_eq!(name, "");
+    }
+
+    #[test]
+    fn test_files_bytes_differ_large_aligned() {
+        // Exercise the multi-chunk path: two files larger than the 64 KiB
+        // BufReader capacity, identical content. Must report no diff.
+        let tmp = TempDataDir::new("diff-bytes");
+        let a = tmp.path().join("a");
+        let b = tmp.path().join("b");
+        let payload: Vec<u8> = (0u8..=255).cycle().take(200_000).collect();
+        fs::write(&a, &payload).unwrap();
+        fs::write(&b, &payload).unwrap();
+        assert!(!files_differ(&a, &b));
+    }
+
+    #[test]
+    fn test_files_bytes_differ_trailing_byte() {
+        // Same length, differ only in the very last byte. Previously at
+        // risk of false negatives with short reads; must report a diff.
+        let tmp = TempDataDir::new("diff-bytes-trail");
+        let a = tmp.path().join("a");
+        let b = tmp.path().join("b");
+        let mut pa: Vec<u8> = (0u8..=255).cycle().take(100_000).collect();
+        let mut pb = pa.clone();
+        *pa.last_mut().unwrap() = 0;
+        *pb.last_mut().unwrap() = 1;
+        fs::write(&a, &pa).unwrap();
+        fs::write(&b, &pb).unwrap();
+        assert!(files_differ(&a, &b));
     }
 
     #[test]

@@ -1,12 +1,24 @@
 //! OCI registry image pull support.
 //!
-//! Pulls container images directly from OCI-compatible registries using the
-//! OCI Distribution Spec. Supports anonymous and authenticated bearer token
-//! authentication.
+//! Pulls container images directly from OCI-compatible registries using
+//! the OCI Distribution Spec. Handles anonymous and bearer-token auth,
+//! transparent redirects to blob storage, a small on-disk manifest cache
+//! to avoid repeating registry round trips, and architecture checks that
+//! refuse to unpack an image whose `architecture` field does not match
+//! the host.
 //!
 //! Docker Hub credentials can be configured via `sdme config`:
+//!
 //! - `sdme config set docker_user <USERNAME>`
 //! - `sdme config set docker_token <TOKEN>`
+//!
+//! # Architecture strings
+//!
+//! OCI uses Go-style architecture names (`amd64`, `arm64`, `ppc64le`, ...)
+//! which [`host_arch`] maps from Rust's `std::env::consts::ARCH`. The
+//! sdme release artifacts use kernel-style names (`x86_64`, `aarch64`);
+//! see [`crate::update::detect_arch`]. Both spellings are intentional
+//! and correct in their own namespace.
 
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -408,7 +420,14 @@ struct ManifestList {
     manifests: Vec<PlatformDescriptor>,
 }
 
-/// Map Rust's `std::env::consts::ARCH` to OCI architecture strings.
+/// Map Rust's `std::env::consts::ARCH` to the OCI architecture strings
+/// used by registries and image manifests.
+///
+/// OCI (and Go's `GOARCH`, and Docker) spell the 64-bit arches as `amd64`
+/// and `arm64`; the Linux kernel (via `uname -m`) and the sdme release
+/// artifacts use `x86_64` and `aarch64`. Both spellings are correct in
+/// their respective namespaces. See [`crate::update::detect_arch`] for
+/// the release-artifact form used when pulling sdme binaries.
 fn host_arch() -> &'static str {
     match std::env::consts::ARCH {
         "x86_64" => "amd64",
@@ -422,14 +441,24 @@ fn host_arch() -> &'static str {
 }
 
 /// Bail if the image architecture does not match the host.
+///
+/// `image_arch` is the `architecture` field from the OCI image config blob
+/// (e.g. `amd64`, `arm64`). The OCI Image Spec marks the field as required,
+/// but some registries still serve manifests with it absent; in that case
+/// we emit a warning so a silent cross-arch pull does not sneak through.
 fn check_image_architecture(image_arch: Option<&str>) -> Result<()> {
     let host = host_arch();
-    if let Some(arch) = image_arch {
-        if arch != host {
-            bail!("image architecture {arch} does not match host {host}");
+    match image_arch {
+        Some(arch) if arch == host => Ok(()),
+        Some(arch) => bail!("image architecture {arch} does not match host {host}"),
+        None => {
+            eprintln!(
+                "warning: image config is missing the 'architecture' field; \
+                 cannot verify compatibility with host ({host})"
+            );
+            Ok(())
         }
     }
-    Ok(())
 }
 
 /// The `config` object inside an OCI image config blob.

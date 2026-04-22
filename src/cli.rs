@@ -221,6 +221,11 @@ pub(crate) fn start_and_await_boot(cfg: &BootConfig) -> Result<()> {
             let _guard = sdme::InterruptGuard::save_and_reset();
             eprintln!("boot failed, stopping '{name}'");
             let _ = containers::stop(name, containers::StopMode::Terminate, stop_timeout, verbose);
+            // Surface unit logs for any caller (create, start, restart, build)
+            // whose boot attempt ended because the container exited.
+            // Skipped on TimedOut because the container is still running and
+            // `sdme logs` gives the same information without noise.
+            dump_boot_journal(name);
             Err(e)
         }
     }
@@ -228,9 +233,11 @@ pub(crate) fn start_and_await_boot(cfg: &BootConfig) -> Result<()> {
 
 /// Print recent journal entries for a container whose boot failed.
 ///
-/// Runs `journalctl` on the host to show the nspawn unit's output so the
-/// user can diagnose why the container failed to start. Errors are
-/// silently ignored because this is best-effort diagnostics.
+/// Runs `journalctl -u <unit>` and forwards the log lines to stderr. The
+/// output is filtered to drop journalctl's separator headers (lines
+/// starting with `-- `); if nothing remains, nothing is printed. This
+/// keeps the diagnostic quiet when the journal has no useful content
+/// (e.g. the unit failed before any exec output was produced).
 fn dump_boot_journal(name: &str) {
     let unit = systemd::service_name(name);
     let output = std::process::Command::new("journalctl")
@@ -244,16 +251,18 @@ fn dump_boot_journal(name: &str) {
             "short-monotonic",
         ])
         .output();
-    match output {
-        Ok(out) if !out.stdout.is_empty() => {
-            eprintln!("\n--- journal for {unit} (last 50 lines) ---");
-            // journalctl writes to stdout; forward it to stderr so it
-            // stays together with the rest of the diagnostic output.
-            let _ = std::io::Write::write_all(&mut std::io::stderr(), &out.stdout);
-            eprintln!("--- end journal ---\n");
-        }
-        _ => {}
+    let Ok(out) = output else { return };
+    let content: String = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("-- ") && !l.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if content.is_empty() {
+        return;
     }
+    eprintln!("\n--- journal for {unit} (last 50 lines) ---");
+    eprintln!("{content}");
+    eprintln!("--- end journal ---\n");
 }
 
 /// Start a newly created container and remove it if the start fails.
@@ -269,7 +278,6 @@ pub(crate) fn create_and_start(cfg: &BootConfig) -> Result<()> {
     } = *cfg;
     eprintln!("starting '{name}'");
     if let Err(e) = start_and_await_boot(cfg) {
-        dump_boot_journal(name);
         eprintln!("start failed, removing '{name}'");
         let _ = containers::remove(datadir, name, verbose);
         return Err(e);
