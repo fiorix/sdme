@@ -11,6 +11,48 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+/// Update-check and self-upgrade configuration.
+///
+/// Controls the background version probe and the `sdme upgrade` subcommand.
+/// Defaults target GitHub releases; mirror operators can override all three
+/// URLs to serve the same layout from internal infrastructure.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateCheckConfig {
+    /// Whether to run the background check and print the update banner.
+    #[serde(default = "default_update_check_enabled")]
+    pub enabled: bool,
+
+    /// URL that returns a JSON document with `tag_name` for the latest release.
+    /// Compatible with the GitHub API `/repos/OWNER/REPO/releases/latest` shape.
+    #[serde(default = "default_update_check_version_url")]
+    pub version_url: String,
+
+    /// Template for the binary download URL. `{version}` and `{arch}` are
+    /// substituted. `{version}` has no leading `v`.
+    #[serde(default = "default_update_check_binary_url_template")]
+    pub binary_url_template: String,
+
+    /// Template for the SHA256SUMS URL. `{version}` is substituted.
+    #[serde(default = "default_update_check_checksums_url_template")]
+    pub checksums_url_template: String,
+
+    /// Minimum hours between background probes.
+    #[serde(default = "default_update_check_interval_hours")]
+    pub check_interval_hours: u64,
+}
+
+impl Default for UpdateCheckConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_update_check_enabled(),
+            version_url: default_update_check_version_url(),
+            binary_url_template: default_update_check_binary_url_template(),
+            checksums_url_template: default_update_check_checksums_url_template(),
+            check_interval_hours: default_update_check_interval_hours(),
+        }
+    }
+}
+
 /// Per-distro chroot command overrides for import/export preparation.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct DistroCommands {
@@ -141,6 +183,10 @@ pub struct Config {
     #[serde(default = "default_create_masked_services")]
     pub default_create_masked_services: String,
 
+    /// Update-check and self-upgrade knobs.
+    #[serde(default)]
+    pub update_check: UpdateCheckConfig,
+
     /// Per-distro chroot command overrides for import/export preparation.
     /// Absent = use built-in defaults. Empty vec = explicitly do nothing.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
@@ -227,6 +273,26 @@ fn default_create_masked_services() -> String {
     "systemd-resolved.service".to_string()
 }
 
+fn default_update_check_enabled() -> bool {
+    true
+}
+
+fn default_update_check_version_url() -> String {
+    "https://api.github.com/repos/fiorix/sdme/releases/latest".to_string()
+}
+
+fn default_update_check_binary_url_template() -> String {
+    "https://github.com/fiorix/sdme/releases/download/v{version}/sdme-{arch}-linux".to_string()
+}
+
+fn default_update_check_checksums_url_template() -> String {
+    "https://github.com/fiorix/sdme/releases/download/v{version}/SHA256SUMS".to_string()
+}
+
+fn default_update_check_interval_hours() -> u64 {
+    24
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -255,6 +321,7 @@ impl Default for Config {
             stop_timeout_kill: default_stop_timeout_kill(),
             auto_fs_gc: default_auto_fs_gc(),
             default_create_masked_services: default_create_masked_services(),
+            update_check: UpdateCheckConfig::default(),
             distros: HashMap::new(),
         }
     }
@@ -333,6 +400,28 @@ impl Config {
         println!(
             "default_create_masked_services = {}",
             self.default_create_masked_services
+        );
+        let update_check_enabled = if self.update_check.enabled {
+            "yes"
+        } else {
+            "no"
+        };
+        println!("update_check.enabled = {update_check_enabled}");
+        println!(
+            "update_check.version_url = {}",
+            self.update_check.version_url
+        );
+        println!(
+            "update_check.binary_url_template = {}",
+            self.update_check.binary_url_template
+        );
+        println!(
+            "update_check.checksums_url_template = {}",
+            self.update_check.checksums_url_template
+        );
+        println!(
+            "update_check.check_interval_hours = {}",
+            self.update_check.check_interval_hours
         );
     }
 }
@@ -831,6 +920,62 @@ import_prehook = ["echo hi"]
         // Keys with no built-in default return None.
         assert_eq!(default_value_for_key("distros.debian.import_prehook"), None);
         assert_eq!(default_value_for_key("nonexistent"), None);
+    }
+
+    #[test]
+    fn test_default_update_check() {
+        let cfg = Config::default();
+        assert!(cfg.update_check.enabled);
+        assert_eq!(cfg.update_check.check_interval_hours, 24);
+        assert!(
+            cfg.update_check
+                .version_url
+                .starts_with("https://api.github.com/"),
+            "got: {}",
+            cfg.update_check.version_url
+        );
+        assert!(cfg.update_check.binary_url_template.contains("{version}"));
+        assert!(cfg.update_check.binary_url_template.contains("{arch}"));
+        assert!(cfg
+            .update_check
+            .checksums_url_template
+            .contains("SHA256SUMS"));
+    }
+
+    #[test]
+    fn test_save_and_load_update_check() {
+        let path = temp_config_path();
+        let config = Config {
+            update_check: UpdateCheckConfig {
+                enabled: false,
+                version_url: "https://mirror.example/latest".into(),
+                binary_url_template: "https://mirror.example/v{version}/sdme-{arch}".into(),
+                checksums_url_template: "https://mirror.example/v{version}/SHA256SUMS".into(),
+                check_interval_hours: 6,
+            },
+            ..Config::default()
+        };
+        save(&config, Some(&path)).unwrap();
+        let loaded = load(Some(&path)).unwrap();
+        assert!(!loaded.update_check.enabled);
+        assert_eq!(
+            loaded.update_check.version_url,
+            "https://mirror.example/latest"
+        );
+        assert_eq!(loaded.update_check.check_interval_hours, 6);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_default_value_for_update_check_keys() {
+        assert_eq!(
+            default_value_for_key("update_check.enabled"),
+            Some(toml::Value::Boolean(true))
+        );
+        assert_eq!(
+            default_value_for_key("update_check.check_interval_hours"),
+            Some(toml::Value::Integer(24))
+        );
     }
 
     #[test]

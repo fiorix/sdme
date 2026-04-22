@@ -33,6 +33,7 @@
 //! | [`pod`] | Shared network namespace management |
 //! | [`prune`] | Unused resource analysis and cleanup |
 //! | [`txn`] | Enumerated transaction staging and gc |
+//! | [`update`] | Update-check state and self-upgrade |
 
 pub mod build;
 pub mod config;
@@ -59,6 +60,7 @@ pub(crate) mod submounts;
 pub mod system_check;
 pub mod systemd;
 pub mod txn;
+pub mod update;
 pub mod userns;
 
 pub use mounts::{BindConfig, EnvConfig};

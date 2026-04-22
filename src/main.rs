@@ -890,6 +890,41 @@ NOTES:
     The OCI blob cache is not pruned. It has its own size-based eviction
     (oci_cache_max_size) and can be cleaned with 'sdme fs cache clean'.";
 
+const UPGRADE_HELP: &str = "\
+Replace the running sdme binary with the latest release after verifying
+its SHA-256 checksum.
+
+Downloads the release artifact for the current architecture, verifies it
+against SHA256SUMS from the same release, and atomically renames it over
+the running binary. Safe to run while sdme is executing: the kernel keeps
+the old inode mapped until the process exits.
+
+The check and download use the URLs configured under [update_check] in
+sdme.conf. By default these point at github.com/fiorix/sdme; mirror
+operators can override them to serve the same artifacts internally.
+
+EXAMPLES:
+    # Check what's available without downloading
+    sdme upgrade --check
+
+    # Upgrade to the latest release (interactive confirmation)
+    sudo sdme upgrade
+
+    # Upgrade non-interactively (CI, Ansible, etc.)
+    sudo sdme upgrade -y
+
+    # Pin to a specific version (also allows downgrading)
+    sudo sdme upgrade --version 0.6.10 -y
+
+NOTES:
+    The current user must be root and the directory containing the sdme
+    binary must be writable. HTTP responses are bounded and the download
+    is rejected if it exceeds 128 MiB.
+
+    Signatures (GPG/minisign) are not verified; trust is anchored in
+    HTTPS plus the SHA-256 in the release-hosted SHA256SUMS file, the
+    same model as install.sh.";
+
 // ---------------------------------------------------------------------------
 
 #[derive(Parser)]
@@ -1288,6 +1323,22 @@ enum Command {
         #[arg(long, value_delimiter = ',')]
         except: Vec<String>,
     },
+
+    /// Download and install the latest sdme release
+    #[command(after_long_help = UPGRADE_HELP)]
+    Upgrade {
+        /// Only check and report; do not download or replace the binary
+        #[arg(long)]
+        check: bool,
+
+        /// Assume yes; do not prompt for confirmation
+        #[arg(short = 'y', long)]
+        yes: bool,
+
+        /// Pin to a specific version (e.g. 0.7.0) instead of latest
+        #[arg(long, value_name = "VERSION")]
+        version: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1653,7 +1704,25 @@ enum CacheCommand {
 }
 
 fn main() {
-    if let Err(e) = run() {
+    // Background probe dispatcher: handled before clap so it stays hidden
+    // from --help and clap_complete. The probe is spawned as a detached
+    // subprocess by maybe_spawn_background_check; this is the child entry.
+    // The first `--config <path>` argument (if any) is honored.
+    let raw_args: Vec<String> = std::env::args().collect();
+    if raw_args.iter().skip(1).any(|a| a == "__update-check") {
+        let cfg_path = parse_config_override(&raw_args);
+        let cfg = config::load(cfg_path.as_deref()).unwrap_or_default();
+        let _ = sdme::update::run_background_check(&cfg);
+        return;
+    }
+
+    let result = run();
+    // Best-effort update banner (TTY-only, config-gated, errors swallowed).
+    // Skipped on interrupt so it doesn't appear after "interrupted, exiting".
+    if !sdme::INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed) {
+        sdme::update::maybe_print_banner_from_env();
+    }
+    if let Err(e) = result {
         if sdme::INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed) {
             eprintln!("interrupted, exiting");
             std::process::exit(sdme::interrupt_exit_code());
@@ -1663,8 +1732,28 @@ fn main() {
     }
 }
 
+/// Extract the effective `--config <PATH>` value from raw args.
+///
+/// Kept minimal; only used by the hidden `__update-check` dispatcher which
+/// runs before clap. Supports `--config PATH` and `--config=PATH`.
+fn parse_config_override(args: &[String]) -> Option<PathBuf> {
+    let mut it = args.iter().skip(1);
+    while let Some(a) = it.next() {
+        if let Some(rest) = a.strip_prefix("--config=") {
+            return Some(PathBuf::from(rest));
+        }
+        if a == "--config" {
+            return it.next().map(PathBuf::from);
+        }
+    }
+    None
+}
+
 fn run() -> Result<()> {
     let cli = Cli::parse();
+
+    // Share the effective --config path with the end-of-run banner in main().
+    sdme::update::set_config_override(cli.config.clone());
 
     // Handle commands that don't require root.
     match cli.command {
@@ -1697,6 +1786,11 @@ fn run() -> Result<()> {
         cfg.interactive && !cli.verbose && unsafe { libc::isatty(libc::STDIN_FILENO) != 0 };
 
     let blob_cache = oci::cache::BlobCache::from_config(&cfg)?;
+
+    // Skip the background update probe for commands where it adds no value
+    // (the upgrade command already resolved the latest version; config
+    // commands terminate fast and have no need to phone home).
+    let skip_update_probe = matches!(cli.command, Command::Config(_) | Command::Upgrade { .. });
 
     match cli.command {
         Command::Config(cmd) => match cmd {
@@ -1885,6 +1979,47 @@ fn run() -> Result<()> {
                         }
                         toml_key = key.clone();
                         toml_val = Some(V::String(value));
+                    }
+                    key if key.starts_with("update_check.") => {
+                        let subkey = &key["update_check.".len()..];
+                        toml_key = key.to_string();
+                        toml_val = match subkey {
+                            "enabled" => Some(V::Boolean(match value.as_str() {
+                                "yes" => true,
+                                "no" => false,
+                                _ => bail!(
+                                    "invalid value for update_check.enabled: {value} (expected yes or no)"
+                                ),
+                            })),
+                            "version_url" | "binary_url_template" | "checksums_url_template" => {
+                                if !value.starts_with("https://") {
+                                    bail!("update_check.{subkey} must start with https://: {value}");
+                                }
+                                if subkey == "binary_url_template"
+                                    && (!value.contains("{version}") || !value.contains("{arch}"))
+                                {
+                                    bail!(
+                                        "update_check.binary_url_template must contain {{version}} and {{arch}} placeholders"
+                                    );
+                                }
+                                if subkey == "checksums_url_template" && !value.contains("{version}")
+                                {
+                                    bail!(
+                                        "update_check.checksums_url_template must contain {{version}} placeholder"
+                                    );
+                                }
+                                Some(V::String(value))
+                            }
+                            "check_interval_hours" => {
+                                let hours: u64 = value.parse().map_err(|_| {
+                                    anyhow::anyhow!(
+                                        "update_check.check_interval_hours must be a non-negative integer"
+                                    )
+                                })?;
+                                Some(V::Integer(hours as i64))
+                            }
+                            other => bail!("unknown config key: update_check.{other}"),
+                        };
                     }
                     key if key.starts_with("distros.") => {
                         let parts: Vec<&str> = key.splitn(3, '.').collect();
@@ -3377,7 +3512,25 @@ fn run() -> Result<()> {
                 bail!("some items could not be pruned");
             }
         }
+        Command::Upgrade {
+            check,
+            yes,
+            version,
+        } => {
+            sdme::update::run_upgrade(
+                &cfg,
+                sdme::update::UpgradeOptions {
+                    assume_yes: yes,
+                    check_only: check,
+                    version_override: version.as_deref(),
+                    verbose: cli.verbose,
+                    interactive,
+                },
+            )?;
+        }
     }
+
+    sdme::update::maybe_spawn_background_check(&cfg, skip_update_probe, cli.verbose);
 
     Ok(())
 }
