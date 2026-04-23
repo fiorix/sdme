@@ -132,19 +132,21 @@ automatically via `fix_redis_oci()` in lib.sh.
 
 ## Results
 
-Last verified: 2026-04-08
+Last verified: 2026-04-23
 
-System: Linux 6.17.0-19-generic (aarch64), systemd 257, sdme 0.6.5,
-AppArmor enabled
+System: Linux 7.0.0-14-generic (aarch64), systemd 259, sdme 0.7.0,
+AppArmor enabled. Archlinux skipped on aarch64 (no official ARM image);
+see filter_distros_by_arch() in lib.sh.
 
 ```
 Test Suite                 Pass  Fail  Skip  Status
 -------------------------  ----  ----  ----  ------
 verify-build                 11     0     0  PASS
 verify-cp                    17     0     0  PASS
-verify-distro-boot           63     0     0  PASS
-verify-distro-oci           175     0     0  PASS
-verify-export                22     0     1  PASS
+verify-diff                   9     0     0  PASS
+verify-distro-boot           54     0     0  PASS
+verify-distro-oci           150     0     0  PASS
+verify-export                23     0     0  PASS
 verify-kube-L1-basic         14     0     0  PASS
 verify-kube-L2-probes        41     0     0  PASS
 verify-kube-L2-security      17     0     0  PASS
@@ -158,13 +160,32 @@ verify-network                9     0     0  PASS
 verify-nixos                 26     0     0  PASS
 verify-oci                   18     0     0  PASS
 verify-pods                   9     0     0  PASS
-verify-security              31     0     0  PASS
+verify-security              30     0     0  PASS
 verify-tutorial              79     0     0  PASS
 -------------------------  ----  ----  ----  ------
-Totals                      626     0     1  20 suites
+Totals                      601     0     0  21 suites
 ```
 
 ## Log
+
+### 0.7.0 -- self-update, archlinux image swap (2026-04-23, aarch64)
+
+601 passed, 0 failed, 0 skipped across 21 suites. Wall clock: 11m47s
+for the parallel runner, plus standalone re-runs after environment and
+test fixes. Changes that produced clean run:
+
+- Swapped the archlinux base image from `docker.io/lopsided/archlinux:latest`
+  (multi-arch manifest, but the arm64 entry points at an amd64 config blob
+  and is rejected by sdme's architecture check) to the official
+  `docker.io/archlinux/archlinux:base`. The official image is x86_64 only;
+  `filter_distros_by_arch()` (in lib.sh) now drops archlinux from the
+  distro matrix on non-x86_64 hosts.
+- Added `verify-diff` to the matrix (the 0.6.11 feature already had its
+  own standalone script; it is now surfaced in the Results table).
+- Installed host tooling for optional coverage: `bzip2` (unblocks tar.bz2
+  export verification), `attr` (setfattr/getfattr for tar xattr check),
+  `qemu-utils` (qemu-nbd), `kubeconform` (v0.7.0, SHA-256 verified from
+  upstream release).
 
 ### 0.6.5 -- nsenter fallback, tutorial restructure (2026-04-08, aarch64)
 

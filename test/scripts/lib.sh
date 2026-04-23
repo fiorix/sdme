@@ -193,7 +193,7 @@ declare -A DISTRO_IMAGES=(
     [fedora]="quay.io/fedora/fedora:41"
     [centos]="quay.io/centos/centos:stream10"
     [almalinux]="quay.io/almalinuxorg/almalinux:9"
-    [archlinux]="docker.io/lopsided/archlinux:latest"
+    [archlinux]="docker.io/archlinux/archlinux:base"
     [opensuse]="registry.opensuse.org/opensuse/tumbleweed:latest"
     [nixos]="docker.io/nixos/nix"
 )
@@ -217,6 +217,32 @@ distro_bin() {
     else
         echo "/usr/bin/$cmd"
     fi
+}
+
+# Return the input distro list with entries dropped when the current host
+# has no official image for that distro's architecture. Used by distro-boot,
+# distro-oci, and security userns tests to keep the matrix honest across
+# x86_64 and aarch64 runs.
+#
+# Arch Linux: the official `archlinux/archlinux` image is x86_64 only;
+# the ARM ports ship under a separate project (Arch Linux ARM) that we
+# do not currently test against.
+#   filter_distros_by_arch <distro>...
+filter_distros_by_arch() {
+    local host_arch
+    host_arch="$(uname -m)"
+    local out=()
+    for d in "$@"; do
+        case "$d" in
+            archlinux)
+                [[ "$host_arch" == "x86_64" ]] && out+=("$d")
+                ;;
+            *)
+                out+=("$d")
+                ;;
+        esac
+    done
+    echo "${out[@]}"
 }
 
 # Check that `sdme ps` shows the expected OS pattern for a container.

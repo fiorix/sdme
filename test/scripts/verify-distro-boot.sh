@@ -13,7 +13,7 @@ set -uo pipefail
 
 source "$(dirname "$0")/lib.sh"
 
-DISTROS=(debian ubuntu fedora centos almalinux archlinux opensuse)
+DISTROS=($(filter_distros_by_arch debian ubuntu fedora centos almalinux archlinux opensuse))
 REPORT_DIR="."
 FILTER_DISTROS=()
 
