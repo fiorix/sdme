@@ -491,6 +491,23 @@ impl Drop for TempGuard {
     }
 }
 
+/// Build the state to record after a successful upgrade.
+///
+/// The running process is still the **old** binary; the replacement only
+/// executes on the next invocation. If we stored the true latest version
+/// here, [`maybe_print_banner_from_env`] (called from `main()` right
+/// after `run_upgrade` returns) would see `latest > current` and print
+/// the banner even though the user just upgraded. Dropping
+/// `latest_version` (and its companions) forces the banner's early-exit
+/// path until the next background probe repopulates them.
+fn post_upgrade_state(installed_version: &str) -> State {
+    State {
+        checked_at: now_unix(),
+        checked_version: installed_version.to_string(),
+        ..State::default()
+    }
+}
+
 /// Options for [`run_upgrade`].
 pub struct UpgradeOptions<'a> {
     /// Skip the confirmation prompt.
@@ -672,15 +689,9 @@ pub fn run_upgrade(cfg: &Config, opts: UpgradeOptions<'_>) -> Result<()> {
     })?;
     guard.disarm();
 
-    // Refresh state so the banner disappears immediately.
-    let new_state = State {
-        checked_at: now_unix(),
-        checked_version: target_version.clone(),
-        latest_version: Some(target_version.clone()),
-        download_url: Some(download_url),
-        checksums_url: Some(checksums_url),
-    };
-    let _ = write_state(&state_path(cfg), &new_state);
+    // Keep the running (old) binary from printing the "update available"
+    // banner after this call returns. See [`post_upgrade_state`] for why.
+    let _ = write_state(&state_path(cfg), &post_upgrade_state(&target_version));
 
     println!("sdme: upgraded to {target_version}");
     Ok(())
@@ -784,6 +795,25 @@ feedface00feedface00feedface00feedface00feedface00feedface00feed  unrelated.deb
         assert_eq!(loaded.checked_at, 1_700_000_000);
         assert_eq!(loaded.latest_version, None);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_post_upgrade_state_suppresses_banner() {
+        // Regression: sdme upgrade on the running (old) binary must leave
+        // the state in a shape where maybe_print_banner_from_env takes the
+        // early-exit (latest_version == None) path. Otherwise the banner
+        // prints right after "sdme: upgraded to ..." because the running
+        // process is still the old version.
+        let state = post_upgrade_state("0.7.3");
+        assert_eq!(state.checked_version, "0.7.3");
+        assert!(
+            state.latest_version.is_none(),
+            "latest_version must be None so the banner stays silent \
+             on the running (still-old) binary"
+        );
+        assert!(state.download_url.is_none());
+        assert!(state.checksums_url.is_none());
+        assert!(state.checked_at > 0);
     }
 
     fn touch_mtime(path: &Path, secs_ago: u64) {
