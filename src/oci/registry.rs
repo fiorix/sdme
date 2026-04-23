@@ -15,7 +15,7 @@
 //! # Architecture strings
 //!
 //! OCI uses Go-style architecture names (`amd64`, `arm64`, `ppc64le`, ...)
-//! which [`host_arch`] maps from Rust's `std::env::consts::ARCH`. The
+//! which `host_arch()` maps from Rust's `std::env::consts::ARCH`. The
 //! sdme release artifacts use kernel-style names (`x86_64`, `aarch64`);
 //! see [`crate::update::detect_arch`]. Both spellings are intentional
 //! and correct in their own namespace.

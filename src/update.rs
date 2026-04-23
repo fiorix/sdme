@@ -15,7 +15,8 @@
 //!    `/proc/self/exe`, streams the release binary to a sibling temp file
 //!    with a SHA-256 hasher, verifies the hash against the release's
 //!    `SHA256SUMS`, and atomically renames the temp file over the old
-//!    binary. A [`TempGuard`] ensures any early return removes the temp.
+//!    binary. A `TempGuard` drop-guard ensures any early return removes
+//!    the temp file.
 //!
 //! # State file
 //!
@@ -238,7 +239,7 @@ fn resolve_self_exe() -> Result<PathBuf> {
 /// Sweep stale `.sdme.upgrade.<pid>` temp files left by crashed upgrades.
 ///
 /// Only removes files whose PID is dead and whose mtime is older than
-/// [`STALE_TEMP_AGE_SECS`]. Returns the count removed.
+/// `STALE_TEMP_AGE_SECS` (10 minutes). Returns the count removed.
 pub fn cleanup_stale_upgrade_temps(binary_dir: &Path) -> Result<usize> {
     let Ok(entries) = fs::read_dir(binary_dir) else {
         return Ok(0);
@@ -258,7 +259,7 @@ pub fn cleanup_stale_upgrade_temps(binary_dir: &Path) -> Result<usize> {
 ///   * name matches `^\.sdme\.upgrade\.(\d+)$`,
 ///   * PID is not our own and is not currently alive,
 ///   * file is a regular file (no symlinks or directories),
-///   * mtime is at least [`STALE_TEMP_AGE_SECS`] in the past.
+///   * mtime is at least `STALE_TEMP_AGE_SECS` in the past.
 fn is_stale_upgrade_temp(path: &Path, my_pid: u32, now: SystemTime) -> bool {
     let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
         return false;
