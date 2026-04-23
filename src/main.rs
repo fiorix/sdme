@@ -1304,7 +1304,7 @@ enum Command {
     #[command(name = "pod", subcommand)]
     Pod(PodCommand),
 
-    /// Manage Kubernetes-compatible pods (experimental)
+    /// Manage Kubernetes-compatible pods
     #[command(name = "kube", subcommand)]
     Kube(KubeCommand),
 

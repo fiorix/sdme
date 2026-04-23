@@ -30,8 +30,10 @@ container lifecycle through D-Bus.
 The name stands for *Systemd Machine Editor*, and its pronunciation is
 left as an exercise for the reader.
 
-Sections 1-15 cover the core container functionality. Sections 16-17
-cover experimental features: OCI app support and Kubernetes Pod YAML.
+Sections 1-15 cover container lifecycle, filesystems, networking,
+resource limits, configuration, security, and reliability. Sections
+16-19 cover OCI integration, Kubernetes Pod YAML support, container
+filesystem diff, and self-update.
 
 ## 2. Dev Mode: Cloning Your Host
 
@@ -1539,13 +1541,6 @@ reused by future imports, so aggressive pruning would just force
 re-downloads.
 
 Implementation: `src/prune.rs`.
-
----
-
-# Experimental Features
-
-Everything below this line is experimental. These features work and
-are actively developed, but their interfaces may change.
 
 ## 16. OCI Integration
 
