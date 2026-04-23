@@ -2454,7 +2454,10 @@ sequence in `run_upgrade`:
    (`x86_64` or `aarch64`; see `detect_arch`).
 2. Resolve the target version. With `--version V`, `V` is trimmed and
    any leading `v` is stripped; empty `V` is rejected. Without
-   `--version`, the latest tag is fetched from `version_url`.
+   `--version`, the latest tag is fetched from `version_url`. The
+   progress and success lines use "upgrading" / "upgraded" when the
+   target is newer than the running binary, and "downgrading" /
+   "downgraded" otherwise (see `action_words`).
 3. If the target equals the running version, print and exit.
 4. With `--check`, print the comparison and exit.
 5. Canonicalize `/proc/self/exe` and its parent directory. The parent
@@ -2475,8 +2478,14 @@ sequence in `run_upgrade`:
 11. `chmod 0755` the temp and `rename(2)` it over the running binary.
     Linux keeps the old inode mapped until the process exits, so the
     replacement is safe in-flight.
-12. Refresh the state file so the banner does not re-appear on the
-    next run.
+12. Rewrite the state file via `post_upgrade_state` so
+    `maybe_print_banner_from_env` stays silent for the rest of this
+    process. The running binary is still the pre-upgrade version at
+    this point, so storing the true `latest_version` here would
+    immediately trigger the "update available" banner right after the
+    success line. Dropping `latest_version` (and the URL fields) forces
+    the banner's None-path early return; the next background probe
+    repopulates the fields authoritatively for the new binary.
 
 No signature verification is performed; trust anchors in HTTPS plus
 the hash comparison against `SHA256SUMS` from the same release. This

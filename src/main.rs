@@ -921,6 +921,10 @@ NOTES:
     binary must be writable. HTTP responses are bounded and the download
     is rejected if it exceeds 128 MiB.
 
+    Progress and success lines say \"upgrading\"/\"upgraded\" when the
+    target is newer than the running binary, and
+    \"downgrading\"/\"downgraded\" when it is older (with --version).
+
     Signatures (GPG/minisign) are not verified; trust is anchored in
     HTTPS plus the SHA-256 in the release-hosted SHA256SUMS file, the
     same model as install.sh.";
