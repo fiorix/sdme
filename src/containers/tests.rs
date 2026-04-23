@@ -677,6 +677,114 @@ fn test_find_app_pid_selects_nested_pid1() {
     assert_eq!(*app_nspids.last().unwrap(), 1u32);
 }
 
+// --- resolve_target_user tests ---
+
+// Serialize tests that mutate SUDO_USER so they don't race each other.
+static SUDO_USER_LOCK: Mutex<()> = Mutex::new(());
+
+fn host_clone_state() -> State {
+    let mut s = State::new();
+    s.set("ROOTFS", "");
+    s
+}
+
+fn imported_rootfs_state() -> State {
+    let mut s = State::new();
+    s.set("ROOTFS", "ubuntu");
+    s
+}
+
+#[test]
+fn test_resolve_user_explicit_name_wins() {
+    let _g = SUDO_USER_LOCK.lock().unwrap();
+    // Explicit --user alice always wins, regardless of state or config.
+    let host = host_clone_state();
+    let imported = imported_rootfs_state();
+    std::env::remove_var("SUDO_USER");
+    assert_eq!(
+        exec::resolve_target_user_public(Some(&host), Some("alice"), true),
+        Some("alice".into())
+    );
+    assert_eq!(
+        exec::resolve_target_user_public(Some(&imported), Some("alice"), false),
+        Some("alice".into())
+    );
+    assert_eq!(
+        exec::resolve_target_user_public(None, Some("alice"), true),
+        Some("alice".into())
+    );
+}
+
+#[test]
+fn test_resolve_user_explicit_root_means_no_override() {
+    let _g = SUDO_USER_LOCK.lock().unwrap();
+    // --user root is the explicit "force root" path: returns None so
+    // machinectl's default (root) applies, even if SUDO_USER is set.
+    let host = host_clone_state();
+    std::env::set_var("SUDO_USER", "alice");
+    assert_eq!(
+        exec::resolve_target_user_public(Some(&host), Some("root"), true),
+        None
+    );
+    std::env::remove_var("SUDO_USER");
+}
+
+#[test]
+fn test_resolve_user_default_host_clone_with_sudo_user() {
+    let _g = SUDO_USER_LOCK.lock().unwrap();
+    // Host clone + join_as_sudo_user=true + $SUDO_USER set => use sudo user.
+    let host = host_clone_state();
+    let user = std::env::var("USER").unwrap();
+    std::env::set_var("SUDO_USER", &user);
+    let got = exec::resolve_target_user_public(Some(&host), None, true);
+    std::env::remove_var("SUDO_USER");
+    assert_eq!(got, Some(user));
+}
+
+#[test]
+fn test_resolve_user_default_host_clone_config_off() {
+    let _g = SUDO_USER_LOCK.lock().unwrap();
+    // join_as_sudo_user=false => no fall-through, even on host clone.
+    let host = host_clone_state();
+    std::env::set_var("SUDO_USER", "alice");
+    let got = exec::resolve_target_user_public(Some(&host), None, false);
+    std::env::remove_var("SUDO_USER");
+    assert_eq!(got, None);
+}
+
+#[test]
+fn test_resolve_user_default_imported_rootfs() {
+    let _g = SUDO_USER_LOCK.lock().unwrap();
+    // Non-host-clone (ROOTFS="ubuntu") => default root regardless of config/env.
+    let imported = imported_rootfs_state();
+    std::env::set_var("SUDO_USER", "alice");
+    let got = exec::resolve_target_user_public(Some(&imported), None, true);
+    std::env::remove_var("SUDO_USER");
+    assert_eq!(got, None);
+}
+
+#[test]
+fn test_resolve_user_default_host_clone_no_sudo_user() {
+    let _g = SUDO_USER_LOCK.lock().unwrap();
+    // Host clone but no SUDO_USER => default root.
+    let host = host_clone_state();
+    std::env::remove_var("SUDO_USER");
+    assert_eq!(
+        exec::resolve_target_user_public(Some(&host), None, true),
+        None
+    );
+}
+
+#[test]
+fn test_resolve_user_default_no_state() {
+    let _g = SUDO_USER_LOCK.lock().unwrap();
+    // Missing state file => default root (conservative fallback).
+    std::env::set_var("SUDO_USER", "alice");
+    let got = exec::resolve_target_user_public(None, None, true);
+    std::env::remove_var("SUDO_USER");
+    assert_eq!(got, None);
+}
+
 // --- OS detection tests ---
 
 #[test]

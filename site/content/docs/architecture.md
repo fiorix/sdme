@@ -97,13 +97,21 @@ land on the overlayfs upper layer and never touch the host - well,
 except that they are stored on the host. This matters, and the details
 are explained in Section 14.
 
-**User identity preservation.** When sdme is run via `sudo` and the
-container is a host-rootfs clone (no `-r` flag), it reads `$SUDO_USER`
-and joins the container as that user rather than root. This is a
-convenience for landing on your own machine as your own user: your own
-`$HOME`, dotfiles, shell, etc. The behaviour is controlled by the
-`join_as_sudo_user` config setting (enabled by default) and can be
-disabled with `sdme config set join_as_sudo_user no`.
+**User identity preservation.** `sdme new`, `sdme join`, and `sdme exec`
+accept `--user NAME` to pick the UNIX user inside the container. When
+`--user` is omitted, the default is resolved as follows:
+
+1. If the container is a host-rootfs clone (no `-r` flag) AND
+   `join_as_sudo_user` is on (default) AND `$SUDO_USER` is set, join
+   as `$SUDO_USER`. This is a convenience for landing on your own
+   machine as your own user: your own `$HOME`, dotfiles, shell, etc.
+2. Otherwise, join as root.
+
+`--user root` is the explicit "force root" form and always wins, even
+on a host-rootfs clone with `$SUDO_USER` set. Disable the implicit
+fall-through globally with `sdme config set join_as_sudo_user no`.
+`--user` is not persisted to container state: each `join`/`exec`
+recomputes the default and accepts its own `--user`.
 
 **Opaque directories** are the key to making host clones usable.
 Without them, the container would inherit the host's systemd units and
@@ -1032,8 +1040,9 @@ update_check.check_interval_hours 24
 - `interactive`: enable interactive prompts.
 - `datadir`: root directory for all container and rootfs data.
 - `boot_timeout`: seconds to wait for container boot.
-- `join_as_sudo_user`: join host-rootfs containers as
-  `$SUDO_USER` instead of root.
+- `join_as_sudo_user`: when no `--user` is given, join host-rootfs
+  containers as `$SUDO_USER` instead of root. `--user` on
+  `new`/`join`/`exec` always overrides this.
 - `host_rootfs_opaque_dirs`: default opaque dirs for host-rootfs
   containers (empty string disables).
 - `hardened_drop_caps`: capabilities dropped by `--hardened`.

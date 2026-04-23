@@ -30,23 +30,34 @@ fn ensure_running(opts: &ShellOptions) -> Result<()> {
 }
 
 /// Enter a running container via `machinectl shell`.
+///
+/// `user` is the explicit `--user` flag value. `Some("root")` forces root;
+/// `Some(name)` runs as that UNIX user; `None` selects the default: for a
+/// host-rootfs clone with `join_as_sudo_user` enabled and `$SUDO_USER` set,
+/// the default is that sudo user; otherwise it is root.
 pub fn join(
     opts: &ShellOptions,
     command: &[String],
+    user: Option<&str>,
     join_as_sudo_user: bool,
 ) -> Result<ExitStatus> {
     ensure_running(opts)?;
-    machinectl_shell(opts, command, join_as_sudo_user)
+    machinectl_shell(opts, command, user, join_as_sudo_user)
 }
 
 /// Run a one-off command in a running container via `machinectl shell`.
+///
+/// `user` follows the same rule as [`join`]: `Some("root")` forces root,
+/// `Some(name)` runs as that UNIX user, `None` picks the default (sudo
+/// user on host-rootfs clones when `join_as_sudo_user` is on, else root).
 pub fn exec(
     opts: &ShellOptions,
     command: &[String],
+    user: Option<&str>,
     join_as_sudo_user: bool,
 ) -> Result<ExitStatus> {
     ensure_running(opts)?;
-    machinectl_shell(opts, command, join_as_sudo_user)
+    machinectl_shell(opts, command, user, join_as_sudo_user)
 }
 
 /// Candidate inner cgroup paths under a container's cgroup.
@@ -188,9 +199,42 @@ pub fn exec_oci(opts: &ShellOptions, app_name: &str, command: &[String]) -> Resu
     Ok(status)
 }
 
+/// Resolve the UNIX user to pass to `machinectl shell --uid`.
+///
+/// Rules:
+/// - `cli_user = Some("root")` -> `None` (explicit root, rely on
+///   machinectl's default).
+/// - `cli_user = Some(name)`   -> `Some(name)` (explicit override always wins).
+/// - `cli_user = None`         -> only fall through to `$SUDO_USER` when the
+///   container is a host clone (`ROOTFS == ""`) AND
+///   `join_as_sudo_user` is on AND `sudo_user()` resolves.
+///   Otherwise `None` (default to root).
+fn resolve_target_user(
+    state: Option<&State>,
+    cli_user: Option<&str>,
+    join_as_sudo_user: bool,
+) -> Option<String> {
+    if let Some(u) = cli_user {
+        return if u == "root" {
+            None
+        } else {
+            Some(u.to_string())
+        };
+    }
+    if !join_as_sudo_user {
+        return None;
+    }
+    let state = state?;
+    if state.get("ROOTFS") != Some("") {
+        return None;
+    }
+    crate::sudo_user().map(|su| su.name)
+}
+
 fn machinectl_shell(
     opts: &ShellOptions,
     command: &[String],
+    user: Option<&str>,
     join_as_sudo_user: bool,
 ) -> Result<ExitStatus> {
     let ShellOptions {
@@ -201,25 +245,32 @@ fn machinectl_shell(
     let mut cmd = std::process::Command::new("machinectl");
     cmd.arg("shell");
 
-    if join_as_sudo_user {
-        let state_path = datadir.join("state").join(name);
-        if let Ok(state) = State::read_from(&state_path) {
-            if state.get("ROOTFS") == Some("") {
-                if let Some(su) = crate::sudo_user() {
-                    let opaque = state.get("OPAQUE_DIRS").unwrap_or("");
-                    if opaque.is_empty() {
-                        eprintln!("host rootfs container: joining as user '{}'", su.name);
-                    } else {
-                        let dirs = opaque.split(',').collect::<Vec<_>>().join(", ");
-                        eprintln!(
-                            "host rootfs container: joining as user '{}' with opaque dirs {dirs}",
-                            su.name
-                        );
-                    }
-                    cmd.args(["--uid", &su.name]);
-                } else if verbose {
-                    eprintln!("host rootfs container but no sudo user detected; joining as root");
-                }
+    // Read state once so the user resolution and the opaque-dirs hint
+    // share the same view.
+    let state = State::read_from(&datadir.join("state").join(name)).ok();
+    let state_ref = state.as_ref();
+
+    if let Some(uid_name) = resolve_target_user(state_ref, user, join_as_sudo_user) {
+        if user.is_none() {
+            // Implicit host-clone fall-through: surface it so the operator
+            // sees why the session is not running as root.
+            let opaque = state_ref.and_then(|s| s.get("OPAQUE_DIRS")).unwrap_or("");
+            if opaque.is_empty() {
+                eprintln!("host rootfs container: joining as user '{uid_name}'");
+            } else {
+                let dirs = opaque.split(',').collect::<Vec<_>>().join(", ");
+                eprintln!(
+                    "host rootfs container: joining as user '{uid_name}' with opaque dirs {dirs}"
+                );
+            }
+        }
+        cmd.args(["--uid", &uid_name]);
+    } else if user.is_none() && verbose {
+        // Only log this when the user did not ask for anything explicit and
+        // we still chose root; otherwise the message is noise.
+        if let Some(s) = state_ref {
+            if s.get("ROOTFS") == Some("") && join_as_sudo_user {
+                eprintln!("host rootfs container but no sudo user detected; joining as root");
             }
         }
     }
@@ -333,7 +384,7 @@ fn nsenter_shell(name: &str, command: &[String], verbose: bool) -> Result<ExitSt
 }
 
 #[cfg(test)]
-pub(super) use self::test_helpers::parse_nspid_public;
+pub(super) use self::test_helpers::{parse_nspid_public, resolve_target_user_public};
 
 #[cfg(test)]
 mod test_helpers {
@@ -342,5 +393,14 @@ mod test_helpers {
     /// Expose parse_nspid for tests in the sibling tests module.
     pub fn parse_nspid_public(status_content: &str) -> Option<Vec<u32>> {
         parse_nspid(status_content)
+    }
+
+    /// Expose resolve_target_user for tests in the sibling tests module.
+    pub fn resolve_target_user_public(
+        state: Option<&State>,
+        cli_user: Option<&str>,
+        join_as_sudo_user: bool,
+    ) -> Option<String> {
+        resolve_target_user(state, cli_user, join_as_sudo_user)
     }
 }

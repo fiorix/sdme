@@ -55,8 +55,9 @@ COMMON COMMANDS:
     sdme config get         Show configuration
 
 ENVIRONMENT:
-    SUDO_USER           When set, 'join' and 'exec' run as this user (see
-                        join_as_sudo_user config key)
+    SUDO_USER           For host-clone containers (rootfs=/), 'new', 'join',
+                        and 'exec' default to this user when join_as_sudo_user
+                        is on. Use --user to override (--user root forces root).
     https_proxy, ...    HTTP proxy for downloads (pass through sudo with -E)
     no_proxy            Hosts that bypass the proxy
 
@@ -127,6 +128,16 @@ EXAMPLES:
 
     # Specific shell or command
     sdme new -r ubuntu -- /bin/bash
+
+    # Force the auto-join to run as root (even on a host-clone container)
+    sdme new --user root
+
+USER SELECTION:
+    --user picks the UNIX user for the auto-join at the end of 'new'.
+    Default: root, except on host-clone containers (rootfs=/) where the
+    default is $SUDO_USER when join_as_sudo_user is on. --user does not
+    persist to container state; subsequent 'join'/'exec' apply the same
+    defaults and accept their own --user.
 
 PORT FORWARDING:
     --port creates nftables DNAT rules for incoming traffic from the
@@ -243,11 +254,20 @@ EXAMPLES:
     # Run a specific shell
     sdme join mybox -- /bin/bash
 
+    # Enter as a specific user (use --user root to force root)
+    sdme join mybox --user alice
+
     # Enter the OCI app's PID/IPC/mount namespaces
     sdme join mybox --oci
 
     # Target a specific app in a multi-container kube pod
-    sdme join mypod --oci nginx";
+    sdme join mypod --oci nginx
+
+USER SELECTION:
+    --user picks the UNIX user inside the container.
+    Default: root, except on host-clone containers (rootfs=/) where the
+    default is $SUDO_USER when join_as_sudo_user is on. --user root
+    explicitly forces root. --oci sessions ignore --user.";
 
 const EXEC_HELP: &str = "\
 Run a one-off command inside a running container via machinectl.
@@ -257,11 +277,20 @@ EXAMPLES:
     sdme exec mybox -- cat /etc/os-release
     sdme exec mybox -- apt-get update
 
+    # Run as a specific user (use --user root to force root)
+    sdme exec mybox --user alice -- id
+
     # Enter the OCI app's PID/IPC/mount namespaces
     sdme exec mybox --oci -- ls /app
 
     # Target a specific app in a multi-container kube pod
-    sdme exec mypod --oci redis -- redis-cli ping";
+    sdme exec mypod --oci redis -- redis-cli ping
+
+USER SELECTION:
+    --user picks the UNIX user inside the container.
+    Default: root, except on host-clone containers (rootfs=/) where the
+    default is $SUDO_USER when join_as_sudo_user is on. --user root
+    explicitly forces root. --oci sessions ignore --user.";
 
 const PS_HELP: &str = "\
 List all containers with status, health, and configuration summary.
@@ -1066,6 +1095,9 @@ enum Command {
     Exec {
         /// Container name
         name: String,
+        /// Run as this user inside the container (default: root, or $SUDO_USER for host-clone containers when join_as_sudo_user is on)
+        #[arg(long, value_name = "USER")]
+        user: Option<String>,
         /// Enter the OCI app's namespaces (optional app name for multi-container kube pods)
         #[arg(long, num_args = 0..=1, default_missing_value = "", value_name = "APP")]
         oci: Option<String>,
@@ -1087,6 +1119,10 @@ enum Command {
         /// Boot timeout in seconds (overrides config, default: 60)
         #[arg(short, long)]
         timeout: Option<u64>,
+
+        /// Run as this user inside the container (default: root, or $SUDO_USER for host-clone containers when join_as_sudo_user is on)
+        #[arg(long, value_name = "USER")]
+        user: Option<String>,
 
         /// Enter the OCI app's namespaces (optional app name for multi-container kube pods; default shell: /bin/sh)
         #[arg(long, num_args = 0..=1, default_missing_value = "", value_name = "APP")]
@@ -1123,6 +1159,10 @@ enum Command {
         /// Boot timeout in seconds (overrides config, default: 60)
         #[arg(short, long)]
         timeout: Option<u64>,
+
+        /// Run as this user inside the container on the auto-join (default: root, or $SUDO_USER for host-clone containers when join_as_sudo_user is on)
+        #[arg(long, value_name = "USER")]
+        user: Option<String>,
 
         /// Memory limit (e.g. 512M, 2G)
         #[arg(long)]
@@ -2233,7 +2273,12 @@ fn run() -> Result<()> {
             }
             println!("{name}");
         }
-        Command::Exec { name, oci, command } => {
+        Command::Exec {
+            name,
+            user,
+            oci,
+            command,
+        } => {
             let name = containers::resolve_name(&cfg.datadir, &name)?;
             let shell_opts = containers::ShellOptions {
                 datadir: &cfg.datadir,
@@ -2245,7 +2290,12 @@ fn run() -> Result<()> {
                     resolve_oci_app_name(&cfg.datadir, &name, oci_app_explicit(oci_app))?;
                 containers::exec_oci(&shell_opts, &app_name, &command)?
             } else {
-                containers::exec(&shell_opts, &command, cfg.join_as_sudo_user)?
+                containers::exec(
+                    &shell_opts,
+                    &command,
+                    user.as_deref(),
+                    cfg.join_as_sudo_user,
+                )?
             };
             std::process::exit(status.code().unwrap_or(1));
         }
@@ -2319,6 +2369,7 @@ fn run() -> Result<()> {
             name,
             start,
             timeout,
+            user,
             oci,
             command,
         } => {
@@ -2377,7 +2428,12 @@ fn run() -> Result<()> {
                 name: &name,
                 verbose: cli.verbose,
             };
-            let status = containers::join(&shell_opts, &command, cfg.join_as_sudo_user)?;
+            let status = containers::join(
+                &shell_opts,
+                &command,
+                user.as_deref(),
+                cfg.join_as_sudo_user,
+            )?;
             std::process::exit(status.code().unwrap_or(1));
         }
         Command::Logs { name, oci, args } => {
@@ -2396,7 +2452,7 @@ fn run() -> Result<()> {
                     name: &name,
                     verbose: cli.verbose,
                 };
-                let status = containers::exec(&shell_opts, &command, cfg.join_as_sudo_user)?;
+                let status = containers::exec(&shell_opts, &command, None, cfg.join_as_sudo_user)?;
                 std::process::exit(status.code().unwrap_or(1));
             } else {
                 system_check::check_dependencies(
@@ -2424,6 +2480,7 @@ fn run() -> Result<()> {
             name,
             fs,
             timeout,
+            user,
             memory,
             cpus,
             cpu_weight,
@@ -2557,7 +2614,12 @@ fn run() -> Result<()> {
                 name: &name,
                 verbose: cli.verbose,
             };
-            let status = containers::join(&shell_opts, &command, cfg.join_as_sudo_user)?;
+            let status = containers::join(
+                &shell_opts,
+                &command,
+                user.as_deref(),
+                cfg.join_as_sudo_user,
+            )?;
             if !status.success() {
                 let code = status.code().unwrap_or(1);
                 eprintln!("join failed (exit code {code}), removing '{name}'");
@@ -2951,7 +3013,7 @@ fn run() -> Result<()> {
                     name: &name,
                     verbose: cli.verbose,
                 };
-                let status = containers::join(&shell_opts, &[], cfg.join_as_sudo_user)?;
+                let status = containers::join(&shell_opts, &[], None, cfg.join_as_sudo_user)?;
                 if !status.success() {
                     let code = status.code().unwrap_or(1);
                     std::process::exit(code);
