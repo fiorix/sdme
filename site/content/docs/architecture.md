@@ -1019,6 +1019,12 @@ stop_timeout_terminate            30
 stop_timeout_kill                 15
 auto_fs_gc                        true
 default_export_free_space         256M
+update_check.enabled              true
+update_check.version_url          https://api.github.com/repos/fiorix/sdme/releases/latest
+update_check.binary_url_template  https://github.com/fiorix/sdme/releases/download/v{version}/sdme-{arch}-linux
+update_check.checksums_url_template
+                                  https://github.com/fiorix/sdme/releases/download/v{version}/SHA256SUMS
+update_check.check_interval_hours 24
 ```
 
 - `interactive`: enable interactive prompts.
@@ -1061,6 +1067,18 @@ default_export_free_space         256M
   before mutating operations.
 - `default_export_free_space`: extra free space for auto-calculated
   raw disk image size.
+- `update_check.enabled`: run the background version probe and print
+  the update-available banner. See section 19.
+- `update_check.version_url`: URL returning JSON with a `tag_name`
+  field for the latest release (GitHub API compatible).
+- `update_check.binary_url_template`: URL template for the release
+  binary; `{version}` and `{arch}` are substituted. `{version}` has
+  no leading `v`; `{arch}` is `x86_64` or `aarch64`.
+- `update_check.checksums_url_template`: URL template for the
+  `SHA256SUMS` file; `{version}` is substituted.
+- `update_check.check_interval_hours`: minimum hours between
+  background probes; failures still update the timestamp to avoid
+  retry storms on air-gapped hosts.
 - `distros.<family>.import_prehook`: chroot commands to make a
   rootfs bootable (install systemd, dbus, etc.). Family names:
   `debian`, `fedora`, `arch`, `suse`, `nixos`, `unknown`. Absent =
@@ -2348,3 +2366,154 @@ sdme diff mybox -- /etc /var/log
 | *(default)* | `A/M/D<tab>path` with binary label |
 | `--stat` | Summary counts by change type |
 | `--name-only` | File paths only, for scripting |
+
+## 19. Self-Update and Upgrade
+
+sdme ships as a single static musl binary and can check for new releases
+on its own. Three cooperating parts live in `src/update.rs`:
+
+1. **Background probe**: a detached subprocess that fetches the latest
+   release metadata and records it to a state file.
+2. **Banner**: a single line printed to stderr at the end of a run when
+   a newer release is available.
+3. **`sdme upgrade`**: an explicit subcommand that downloads and
+   atomically replaces the running binary after SHA-256 verification.
+
+All three obey the `[update_check]` section of `/etc/sdme.conf` and the
+`SDME_UPDATE_CHECK=0` environment variable. Mirror operators can point
+the three URL knobs at an internal release layout.
+
+### Background probe
+
+After any non-config command, sdme evaluates four gates before launching
+the probe:
+
+1. `update_check.enabled` must be true.
+2. `SDME_UPDATE_CHECK` must not equal `0`.
+3. The command must not be in the skip list (all `sdme config ...`
+   subcommands, and `sdme upgrade` itself).
+4. The on-disk state file's `checked_at` must be older than
+   `check_interval_hours`.
+
+When all four pass, sdme spawns `/proc/self/exe __update-check` with
+stdin, stdout, and stderr connected to `/dev/null`, and calls
+`setsid(2)` in the child via `CommandExt::pre_exec` so the child joins
+a new session. The parent process does not `wait(2)`; it simply
+returns. The detached child:
+
+1. Fetches `update_check.version_url` with a 3-second connect and
+   5-second body timeout.
+2. Parses the `tag_name` field out of the JSON response.
+3. Renders `binary_url_template` and `checksums_url_template` for
+   the current `{arch}` and the fetched `{version}`.
+4. Writes the state file atomically with mode `0644` via
+   `atomic_write_mode`.
+5. Sweeps any stale `.sdme.upgrade.<pid>` temp files next to the
+   running binary (see below).
+
+The hidden `__update-check` entry point is dispatched in `main.rs`
+before clap parses the argument vector, so it never appears in
+`--help` and does not interfere with shell-completion generation.
+
+### State file
+
+The state file lives at `{datadir}/update-check.json` (default
+`/var/lib/sdme/update-check.json`):
+
+```json
+{
+  "checked_at": 1776856254,
+  "checked_version": "0.7.0",
+  "latest_version": "0.7.1",
+  "download_url":  "https://.../sdme-x86_64-linux",
+  "checksums_url": "https://.../SHA256SUMS"
+}
+```
+
+`checked_at` is updated even when the HTTP fetch fails. An air-gapped
+host therefore retries at most once per interval, regardless of how
+often sdme is invoked.
+
+### Banner
+
+`main()` calls `maybe_print_banner_from_env()` after `run()` returns,
+outside the hot path. The banner prints only when every check holds:
+
+- `stderr` is a TTY (`isatty(STDERR_FILENO)`).
+- `update_check.enabled` is true and `SDME_UPDATE_CHECK != 0`.
+- The state file has a `latest_version` greater than the running
+  binary's `env!("CARGO_PKG_VERSION")` per a simple major/minor/patch
+  numeric comparison.
+- The process was not interrupted by a signal.
+
+The banner is one line, goes to stderr, and directs the user to
+`sudo sdme upgrade` or `sdme config set update_check.enabled no`.
+Non-TTY output (scripts, pipelines) is never decorated.
+
+### sdme upgrade
+
+`sdme upgrade` is explicit, requires root, and performs the following
+sequence in `run_upgrade`:
+
+1. Map the host architecture to the release artifact spelling
+   (`x86_64` or `aarch64`; see `detect_arch`).
+2. Resolve the target version. With `--version V`, `V` is trimmed and
+   any leading `v` is stripped; empty `V` is rejected. Without
+   `--version`, the latest tag is fetched from `version_url`.
+3. If the target equals the running version, print and exit.
+4. With `--check`, print the comparison and exit.
+5. Canonicalize `/proc/self/exe` and its parent directory. The parent
+   directory must be writable; sdme probes by creating a short-lived
+   file `.sdme.upgrade-probe.<pid>`.
+6. Sweep stale `.sdme.upgrade.<pid>` temp files from previous failed
+   upgrades (see below).
+7. Prompt the user unless `-y` is given.
+8. Render `binary_url_template` and `checksums_url_template`. Both
+   must start with `https://`; `http://` is refused.
+9. Download the binary to `.sdme.upgrade.<pid>` in the same directory
+   as the running binary (same filesystem guarantees atomic rename),
+   streaming through a SHA-256 hasher and enforcing a 128 MiB cap. A
+   drop-guard unlinks the temp on any early return.
+10. Fetch `SHA256SUMS`, parse the line matching `sdme-<arch>-linux`,
+    and compare against the streamed hash. A mismatch aborts and the
+    drop-guard removes the temp.
+11. `chmod 0755` the temp and `rename(2)` it over the running binary.
+    Linux keeps the old inode mapped until the process exits, so the
+    replacement is safe in-flight.
+12. Refresh the state file so the banner does not re-appear on the
+    next run.
+
+No signature verification is performed; trust anchors in HTTPS plus
+the hash comparison against `SHA256SUMS` from the same release. This
+matches the installer script at `site/static/install.sh`.
+
+### Stale temp cleanup
+
+Interrupted upgrades (SIGKILL, power loss, disk full) can leave a
+`.sdme.upgrade.<pid>` file next to the binary. `cleanup_stale_upgrade_temps`
+sweeps these from both the background probe and the start of every
+`sdme upgrade`. A temp file is removed only if:
+
+- The filename matches `^\.sdme\.upgrade\.\d+$` exactly (the probe's
+  `.sdme.upgrade-probe.<pid>` prefix deliberately differs).
+- The parsed PID is not the current process.
+- `kill(pid, 0)` reports the PID is not alive.
+- `symlink_metadata` shows a regular file (symlinks are never
+  followed, directories are never recursed into).
+- The mtime is at least 10 minutes in the past, guarding against PID
+  reuse.
+
+### Mirror and air-gap support
+
+All three URL knobs are independently overridable, so an internal
+release mirror needs only to serve the same three shapes:
+
+- `version_url` returns JSON with a `tag_name` field.
+- `binary_url_template` resolves to the release binary for
+  `{version}` and `{arch}`.
+- `checksums_url_template` resolves to a GNU-format SHA-256 checksums
+  file where one line matches `sdme-<arch>-linux`.
+
+Air-gapped hosts can set `update_check.enabled = false`, or leave it
+on: the probe will fail, update `checked_at` silently, and retry no
+sooner than the next interval.
