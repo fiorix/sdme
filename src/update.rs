@@ -491,6 +491,20 @@ impl Drop for TempGuard {
     }
 }
 
+/// Return the action gerund ("upgrading" or "downgrading") and its past
+/// participle ("upgraded" or "downgraded") for a move from `current` to
+/// `target`. Equal versions are intercepted earlier in [`run_upgrade`],
+/// so this only sees a strict change in direction. Unparseable inputs
+/// default to "upgrading" because that is the common-case sdme behavior
+/// and the prior message used that wording.
+fn action_words(target: &str, current: &str) -> (&'static str, &'static str) {
+    if semver_newer(current, target) {
+        ("downgrading", "downgraded")
+    } else {
+        ("upgrading", "upgraded")
+    }
+}
+
 /// Build the state to record after a successful upgrade.
 ///
 /// The running process is still the **old** binary; the replacement only
@@ -604,8 +618,9 @@ pub fn run_upgrade(cfg: &Config, opts: UpgradeOptions<'_>) -> Result<()> {
         _ => {}
     }
 
+    let (gerund, participle) = action_words(&target_version, &current);
     println!(
-        "sdme: upgrading from {current} to {target_version} ({arch}) at {}",
+        "sdme: {gerund} from {current} to {target_version} ({arch}) at {}",
         exe_path.display()
     );
 
@@ -693,7 +708,7 @@ pub fn run_upgrade(cfg: &Config, opts: UpgradeOptions<'_>) -> Result<()> {
     // banner after this call returns. See [`post_upgrade_state`] for why.
     let _ = write_state(&state_path(cfg), &post_upgrade_state(&target_version));
 
-    println!("sdme: upgraded to {target_version}");
+    println!("sdme: {participle} to {target_version}");
     Ok(())
 }
 
@@ -795,6 +810,22 @@ feedface00feedface00feedface00feedface00feedface00feedface00feed  unrelated.deb
         assert_eq!(loaded.checked_at, 1_700_000_000);
         assert_eq!(loaded.latest_version, None);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_action_words() {
+        assert_eq!(action_words("0.8.0", "0.7.3"), ("upgrading", "upgraded"));
+        assert_eq!(action_words("1.0.0", "0.99.99"), ("upgrading", "upgraded"));
+        assert_eq!(
+            action_words("0.7.0", "0.7.3"),
+            ("downgrading", "downgraded")
+        );
+        assert_eq!(
+            action_words("0.6.11", "0.7.0"),
+            ("downgrading", "downgraded")
+        );
+        // Unparseable inputs fall back to "upgrading" (legacy wording).
+        assert_eq!(action_words("nonsense", "0.7.0"), ("upgrading", "upgraded"));
     }
 
     #[test]
