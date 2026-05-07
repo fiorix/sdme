@@ -45,7 +45,12 @@ pub fn join(
     machinectl_shell(opts, command, user, join_as_sudo_user)
 }
 
-/// Run a one-off command in a running container via `machinectl shell`.
+/// Run a one-off command in a running container via `systemd-run --pipe`.
+///
+/// Uses `systemd-run --machine=NAME --pipe --wait --quiet` so stdout/stderr
+/// are pipes (not a PTY) and the command's exit code is forwarded. This
+/// makes `sdme exec NAME -- cmd | grep foo` capture output correctly. Use
+/// `sdme join` for an interactive PTY shell.
 ///
 /// `user` follows the same rule as [`join`]: `Some("root")` forces root,
 /// `Some(name)` runs as that UNIX user, `None` picks the default (sudo
@@ -57,7 +62,7 @@ pub fn exec(
     join_as_sudo_user: bool,
 ) -> Result<ExitStatus> {
     ensure_running(opts)?;
-    machinectl_shell(opts, command, user, join_as_sudo_user)
+    systemd_run_pipe(opts, command, user, join_as_sudo_user)
 }
 
 /// Candidate inner cgroup paths under a container's cgroup.
@@ -229,6 +234,75 @@ fn resolve_target_user(
         return None;
     }
     crate::sudo_user().map(|su| su.name)
+}
+
+/// Run a command in the container via `systemd-run --machine=NAME --pipe`.
+///
+/// Stdout/stderr are pipes (no PTY), exit code is forwarded via `--wait`,
+/// and `--collect` cleans up the transient unit even on failure.
+fn systemd_run_pipe(
+    opts: &ShellOptions,
+    command: &[String],
+    user: Option<&str>,
+    join_as_sudo_user: bool,
+) -> Result<ExitStatus> {
+    let ShellOptions {
+        datadir,
+        name,
+        verbose,
+    } = *opts;
+    let mut cmd = std::process::Command::new("systemd-run");
+    cmd.args([
+        "--machine",
+        name,
+        "--pipe",
+        "--wait",
+        "--quiet",
+        "--collect",
+    ]);
+
+    let state = State::read_from(&datadir.join("state").join(name)).ok();
+    let state_ref = state.as_ref();
+
+    if let Some(uid_name) = resolve_target_user(state_ref, user, join_as_sudo_user) {
+        if user.is_none() {
+            // Implicit host-clone fall-through: surface it so the operator
+            // sees why the command is not running as root.
+            let opaque = state_ref.and_then(|s| s.get("OPAQUE_DIRS")).unwrap_or("");
+            if opaque.is_empty() {
+                eprintln!("host rootfs container: running as user '{uid_name}'");
+            } else {
+                let dirs = opaque.split(',').collect::<Vec<_>>().join(", ");
+                eprintln!(
+                    "host rootfs container: running as user '{uid_name}' with opaque dirs {dirs}"
+                );
+            }
+        }
+        cmd.args(["--uid", &uid_name]);
+    } else if user.is_none() && verbose {
+        if let Some(s) = state_ref {
+            if s.get("ROOTFS") == Some("") && join_as_sudo_user {
+                eprintln!("host rootfs container but no sudo user detected; running as root");
+            }
+        }
+    }
+
+    cmd.arg("--");
+    cmd.args(command);
+
+    if verbose {
+        eprintln!(
+            "exec: systemd-run {}",
+            cmd.get_args()
+                .map(|a| a.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+    }
+
+    let status = cmd.status().context("failed to run systemd-run")?;
+    crate::check_interrupted()?;
+    Ok(status)
 }
 
 fn machinectl_shell(

@@ -270,12 +270,17 @@ USER SELECTION:
     explicitly forces root. --oci sessions ignore --user.";
 
 const EXEC_HELP: &str = "\
-Run a one-off command inside a running container via machinectl.
-The exit status of the command is forwarded.
+Run a one-off command inside a running container via systemd-run --pipe.
+Stdout/stderr are pipes (not a PTY) so output captures correctly in shell
+pipelines. The exit status of the command is forwarded. Use `sdme join`
+for an interactive PTY shell.
 
 EXAMPLES:
     sdme exec mybox -- cat /etc/os-release
     sdme exec mybox -- apt-get update
+
+    # Pipelines work because stdout is a pipe, not a PTY
+    sdme exec mybox -- cat /proc/cpuinfo | grep MHz
 
     # Run as a specific user (use --user root to force root)
     sdme exec mybox --user alice -- id
@@ -290,7 +295,13 @@ USER SELECTION:
     --user picks the UNIX user inside the container.
     Default: root, except on host-clone containers (rootfs=/) where the
     default is $SUDO_USER when join_as_sudo_user is on. --user root
-    explicitly forces root. --oci sessions ignore --user.";
+    explicitly forces root. --oci sessions ignore --user.
+
+ENVIRONMENT:
+    exec runs the command as a transient systemd unit inside the
+    container, not through a PAM login session. The environment is
+    minimal: no HOME, no /etc/profile, no .profile/.bashrc evaluation.
+    For full login-shell semantics, use 'sdme join -- /path/to/cmd'.";
 
 const PS_HELP: &str = "\
 List all containers with status, health, and configuration summary.

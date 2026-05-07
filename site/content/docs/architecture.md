@@ -296,23 +296,40 @@ unit starts, sdme waits for the container to reach the `running` state
 by subscribing to `machined` D-Bus signals and polling the machine
 state. The boot timeout defaults to 60 seconds and is configurable.
 
-**join** and **exec** spawn `machinectl shell` as a child process and
-forward its exit status. This was a deliberate choice: machinectl
-handles the namespace entry, PAM session setup, and environment
-correctly, and reimplementing that logic in Rust would buy nothing.
-Spawning (rather than exec'ing) keeps sdme alive so it can inspect the
-exit code and clean up on failure (particularly important for `sdme
-new`, which removes the container if the join fails). If machinectl
-fails to allocate a PTY (which can happen on certain VM or kernel
-configurations with user namespaces), sdme falls back to `nsenter`,
-entering the container's namespaces directly via the leader PID.
-When the container uses user namespace isolation (`--hardened`,
-`--userns`), nsenter also enters the user (`-U`) and cgroup (`-C`)
-namespaces so that `systemctl`, `journalctl`, and other tools that
-communicate over D-Bus can authenticate with the container's systemd
-instance. For interactive sessions, the nsenter fallback uses
-`script(1)` to allocate a PTY so the shell has proper line
-editing and job control.
+**join** spawns `machinectl shell` as a child process and forwards its
+exit status. This was a deliberate choice: machinectl handles the
+namespace entry, PAM session setup, and environment correctly, and
+reimplementing that logic in Rust would buy nothing. Spawning (rather
+than exec'ing) keeps sdme alive so it can inspect the exit code and
+clean up on failure (particularly important for `sdme new`, which
+removes the container if the join fails). If machinectl fails to
+allocate a PTY (which can happen on certain VM or kernel configurations
+with user namespaces), sdme falls back to `nsenter`, entering the
+container's namespaces directly via the leader PID. When the container
+uses user namespace isolation (`--hardened`, `--userns`), nsenter also
+enters the user (`-U`) and cgroup (`-C`) namespaces so that
+`systemctl`, `journalctl`, and other tools that communicate over D-Bus
+can authenticate with the container's systemd instance. For interactive
+sessions, the nsenter fallback uses `script(1)` to allocate a PTY so
+the shell has proper line editing and job control.
+
+**exec** uses `systemd-run --machine=NAME --pipe --wait --quiet
+--collect` instead of `machinectl shell`. `--pipe` connects stdin,
+stdout, and stderr as pipes (not a PTY), so output captures correctly
+in shell pipelines (`sdme exec mybox -- foo | grep bar`); `--wait`
+forwards the command's exit status; `--collect` removes the transient
+unit even on failure. `machinectl shell` always allocates a PTY, which
+swallows stdout when the caller is a pipe. For an interactive PTY
+shell, use `sdme join`.
+
+A subtle behaviour difference follows from this choice: `systemd-run`
+runs the command as a transient unit under the container's PID 1, not
+through a PAM login session. There is no `HOME`, `/etc/profile` is not
+sourced, and `.profile`/`.bashrc` are not evaluated. Programs that
+depend on a login environment (dotfile-driven tools, locale/PATH set
+by `pam_env`, etc.) should be run via `sdme join -- /path/to/cmd`
+instead, which goes through `machinectl shell` and gets a full PAM
+session.
 
 The balance struck is: use D-Bus where it gives us programmatic
 control (start, stop, status queries), shell out where the existing
@@ -502,7 +519,7 @@ execute against the running container:
   imported rootfs (`fs:name:/path`), or another container
   (`container-name:/path`).
 - **RUN** executes a command inside the container via
-  `machinectl shell`.
+  `systemd-run --machine=NAME --pipe --wait --quiet`.
 
 Because the container is started once and stays running throughout the
 build, there are no stop/start cycles between COPY and RUN operations.
