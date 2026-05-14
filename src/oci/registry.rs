@@ -562,6 +562,10 @@ fn fetch_config_blob(
     serde_json::from_str(&body_str).with_context(|| format!("failed to parse config blob {digest}"))
 }
 
+fn require_image_config(result: Result<OciImageConfig>, digest: &str) -> Result<OciImageConfig> {
+    result.with_context(|| format!("failed to fetch required image config {digest}"))
+}
+
 /// Fetch a manifest (or manifest list) from a registry.
 fn fetch_manifest(
     ctx: &PullContext<'_>,
@@ -830,7 +834,20 @@ fn load_cached_manifest(
     if now.saturating_sub(cached.timestamp) > ttl_secs {
         return None;
     }
+    if !cached_manifest_has_required_config(&cached) {
+        return None;
+    }
     Some(cached)
+}
+
+fn cached_manifest_has_required_config(cached: &CachedManifest) -> bool {
+    let has_config_descriptor = cached
+        .manifest
+        .get("config")
+        .and_then(|config| config.get("digest"))
+        .and_then(serde_json::Value::as_str)
+        .is_some();
+    !has_config_descriptor || cached.container_config.is_some()
 }
 
 /// Save a resolved manifest to the cache.
@@ -954,49 +971,42 @@ pub(crate) fn import_registry_image(
 
     // Fetch the config blob if present in the manifest.
     let (container_config, image_architecture) = if let Some(ref config_desc) = manifest.config {
-        match fetch_config_blob(
-            &ctx,
-            &image.registry,
-            &image.repository,
+        let image_config = require_image_config(
+            fetch_config_blob(
+                &ctx,
+                &image.registry,
+                &image.repository,
+                &config_desc.digest,
+            ),
             &config_desc.digest,
-        ) {
-            Ok(image_config) => {
-                check_image_architecture(image_config.architecture.as_deref())?;
-                let arch = image_config.architecture.clone();
-                if verbose {
-                    if let Some(ref cc) = image_config.config {
-                        eprintln!(
-                            "image config: entrypoint={:?} cmd={:?} workdir={:?} user={:?}",
-                            cc.entrypoint, cc.cmd, cc.working_dir, cc.user
-                        );
-                        if let Some(ref env) = cc.env {
-                            eprintln!("image config: env ({} vars)", env.len());
-                        }
-                        if let Some(ref ports) = cc.exposed_ports {
-                            if !ports.is_empty() {
-                                eprintln!(
-                                    "image config: exposed ports: {}",
-                                    sorted_keys_csv(ports)
-                                );
-                            }
-                        }
-                        if let Some(ref vols) = cc.volumes {
-                            if !vols.is_empty() {
-                                eprintln!("image config: volumes: {}", sorted_keys_csv(vols));
-                            }
-                        }
-                        if let Some(ref sig) = cc.stop_signal {
-                            eprintln!("image config: stop signal: {sig}");
-                        }
+        )?;
+        check_image_architecture(image_config.architecture.as_deref())?;
+        let arch = image_config.architecture.clone();
+        if verbose {
+            if let Some(ref cc) = image_config.config {
+                eprintln!(
+                    "image config: entrypoint={:?} cmd={:?} workdir={:?} user={:?}",
+                    cc.entrypoint, cc.cmd, cc.working_dir, cc.user
+                );
+                if let Some(ref env) = cc.env {
+                    eprintln!("image config: env ({} vars)", env.len());
+                }
+                if let Some(ref ports) = cc.exposed_ports {
+                    if !ports.is_empty() {
+                        eprintln!("image config: exposed ports: {}", sorted_keys_csv(ports));
                     }
                 }
-                (image_config.config, arch)
-            }
-            Err(e) => {
-                eprintln!("warning: failed to fetch image config: {e:#}");
-                (None, None)
+                if let Some(ref vols) = cc.volumes {
+                    if !vols.is_empty() {
+                        eprintln!("image config: volumes: {}", sorted_keys_csv(vols));
+                    }
+                }
+                if let Some(ref sig) = cc.stop_signal {
+                    eprintln!("image config: stop signal: {sig}");
+                }
             }
         }
+        (image_config.config, arch)
     } else {
         (None, None)
     };
@@ -1330,6 +1340,47 @@ mod tests {
         assert!(is_docker_hub("index.docker.io"));
         assert!(!is_docker_hub("quay.io"));
         assert!(!is_docker_hub("ghcr.io"));
+    }
+
+    #[test]
+    fn test_load_cached_manifest_ignores_missing_required_config() {
+        let cache_dir = std::env::temp_dir().join(format!(
+            "sdme-test-registry-cache-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&cache_dir);
+
+        let image = ImageReference::parse("docker.io/redis:latest").unwrap();
+        let path = manifest_cache_path(&cache_dir, &image);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let cached = CachedManifest {
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            manifest: serde_json::json!({
+                "config": {"digest": "sha256:abc"},
+                "layers": [{"digest": "sha256:def"}]
+            }),
+            container_config: None,
+            image_architecture: None,
+        };
+        fs::write(&path, serde_json::to_string(&cached).unwrap()).unwrap();
+
+        assert!(load_cached_manifest(&cache_dir, &image, 900).is_none());
+
+        let _ = fs::remove_dir_all(&cache_dir);
+    }
+
+    #[test]
+    fn test_required_image_config_fetch_errors_are_fatal() {
+        let err = require_image_config(Err(anyhow::anyhow!("timeout: resolve")), "sha256:abc")
+            .unwrap_err();
+        let msg = format!("{err:#}");
+
+        assert!(msg.contains("failed to fetch required image config sha256:abc"));
+        assert!(msg.contains("timeout: resolve"));
     }
 
     #[test]

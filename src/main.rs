@@ -4,7 +4,7 @@
 //! appropriate library function.
 
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
@@ -1804,6 +1804,53 @@ fn parse_config_override(args: &[String]) -> Option<PathBuf> {
     None
 }
 
+fn rootfs_os_release_has_id(rootfs: &Path, expected: &str) -> bool {
+    for relative in ["etc/os-release", "usr/lib/os-release"] {
+        let Ok(content) = std::fs::read_to_string(rootfs.join(relative)) else {
+            continue;
+        };
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let Some(value) = line.strip_prefix("ID=") else {
+                continue;
+            };
+            let value = value.trim().trim_matches('"');
+            return value == expected;
+        }
+    }
+
+    false
+}
+
+fn container_journalctl_path(datadir: &Path, name: &str) -> &'static str {
+    let nixos_relative = "run/current-system/sw/bin/journalctl";
+    let merged_path = datadir
+        .join("containers")
+        .join(name)
+        .join("merged")
+        .join(nixos_relative);
+    if merged_path.exists() {
+        return "/run/current-system/sw/bin/journalctl";
+    }
+
+    let state_path = datadir.join("state").join(name);
+    if let Ok(state) = sdme::State::read_from(&state_path) {
+        if let Some(rootfs) = state.get("ROOTFS").filter(|rootfs| !rootfs.is_empty()) {
+            let rootfs_path = datadir.join("fs").join(rootfs);
+            if rootfs_path.join(nixos_relative).exists()
+                || rootfs_os_release_has_id(&rootfs_path, "nixos")
+            {
+                return "/run/current-system/sw/bin/journalctl";
+            }
+        }
+    }
+
+    "/usr/bin/journalctl"
+}
+
 fn run() -> Result<()> {
     let cli = Cli::parse();
 
@@ -2452,8 +2499,9 @@ fn run() -> Result<()> {
             if let Some(ref oci_app) = oci {
                 let app_name =
                     resolve_oci_app_name(&cfg.datadir, &name, oci_app_explicit(oci_app))?;
+                let journalctl = container_journalctl_path(&cfg.datadir, &name);
                 let mut command = vec![
-                    "/usr/bin/journalctl".to_string(),
+                    journalctl.to_string(),
                     "-u".to_string(),
                     format!("sdme-oci-{app_name}.service"),
                 ];
@@ -3629,6 +3677,77 @@ mod tests {
         fs::create_dir_all(dir.join("oci/apps/app")).unwrap();
         fs::write(dir.join("oci/apps/app/ports"), ports_content).unwrap();
         dir
+    }
+
+    fn make_datadir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "sdme-test-datadir-{}-{:?}-{name}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn test_container_journalctl_path_defaults_to_usr_bin() {
+        let datadir = make_datadir("journal-default");
+        fs::create_dir_all(datadir.join("containers/box/merged")).unwrap();
+
+        assert_eq!(
+            container_journalctl_path(&datadir, "box"),
+            "/usr/bin/journalctl"
+        );
+
+        let _ = fs::remove_dir_all(&datadir);
+    }
+
+    #[test]
+    fn test_container_journalctl_path_detects_nixos() {
+        let datadir = make_datadir("journal-nixos");
+        let journalctl = datadir.join("containers/box/merged/run/current-system/sw/bin/journalctl");
+        fs::create_dir_all(journalctl.parent().unwrap()).unwrap();
+        fs::write(&journalctl, "").unwrap();
+
+        assert_eq!(
+            container_journalctl_path(&datadir, "box"),
+            "/run/current-system/sw/bin/journalctl"
+        );
+
+        let _ = fs::remove_dir_all(&datadir);
+    }
+
+    #[test]
+    fn test_container_journalctl_path_detects_nixos_rootfs_from_state() {
+        let datadir = make_datadir("journal-nixos-state");
+        fs::create_dir_all(datadir.join("state")).unwrap();
+        fs::write(datadir.join("state/box"), "NAME=box\nROOTFS=nixos\n").unwrap();
+        let journalctl = datadir.join("fs/nixos/run/current-system/sw/bin/journalctl");
+        fs::create_dir_all(journalctl.parent().unwrap()).unwrap();
+        fs::write(&journalctl, "").unwrap();
+
+        assert_eq!(
+            container_journalctl_path(&datadir, "box"),
+            "/run/current-system/sw/bin/journalctl"
+        );
+
+        let _ = fs::remove_dir_all(&datadir);
+    }
+
+    #[test]
+    fn test_container_journalctl_path_detects_nixos_from_os_release() {
+        let datadir = make_datadir("journal-nixos-os-release");
+        fs::create_dir_all(datadir.join("state")).unwrap();
+        fs::write(datadir.join("state/box"), "NAME=box\nROOTFS=nixos\n").unwrap();
+        fs::create_dir_all(datadir.join("fs/nixos/etc")).unwrap();
+        fs::write(datadir.join("fs/nixos/etc/os-release"), "ID=nixos\n").unwrap();
+
+        assert_eq!(
+            container_journalctl_path(&datadir, "box"),
+            "/run/current-system/sw/bin/journalctl"
+        );
+
+        let _ = fs::remove_dir_all(&datadir);
     }
 
     #[test]

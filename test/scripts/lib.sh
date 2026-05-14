@@ -317,6 +317,50 @@ ensure_base_fs() {
     fi
 }
 
+# Ensure Python is available inside a rootfs used by test probes.
+# Several E2E checks use Python for TCP listeners and protocol probes, but
+# current minimal Ubuntu OCI images do not include it by default.
+ensure_python3_in_rootfs() {
+    local name="$1" root="/var/lib/sdme/fs/$1"
+
+    if [[ -x "$root/usr/bin/python3" ]]; then
+        return 0
+    fi
+    if [[ ! -x "$root/usr/bin/apt-get" ]]; then
+        echo "error: rootfs '$name' needs /usr/bin/python3 for this test, and apt-get is unavailable" >&2
+        return 1
+    fi
+
+    echo "==> Installing python3 in rootfs '$name' for test probes"
+    local tmp had_resolv=0 ok=0
+    tmp=$(mktemp -d)
+    if [[ -e "$root/etc/resolv.conf" || -L "$root/etc/resolv.conf" ]]; then
+        cp -a "$root/etc/resolv.conf" "$tmp/resolv.conf"
+        had_resolv=1
+    fi
+
+    rm -f "$root/etc/resolv.conf"
+    cp -L /etc/resolv.conf "$root/etc/resolv.conf"
+
+    if DEBIAN_FRONTEND=noninteractive chroot "$root" apt-get -o APT::Sandbox::User="" update && \
+       DEBIAN_FRONTEND=noninteractive chroot "$root" apt-get -o APT::Sandbox::User="" install -y python3 && \
+       chroot "$root" apt-get clean; then
+        ok=1
+    fi
+    rm -rf "$root/var/lib/apt/lists"/*
+
+    rm -f "$root/etc/resolv.conf"
+    if [[ $had_resolv -eq 1 ]]; then
+        cp -a "$tmp/resolv.conf" "$root/etc/resolv.conf"
+    fi
+    rm -rf "$tmp"
+
+    if [[ $ok -ne 1 ]]; then
+        echo "error: failed to install python3 in rootfs '$name'" >&2
+        return 1
+    fi
+}
+
 # Import default base rootfs when BASE_FS is "ubuntu" (the common case).
 ensure_default_base_fs() {
     if [[ "${BASE_FS:-}" == "ubuntu" ]]; then

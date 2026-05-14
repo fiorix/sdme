@@ -42,7 +42,19 @@ pub fn join(
     join_as_sudo_user: bool,
 ) -> Result<ExitStatus> {
     ensure_running(opts)?;
-    machinectl_shell(opts, command, user, join_as_sudo_user)
+    if should_pipe_join_command(command, stdout_is_tty()) {
+        systemd_run_pipe(opts, command, user, join_as_sudo_user)
+    } else {
+        machinectl_shell(opts, command, user, join_as_sudo_user)
+    }
+}
+
+fn should_pipe_join_command(command: &[String], stdout_is_tty: bool) -> bool {
+    !command.is_empty() && !stdout_is_tty
+}
+
+fn stdout_is_tty() -> bool {
+    unsafe { libc::isatty(libc::STDOUT_FILENO) != 0 }
 }
 
 /// Run a one-off command in a running container via `systemd-run --pipe`.
@@ -458,7 +470,9 @@ fn nsenter_shell(name: &str, command: &[String], verbose: bool) -> Result<ExitSt
 }
 
 #[cfg(test)]
-pub(super) use self::test_helpers::{parse_nspid_public, resolve_target_user_public};
+pub(super) use self::test_helpers::{
+    parse_nspid_public, resolve_target_user_public, should_pipe_join_command_public,
+};
 
 #[cfg(test)]
 mod test_helpers {
@@ -476,5 +490,10 @@ mod test_helpers {
         join_as_sudo_user: bool,
     ) -> Option<String> {
         resolve_target_user(state, cli_user, join_as_sudo_user)
+    }
+
+    /// Expose join backend selection for tests in the sibling tests module.
+    pub fn should_pipe_join_command_public(command: &[String], stdout_is_tty: bool) -> bool {
+        should_pipe_join_command(command, stdout_is_tty)
     }
 }

@@ -35,6 +35,7 @@ ensure_sdme
 require_gate smoke
 require_gate interrupt
 ensure_base_fs ubuntu docker.io/ubuntu
+ensure_python3_in_rootfs ubuntu
 
 # ---------------------------------------------------------------------------
 # Test 1: nspawn pods (--pod)
