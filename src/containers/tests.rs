@@ -785,6 +785,15 @@ fn test_resolve_user_default_no_state() {
     assert_eq!(got, None);
 }
 
+#[test]
+fn test_join_command_uses_pipe_backend_without_tty() {
+    let command = vec!["/usr/bin/echo".to_string(), "ok".to_string()];
+
+    assert!(exec::should_pipe_join_command_public(&command, false));
+    assert!(!exec::should_pipe_join_command_public(&command, true));
+    assert!(!exec::should_pipe_join_command_public(&[], false));
+}
+
 // --- OS detection tests ---
 
 #[test]

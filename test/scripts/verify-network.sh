@@ -82,6 +82,7 @@ phase1_import() {
     log "Phase 1: Import rootfs"
 
     ensure_base_fs "net-ubuntu" "${DISTRO_IMAGES[ubuntu]}"
+    ensure_python3_in_rootfs "net-ubuntu"
 
     local app_fs="net-nginx"
     if fs_exists "$app_fs"; then

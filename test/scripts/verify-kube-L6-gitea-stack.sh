@@ -281,16 +281,17 @@ test_ready_mysql() {
     fi
 
     echo "--- $test_name: waiting for MySQL (up to ${TIMEOUT_MYSQL}s) ---"
-    if "$SDME" exec "$POD_NAME" -- /usr/bin/python3 -c "
+    local output
+    if output=$("$SDME" exec "$POD_NAME" -- /usr/bin/python3 -c "
 import socket,sys,time
 end=time.time()+${TIMEOUT_MYSQL}
 while time.time()<end:
  try: s=socket.create_connection(('127.0.0.1',3306),2); s.close(); sys.exit(0)
- except: time.sleep(3)
-sys.exit(1)" 2>/dev/null; then
+ except Exception: time.sleep(3)
+sys.exit(1)" 2>&1); then
         record "$test_name" PASS
     else
-        record "$test_name" FAIL "port 3306 not listening after ${TIMEOUT_MYSQL}s"
+        record "$test_name" FAIL "port 3306 not listening after ${TIMEOUT_MYSQL}s: $output"
     fi
 }
 
@@ -306,16 +307,17 @@ test_ready_gitea() {
     fi
 
     echo "--- $test_name: waiting for Gitea (up to ${TIMEOUT_GITEA}s) ---"
-    if "$SDME" exec "$POD_NAME" -- /usr/bin/python3 -c "
+    local output
+    if output=$("$SDME" exec "$POD_NAME" -- /usr/bin/python3 -c "
 import socket,sys,time
 end=time.time()+${TIMEOUT_GITEA}
 while time.time()<end:
  try: s=socket.create_connection(('127.0.0.1',3000),2); s.close(); sys.exit(0)
- except: time.sleep(3)
-sys.exit(1)" 2>/dev/null; then
+ except Exception: time.sleep(3)
+sys.exit(1)" 2>&1); then
         record "$test_name" PASS
     else
-        record "$test_name" FAIL "port 3000 not listening after ${TIMEOUT_GITEA}s"
+        record "$test_name" FAIL "port 3000 not listening after ${TIMEOUT_GITEA}s: $output"
     fi
 }
 
@@ -327,16 +329,17 @@ test_ready_nginx() {
     fi
 
     echo "--- $test_name: waiting for Nginx (up to ${TIMEOUT_NGINX}s) ---"
-    if "$SDME" exec "$POD_NAME" -- /usr/bin/python3 -c "
+    local output
+    if output=$("$SDME" exec "$POD_NAME" -- /usr/bin/python3 -c "
 import socket,sys,time
 end=time.time()+${TIMEOUT_NGINX}
 while time.time()<end:
  try: s=socket.create_connection(('127.0.0.1',8080),2); s.close(); sys.exit(0)
- except: time.sleep(3)
-sys.exit(1)" 2>/dev/null; then
+ except Exception: time.sleep(3)
+sys.exit(1)" 2>&1); then
         record "$test_name" PASS
     else
-        record "$test_name" FAIL "port 8080 not listening after ${TIMEOUT_NGINX}s"
+        record "$test_name" FAIL "port 8080 not listening after ${TIMEOUT_NGINX}s: $output"
     fi
 }
 
@@ -434,6 +437,7 @@ main() {
     require_gate kube-l1
 
     ensure_default_base_fs
+    ensure_python3_in_rootfs "$BASE_FS"
 
     echo "=== sdme Gitea pod verification ==="
     echo "base-fs: $BASE_FS"

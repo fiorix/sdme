@@ -158,10 +158,10 @@ test_different_rootfs() {
     local output
 
     # sdme fs import ubuntu docker.io/ubuntu
-    if ensure_base_fs "$BASE_FS" "$BASE_IMAGE"; then
+    if ensure_base_fs "$BASE_FS" "$BASE_IMAGE" && ensure_python3_in_rootfs "$BASE_FS"; then
         record "rootfs/import" PASS
     else
-        record "rootfs/import" FAIL "ensure_base_fs failed"
+        record "rootfs/import" FAIL "base rootfs setup failed"
         return
     fi
 

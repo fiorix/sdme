@@ -143,16 +143,17 @@ test_ready_nginx() {
     fi
 
     echo "--- $test_name: waiting for port 8080 (up to ${TIMEOUT_READY}s) ---"
-    if "$SDME" exec "$POD_NAME" -- /usr/bin/python3 -c "
+    local output
+    if output=$("$SDME" exec "$POD_NAME" -- /usr/bin/python3 -c "
 import socket,sys,time
 end=time.time()+${TIMEOUT_READY}
 while time.time()<end:
  try: s=socket.create_connection(('127.0.0.1',8080),2); s.close(); sys.exit(0)
- except: time.sleep(3)
-sys.exit(1)" 2>/dev/null; then
+ except Exception: time.sleep(3)
+sys.exit(1)" 2>&1); then
         record "$test_name" PASS
     else
-        record "$test_name" FAIL "port 8080 not listening after ${TIMEOUT_READY}s"
+        record "$test_name" FAIL "port 8080 not listening after ${TIMEOUT_READY}s: $output"
     fi
 }
 
@@ -191,6 +192,7 @@ main() {
     require_gate kube-l1
 
     ensure_default_base_fs
+    ensure_python3_in_rootfs "$BASE_FS"
 
     echo "=== sdme kube networking verification ==="
     echo "base-fs: $BASE_FS"

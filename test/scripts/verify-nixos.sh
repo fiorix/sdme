@@ -374,9 +374,18 @@ YAMLEOF
     fi
     record "kube/boot" PASS
 
-    # Check the OCI app service inside the container.
-    if output=$(timeout "$TIMEOUT_TEST" sdme exec "$CT_KUBE" \
-            "$NIXOS_BIN/systemctl" is-active sdme-oci-nginx-unprivileged.service 2>&1); then
+    # Check the OCI app service inside the container. On busy parallel runs the
+    # service can still be transitioning when `sdme start` returns.
+    local service_ok=0 deadline=$((SECONDS + TIMEOUT_TEST))
+    while (( SECONDS < deadline )); do
+        if output=$(timeout 5 sdme exec "$CT_KUBE" \
+                "$NIXOS_BIN/systemctl" is-active sdme-oci-nginx-unprivileged.service 2>&1); then
+            service_ok=1
+            break
+        fi
+        sleep 2
+    done
+    if [[ $service_ok -eq 1 ]]; then
         record "kube/service" PASS
     else
         record "kube/service" FAIL "$output"

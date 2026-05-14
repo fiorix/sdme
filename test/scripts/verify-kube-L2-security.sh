@@ -432,6 +432,12 @@ test_runtime_hardened_service_active() {
     if echo "$output" | grep -qw 'active'; then
         record "$test_name" PASS
     else
+        if ! "$SDME" exec "$POD_NAME" -- /bin/sh -c \
+            'test -r /sys/kernel/security/apparmor/profiles && grep -q "^sdme-default " /sys/kernel/security/apparmor/profiles' \
+            >/dev/null 2>&1; then
+            record "$test_name" SKIP "AppArmor profile not visible inside nspawn; runtime AppArmor unsupported in this environment"
+            return
+        fi
         local status
         status=$(echo "$output" | grep -v 'Connected to\|Press \^]\|Connection to\|^$' | tail -1)
         record "$test_name" FAIL "service: $status"
