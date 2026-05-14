@@ -3,34 +3,37 @@
 use std::fs;
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 
-use crate::{systemd, ResourceLimits, State};
+use crate::{systemd, userns, ResourceLimits, State};
 
 use super::{ensure_exists, volumes_dir};
 
 /// Stop a container if running, then delete its state file and overlayfs directories.
 pub fn remove(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
-    ensure_exists(datadir, name)?;
+    let state_file = datadir.join("state").join(name);
+    if !state_file.exists() {
+        bail!("container does not exist: {name}");
+    }
 
     // Acquire exclusive lock to prevent removal while a build is reading from this container.
     let _lock = crate::lock::lock_exclusive(datadir, "containers", name)
         .with_context(|| format!("cannot remove container '{name}': in use"))?;
 
     // Read state before removal to check for OCI volumes and enabled state.
-    let state_file = datadir.join("state").join(name);
-    let (has_oci_volumes, is_enabled) = if state_file.exists() {
-        State::read_from(&state_file)
-            .ok()
-            .map(|s| {
-                let oci = s.get("OCI_VOLUMES").map(|v| !v.is_empty()).unwrap_or(false);
-                let enabled = s.is_yes("ENABLED");
-                (oci, enabled)
-            })
-            .unwrap_or((false, false))
+    let state = if state_file.exists() {
+        State::read_from(&state_file).ok()
     } else {
-        (false, false)
+        None
     };
+    let (has_oci_volumes, is_enabled) = state
+        .as_ref()
+        .map(|s| {
+            let oci = s.get("OCI_VOLUMES").map(|v| !v.is_empty()).unwrap_or(false);
+            let enabled = s.is_yes("ENABLED");
+            (oci, enabled)
+        })
+        .unwrap_or((false, false));
 
     // Disable the unit if it was enabled (best-effort).
     if is_enabled {
@@ -55,7 +58,9 @@ pub fn remove(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
         }
     }
 
-    if state_file.exists() {
+    if let Some(state) = &state {
+        remove_state_file_after_release(datadir, name, &state_file, state, verbose)?;
+    } else if state_file.exists() {
         fs::remove_file(&state_file)
             .with_context(|| format!("failed to remove {}", state_file.display()))?;
         if verbose {
@@ -72,6 +77,36 @@ pub fn remove(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+pub(super) fn remove_state_file_after_release(
+    datadir: &Path,
+    name: &str,
+    state_file: &Path,
+    state: &State,
+    verbose: bool,
+) -> Result<()> {
+    release_managed_subids_for_state(datadir, name, state)?;
+    if state_file.exists() {
+        fs::remove_file(state_file)
+            .with_context(|| format!("failed to remove {}", state_file.display()))?;
+        if verbose {
+            eprintln!("removed {}", state_file.display());
+        }
+    }
+    Ok(())
+}
+
+/// Release a container's managed subordinate ID allocation if its state uses one.
+pub(super) fn release_managed_subids_for_state(
+    datadir: &Path,
+    name: &str,
+    state: &State,
+) -> Result<()> {
+    if state.is_yes("USERNS_MANAGED") {
+        userns::release_managed_subids(datadir, name)?;
+    }
     Ok(())
 }
 

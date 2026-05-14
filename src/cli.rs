@@ -183,13 +183,10 @@ pub(crate) fn start_and_await_boot(cfg: &BootConfig) -> Result<()> {
             if let Some(shift_str) = state.get_nonempty("USERNS_SHIFT") {
                 if let Ok(shift) = shift_str.parse::<u64>() {
                     if let Some(conflict) = sdme::userns::check_shift_conflict(name, shift) {
-                        eprintln!(
-                            "warning: UID range {shift} conflicts with running container '{conflict}'"
-                        );
-                        eprintln!("falling back to nspawn pick (first boot may be slow)");
                         let mut state = state;
-                        state.remove("USERNS_SHIFT");
-                        let _ = state.write_to(&state_path);
+                        if handle_userns_shift_conflict(&mut state, name, shift, &conflict)? {
+                            state.write_to(&state_path)?;
+                        }
                     }
                 }
             }
@@ -229,6 +226,23 @@ pub(crate) fn start_and_await_boot(cfg: &BootConfig) -> Result<()> {
             Err(e)
         }
     }
+}
+
+fn handle_userns_shift_conflict(
+    state: &mut sdme::State,
+    name: &str,
+    shift: u64,
+    conflict: &str,
+) -> Result<bool> {
+    if state.is_yes("USERNS_MANAGED") {
+        bail!(
+            "managed UID range {shift} for container '{name}' conflicts with running container '{conflict}'"
+        );
+    }
+    eprintln!("warning: UID range {shift} conflicts with running container '{conflict}'");
+    eprintln!("falling back to nspawn pick (first boot may be slow)");
+    state.remove("USERNS_SHIFT");
+    Ok(true)
 }
 
 /// Print recent journal entries for a container whose boot failed.
@@ -370,15 +384,21 @@ pub(crate) fn probe_and_prechown(
                  eliminates this step"
             );
 
-            let shift = userns::allocate_uid_shift(datadir, name)?;
+            let state_path = datadir.join("state").join(name);
+            let mut state = sdme::State::read_from(&state_path)?;
+            let shift = match state
+                .get_nonempty("USERNS_SHIFT")
+                .and_then(|s| s.parse::<u64>().ok())
+            {
+                Some(shift) => shift,
+                None => userns::allocate_uid_shift(datadir, name)?,
+            };
             if verbose {
                 eprintln!("allocated UID shift: {shift}");
             }
             userns::prechown_overlayfs(datadir, name, lowerdir, shift)?;
 
             // Store the shift in the state file so to_nspawn_args uses it.
-            let state_path = datadir.join("state").join(name);
-            let mut state = sdme::State::read_from(&state_path)?;
             state.set("USERNS_SHIFT", shift.to_string());
             state.write_to(&state_path)?;
         }
@@ -941,4 +961,34 @@ pub(crate) fn validate_kube_oci_pod_args(datadir: &Path, oci_pod: Option<&str>) 
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_managed_userns_shift_conflict_is_error() {
+        let mut state = sdme::State::new();
+        state.set("USERNS_SHIFT", "655360");
+        state.set("USERNS_MANAGED", "yes");
+
+        let err = handle_userns_shift_conflict(&mut state, "owned", 655360, "other").unwrap_err();
+
+        assert!(
+            err.to_string().contains("managed UID range 655360"),
+            "unexpected error: {err:#}"
+        );
+        assert_eq!(state.get("USERNS_SHIFT"), Some("655360"));
+    }
+
+    #[test]
+    fn test_unmanaged_userns_shift_conflict_clears_shift() {
+        let mut state = sdme::State::new();
+        state.set("USERNS_SHIFT", "655360");
+
+        handle_userns_shift_conflict(&mut state, "owned", 655360, "other").unwrap();
+
+        assert_eq!(state.get("USERNS_SHIFT"), None);
+    }
 }
