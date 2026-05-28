@@ -103,6 +103,31 @@ fn test_nspawn_dropin_with_userns() {
 }
 
 #[test]
+fn test_nspawn_dropin_with_owner_userns_shift() {
+    let paths = test_paths();
+    let mut state = crate::State::new();
+    state.set("USERNS", "yes");
+    state.set("USERNS_SHIFT", "655360");
+    state.set("USERNS_RANGE", "65536");
+    state.set("USERNS_MANAGED", "yes");
+    state.set("USERNS_OWNER", "alice");
+    let args = SecurityConfig::from_state(&state).to_nspawn_args(255);
+    let content = nspawn_dropin(&DropinConfig {
+        datadir: "/var/lib/sdme",
+        name: "ownedbox",
+        lowerdir: "/",
+        paths: &paths,
+        nspawn_args: &args,
+        service_directives: &[],
+        submounts: &[],
+        pod_netns: None,
+    });
+    assert!(content.contains("--private-users=655360:65536"));
+    assert!(content.contains("--private-users-ownership=auto"));
+    assert!(!content.contains("--private-users=pick"));
+}
+
+#[test]
 fn test_nspawn_dropin_with_pod_netns() {
     let paths = test_paths();
     let args = vec![
@@ -128,6 +153,35 @@ fn test_nspawn_dropin_with_pod_netns() {
     assert!(content.contains("--private-users=pick"));
     assert!(content.contains("--boot"));
     // --network-namespace-path should NOT appear.
+    assert!(!content.contains("--network-namespace-path"));
+}
+
+#[test]
+fn test_nspawn_dropin_with_pod_netns_and_owner_userns_shift() {
+    let paths = test_paths();
+    let mut state = crate::State::new();
+    state.set("USERNS", "yes");
+    state.set("USERNS_SHIFT", "655360");
+    state.set("USERNS_RANGE", "65536");
+    state.set("USERNS_MANAGED", "yes");
+    state.set("USERNS_OWNER", "alice");
+    let args = SecurityConfig::from_state(&state).to_nspawn_args(255);
+    let content = nspawn_dropin(&DropinConfig {
+        datadir: "/var/lib/sdme",
+        name: "podbox",
+        lowerdir: "/",
+        paths: &paths,
+        nspawn_args: &args,
+        service_directives: &[],
+        submounts: &[],
+        pod_netns: Some("/run/sdme/pods/mypod/netns"),
+    });
+    assert!(content.contains(
+        "ExecStart=/usr/bin/nsenter --net=/run/sdme/pods/mypod/netns -- /usr/bin/systemd-nspawn"
+    ));
+    assert!(content.contains("--private-users=655360:65536"));
+    assert!(content.contains("--private-users-ownership=auto"));
+    assert!(!content.contains("--private-users=pick"));
     assert!(!content.contains("--network-namespace-path"));
 }
 

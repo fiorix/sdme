@@ -114,6 +114,9 @@ EXAMPLES:
     # Hardened security (userns, private-network, no-new-privileges, cap drops)
     sdme new sandbox -r ubuntu --hardened
 
+    # Owner-managed user namespace range
+    sdme new mybox -r ubuntu --owner alice
+
     # Strict security (hardened + Docker-equivalent caps, seccomp, AppArmor)
     sdme new jail -r ubuntu --strict
 
@@ -194,6 +197,9 @@ EXAMPLES:
 
     # User namespace isolation
     sdme create mybox -r ubuntu --userns
+
+    # Owner-managed user namespace range
+    sdme create mybox -r ubuntu --owner alice
 
     # Read-only rootfs with dropped capabilities
     sdme create mybox -r ubuntu --read-only --drop-capability CAP_NET_RAW
@@ -884,8 +890,9 @@ SECURITY:
     are complementary and can be used together.";
 
 const PRUNE_HELP: &str = "\
-Remove unused filesystems, unhealthy containers, orphaned pods, stale
-transactions, and unreferenced secrets, configmaps, and volumes.
+Remove unused filesystems, unhealthy containers, released subordinate ID
+ranges, orphaned pods, stale transactions, and unreferenced secrets,
+configmaps, and volumes.
 
 Runs an analysis phase first, displays what would be pruned, and asks
 for confirmation before proceeding. The configured default_base_fs is
@@ -910,6 +917,7 @@ EXAMPLES:
 CATEGORIES:
     Filesystems          Imported rootfs with no containers using them
     Containers           Containers with non-ok health status
+    Subordinate IDs      Released managed subuid/subgid ranges
     Pods                 Pod network namespaces with no containers attached
     Secrets              Kube secrets (copied at create time, not runtime-bound)
     ConfigMaps           Kube configmaps (copied at create time, not runtime-bound)
@@ -924,8 +932,8 @@ NOTES:
 
     The --except flag accepts plain names (matches all categories) or
     category:name prefixes to disambiguate when a name appears in
-    multiple categories. Prefixes: fs, container, pod, secret, configmap,
-    volume, txn.
+    multiple categories. Prefixes: fs, container, subid, pod, secret,
+    configmap, volume, txn.
 
     The OCI blob cache is not pruned. It has its own size-based eviction
     (oci_cache_max_size) and can be cleaned with 'sdme fs cache clean'.";
@@ -1003,6 +1011,10 @@ enum Command {
     Create {
         /// Container name (generated if not provided)
         name: Option<String>,
+
+        /// Host owner for managed per-container user namespace range
+        #[arg(long)]
+        owner: Option<String>,
 
         /// Root filesystem to use (host filesystem if not provided)
         #[arg(short = 'r', long = "fs")]
@@ -1162,6 +1174,10 @@ enum Command {
     New {
         /// Container name (generated if not provided)
         name: Option<String>,
+
+        /// Host owner for managed per-container user namespace range
+        #[arg(long)]
+        owner: Option<String>,
 
         /// Root filesystem to use (host filesystem if not provided)
         #[arg(short = 'r', long = "fs")]
@@ -2207,6 +2223,7 @@ fn run() -> Result<()> {
         }
         Command::Create {
             name,
+            owner,
             fs,
             memory,
             cpus,
@@ -2277,10 +2294,11 @@ fn run() -> Result<()> {
                     .to_string(),
                 None => "/".to_string(),
             };
-            let userns_enabled = sec.userns;
+            let userns_enabled = sec.userns || owner.is_some();
 
             let opts = containers::CreateOptions {
                 name,
+                owner,
                 rootfs: fs,
                 limits,
                 network,
@@ -2290,6 +2308,7 @@ fn run() -> Result<()> {
                 binds,
                 envs,
                 security: sec,
+                owner_allocation: None,
                 oci_volumes,
                 oci_envs,
                 masked_services,
@@ -2537,6 +2556,7 @@ fn run() -> Result<()> {
         }
         Command::New {
             name,
+            owner,
             fs,
             timeout,
             user,
@@ -2608,10 +2628,11 @@ fn run() -> Result<()> {
                     .to_string(),
                 None => "/".to_string(),
             };
-            let userns_enabled = sec.userns;
+            let userns_enabled = sec.userns || owner.is_some();
 
             let opts = containers::CreateOptions {
                 name,
+                owner,
                 rootfs: fs,
                 limits,
                 network,
@@ -2621,6 +2642,7 @@ fn run() -> Result<()> {
                 binds,
                 envs,
                 security: sec,
+                owner_allocation: None,
                 oci_volumes,
                 oci_envs,
                 masked_services,
@@ -3765,6 +3787,24 @@ mod tests {
         assert!(network.ports.contains(&"tcp:443:443".to_string()));
 
         let _ = fs::remove_dir_all(&rootfs);
+    }
+
+    #[test]
+    fn test_create_owner_cli_parses() {
+        let cli = Cli::try_parse_from(["sdme", "create", "mybox", "--owner", "alice"]).unwrap();
+        match cli.command {
+            Command::Create { owner, .. } => assert_eq!(owner.as_deref(), Some("alice")),
+            _ => panic!("expected create command"),
+        }
+    }
+
+    #[test]
+    fn test_new_owner_cli_parses() {
+        let cli = Cli::try_parse_from(["sdme", "new", "mybox", "--owner", "alice"]).unwrap();
+        match cli.command {
+            Command::New { owner, .. } => assert_eq!(owner.as_deref(), Some("alice")),
+            _ => panic!("expected new command"),
+        }
     }
 
     #[test]

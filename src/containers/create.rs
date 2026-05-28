@@ -8,8 +8,8 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::{bail, Context, Result};
 
 use crate::{
-    names, rootfs, systemd, validate_name, BindConfig, EnvConfig, NetworkConfig, ResourceLimits,
-    SecurityConfig, State,
+    names, rootfs, systemd, userns, validate_name, BindConfig, EnvConfig, NetworkConfig,
+    ResourceLimits, SecurityConfig, State,
 };
 
 use super::{get_umask, resolve_rootfs, set_dir_permissions, unix_timestamp, volumes_dir};
@@ -37,6 +37,10 @@ pub struct CreateOptions {
     pub envs: EnvConfig,
     /// Security hardening configuration.
     pub security: SecurityConfig,
+    /// Host owner for a managed per-container subordinate ID allocation.
+    pub owner: Option<String>,
+    /// Pre-allocated managed subordinate ID range.
+    pub owner_allocation: Option<userns::ManagedSubidAllocation>,
     /// OCI volume mount paths from the image.
     pub oci_volumes: Vec<String>,
     /// OCI environment variables from the image.
@@ -127,12 +131,46 @@ pub fn create(datadir: &Path, opts: &CreateOptions, verbose: bool) -> Result<Str
         eprintln!("claimed state file: {}", state_path.display());
     }
 
-    match do_create(datadir, &name, &rootfs, opts, &opaque_dirs, verbose) {
+    let mut security = opts.security.clone();
+    let owner_allocation = match (&opts.owner_allocation, &opts.owner) {
+        (Some(allocation), _) => {
+            security.userns = true;
+            security.userns_shift = Some(allocation.start);
+            Some(allocation.clone())
+        }
+        (None, Some(owner)) => {
+            let allocation = match userns::allocate_managed_subids(datadir, &name, owner) {
+                Ok(allocation) => allocation,
+                Err(e) => {
+                    let _ = fs::remove_file(&state_path);
+                    return Err(e);
+                }
+            };
+            security.userns = true;
+            security.userns_shift = Some(allocation.start);
+            Some(allocation)
+        }
+        (None, None) => None,
+    };
+
+    match do_create(
+        datadir,
+        &name,
+        &rootfs,
+        opts,
+        &opaque_dirs,
+        &security,
+        owner_allocation.as_ref(),
+        verbose,
+    ) {
         Ok(()) => Ok(name),
         Err(e) => {
             let container_dir = datadir.join("containers").join(&name);
             let _ = fs::remove_dir_all(&container_dir);
             let _ = fs::remove_file(&state_path);
+            if owner_allocation.is_some() {
+                let _ = userns::release_managed_subids(datadir, &name);
+            }
             Err(e)
         }
     }
@@ -144,6 +182,8 @@ fn do_create(
     rootfs: &Path,
     opts: &CreateOptions,
     opaque_dirs: &[String],
+    security: &SecurityConfig,
+    owner_allocation: Option<&userns::ManagedSubidAllocation>,
     verbose: bool,
 ) -> Result<()> {
     let container_dir = datadir.join("containers").join(name);
@@ -489,15 +529,14 @@ fn do_create(
     // drop-in to adjust the bounding set. Without this, the inner service
     // claims capabilities the container doesn't have, which causes boot
     // failures on distros where systemd enforces the mismatch (e.g. SUSE).
-    if !opts.security.drop_caps.is_empty() {
+    if !security.drop_caps.is_empty() {
         let app_names = crate::oci::rootfs::detect_all_oci_app_names(rootfs);
         if !app_names.is_empty() {
             use std::collections::HashSet;
 
             use crate::security::OCI_DEFAULT_CAPS;
 
-            let drop_set: HashSet<&str> =
-                opts.security.drop_caps.iter().map(|s| s.as_str()).collect();
+            let drop_set: HashSet<&str> = security.drop_caps.iter().map(|s| s.as_str()).collect();
             let caps: Vec<&str> = OCI_DEFAULT_CAPS
                 .iter()
                 .copied()
@@ -530,7 +569,13 @@ fn do_create(
         }
     }
 
-    opts.security.write_to_state(&mut state);
+    security.write_to_state(&mut state);
+    if let Some(allocation) = owner_allocation {
+        state.set("OWNER", allocation.owner.as_str());
+        state.set("USERNS_OWNER", allocation.owner.as_str());
+        state.set("USERNS_RANGE", allocation.count.to_string());
+        state.set("USERNS_MANAGED", "yes");
+    }
     if !opts.masked_services.is_empty() {
         state.set("MASKED_SERVICES", opts.masked_services.join(","));
     }

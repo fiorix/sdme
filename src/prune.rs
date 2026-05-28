@@ -13,7 +13,7 @@ use anyhow::{Context, Result};
 
 use std::sync::atomic::Ordering;
 
-use crate::{check_interrupted, containers, kube, pod, rootfs, txn, State, INTERRUPTED};
+use crate::{check_interrupted, containers, kube, pod, rootfs, txn, userns, State, INTERRUPTED};
 
 /// Category of a prunable resource, ordered by display and removal priority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,6 +22,8 @@ pub enum PruneCategory {
     Filesystem,
     /// Container with unhealthy status.
     Container,
+    /// Released managed subordinate UID/GID range.
+    SubId,
     /// Pod with no containers attached.
     Pod,
     /// Kube secret (copied at create time, not runtime-bound).
@@ -40,6 +42,7 @@ impl PruneCategory {
         match self {
             Self::Filesystem => "fs",
             Self::Container => "container",
+            Self::SubId => "subid",
             Self::Pod => "pod",
             Self::Secret => "secret",
             Self::ConfigMap => "configmap",
@@ -53,6 +56,7 @@ impl PruneCategory {
         match self {
             Self::Filesystem => "Filesystems",
             Self::Container => "Containers",
+            Self::SubId => "Subordinate ID ranges",
             Self::Pod => "Pods",
             Self::Secret => "Secrets",
             Self::ConfigMap => "ConfigMaps",
@@ -63,9 +67,10 @@ impl PruneCategory {
 }
 
 /// Display ordering of categories: filesystems first, stale transactions last.
-const DISPLAY_ORDER: [PruneCategory; 7] = [
+const DISPLAY_ORDER: [PruneCategory; 8] = [
     PruneCategory::Filesystem,
     PruneCategory::Container,
+    PruneCategory::SubId,
     PruneCategory::Pod,
     PruneCategory::Secret,
     PruneCategory::ConfigMap,
@@ -75,10 +80,11 @@ const DISPLAY_ORDER: [PruneCategory; 7] = [
 
 /// Removal ordering: stale transactions first (no lock), then follows lock
 /// ordering (fs, containers, pods, secrets, configmaps), volumes last.
-const REMOVAL_ORDER: [PruneCategory; 7] = [
+const REMOVAL_ORDER: [PruneCategory; 8] = [
     PruneCategory::StaleTransaction,
     PruneCategory::Filesystem,
     PruneCategory::Container,
+    PruneCategory::SubId,
     PruneCategory::Pod,
     PruneCategory::Secret,
     PruneCategory::ConfigMap,
@@ -143,7 +149,21 @@ pub fn analyze(datadir: &Path, default_base_fs: &str) -> Result<Vec<PrunableItem
 
     check_interrupted()?;
 
-    // 3. Unused pods: no containers reference them.
+    // 3. Released managed subid allocations with exact host file lines.
+    for allocation in userns::released_managed_subids(datadir)? {
+        items.push(PrunableItem {
+            category: PruneCategory::SubId,
+            name: allocation.container,
+            reason: format!(
+                "released managed range {}:{} for {}",
+                allocation.start, allocation.count, allocation.owner
+            ),
+        });
+    }
+
+    check_interrupted()?;
+
+    // 4. Unused pods: no containers reference them.
     let pod_entries = pod::list(datadir)?;
     for p in &pod_entries {
         if p.containers.is_empty() {
@@ -157,7 +177,7 @@ pub fn analyze(datadir: &Path, default_base_fs: &str) -> Result<Vec<PrunableItem
 
     check_interrupted()?;
 
-    // 4. All secrets (copied at create time, not runtime-bound).
+    // 5. All secrets (copied at create time, not runtime-bound).
     let secrets = kube::secret::list(datadir)?;
     for s in &secrets {
         items.push(PrunableItem {
@@ -169,7 +189,7 @@ pub fn analyze(datadir: &Path, default_base_fs: &str) -> Result<Vec<PrunableItem
 
     check_interrupted()?;
 
-    // 5. All configmaps (copied at create time, not runtime-bound).
+    // 6. All configmaps (copied at create time, not runtime-bound).
     let configmaps = kube::configmap::list(datadir)?;
     for cm in &configmaps {
         items.push(PrunableItem {
@@ -181,7 +201,7 @@ pub fn analyze(datadir: &Path, default_base_fs: &str) -> Result<Vec<PrunableItem
 
     check_interrupted()?;
 
-    // 6. Orphaned volumes: no container references the volume path.
+    // 7. Orphaned volumes: no container references the volume path.
     let volumes_dir = datadir.join("volumes");
     if volumes_dir.is_dir() {
         // Collect all BINDS values from container state files for matching.
@@ -228,7 +248,7 @@ pub fn analyze(datadir: &Path, default_base_fs: &str) -> Result<Vec<PrunableItem
 
     check_interrupted()?;
 
-    // 7. Stale transaction staging directories.
+    // 8. Stale transaction staging directories.
     let fs_dir = datadir.join("fs");
     let stale = txn::find_all_stale_txns(&fs_dir)?;
     for path in &stale {
@@ -355,6 +375,7 @@ pub fn execute(
                 }
                 PruneCategory::Filesystem => rootfs::remove(datadir, &item.name, auto_gc, verbose),
                 PruneCategory::Container => containers::remove(datadir, &item.name, verbose),
+                PruneCategory::SubId => userns::prune_managed_subid(datadir, &item.name),
                 PruneCategory::Pod => pod::remove(datadir, &item.name, true, verbose),
                 PruneCategory::Secret => {
                     kube::secret::remove(datadir, std::slice::from_ref(&item.name))
@@ -462,6 +483,7 @@ mod tests {
         let categories = [
             PruneCategory::Filesystem,
             PruneCategory::Container,
+            PruneCategory::SubId,
             PruneCategory::Pod,
             PruneCategory::Secret,
             PruneCategory::ConfigMap,

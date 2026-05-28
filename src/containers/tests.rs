@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use crate::testutil::TempDataDir;
+use crate::userns::ManagedSubidAllocation;
 use crate::{validate_name, State};
 
 use super::*;
@@ -109,6 +110,145 @@ fn test_create_with_name() {
 
     let state = State::read_from(&tmp.path().join("state/hello")).unwrap();
     assert_eq!(state.get("NAME"), Some("hello"));
+}
+
+#[test]
+fn test_create_with_owner_managed_userns_state() {
+    let _lock = UMASK_LOCK.lock().unwrap();
+    let tmp = tmp();
+    let opts = CreateOptions {
+        name: Some("owned".to_string()),
+        owner_allocation: Some(ManagedSubidAllocation {
+            container: "owned".to_string(),
+            owner: "alice".to_string(),
+            start: 655360,
+            count: 65536,
+        }),
+        security: crate::SecurityConfig {
+            userns: true,
+            userns_shift: Some(655360),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let name = create(tmp.path(), &opts, false).unwrap();
+    assert_eq!(name, "owned");
+
+    let state = State::read_from(&tmp.path().join("state/owned")).unwrap();
+    assert_eq!(state.get("OWNER"), Some("alice"));
+    assert_eq!(state.get("USERNS"), Some("yes"));
+    assert_eq!(state.get("USERNS_OWNER"), Some("alice"));
+    assert_eq!(state.get("USERNS_SHIFT"), Some("655360"));
+    assert_eq!(state.get("USERNS_RANGE"), Some("65536"));
+    assert_eq!(state.get("USERNS_MANAGED"), Some("yes"));
+}
+
+#[test]
+fn test_remove_releases_managed_owner_allocation() {
+    let _lock = UMASK_LOCK.lock().unwrap();
+    let tmp = tmp();
+    let opts = CreateOptions {
+        name: Some("owned".to_string()),
+        owner_allocation: Some(ManagedSubidAllocation {
+            container: "owned".to_string(),
+            owner: "alice".to_string(),
+            start: 655360,
+            count: 65536,
+        }),
+        security: crate::SecurityConfig {
+            userns: true,
+            userns_shift: Some(655360),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    create(tmp.path(), &opts, false).unwrap();
+
+    let registry_dir = tmp.path().join("subids");
+    fs::create_dir_all(&registry_dir).unwrap();
+    fs::write(
+        registry_dir.join("allocations"),
+        "CONTAINER=owned\nOWNER=alice\nSTART=655360\nCOUNT=65536\nKIND=uidgid\nSTATUS=active\nCREATED=1\n",
+    )
+    .unwrap();
+
+    let state = State::read_from(&tmp.path().join("state/owned")).unwrap();
+    super::manage::release_managed_subids_for_state(tmp.path(), "owned", &state).unwrap();
+
+    let registry = fs::read_to_string(registry_dir.join("allocations")).unwrap();
+    assert!(registry.contains("STATUS=released\n"));
+    assert!(registry.contains("RELEASED="));
+}
+
+#[test]
+fn test_remove_keeps_state_when_managed_release_fails() {
+    let tmp = tmp();
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(&state_dir).unwrap();
+    let state_path = state_dir.join("owned");
+    let mut state = State::new();
+    state.set("NAME", "owned");
+    state.set("USERNS_MANAGED", "yes");
+    state.write_to(&state_path).unwrap();
+    let registry_dir = tmp.path().join("subids");
+    fs::create_dir_all(&registry_dir).unwrap();
+    fs::write(registry_dir.join("allocations"), "CONTAINER=owned\n").unwrap();
+
+    let err = super::manage::remove_state_file_after_release(
+        tmp.path(),
+        "owned",
+        &state_path,
+        &state,
+        false,
+    )
+    .unwrap_err();
+
+    assert!(
+        err.to_string().contains("missing OWNER"),
+        "unexpected error: {err:#}"
+    );
+    assert!(state_path.exists());
+}
+
+#[test]
+fn test_create_failure_releases_managed_owner_allocation() {
+    let _lock = UMASK_LOCK.lock().unwrap();
+    let tmp = tmp();
+    let rootfs_dir = tmp.path().join("fs/failoci");
+    fs::create_dir_all(rootfs_dir.join("oci/apps/app")).unwrap();
+    let registry_dir = tmp.path().join("subids");
+    fs::create_dir_all(&registry_dir).unwrap();
+    fs::write(
+        registry_dir.join("allocations"),
+        "CONTAINER=owned-fail\nOWNER=alice\nSTART=655360\nCOUNT=65536\nKIND=uidgid\nSTATUS=active\nCREATED=1\n",
+    )
+    .unwrap();
+
+    let opts = CreateOptions {
+        name: Some("owned-fail".to_string()),
+        rootfs: Some("failoci".to_string()),
+        owner_allocation: Some(ManagedSubidAllocation {
+            container: "owned-fail".to_string(),
+            owner: "alice".to_string(),
+            start: 655360,
+            count: 65536,
+        }),
+        oci_envs: vec!["FOO=bar".to_string()],
+        ..Default::default()
+    };
+
+    let err = create(tmp.path(), &opts, false).unwrap_err();
+    assert!(
+        err.to_string().contains("no env file found"),
+        "unexpected error: {err:#}"
+    );
+
+    let registry = fs::read_to_string(registry_dir.join("allocations")).unwrap();
+    assert!(registry.contains("STATUS=released\n"));
+    assert!(registry.contains("RELEASED="));
+    assert!(!tmp.path().join("state/owned-fail").exists());
+    assert!(!tmp.path().join("containers/owned-fail").exists());
 }
 
 #[test]

@@ -16,9 +16,10 @@
 
 use std::collections::HashSet;
 use std::fs;
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
 use rayon::prelude::*;
@@ -45,6 +46,600 @@ const SIPHASH_KEY: [u8; 16] = [
 
 /// Maximum allocation attempts before giving up.
 const MAX_RETRIES: u32 = 100;
+
+/// A managed subordinate UID/GID allocation owned by sdme.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedSubidAllocation {
+    /// Container that owns the allocation.
+    pub container: String,
+    /// Host passwd owner recorded in `/etc/subuid` and `/etc/subgid`.
+    pub owner: String,
+    /// First host UID/GID in the range.
+    pub start: u64,
+    /// Number of UIDs/GIDs in the range.
+    pub count: u64,
+}
+
+impl ManagedSubidAllocation {
+    fn exact_line(&self) -> String {
+        format!("{}:{}:{}", self.owner, self.start, self.count)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ManagedSubidRecord {
+    allocation: ManagedSubidAllocation,
+    status: String,
+    created: String,
+    released: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SubidRange {
+    owner: String,
+    start: u64,
+    count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileSnapshot {
+    existed: bool,
+    content: String,
+}
+
+impl SubidRange {
+    fn id_range(&self) -> IdRange {
+        IdRange {
+            start: self.start,
+            count: self.count,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct IdRange {
+    start: u64,
+    count: u64,
+}
+
+impl IdRange {
+    fn end(&self) -> Option<u64> {
+        self.start.checked_add(self.count)
+    }
+
+    fn overlaps(&self, other: &Self) -> bool {
+        let Some(end) = self.end() else {
+            return true;
+        };
+        let Some(other_end) = other.end() else {
+            return true;
+        };
+        self.start < other_end && other.start < end
+    }
+}
+
+/// Allocate and persist a managed subordinate UID/GID range for a container.
+///
+/// The owner must resolve via the host passwd database. This writes matching
+/// entries to `/etc/subuid` and `/etc/subgid`, then records the allocation in
+/// sdme's managed subid registry.
+pub fn allocate_managed_subids(
+    datadir: &Path,
+    container: &str,
+    owner: &str,
+) -> Result<ManagedSubidAllocation> {
+    validate_owner_exists(owner)?;
+    allocate_managed_subids_with_paths(
+        datadir,
+        container,
+        owner,
+        Path::new("/etc/subuid"),
+        Path::new("/etc/subgid"),
+    )
+}
+
+/// Validate that an owner name is safe for subid files and exists on the host.
+pub fn validate_owner_exists(owner: &str) -> Result<()> {
+    validate_owner_name(owner)?;
+    let c_owner = std::ffi::CString::new(owner).context("owner contains null byte")?;
+    let passwd = unsafe { libc::getpwnam(c_owner.as_ptr()) };
+    if passwd.is_null() {
+        bail!("owner user not found: {owner}");
+    }
+    Ok(())
+}
+
+/// Mark active managed subordinate ID allocations for a container as released.
+///
+/// This updates only sdme's registry. It intentionally leaves `/etc/subuid`
+/// and `/etc/subgid` unchanged so cleanup remains explicit through prune.
+pub fn release_managed_subids(datadir: &Path, container: &str) -> Result<()> {
+    let _lock = lock::lock_exclusive(datadir, "userns", "subid")
+        .context("cannot lock managed subid release")?;
+    let mut records = read_registry_records(datadir)?;
+    let released = unix_timestamp().to_string();
+    let mut changed = false;
+
+    for record in &mut records {
+        if record.allocation.container == container && record.status == "active" {
+            record.status = "released".to_string();
+            record.released = Some(released.clone());
+            changed = true;
+        }
+    }
+
+    if changed {
+        write_registry_records(datadir, &records)?;
+    }
+    Ok(())
+}
+
+/// Return released managed allocations that still have exact subid lines.
+///
+/// If `/etc/subuid` and `/etc/subgid` disagree for a released managed record,
+/// this returns an error and leaves both files untouched.
+pub fn released_managed_subids(datadir: &Path) -> Result<Vec<ManagedSubidAllocation>> {
+    released_managed_subids_with_paths(datadir, Path::new("/etc/subuid"), Path::new("/etc/subgid"))
+}
+
+/// Remove exact subuid/subgid lines for a released managed allocation.
+///
+/// The registry entry is marked `pruned` after the exact lines are absent
+/// from both files. Entries still referenced by live container state are not
+/// pruned.
+pub fn prune_managed_subid(datadir: &Path, container: &str) -> Result<()> {
+    prune_managed_subid_with_paths(
+        datadir,
+        container,
+        Path::new("/etc/subuid"),
+        Path::new("/etc/subgid"),
+    )
+}
+
+fn released_managed_subids_with_paths(
+    datadir: &Path,
+    subuid_path: &Path,
+    subgid_path: &Path,
+) -> Result<Vec<ManagedSubidAllocation>> {
+    let records = read_registry_records(datadir)?;
+    let subuid_content = read_optional_file(subuid_path)?;
+    let subgid_content = read_optional_file(subgid_path)?;
+    let mut released = Vec::new();
+
+    for record in records.iter().filter(|record| record.status == "released") {
+        if live_state_references_allocation(datadir, &record.allocation)? {
+            continue;
+        }
+        let line = record.allocation.exact_line();
+        match (
+            has_exact_line(&subuid_content, &line),
+            has_exact_line(&subgid_content, &line),
+        ) {
+            (true, true) => released.push(record.allocation.clone()),
+            (false, false) => {}
+            _ => bail!(
+                "subuid/subgid mismatch for managed allocation {}:{}:{}",
+                record.allocation.owner,
+                record.allocation.start,
+                record.allocation.count
+            ),
+        }
+    }
+
+    Ok(released)
+}
+
+fn prune_managed_subid_with_paths(
+    datadir: &Path,
+    container: &str,
+    subuid_path: &Path,
+    subgid_path: &Path,
+) -> Result<()> {
+    let _lock = lock::lock_exclusive(datadir, "userns", "subid")
+        .context("cannot lock managed subid prune")?;
+    let mut records = read_registry_records(datadir)?;
+    let Some(idx) = records
+        .iter()
+        .position(|record| record.allocation.container == container && record.status == "released")
+    else {
+        bail!("released managed subid allocation not found for container: {container}");
+    };
+
+    let allocation = records[idx].allocation.clone();
+    if live_state_references_allocation(datadir, &allocation)? {
+        bail!("managed subid allocation for '{container}' is still referenced by container state");
+    }
+
+    let line = allocation.exact_line();
+    let subuid_snapshot = read_file_snapshot(subuid_path)?;
+    let subgid_snapshot = read_file_snapshot(subgid_path)?;
+    match (
+        has_exact_line(&subuid_snapshot.content, &line),
+        has_exact_line(&subgid_snapshot.content, &line),
+    ) {
+        (true, true) => {
+            remove_exact_line(subuid_path, &line, 0o644)?;
+            if let Err(e) = remove_exact_line(subgid_path, &line, 0o644) {
+                let _ = restore_file_snapshot(subuid_path, &subuid_snapshot, 0o644);
+                return Err(e);
+            }
+        }
+        (false, false) => {}
+        _ => bail!(
+            "subuid/subgid mismatch for managed allocation {}:{}:{}",
+            allocation.owner,
+            allocation.start,
+            allocation.count
+        ),
+    }
+
+    records[idx].status = "pruned".to_string();
+    if let Err(e) = write_registry_records(datadir, &records) {
+        let _ = restore_file_snapshot(subgid_path, &subgid_snapshot, 0o644);
+        let _ = restore_file_snapshot(subuid_path, &subuid_snapshot, 0o644);
+        return Err(e);
+    }
+    Ok(())
+}
+
+fn allocate_managed_subids_with_paths(
+    datadir: &Path,
+    container: &str,
+    owner: &str,
+    subuid_path: &Path,
+    subgid_path: &Path,
+) -> Result<ManagedSubidAllocation> {
+    validate_owner_name(owner)?;
+    let _lock = lock::lock_exclusive(datadir, "userns", "subid")
+        .context("cannot lock managed subid allocation")?;
+
+    let subuid_snapshot = read_file_snapshot(subuid_path)?;
+    let subgid_snapshot = read_file_snapshot(subgid_path)?;
+    let subuid_ranges = parse_subid_ranges(&subuid_snapshot.content)
+        .with_context(|| format!("failed to parse {}", subuid_path.display()))?;
+    let subgid_ranges = parse_subid_ranges(&subgid_snapshot.content)
+        .with_context(|| format!("failed to parse {}", subgid_path.display()))?;
+    let occupied = collect_occupied_subid_ranges(datadir, &subuid_ranges, &subgid_ranges)?;
+    let start = first_free_subid_start(&occupied)?;
+
+    let allocation = ManagedSubidAllocation {
+        container: container.to_string(),
+        owner: owner.to_string(),
+        start,
+        count: UID_RANGE,
+    };
+    let line = allocation.exact_line();
+    append_exact_line(subuid_path, &line, 0o644)?;
+    if let Err(e) = append_exact_line(subgid_path, &line, 0o644) {
+        let _ = restore_file_snapshot(subuid_path, &subuid_snapshot, 0o644);
+        return Err(e);
+    }
+    if let Err(e) = append_registry_record(datadir, &allocation) {
+        let _ = restore_file_snapshot(subgid_path, &subgid_snapshot, 0o644);
+        let _ = restore_file_snapshot(subuid_path, &subuid_snapshot, 0o644);
+        return Err(e);
+    }
+    Ok(allocation)
+}
+
+fn validate_owner_name(owner: &str) -> Result<()> {
+    if owner.is_empty() {
+        bail!("owner cannot be empty");
+    }
+    if owner.contains(':') || owner.contains('\n') || owner.contains('\r') {
+        bail!("owner contains characters that are invalid in subid files: {owner}");
+    }
+    Ok(())
+}
+
+fn parse_subid_ranges(content: &str) -> Result<Vec<SubidRange>> {
+    let mut ranges = Vec::new();
+    for (idx, raw) in content.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let parts: Vec<&str> = line.split(':').collect();
+        if parts.len() != 3 || parts[0].is_empty() {
+            bail!("invalid subid line {}: {line}", idx + 1);
+        }
+        let start = parts[1]
+            .parse::<u64>()
+            .with_context(|| format!("invalid subid start on line {}: {line}", idx + 1))?;
+        let count = parts[2]
+            .parse::<u64>()
+            .with_context(|| format!("invalid subid count on line {}: {line}", idx + 1))?;
+        if count == 0 || start.checked_add(count).is_none() {
+            bail!("invalid subid range on line {}: {line}", idx + 1);
+        }
+        ranges.push(SubidRange {
+            owner: parts[0].to_string(),
+            start,
+            count,
+        });
+    }
+    Ok(ranges)
+}
+
+fn collect_occupied_subid_ranges(
+    datadir: &Path,
+    subuid_ranges: &[SubidRange],
+    subgid_ranges: &[SubidRange],
+) -> Result<Vec<IdRange>> {
+    let mut occupied: Vec<IdRange> = subuid_ranges.iter().map(SubidRange::id_range).collect();
+    occupied.extend(subgid_ranges.iter().map(SubidRange::id_range));
+
+    let state_dir = datadir.join("state");
+    if let Ok(entries) = fs::read_dir(&state_dir) {
+        for entry in entries.flatten() {
+            if let Ok(state) = State::read_from(&entry.path()) {
+                if let Some(start) = state
+                    .get_nonempty("USERNS_SHIFT")
+                    .and_then(|s| s.parse::<u64>().ok())
+                {
+                    let count = state
+                        .get_nonempty("USERNS_RANGE")
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .unwrap_or(UID_RANGE);
+                    occupied.push(IdRange { start, count });
+                }
+            }
+        }
+    }
+
+    for (_, shift) in running_machine_shifts() {
+        occupied.push(IdRange {
+            start: shift,
+            count: UID_RANGE,
+        });
+    }
+
+    for record in read_registry_records(datadir)? {
+        if record.status != "pruned" {
+            occupied.push(IdRange {
+                start: record.allocation.start,
+                count: record.allocation.count,
+            });
+        }
+    }
+
+    Ok(occupied)
+}
+
+fn first_free_subid_start(occupied: &[IdRange]) -> Result<u64> {
+    let mut candidate = UID_BASE_MIN;
+    while candidate <= UID_BASE_MAX {
+        let range = IdRange {
+            start: candidate,
+            count: UID_RANGE,
+        };
+        if !occupied.iter().any(|used| range.overlaps(used)) {
+            return Ok(candidate);
+        }
+        candidate = match candidate.checked_add(UID_RANGE) {
+            Some(next) => next,
+            None => break,
+        };
+    }
+    bail!("failed to allocate managed subordinate ID range (all slots in use)")
+}
+
+fn append_exact_line(path: &Path, line: &str, default_mode: u32) -> Result<()> {
+    let mut content = read_optional_file(path)?;
+    if has_exact_line(&content, line) {
+        return Ok(());
+    }
+    if !content.is_empty() && !content.ends_with('\n') {
+        content.push('\n');
+    }
+    content.push_str(line);
+    content.push('\n');
+    atomic_write_preserve_mode(path, content.as_bytes(), default_mode)
+}
+
+fn remove_exact_line(path: &Path, line: &str, default_mode: u32) -> Result<()> {
+    let content = read_optional_file(path)?;
+    let mut out = String::new();
+    for existing in content.lines() {
+        if existing == line {
+            continue;
+        }
+        out.push_str(existing);
+        out.push('\n');
+    }
+    atomic_write_preserve_mode(path, out.as_bytes(), default_mode)
+}
+
+fn has_exact_line(content: &str, line: &str) -> bool {
+    content.lines().any(|existing| existing == line)
+}
+
+fn live_state_references_allocation(
+    datadir: &Path,
+    allocation: &ManagedSubidAllocation,
+) -> Result<bool> {
+    let state_dir = datadir.join("state");
+    if !state_dir.is_dir() {
+        return Ok(false);
+    }
+    for entry in fs::read_dir(&state_dir)
+        .with_context(|| format!("failed to read {}", state_dir.display()))?
+    {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let state = State::read_from(&entry.path())?;
+        let start = state
+            .get_nonempty("USERNS_SHIFT")
+            .and_then(|s| s.parse::<u64>().ok());
+        let count = state
+            .get_nonempty("USERNS_RANGE")
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(UID_RANGE);
+        if start == Some(allocation.start) && count == allocation.count {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn append_registry_record(datadir: &Path, allocation: &ManagedSubidAllocation) -> Result<()> {
+    let path = registry_path(datadir);
+    ensure_registry_dir(datadir)?;
+    let mut content = read_optional_file(&path)?;
+    if !content.is_empty() {
+        if !content.ends_with('\n') {
+            content.push('\n');
+        }
+        content.push('\n');
+    }
+    content.push_str(&format!(
+        "CONTAINER={}\nOWNER={}\nSTART={}\nCOUNT={}\nKIND=uidgid\nSTATUS=active\nCREATED={}\n",
+        allocation.container,
+        allocation.owner,
+        allocation.start,
+        allocation.count,
+        unix_timestamp()
+    ));
+    atomic_write_preserve_mode(&path, content.as_bytes(), 0o600)
+}
+
+fn read_registry_records(datadir: &Path) -> Result<Vec<ManagedSubidRecord>> {
+    let content = read_optional_file(&registry_path(datadir))?;
+    let mut records = Vec::new();
+    let mut block = Vec::new();
+
+    for line in content.lines() {
+        if line.trim().is_empty() {
+            parse_registry_block(&block, &mut records)?;
+            block.clear();
+        } else {
+            block.push(line.to_string());
+        }
+    }
+    parse_registry_block(&block, &mut records)?;
+    Ok(records)
+}
+
+fn parse_registry_block(lines: &[String], records: &mut Vec<ManagedSubidRecord>) -> Result<()> {
+    if lines.is_empty() {
+        return Ok(());
+    }
+    let mut content = lines.join("\n");
+    content.push('\n');
+    let state = State::parse(&content).context("failed to parse managed subid registry")?;
+    let container = state
+        .get_nonempty("CONTAINER")
+        .context("managed subid registry record missing CONTAINER")?;
+    let owner = state
+        .get_nonempty("OWNER")
+        .context("managed subid registry record missing OWNER")?;
+    let start = state
+        .get_nonempty("START")
+        .context("managed subid registry record missing START")?
+        .parse::<u64>()
+        .context("managed subid registry record has invalid START")?;
+    let count = state
+        .get_nonempty("COUNT")
+        .context("managed subid registry record missing COUNT")?
+        .parse::<u64>()
+        .context("managed subid registry record has invalid COUNT")?;
+    let status = state
+        .get_nonempty("STATUS")
+        .context("managed subid registry record missing STATUS")?;
+    let created = state.get("CREATED").unwrap_or("").to_string();
+    records.push(ManagedSubidRecord {
+        allocation: ManagedSubidAllocation {
+            container: container.to_string(),
+            owner: owner.to_string(),
+            start,
+            count,
+        },
+        status: status.to_string(),
+        created,
+        released: state.get_nonempty("RELEASED").map(String::from),
+    });
+    Ok(())
+}
+
+fn write_registry_records(datadir: &Path, records: &[ManagedSubidRecord]) -> Result<()> {
+    ensure_registry_dir(datadir)?;
+    let path = registry_path(datadir);
+    let mut content = String::new();
+    for (idx, record) in records.iter().enumerate() {
+        if idx > 0 {
+            content.push('\n');
+        }
+        content.push_str(&format!(
+            "CONTAINER={}\nOWNER={}\nSTART={}\nCOUNT={}\nKIND=uidgid\nSTATUS={}\nCREATED={}\n",
+            record.allocation.container,
+            record.allocation.owner,
+            record.allocation.start,
+            record.allocation.count,
+            record.status,
+            record.created,
+        ));
+        if let Some(released) = &record.released {
+            content.push_str(&format!("RELEASED={released}\n"));
+        }
+    }
+    atomic_write_preserve_mode(&path, content.as_bytes(), 0o600)
+}
+
+fn ensure_registry_dir(datadir: &Path) -> Result<()> {
+    let dir = datadir.join("subids");
+    fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("failed to set permissions on {}", dir.display()))?;
+    Ok(())
+}
+
+fn registry_path(datadir: &Path) -> PathBuf {
+    datadir.join("subids").join("allocations")
+}
+
+fn read_optional_file(path: &Path) -> Result<String> {
+    read_file_snapshot(path).map(|snapshot| snapshot.content)
+}
+
+fn read_file_snapshot(path: &Path) -> Result<FileSnapshot> {
+    match fs::read_to_string(path) {
+        Ok(content) => Ok(FileSnapshot {
+            existed: true,
+            content,
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(FileSnapshot {
+            existed: false,
+            content: String::new(),
+        }),
+        Err(e) => Err(e).with_context(|| format!("failed to read {}", path.display())),
+    }
+}
+
+fn restore_file_snapshot(path: &Path, snapshot: &FileSnapshot, default_mode: u32) -> Result<()> {
+    if snapshot.existed {
+        atomic_write_preserve_mode(path, snapshot.content.as_bytes(), default_mode)
+    } else if path.exists() {
+        fs::remove_file(path).with_context(|| format!("failed to remove {}", path.display()))
+    } else {
+        Ok(())
+    }
+}
+
+fn atomic_write_preserve_mode(path: &Path, data: &[u8], default_mode: u32) -> Result<()> {
+    let mode = fs::metadata(path)
+        .map(|m| m.permissions().mode() & 0o7777)
+        .unwrap_or(default_mode);
+    crate::atomic_write_mode(path, data, mode)
+}
+
+fn unix_timestamp() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
 
 /// Allocate a UID shift for a container, matching nspawn's `pick` algorithm.
 ///
@@ -427,6 +1022,7 @@ fn sipround(v0: &mut u64, v1: &mut u64, v2: &mut u64, v3: &mut u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::TempDataDir;
 
     #[test]
     fn test_hash_to_shift_alignment() {
@@ -474,5 +1070,210 @@ mod tests {
             shift, 1678049280,
             "shift for 'iporakepaba' does not match nspawn's output"
         );
+    }
+
+    #[test]
+    fn test_parse_subid_ranges() {
+        let ranges =
+            parse_subid_ranges("alice:231072:65536\n\n# comment\nbob:296608:65536\n").unwrap();
+        assert_eq!(
+            ranges,
+            vec![
+                SubidRange {
+                    owner: "alice".to_string(),
+                    start: 231072,
+                    count: 65536,
+                },
+                SubidRange {
+                    owner: "bob".to_string(),
+                    start: 296608,
+                    count: 65536,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_allocate_managed_subids_writes_identity_files_and_registry() {
+        let tmp = TempDataDir::new("managed-subids");
+        let subuid = tmp.path().join("subuid");
+        let subgid = tmp.path().join("subgid");
+        fs::write(&subuid, "root:100000:65536\nalice:524288:65536\n").unwrap();
+        fs::write(&subgid, "root:100000:65536\n").unwrap();
+
+        let state_dir = tmp.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+        let mut state = State::new();
+        state.set("NAME", "existing");
+        state.set("USERNS_SHIFT", "589824");
+        state.write_to(&state_dir.join("existing")).unwrap();
+
+        let allocation =
+            allocate_managed_subids_with_paths(tmp.path(), "mybox", "alice", &subuid, &subgid)
+                .unwrap();
+
+        assert_eq!(allocation.owner, "alice");
+        assert_eq!(allocation.start, 655360);
+        assert_eq!(allocation.count, 65536);
+        assert!(fs::read_to_string(&subuid)
+            .unwrap()
+            .contains("alice:655360:65536\n"));
+        assert!(fs::read_to_string(&subgid)
+            .unwrap()
+            .contains("alice:655360:65536\n"));
+
+        let registry = fs::read_to_string(tmp.path().join("subids/allocations")).unwrap();
+        assert!(registry.contains("CONTAINER=mybox\n"));
+        assert!(registry.contains("OWNER=alice\n"));
+        assert!(registry.contains("START=655360\n"));
+        assert!(registry.contains("COUNT=65536\n"));
+        assert!(registry.contains("KIND=uidgid\n"));
+        assert!(registry.contains("STATUS=active\n"));
+    }
+
+    #[test]
+    fn test_allocate_managed_subids_rolls_back_subuid_when_subgid_write_fails() {
+        let tmp = TempDataDir::new("managed-subids-rollback");
+        let subuid = tmp.path().join("subuid");
+        let subgid = tmp.path().join("missing/subgid");
+        fs::write(&subuid, "root:100000:65536\n").unwrap();
+
+        let err =
+            allocate_managed_subids_with_paths(tmp.path(), "mybox", "alice", &subuid, &subgid)
+                .unwrap_err();
+
+        assert!(
+            err.to_string().contains("subgid"),
+            "unexpected error: {err:#}"
+        );
+        assert_eq!(fs::read_to_string(&subuid).unwrap(), "root:100000:65536\n");
+        assert!(!tmp.path().join("subids/allocations").exists());
+    }
+
+    #[test]
+    fn test_release_managed_subids_marks_registry_released() {
+        let tmp = TempDataDir::new("managed-subids-release");
+        let subuid = tmp.path().join("subuid");
+        let subgid = tmp.path().join("subgid");
+        fs::write(&subuid, "").unwrap();
+        fs::write(&subgid, "").unwrap();
+        allocate_managed_subids_with_paths(tmp.path(), "mybox", "alice", &subuid, &subgid).unwrap();
+
+        release_managed_subids(tmp.path(), "mybox").unwrap();
+
+        let registry = fs::read_to_string(tmp.path().join("subids/allocations")).unwrap();
+        assert!(registry.contains("CONTAINER=mybox\n"));
+        assert!(registry.contains("STATUS=released\n"));
+        assert!(registry.contains("RELEASED="));
+        assert!(!registry.contains("STATUS=active\n"));
+        assert!(fs::read_to_string(&subuid)
+            .unwrap()
+            .contains("alice:524288:65536\n"));
+        assert!(fs::read_to_string(&subgid)
+            .unwrap()
+            .contains("alice:524288:65536\n"));
+    }
+
+    #[test]
+    fn test_released_managed_subids_lists_exact_released_lines() {
+        let tmp = TempDataDir::new("managed-subids-prune-list");
+        let subuid = tmp.path().join("subuid");
+        let subgid = tmp.path().join("subgid");
+        fs::write(&subuid, "").unwrap();
+        fs::write(&subgid, "").unwrap();
+        let allocation =
+            allocate_managed_subids_with_paths(tmp.path(), "mybox", "alice", &subuid, &subgid)
+                .unwrap();
+        release_managed_subids(tmp.path(), "mybox").unwrap();
+
+        let released = released_managed_subids_with_paths(tmp.path(), &subuid, &subgid).unwrap();
+
+        assert_eq!(released, vec![allocation]);
+    }
+
+    #[test]
+    fn test_released_managed_subids_requires_exact_lines() {
+        let tmp = TempDataDir::new("managed-subids-prune-exact");
+        let subuid = tmp.path().join("subuid");
+        let subgid = tmp.path().join("subgid");
+        fs::write(&subuid, "").unwrap();
+        fs::write(&subgid, "").unwrap();
+        allocate_managed_subids_with_paths(tmp.path(), "mybox", "alice", &subuid, &subgid).unwrap();
+        release_managed_subids(tmp.path(), "mybox").unwrap();
+        fs::write(&subuid, " alice:524288:65536\n").unwrap();
+        fs::write(&subgid, "alice:524288:65536 \n").unwrap();
+
+        let released = released_managed_subids_with_paths(tmp.path(), &subuid, &subgid).unwrap();
+
+        assert!(released.is_empty());
+    }
+
+    #[test]
+    fn test_prune_managed_subid_removes_exact_lines_and_marks_pruned() {
+        let tmp = TempDataDir::new("managed-subids-prune");
+        let subuid = tmp.path().join("subuid");
+        let subgid = tmp.path().join("subgid");
+        fs::write(&subuid, "root:100000:65536\n").unwrap();
+        fs::write(&subgid, "root:100000:65536\n").unwrap();
+        allocate_managed_subids_with_paths(tmp.path(), "mybox", "alice", &subuid, &subgid).unwrap();
+        release_managed_subids(tmp.path(), "mybox").unwrap();
+
+        prune_managed_subid_with_paths(tmp.path(), "mybox", &subuid, &subgid).unwrap();
+
+        assert_eq!(fs::read_to_string(&subuid).unwrap(), "root:100000:65536\n");
+        assert_eq!(fs::read_to_string(&subgid).unwrap(), "root:100000:65536\n");
+        let registry = fs::read_to_string(tmp.path().join("subids/allocations")).unwrap();
+        assert!(registry.contains("CONTAINER=mybox\n"));
+        assert!(registry.contains("STATUS=pruned\n"));
+        assert!(!registry.contains("STATUS=released\n"));
+    }
+
+    #[test]
+    fn test_prune_managed_subid_rejects_subid_mismatch() {
+        let tmp = TempDataDir::new("managed-subids-prune-mismatch");
+        let subuid = tmp.path().join("subuid");
+        let subgid = tmp.path().join("subgid");
+        fs::write(&subuid, "").unwrap();
+        fs::write(&subgid, "").unwrap();
+        allocate_managed_subids_with_paths(tmp.path(), "mybox", "alice", &subuid, &subgid).unwrap();
+        release_managed_subids(tmp.path(), "mybox").unwrap();
+        fs::write(&subgid, "").unwrap();
+
+        let err =
+            prune_managed_subid_with_paths(tmp.path(), "mybox", &subuid, &subgid).unwrap_err();
+
+        assert!(
+            err.to_string().contains("subuid/subgid mismatch"),
+            "unexpected error: {err:#}"
+        );
+        assert!(fs::read_to_string(&subuid)
+            .unwrap()
+            .contains("alice:524288:65536\n"));
+    }
+
+    #[test]
+    fn test_prune_managed_subid_rolls_back_subuid_when_subgid_write_fails() {
+        let tmp = TempDataDir::new("managed-subids-prune-rollback");
+        let subuid = tmp.path().join("subuid");
+        let subgid = tmp.path().join("subgid");
+        fs::write(&subuid, "").unwrap();
+        fs::write(&subgid, "").unwrap();
+        allocate_managed_subids_with_paths(tmp.path(), "mybox", "alice", &subuid, &subgid).unwrap();
+        release_managed_subids(tmp.path(), "mybox").unwrap();
+        fs::create_dir(tmp.path().join(".subgid.tmp")).unwrap();
+
+        let err =
+            prune_managed_subid_with_paths(tmp.path(), "mybox", &subuid, &subgid).unwrap_err();
+
+        assert!(
+            err.to_string().contains("subgid"),
+            "unexpected error: {err:#}"
+        );
+        assert!(fs::read_to_string(&subuid)
+            .unwrap()
+            .contains("alice:524288:65536\n"));
+        assert!(fs::read_to_string(&subgid)
+            .unwrap()
+            .contains("alice:524288:65536\n"));
     }
 }
