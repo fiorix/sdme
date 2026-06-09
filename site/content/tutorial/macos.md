@@ -33,7 +33,7 @@ Other distro templates are available via `limactl create --list-templates`.
 Inside the VM:
 
 ```bash
-curl -fsSL https://fiorix.github.io/sdme/install.sh | sudo sh
+curl -fsSL https://sdme.io/install.sh | sudo sh
 ```
 
 Verify the installation:
