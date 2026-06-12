@@ -109,6 +109,47 @@ else
     fail "ps does not show $CT_NAME"
 fi
 
+# -- Health --------------------------------------------------------------------
+
+# poll_health NAME EXPECTED TIMEOUT: wait until the ps HEALTH column for
+# NAME equals EXPECTED. Health follows is-system-running inside the
+# container, which flips asynchronously after a unit fails or is reset.
+poll_health() {
+    local name="$1" expected="$2" deadline=$((SECONDS + $3)) h
+    while ((SECONDS < deadline)); do
+        h=$("$SDME" ps 2>/dev/null | awk -v n="$name" '$1 == n {print $3}')
+        [[ "$h" == "$expected" ]] && return 0
+        sleep 2
+    done
+    return 1
+}
+
+log "Checking health reporting (is-system-running)"
+# Clear units that may have failed during boot so health starts from ok.
+"$SDME" exec "$CT_NAME" -- /usr/bin/systemctl reset-failed >/dev/null 2>&1
+if poll_health "$CT_NAME" ok "$TIMEOUT_TEST"; then
+    ok "health ok on running container"
+else
+    fail "health not ok on running container"
+fi
+
+# A failed unit inside the container must surface as degraded.
+"$SDME" exec "$CT_NAME" -- /usr/bin/systemd-run --unit smoke-degraded \
+    -p Type=oneshot /bin/false >/dev/null 2>&1 || true
+if poll_health "$CT_NAME" degraded "$TIMEOUT_TEST"; then
+    ok "health degraded after unit failure"
+else
+    fail "health did not report degraded after unit failure"
+fi
+
+# Clearing the failed unit must bring health back to ok.
+"$SDME" exec "$CT_NAME" -- /usr/bin/systemctl reset-failed >/dev/null 2>&1
+if poll_health "$CT_NAME" ok "$TIMEOUT_TEST"; then
+    ok "health ok after reset-failed"
+else
+    fail "health did not recover after reset-failed"
+fi
+
 # -- Stop ----------------------------------------------------------------------
 
 log "Stopping container"

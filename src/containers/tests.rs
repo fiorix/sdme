@@ -903,3 +903,24 @@ fn test_list_os_cascade_priority() {
     let info = infos.iter().find(|i| i.name == "cascade").unwrap();
     assert_eq!(info.os, "Rootfs OS");
 }
+
+#[test]
+fn test_system_state_health_running_is_ok() {
+    let h = super::list::system_state_health(Some("running".to_string()));
+    assert_eq!(h, "ok");
+}
+
+#[test]
+fn test_system_state_health_other_states_pass_through() {
+    for state in ["degraded", "starting", "maintenance", "stopping"] {
+        let h = super::list::system_state_health(Some(state.to_string()));
+        assert_eq!(h, state);
+    }
+}
+
+#[test]
+fn test_system_state_health_unreachable_is_unknown() {
+    // An unreachable container manager must never be reported healthy.
+    let h = super::list::system_state_health(None);
+    assert_eq!(h, "unknown");
+}

@@ -168,6 +168,17 @@ Totals                      601     0     0  21 suites
 
 ## Log
 
+### 0.9.0 -- in-container health in ps (2026-06-12, x86_64)
+
+smoke: 12 passed, 0 failed, 0 skipped, including 3 new health
+assertions (ok on a running container, degraded after an injected
+unit failure, ok again after reset-failed). Run on Linux
+6.8.0-117-generic (x86_64), systemd 255, ubuntu base fs. The full
+matrix was not re-run for this change: the affected paths (ps health,
+prune analysis) are covered by the smoke gate, cargo test (787
+passed), and a read-only check of `ps` and `prune --dry-run` against
+a production host running five containers.
+
 ### 0.7.0 -- self-update, archlinux image swap (2026-04-23, aarch64)
 
 601 passed, 0 failed, 0 skipped across 21 suites. Wall clock: 11m47s

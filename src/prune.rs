@@ -107,6 +107,19 @@ pub fn is_excluded(item: &PrunableItem, except: &[String]) -> bool {
     })
 }
 
+/// Whether a container is a prune candidate based on its status and health.
+///
+/// Live containers (running, starting, stopping) are never candidates:
+/// health on a running container reflects the state of systemd inside it
+/// ("degraded", "starting", "unknown") or a readiness probe ("not-ready"),
+/// which are operational signals for the admin, not garbage to collect.
+/// Prune targets containers that are down AND unhealthy: failed units,
+/// missing dirs, broken state files.
+pub fn is_prunable_container(status: &str, health: &str) -> bool {
+    let live = matches!(status, "running" | "starting" | "stopping");
+    !live && health != "ok" && health != "ready"
+}
+
 /// Scan all resource types and return items that can be pruned.
 ///
 /// The configured `default_base_fs` is always excluded from filesystem
@@ -129,10 +142,10 @@ pub fn analyze(datadir: &Path, default_base_fs: &str) -> Result<Vec<PrunableItem
 
     check_interrupted()?;
 
-    // 2. Unhealthy containers: anything not "ok" or "ready".
+    // 2. Unhealthy containers: anything not "ok" or "ready", unless live.
     let ct_entries = containers::list(datadir)?;
     for entry in &ct_entries {
-        if entry.health != "ok" && entry.health != "ready" {
+        if is_prunable_container(&entry.status, &entry.health) {
             items.push(PrunableItem {
                 category: PruneCategory::Container,
                 name: entry.name.clone(),
@@ -412,6 +425,30 @@ fn remove_stale_txn(path: &Path, verbose: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_is_prunable_container_stopped_unhealthy() {
+        assert!(is_prunable_container("stopped", "failed"));
+        assert!(is_prunable_container("stopped", "missing fs"));
+        assert!(is_prunable_container("stopped", "not-ready"));
+    }
+
+    #[test]
+    fn test_is_prunable_container_stopped_healthy() {
+        assert!(!is_prunable_container("stopped", "ok"));
+        assert!(!is_prunable_container("stopped", "ready"));
+    }
+
+    #[test]
+    fn test_is_prunable_container_live_never_pruned() {
+        // A running container can legitimately report degraded, starting,
+        // not-ready, or unknown health; none of these make it garbage.
+        assert!(!is_prunable_container("running", "degraded"));
+        assert!(!is_prunable_container("running", "unknown"));
+        assert!(!is_prunable_container("running", "not-ready"));
+        assert!(!is_prunable_container("starting", "unknown"));
+        assert!(!is_prunable_container("stopping", "degraded"));
+    }
 
     #[test]
     fn test_is_excluded_plain_name() {

@@ -1519,9 +1519,35 @@ survives the cleanup stop and propagates to the outer loop.
 
 ### Health checks
 
-`sdme ps` detects containers with missing directories or missing rootfs
-and reports them as `broken` rather than crashing or silently hiding
-them. OS detection uses the container's overlayfs layers (not the host
+The HEALTH column in `sdme ps` layers three signals, checked from the
+host inward; the first one that reports a problem wins:
+
+  1. State integrity. A missing container directory, missing rootfs,
+     or unreadable state file is reported directly (`missing fs`,
+     `missing container dir`, `unreadable state file`) rather than
+     crashing or silently hiding the container.
+  2. Host unit state. If the container's `sdme@NAME.service` is in
+     failed state, health is `failed`.
+  3. In-container systemd state. For running containers, sdme runs
+     `systemctl --machine=NAME is-system-running`. `running` maps to
+     `ok`; any other state (`degraded`, `starting`, `maintenance`) is
+     shown as-is. If the query fails (D-Bus not up yet, wedged init),
+     health is `unknown` rather than `ok`: an unreachable container is
+     never reported healthy.
+
+A failed unit inside a running container (a web server that crashed at
+boot, for example) therefore surfaces as `degraded` in `sdme ps`
+without any per-container probe configuration. The query shells out to
+systemctl rather than using zbus because reaching a userns container's
+bus from the host requires a forked-helper connection that systemctl
+(like busctl) already implements; the full rationale is documented at
+`wait_for_dbus` in `src/systemd/dbus.rs`.
+
+Kube containers with readiness probes report `ready` / `not-ready`
+from the probe-ready files written by `sdme-kube-probe` instead of the
+in-container systemd state.
+
+OS detection uses the container's overlayfs layers (not the host
 root) to resolve the distro name.
 
 If you find a way to leave sdme's state inconsistent (a container that
@@ -1537,8 +1563,11 @@ collects items that can be safely removed:
 
   - Filesystems with no containers using them (except the configured
     `default_base_fs`)
-  - Containers with non-ok health status (missing dirs, broken state,
-    failed, not-ready)
+  - Stopped containers with non-ok health status (missing dirs, broken
+    state, failed, not-ready). Live containers are never candidates:
+    a running container can report transient health (`degraded`,
+    `starting`, `unknown`) that signals an operational problem, not
+    garbage to collect
   - Pods with no containers attached
   - Kube secrets and configmaps (all are candidates because they are
     copied into the container rootfs at `kube create` time, not

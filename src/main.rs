@@ -312,6 +312,23 @@ OCI apps with env/ports/volumes, network config, resource limits,
 submounts, kube metadata, pod membership, rootfs), use --json or
 --json-pretty.
 
+HEALTH values:
+    ok           no problems detected
+    failed       the container's host-side service unit failed
+    degraded     a unit inside the running container is in failed state
+    starting     systemd inside the container is still booting
+    unknown      running, but systemd inside is unreachable
+    ready        kube readiness probes passing (containers with probes)
+    not-ready    kube readiness probes failing
+    other        broken state ('missing fs', 'missing container dir',
+                 'unreadable state file') or any other state reported
+                 by systemctl is-system-running inside the container
+
+For running containers without kube probes, health comes from
+'systemctl --machine=NAME is-system-running' inside the container, so
+a service that crashed at boot surfaces as 'degraded' without any
+per-container probe configuration.
+
 The default output format can be set with:
     sdme config set default_output_format json
 
@@ -909,7 +926,8 @@ EXAMPLES:
 
 CATEGORIES:
     Filesystems          Imported rootfs with no containers using them
-    Containers           Containers with non-ok health status
+    Containers           Stopped containers with non-ok health status;
+                         live containers are never prune candidates
     Pods                 Pod network namespaces with no containers attached
     Secrets              Kube secrets (copied at create time, not runtime-bound)
     ConfigMaps           Kube configmaps (copied at create time, not runtime-bound)

@@ -56,6 +56,34 @@ pub fn unit_active_state(name: &str) -> Option<String> {
     dbus::pub_get_unit_active_state(&service_name(name))
 }
 
+/// Return the overall systemd state inside a running container via
+/// `systemctl --machine=NAME is-system-running`.
+///
+/// Possible values include `"running"`, `"degraded"`, `"starting"`,
+/// `"maintenance"` and `"stopping"`. Returns `None` when the container's
+/// manager is unreachable (machine not registered, D-Bus not up yet,
+/// wedged init).
+///
+/// Shells out instead of using zbus because connecting to a userns
+/// container's bus requires the forked-helper dance that systemctl
+/// (like busctl) already implements; see the rationale in
+/// `dbus::wait_for_dbus`. `is-system-running` exits non-zero for any
+/// state other than `"running"`, so the exit status is ignored and
+/// only stdout is considered.
+pub fn machine_system_state(name: &str) -> Option<String> {
+    let output = std::process::Command::new("systemctl")
+        .arg(format!("--machine={name}"))
+        .arg("is-system-running")
+        .output()
+        .ok()?;
+    let state = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if state.is_empty() {
+        None
+    } else {
+        Some(state)
+    }
+}
+
 /// Shared configuration for container service operations (enable, start).
 pub struct ServiceConfig<'a> {
     /// Data directory containing container state.

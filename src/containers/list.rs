@@ -107,6 +107,23 @@ fn probe_readiness_health(container_dir: &Path, state: &State) -> String {
     }
 }
 
+/// Map `systemctl is-system-running` output to a health value for a
+/// running container.
+///
+/// `"running"` means all units started cleanly and is reported as
+/// `"ok"`. Any other state (`"degraded"`, `"starting"`,
+/// `"maintenance"`, ...) is reported as-is. `None` (container manager
+/// unreachable, e.g. D-Bus not up yet during early boot, or a wedged
+/// init) is reported as `"unknown"` rather than `"ok"` so an
+/// unresponsive container is never reported healthy.
+pub(crate) fn system_state_health(state: Option<String>) -> String {
+    match state.as_deref() {
+        Some("running") => "ok".to_string(),
+        Some(other) => other.to_string(),
+        None => "unknown".to_string(),
+    }
+}
+
 /// List all containers with their status, health, OS, and metadata.
 pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
     let state_dir = datadir.join("state");
@@ -193,6 +210,11 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
             // file in the container's overlayfs to report ready/not-ready.
             if s.is_yes("HAS_PROBES") {
                 probe_readiness_health(&container_dir, s)
+            } else if active_state.as_deref() == Some("active") {
+                // For running containers without probes, surface the state
+                // of systemd inside the container so a failed unit shows up
+                // as "degraded" instead of hiding behind a healthy machine.
+                system_state_health(systemd::machine_system_state(name))
             } else {
                 "ok".to_string()
             }
