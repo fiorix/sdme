@@ -1,4 +1,4 @@
-base_url = "https://fiorix.github.io/sdme"
+base_url = "https://sdme.io"
 title = "sdme"
 description = "The systemd machine editor"
 compile_sass = false

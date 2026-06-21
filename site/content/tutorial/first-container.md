@@ -16,7 +16,7 @@ think of it as a lightweight VM without the hypervisor overhead.
 If you haven't installed sdme yet:
 
 ```sh
-curl -fsSL https://fiorix.github.io/sdme/install.sh | sudo sh
+curl -fsSL https://sdme.io/install.sh | sudo sh
 ```
 
 This installs a single static binary to `/usr/local/bin/sdme`. Your system

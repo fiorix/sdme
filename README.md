@@ -30,7 +30,7 @@ services. The install script downloads the latest release, verifies
 SHA256 checksums, and places the binary in `/usr/local/bin`:
 
 ```sh
-curl -fsSL https://fiorix.github.io/sdme/install.sh | sudo sh
+curl -fsSL https://sdme.io/install.sh | sudo sh
 ```
 
 Your system also needs `systemd-container` installed so that
@@ -41,8 +41,8 @@ systemd-nspawn and machinectl are available:
 - Arch Linux: included in the base `systemd` package
 
 For .deb, .rpm, and .pkg packages, see the
-[downloads page](https://fiorix.github.io/sdme/#downloads).
+[downloads page](https://sdme.io/#downloads).
 
 ## Tutorials and documentation
 
-**[fiorix.github.io/sdme](https://fiorix.github.io/sdme/)**
+**[sdme.io](https://sdme.io/)**
