@@ -1,7 +1,7 @@
 +++
 title = "Building Root Filesystems"
 description = "Build custom root filesystems with sdme fs build using Dockerfile-like configs."
-weight = 12
+weight = 13
 +++
 
 The `sdme fs build` command creates custom root filesystems from a

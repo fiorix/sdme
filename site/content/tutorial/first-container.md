@@ -1,7 +1,7 @@
 +++
 title = "Your First Container"
 description = "Create a container, manage it, and learn how to run background processes like tmux."
-weight = 2
+weight = 3
 +++
 
 sdme runs full Linux systems as containers, not just application

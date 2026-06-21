@@ -1,7 +1,7 @@
 +++
 title = "Network Configuration"
 description = "Configure container networking: host network, private network, veth, zones, bridges, and port forwarding."
-weight = 9
+weight = 10
 +++
 
 sdme containers share the host network by default. This tutorial

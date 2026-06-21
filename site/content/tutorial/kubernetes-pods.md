@@ -1,7 +1,7 @@
 +++
 title = "Running Kubernetes Pods"
 description = "Deploy OCI applications from Kubernetes Pod YAML manifests."
-weight = 11
+weight = 12
 +++
 
 sdme can create containers from Kubernetes Pod YAML manifests
