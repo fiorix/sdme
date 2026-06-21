@@ -505,6 +505,14 @@ fn action_words(target: &str, current: &str) -> (&'static str, &'static str) {
     }
 }
 
+/// Whether the upgrade confirmation prompt should default to Yes. True for an
+/// upgrade (and the unparseable case), false only for a clear downgrade. Uses
+/// the same predicate as [`action_words`] so the prompt default always matches
+/// the "upgrading"/"downgrading" wording shown to the user.
+fn prompt_defaults_yes(target: &str, current: &str) -> bool {
+    !semver_newer(current, target)
+}
+
 /// Build the state to record after a successful upgrade.
 ///
 /// The running process is still the **old** binary; the replacement only
@@ -628,7 +636,14 @@ pub fn run_upgrade(cfg: &Config, opts: UpgradeOptions<'_>) -> Result<()> {
         if !opts.interactive {
             bail!("use -y to confirm upgrade in non-interactive mode");
         }
-        if !crate::confirm("proceed? [y/N] ")? {
+        // Default to Yes for an upgrade, No for a downgrade: a downgrade is the
+        // surprising direction and should require an explicit "y".
+        let confirmed = if prompt_defaults_yes(&target_version, &current) {
+            crate::confirm_default_yes("proceed? [Y/n] ")?
+        } else {
+            crate::confirm("proceed? [y/N] ")?
+        };
+        if !confirmed {
             bail!("aborted");
         }
     }
@@ -826,6 +841,18 @@ feedface00feedface00feedface00feedface00feedface00feedface00feed  unrelated.deb
         );
         // Unparseable inputs fall back to "upgrading" (legacy wording).
         assert_eq!(action_words("nonsense", "0.7.0"), ("upgrading", "upgraded"));
+    }
+
+    #[test]
+    fn test_prompt_defaults_yes() {
+        // Upgrade: default Yes.
+        assert!(prompt_defaults_yes("0.8.0", "0.7.3"));
+        assert!(prompt_defaults_yes("1.0.0", "0.99.99"));
+        // Downgrade: default No.
+        assert!(!prompt_defaults_yes("0.7.0", "0.7.3"));
+        assert!(!prompt_defaults_yes("0.6.11", "0.7.0"));
+        // Unparseable target: default Yes, matching action_words wording.
+        assert!(prompt_defaults_yes("nonsense", "0.7.0"));
     }
 
     #[test]

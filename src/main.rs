@@ -964,6 +964,8 @@ NOTES:
     Progress and success lines say \"upgrading\"/\"upgraded\" when the
     target is newer than the running binary, and
     \"downgrading\"/\"downgraded\" when it is older (with --version).
+    The confirmation prompt defaults to Yes for an upgrade ([Y/n]) and
+    No for a downgrade ([y/N]).
 
     Signatures (GPG/minisign) are not verified; trust is anchored in
     HTTPS plus the SHA-256 in the release-hosted SHA256SUMS file, the
