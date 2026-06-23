@@ -4,36 +4,20 @@ description = "Import and run OCI application images like nginx as systemd servi
 weight = 6
 +++
 
-This tutorial shows how to import an OCI application image (nginx) and
-run it inside an sdme container.
+This tutorial shows how to import an OCI application image (nginx) and run it inside an sdme container.
 
 ## Base OS vs application images
 
-When importing an OCI image, sdme classifies it as either a **base OS**
-or an **application**:
+When importing an OCI image, sdme classifies it as either a **base OS** or an **application**:
 
-- **Base OS** images (ubuntu, debian, fedora) are extracted as a
-  standalone sdme rootfs. They contain a full Linux distribution you
-  can boot into.
-- **Application** images (nginx, redis, postgres) have an entrypoint,
-  commands, or exposed ports. sdme places them as a systemd service
-  inside a base OS rootfs.
+- **Base OS** images (ubuntu, debian, fedora) are extracted as a standalone sdme rootfs. They contain a full Linux distribution you can boot into.
+- **Application** images (nginx, redis, postgres) have an entrypoint, commands, or exposed ports. sdme places them as a systemd service inside a base OS rootfs.
 
-This detection is automatic. Application images require a base rootfs
-to run inside, specified with `--base-fs`.
+This detection is automatic. Application images require a base rootfs to run inside, specified with `--base-fs`.
 
 ## How it works
 
-The container always boots from the base OS rootfs (e.g. Ubuntu).
-The application image (e.g. nginx, which may be Alpine-based
-internally) is placed under `/oci/apps/{name}/root` and runs as a
-chrooted systemd service inside that container. The application is
-isolated with its own PID and IPC namespaces, just as it would expect
-in a traditional container runtime. For more details, see the
-[OCI integration](@/docs/architecture.md#16-oci-integration)
-architecture and
-[OCI app isolation](@/docs/security.md#13-oci-app-isolation-architecture)
-security documentation.
+The container always boots from the base OS rootfs (e.g. Ubuntu). The application image (e.g. nginx, which may be Alpine-based internally) is placed under `/oci/apps/{name}/root` and runs as a chrooted systemd service inside that container. The application is isolated with its own PID and IPC namespaces, just as it would expect in a traditional container runtime. For more details, see the [OCI integration](@/docs/architecture.md#16-oci-integration) architecture and [OCI app isolation](@/docs/security.md#13-oci-app-isolation-architecture) security documentation.
 
 <pre class="diagram">
 +--------------------------------------------------+
@@ -56,9 +40,7 @@ security documentation.
 +--------------------------------------------------+
 </pre>
 
-The application runs as a regular systemd service. You get logs via
-`journalctl`, restarts via `systemctl`, and cgroup resource limits,
-all for free.
+The application runs as a regular systemd service. You get logs via `journalctl`, restarts via `systemctl`, and cgroup resource limits, all for free.
 
 ## Import nginx
 
@@ -82,19 +64,15 @@ sudo sdme config set default_base_fs ubuntu
 
 ## Create and start the container
 
-We recommend using `--network-zone` and `--hardened` as described
-in the [services tutorial](@/tutorial/services.md):
+We recommend using `--network-zone` and `--hardened` as described in the [services tutorial](@/tutorial/services.md):
 
 ```sh
 sudo sdme create mycontainer -r nginx --network-zone=services --hardened --started
 ```
 
-Unlike `sdme new` which drops you into a shell, `create --started`
-starts the container in the background. OCI application containers
-run headless services, so there is no need for an interactive shell.
+Unlike `sdme new` which drops you into a shell, `create --started` starts the container in the background. OCI application containers run headless services, so there is no need for an interactive shell.
 
-This gives the container its own network with DNS and user namespace
-isolation. Find the container's IP with `sdme ps`:
+This gives the container its own network with DNS and user namespace isolation. Find the container's IP with `sdme ps`:
 
 ```sh
 sudo sdme ps
@@ -116,8 +94,7 @@ From the host, you can check the OCI application logs:
 sudo sdme logs mycontainer --oci
 ```
 
-This is equivalent to running `journalctl -u sdme-oci-nginx` inside
-the container. Replace `mycontainer` with your container's name.
+This is equivalent to running `journalctl -u sdme-oci-nginx` inside the container. Replace `mycontainer` with your container's name.
 
 ## Enter the OCI application
 

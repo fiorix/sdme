@@ -1,8 +1,6 @@
 # E2E Tests
 
-End-to-end tests for sdme. Runs real containers via systemd-nspawn,
-imports rootfs from OCI registries, and validates the full lifecycle.
-Requires root and a working systemd >= 255.
+End-to-end tests for sdme. Runs real containers via systemd-nspawn, imports rootfs from OCI registries, and validates the full lifecycle. Requires root and a working systemd >= 255.
 
 ## Quick start
 
@@ -28,8 +26,7 @@ sudo ./test/scripts/verify-export.sh
 sudo ./test/scripts/verify-kube-L1-basic.sh --base-fs ubuntu
 ```
 
-Options accepted by all scripts: `--report-dir DIR`, `--help`.
-Set `VERBOSE=1` for detailed output on any script.
+Options accepted by all scripts: `--report-dir DIR`, `--help`. Set `VERBOSE=1` for detailed output on any script.
 
 ## Staged runner
 
@@ -55,8 +52,7 @@ Stage 3: Destructive (serial)
     verify-tutorial.sh (batch ops: stop --all, rm --all).
 ```
 
-Runner options: `--jobs N`, `--timeout-scale N`, `--stagger N`,
-`--skip SCRIPT`, `--only SCRIPT`. See `--help`.
+Runner options: `--jobs N`, `--timeout-scale N`, `--stagger N`, `--skip SCRIPT`, `--only SCRIPT`. See `--help`.
 
 ## Test scripts
 
@@ -103,29 +99,20 @@ The preflight script (`make e2e-preflight`) checks all of these.
 
 ### openSUSE + user namespaces (resolved)
 
-openSUSE Tumbleweed ships newuidmap/newgidmap with security.capability
-xattrs instead of setuid bits. The kernel refuses idmapped mounts when
-these xattrs are present. The built-in Suse import prehook now strips
-them automatically; both export prehooks restore them.
+openSUSE Tumbleweed ships newuidmap/newgidmap with security.capability xattrs instead of setuid bits. The kernel refuses idmapped mounts when these xattrs are present. The built-in Suse import prehook now strips them automatically; both export prehooks restore them.
 
 ### NixOS + OCI apps (resolved)
 
-NixOS activation replaces /etc/systemd/system with an immutable
-symlink to the Nix store. OCI app units are now placed in
-/etc/systemd/system.control/ on NixOS. See `oci::app::systemd_unit_dir()`.
+NixOS activation replaces /etc/systemd/system with an immutable symlink to the Nix store. OCI app units are now placed in /etc/systemd/system.control/ on NixOS. See `oci::app::systemd_unit_dir()`.
 
 ### Redis 8 locale (workaround)
 
-Redis 8+ treats locale config failure as fatal. Set `LANG=C.UTF-8`
-via `--oci-env` or kube YAML `env`. The test suite applies this
-automatically via `fix_redis_oci()` in lib.sh.
+Redis 8+ treats locale config failure as fatal. Set `LANG=C.UTF-8` via `--oci-env` or kube YAML `env`. The test suite applies this automatically via `fix_redis_oci()` in lib.sh.
 
 ## Adding new tests
 
-1. Choose a unique prefix for artifacts. Use `cleanup_prefix "prefix-"`
-   in the cleanup trap.
-2. Add `require_gate smoke` and `require_gate interrupt` after
-   `ensure_root`/`ensure_sdme`.
+1. Choose a unique prefix for artifacts. Use `cleanup_prefix "prefix-"` in the cleanup trap.
+2. Add `require_gate smoke` and `require_gate interrupt` after `ensure_root`/`ensure_sdme`.
 3. Use `scale_timeout` for all timeout values.
 4. Declare port usage in the lib.sh port inventory comment.
 5. Add to `run-parallel.sh`: wave A for most tests, wave B for kube L2+.
@@ -134,9 +121,7 @@ automatically via `fix_redis_oci()` in lib.sh.
 
 Last verified: 2026-04-23
 
-System: Linux 7.0.0-14-generic (aarch64), systemd 259, sdme 0.7.0,
-AppArmor enabled. Archlinux skipped on aarch64 (no official ARM image);
-see filter_distros_by_arch() in lib.sh.
+System: Linux 7.0.0-14-generic (aarch64), systemd 259, sdme 0.7.0, AppArmor enabled. Archlinux skipped on aarch64 (no official ARM image); see filter_distros_by_arch() in lib.sh.
 
 ```
 Test Suite                 Pass  Fail  Skip  Status
@@ -170,120 +155,60 @@ Totals                      601     0     0  21 suites
 
 ### 0.9.0 -- in-container health in ps (2026-06-12, x86_64)
 
-smoke: 12 passed, 0 failed, 0 skipped, including 3 new health
-assertions (ok on a running container, degraded after an injected
-unit failure, ok again after reset-failed). Run on Linux
-6.8.0-117-generic (x86_64), systemd 255, ubuntu base fs. The full
-matrix was not re-run for this change: the affected paths (ps health,
-prune analysis) are covered by the smoke gate, cargo test (787
-passed), and a read-only check of `ps` and `prune --dry-run` against
-a production host running five containers.
+smoke: 12 passed, 0 failed, 0 skipped, including 3 new health assertions (ok on a running container, degraded after an injected unit failure, ok again after reset-failed). Run on Linux 6.8.0-117-generic (x86_64), systemd 255, ubuntu base fs. The full matrix was not re-run for this change: the affected paths (ps health, prune analysis) are covered by the smoke gate, cargo test (787 passed), and a read-only check of `ps` and `prune --dry-run` against a production host running five containers.
 
 ### 0.7.0 -- self-update, archlinux image swap (2026-04-23, aarch64)
 
-601 passed, 0 failed, 0 skipped across 21 suites. Wall clock: 11m47s
-for the parallel runner, plus standalone re-runs after environment and
-test fixes. Changes that produced clean run:
+601 passed, 0 failed, 0 skipped across 21 suites. Wall clock: 11m47s for the parallel runner, plus standalone re-runs after environment and test fixes. Changes that produced clean run:
 
-- Swapped the archlinux base image from `docker.io/lopsided/archlinux:latest`
-  (multi-arch manifest, but the arm64 entry points at an amd64 config blob
-  and is rejected by sdme's architecture check) to the official
-  `docker.io/archlinux/archlinux:base`. The official image is x86_64 only;
-  `filter_distros_by_arch()` (in lib.sh) now drops archlinux from the
-  distro matrix on non-x86_64 hosts.
-- Added `verify-diff` to the matrix (the 0.6.11 feature already had its
-  own standalone script; it is now surfaced in the Results table).
-- Installed host tooling for optional coverage: `bzip2` (unblocks tar.bz2
-  export verification), `attr` (setfattr/getfattr for tar xattr check),
-  `qemu-utils` (qemu-nbd), `kubeconform` (v0.7.0, SHA-256 verified from
-  upstream release).
+- Swapped the archlinux base image from `docker.io/lopsided/archlinux:latest` (multi-arch manifest, but the arm64 entry points at an amd64 config blob and is rejected by sdme's architecture check) to the official `docker.io/archlinux/archlinux:base`. The official image is x86_64 only; `filter_distros_by_arch()` (in lib.sh) now drops archlinux from the distro matrix on non-x86_64 hosts.
+- Added `verify-diff` to the matrix (the 0.6.11 feature already had its own standalone script; it is now surfaced in the Results table).
+- Installed host tooling for optional coverage: `bzip2` (unblocks tar.bz2 export verification), `attr` (setfattr/getfattr for tar xattr check), `qemu-utils` (qemu-nbd), `kubeconform` (v0.7.0, SHA-256 verified from upstream release).
 
 ### 0.6.5 -- nsenter fallback, tutorial restructure (2026-04-08, aarch64)
 
-626 passed, 0 failed, 1 skipped across 20 suites. Fixed
-verify-pods assertion: check for `--private-users=` instead of
-`--private-users=pick` since sdme uses explicit UID ranges. Fixed
-machinectl stderr capture swallowing stdout by inheriting stdout
-while only piping stderr. 1 skip: export xattr. Wall clock: ~23m.
+626 passed, 0 failed, 1 skipped across 20 suites. Fixed verify-pods assertion: check for `--private-users=` instead of `--private-users=pick` since sdme uses explicit UID ranges. Fixed machinectl stderr capture swallowing stdout by inheriting stdout while only piping stderr. 1 skip: export xattr. Wall clock: ~23m.
 
 
 ### 0.6.0 -- test infra fixes, CLAUDE.md rewrite (2026-04-03, aarch64)
 
-626 passed, 0 failed, 1 skipped across 20 suites. Fixed
-ps-kube-column test: check .kube != null and get container names from
-.oci_apps[].name instead of the non-existent .kube array. Removed
-build_and_install from test runner; tests now require
-`make && sudo make install` before running. Removed --no-setup flag.
-Added missing kube test prefixes to stale cleanup list. Added stale
-cleanup between Stage 2 and Stage 3 to prevent kube container
-leftovers from breaking tutorial batch ops. Removed
-SDME_SKIP_PROBE_BUILD (redundant). 1 skip: export xattr. Interrupt
-test skipped (flaky timing on fast systems). Wall clock: 14m05s.
+626 passed, 0 failed, 1 skipped across 20 suites. Fixed ps-kube-column test: check .kube != null and get container names from .oci_apps[].name instead of the non-existent .kube array. Removed build_and_install from test runner; tests now require `make && sudo make install` before running. Removed --no-setup flag. Added missing kube test prefixes to stale cleanup list. Added stale cleanup between Stage 2 and Stage 3 to prevent kube container leftovers from breaking tutorial batch ops. Removed SDME_SKIP_PROBE_BUILD (redundant). 1 skip: export xattr. Interrupt test skipped (flaky timing on fast systems). Wall clock: 14m05s.
 
 ### 0.5.6 -- userns ownership fix, test updates (2026-04-02, aarch64)
 
-624 passed, 0 failed, 2 skipped across 20 suites. Fixed
---private-users-ownership from map to auto: map fails hard on
-filesystems without idmapped mount support (overlayfs on virtiofs),
-auto lets nspawn fall back to recursive chown gracefully. This
-resolved all hardened-boot and userns test failures. Fixed
-ps-kube-column test to use --json (KUBE column removed from text
-table in fba5ee3). Removed unused os_w variable. Bumped userns
-boot timeouts to 180s. 2 skips from stale state (distro-boot
-archlinux, export xattr). Wall clock: ~45m.
+624 passed, 0 failed, 2 skipped across 20 suites. Fixed --private-users-ownership from map to auto: map fails hard on filesystems without idmapped mount support (overlayfs on virtiofs), auto lets nspawn fall back to recursive chown gracefully. This resolved all hardened-boot and userns test failures. Fixed ps-kube-column test to use --json (KUBE column removed from text table in fba5ee3). Removed unused os_w variable. Bumped userns boot timeouts to 180s. 2 skips from stale state (distro-boot archlinux, export xattr). Wall clock: ~45m.
 
 ### 0.5.4 -- tutorial test rewrite, website docs (2026-03-30, aarch64)
 
-626 passed, 0 failed, 1 skipped across 20 suites. Replaced
-verify-usage.sh with verify-tutorial.sh: each test section now maps
-1:1 to a website tutorial. New tests for management (help, ps --json,
-cp), services (fedora + zone + hardened), oci-volumes (postgres
-persistence across rm/recreate), and pod --oci-pod (redis). Dropped
-tests covered by verify-security.sh. verify-network zone issues from
-0.5.3 resolved on this system. Wall clock: 19m55s.
+626 passed, 0 failed, 1 skipped across 20 suites. Replaced verify-usage.sh with verify-tutorial.sh: each test section now maps 1:1 to a website tutorial. New tests for management (help, ps --json, cp), services (fedora + zone + hardened), oci-volumes (postgres persistence across rm/recreate), and pod --oci-pod (redis). Dropped tests covered by verify-security.sh. verify-network zone issues from 0.5.3 resolved on this system. Wall clock: 19m55s.
 
 ### 0.5.3 -- code cleanup, hard link/xattr test fixes (2026-03-22, x86_64)
 
-597 passed, 2 failed, 0 skipped across 20 suites. New tests: cp hard
-link preservation (17 total), export tar hard links + tar xattrs + dir
-export hard links (23 total). Fixed two test bugs: cp test used shadowed
-/tmp path, export xattr test missing `--xattrs` flag on tar extract.
-verify-network zone failures are environment-only (passed on 0.5.2).
-Wall clock: 9m29s.
+597 passed, 2 failed, 0 skipped across 20 suites. New tests: cp hard link preservation (17 total), export tar hard links + tar xattrs + dir export hard links (23 total). Fixed two test bugs: cp test used shadowed /tmp path, export xattr test missing `--xattrs` flag on tar extract. verify-network zone failures are environment-only (passed on 0.5.2). Wall clock: 9m29s.
 
 ### 0.5.2 -- sdme cp, version bump (2026-03-22, x86_64)
 
-593 passed, 0 failed, 0 skipped across 20 suites. New verify-cp suite
-(16 tests). Clean run. Wall clock: 9m33s.
+593 passed, 0 failed, 0 skipped across 20 suites. New verify-cp suite (16 tests). Clean run. Wall clock: 9m33s.
 
 ### 0.5.0 -- version bump, clean run (2026-03-21, x86_64)
 
-577 passed, 0 failed, 0 skipped across 19 suites. All tests pass
-on x86_64 with kernel 6.19.6, systemd 259. Wall clock: 9m34s.
+577 passed, 0 failed, 0 skipped across 19 suites. All tests pass on x86_64 with kernel 6.19.6, systemd 259. Wall clock: 9m34s.
 
 ### 0.4.8 -- test infrastructure revamp (2026-03-21, aarch64)
 
-Staged runner with preflight, smoke, and interrupt gates. Matrix split
-into verify-distro-boot.sh and verify-distro-oci.sh. Timeout scaling,
-stale cleanup, kube-L1 gating. Makefile e2e targets added.
-583 passed, 1 failed, 0 skipped -- 20 suites.
+Staged runner with preflight, smoke, and interrupt gates. Matrix split into verify-distro-boot.sh and verify-distro-oci.sh. Timeout scaling, stale cleanup, kube-L1 gating. Makefile e2e targets added. 583 passed, 1 failed, 0 skipped -- 20 suites.
 
 ### 0.4.6 -- parallel runner (2026-03-21, aarch64)
 
-575 passed, 1 failed, 0 skipped (576 tests), 18/18 suites pass.
-Same known platform issue (opaque xattr on aarch64).
+575 passed, 1 failed, 0 skipped (576 tests), 18/18 suites pass. Same known platform issue (opaque xattr on aarch64).
 
 ### 0.4.5 -- nix-build pipeline removal (2026-03-19, aarch64)
 
-577 passed, 1 failed, 0 skipped (578 tests), 16/16 suites pass.
-264 matrix tests (including NixOS, which has since been removed from
-the matrix -- see verify-nixos.sh for dedicated NixOS testing).
+577 passed, 1 failed, 0 skipped (578 tests), 16/16 suites pass. 264 matrix tests (including NixOS, which has since been removed from the matrix -- see verify-nixos.sh for dedicated NixOS testing).
 
 ### 0.4.4 -- openSUSE caps fix (2026-03-19, aarch64)
 
-The built-in Suse import prehook now strips security.capability xattrs
-from newuidmap/newgidmap, fixing the idmapped mount error that blocked
---userns and --hardened on openSUSE.
+The built-in Suse import prehook now strips security.capability xattrs from newuidmap/newgidmap, fixing the idmapped mount error that blocked --userns and --hardened on openSUSE.
 
 ### 0.4.2 (2026-03-17, x86_64)
 

@@ -4,14 +4,9 @@ description = "Build custom root filesystems with sdme fs build using Dockerfile
 weight = 12
 +++
 
-The `sdme fs build` command creates custom root filesystems from a
-simple build config. The config format uses `FROM`, `RUN`, and `COPY`
-directives, similar to a Dockerfile. Each `RUN` step executes inside
-a booted systemd-nspawn container, so you get a real systemd
-environment with working package managers, services, and networking.
+The `sdme fs build` command creates custom root filesystems from a simple build config. The config format uses `FROM`, `RUN`, and `COPY` directives, similar to a Dockerfile. Each `RUN` step executes inside a booted systemd-nspawn container, so you get a real systemd environment with working package managers, services, and networking.
 
-Builds are resumable: if a `RUN` step fails, re-running the same
-command picks up where it left off. Use `--no-cache` to start fresh.
+Builds are resumable: if a `RUN` step fails, re-running the same command picks up where it left off. Use `--no-cache` to start fresh.
 
 ## Prerequisites
 
@@ -23,8 +18,7 @@ sudo sdme fs import ubuntu docker.io/ubuntu
 
 ## FROM
 
-Every build config starts with a `FROM` directive that specifies the
-base rootfs:
+Every build config starts with a `FROM` directive that specifies the base rootfs:
 
 ```
 FROM ubuntu
@@ -32,8 +26,7 @@ FROM ubuntu
 
 ## RUN
 
-`RUN` executes a shell command inside the container via `/bin/sh -c`.
-Pipes, `&&`, and other shell constructs work normally:
+`RUN` executes a shell command inside the container via `/bin/sh -c`. Pipes, `&&`, and other shell constructs work normally:
 
 ```
 FROM ubuntu
@@ -50,8 +43,7 @@ RUN apt update && \
 
 ## COPY
 
-`COPY` writes files into the rootfs. The source can be the host
-filesystem, another rootfs, or a running container.
+`COPY` writes files into the rootfs. The source can be the host filesystem, another rootfs, or a running container.
 
 ### From host (no prefix)
 
@@ -64,9 +56,7 @@ COPY ./scripts /usr/local/bin
 
 ### From another rootfs (fs: prefix)
 
-Copy from an imported rootfs using `fs:<name>:<path>`. This is how
-multi-stage builds work: compile in a builder rootfs, then copy just
-the binary into a clean runtime rootfs.
+Copy from an imported rootfs using `fs:<name>:<path>`. This is how multi-stage builds work: compile in a builder rootfs, then copy just the binary into a clean runtime rootfs.
 
 ```
 COPY fs:builder:/usr/local/bin/myapp /usr/local/bin/myapp
@@ -74,23 +64,19 @@ COPY fs:builder:/usr/local/bin/myapp /usr/local/bin/myapp
 
 ### From a running container (name:path)
 
-Copy from a running container by name. The container must be running
-when the build executes this step.
+Copy from a running container by name. The container must be running when the build executes this step.
 
-For example, if you have a container called `configgen` that
-generates configuration files at boot:
+For example, if you have a container called `configgen` that generates configuration files at boot:
 
 ```
 COPY configgen:/etc/generated.conf /etc/app/generated.conf
 ```
 
-Each COPY directive takes exactly one source and one destination.
-Globs and multiple sources are not supported.
+Each COPY directive takes exactly one source and one destination. Globs and multiple sources are not supported.
 
 ## Putting it together
 
-A two-stage build that compiles a Go program in a builder rootfs
-and copies the binary into a minimal runtime:
+A two-stage build that compiles a Go program in a builder rootfs and copies the binary into a minimal runtime:
 
 Stage 1 (`builder.sdme`):
 
@@ -119,5 +105,4 @@ sudo sdme fs build runtime ./runtime.sdme
 
 ## Reference
 
-See `sdme fs build --help` for the full reference, including
-resumable builds, cache invalidation, and COPY source prefixes.
+See `sdme fs build --help` for the full reference, including resumable builds, cache invalidation, and COPY source prefixes.

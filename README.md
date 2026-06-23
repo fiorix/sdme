@@ -1,19 +1,10 @@
 # sdme
 
-sdme is a command line tool for managing systemd-nspawn containers on
-Linux. It is distributed as a single static binary or in packages (deb,
-rpm, pkg) for x86_64 and aarch64.
+sdme is a command line tool for managing systemd-nspawn containers on Linux. It is distributed as a single static binary or in packages (deb, rpm, pkg) for x86_64 and aarch64.
 
-sdme configures and orchestrates systemd to run containers. Each
-container boots its own systemd init: services start, timers fire,
-journald collects logs. It works like a real machine. Containers use
-overlayfs copy-on-write layers, so each one gets its own writable
-filesystem on top of a shared base image, keeping the original intact.
+sdme configures and orchestrates systemd to run containers. Each container boots its own systemd init: services start, timers fire, journald collects logs. It works like a real machine. Containers use overlayfs copy-on-write layers, so each one gets its own writable filesystem on top of a shared base image, keeping the original intact.
 
-As part of the toolkit, sdme imports root filesystems from multiple
-sources including OCI registries (e.g. Docker images), tarballs,
-directories, and QCOW2 images. It also deploys multi-container pods
-from Kubernetes Pod YAML manifests.
+As part of the toolkit, sdme imports root filesystems from multiple sources including OCI registries (e.g. Docker images), tarballs, directories, and QCOW2 images. It also deploys multi-container pods from Kubernetes Pod YAML manifests.
 
 ## Why sdme?
 
@@ -25,23 +16,19 @@ from Kubernetes Pod YAML manifests.
 
 ## Installation
 
-sdme is a single static binary with no configuration files or background
-services. The install script downloads the latest release, verifies
-SHA256 checksums, and places the binary in `/usr/local/bin`:
+sdme is a single static binary with no configuration files or background services. The install script downloads the latest release, verifies SHA256 checksums, and places the binary in `/usr/local/bin`:
 
 ```sh
 curl -fsSL https://sdme.io/install.sh | sudo sh
 ```
 
-Your system also needs `systemd-container` installed so that
-systemd-nspawn and machinectl are available:
+Your system also needs `systemd-container` installed so that systemd-nspawn and machinectl are available:
 
 - Debian/Ubuntu: `sudo apt install systemd-container`
 - Fedora/CentOS: `sudo dnf install systemd-container`
 - Arch Linux: included in the base `systemd` package
 
-For .deb, .rpm, and .pkg packages, see the
-[downloads page](https://sdme.io/#downloads).
+For .deb, .rpm, and .pkg packages, see the [downloads page](https://sdme.io/#downloads).
 
 ## Tutorials and documentation
 

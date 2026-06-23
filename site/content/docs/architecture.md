@@ -8,39 +8,21 @@ template = "doc.html"
 
 ## 1. Introduction
 
-sdme is a container manager for Linux. It runs on top of systemd-nspawn
-and overlayfs, both already present on any modern systemd-based
-distribution.
+sdme is a container manager for Linux. It runs on top of systemd-nspawn and overlayfs, both already present on any modern systemd-based distribution.
 
-No daemon, no runtime dependency beyond systemd itself. A single static
-binary that manages overlayfs layering and drives systemd over D-Bus.
+No daemon, no runtime dependency beyond systemd itself. A single static binary that manages overlayfs layering and drives systemd over D-Bus.
 
-The project started as an experiment inspired by
-[virtme-ng](https://github.com/arighi/virtme-ng): what if you could
-clone your running host system into an isolated container with a single
-command? Overlayfs makes this nearly free: mount the host rootfs as a
-read-only lower layer, give the container its own upper layer for writes,
-and you have a full-featured Linux environment that shares the host's
-binaries but can't damage the host's files. That was the seed.
+The project started as an experiment inspired by [virtme-ng](https://github.com/arighi/virtme-ng): what if you could clone your running host system into an isolated container with a single command? Overlayfs makes this nearly free: mount the host rootfs as a read-only lower layer, give the container its own upper layer for writes, and you have a full-featured Linux environment that shares the host's binaries but can't damage the host's files. That was the seed.
 
-From there it grew: importing rootfs from other distros, pulling OCI
-images from registries, building custom root filesystems, and managing
-container lifecycle through D-Bus.
+From there it grew: importing rootfs from other distros, pulling OCI images from registries, building custom root filesystems, and managing container lifecycle through D-Bus.
 
-The name stands for *Systemd Machine Editor*, and its pronunciation is
-left as an exercise for the reader.
+The name stands for *Systemd Machine Editor*, and its pronunciation is left as an exercise for the reader.
 
-Sections 1-15 cover container lifecycle, filesystems, networking,
-resource limits, configuration, security, and reliability. Sections
-16-19 cover OCI integration, Kubernetes Pod YAML support, container
-filesystem diff, and self-update.
+Sections 1-15 cover container lifecycle, filesystems, networking, resource limits, configuration, security, and reliability. Sections 16-19 cover OCI integration, Kubernetes Pod YAML support, container filesystem diff, and self-update.
 
 ## 2. Dev Mode: Cloning Your Host
 
-The foundational mode of sdme is what you get when you run `sdme new`
-with no flags. It creates a container that is an overlayfs clone of your
-running host system: same kernel, same binaries, same libraries, but
-with its own writable layer so changes stay isolated.
+The foundational mode of sdme is what you get when you run `sdme new` with no flags. It creates a container that is an overlayfs clone of your running host system: same kernel, same binaries, same libraries, but with its own writable layer so changes stay isolated.
 
 ```
   +------------------------------------------------------+
@@ -89,97 +71,36 @@ jerinhouma ~ $ systemctl status
 ...
 ```
 
-Each container boots its own systemd instance inside the nspawn
-namespace. The host's systemd manages the container as a service unit;
-the container's systemd manages everything inside. Both talk to their
-own D-Bus, both write to their own journal, but the container's writes
-land on the overlayfs upper layer and never touch the host - well,
-except that they are stored on the host. This matters, and the details
-are explained in Section 14.
+Each container boots its own systemd instance inside the nspawn namespace. The host's systemd manages the container as a service unit; the container's systemd manages everything inside. Both talk to their own D-Bus, both write to their own journal, but the container's writes land on the overlayfs upper layer and never touch the host - well, except that they are stored on the host. This matters, and the details are explained in Section 14.
 
-**User identity preservation.** `sdme new`, `sdme join`, and `sdme exec`
-accept `--user NAME` to pick the UNIX user inside the container. When
-`--user` is omitted, the default is resolved as follows:
+**User identity preservation.** `sdme new`, `sdme join`, and `sdme exec` accept `--user NAME` to pick the UNIX user inside the container. When `--user` is omitted, the default is resolved as follows:
 
-1. If the container is a host-rootfs clone (no `-r` flag) AND
-   `join_as_sudo_user` is on (default) AND `$SUDO_USER` is set, join
-   as `$SUDO_USER`. This is a convenience for landing on your own
-   machine as your own user: your own `$HOME`, dotfiles, shell, etc.
+1. If the container is a host-rootfs clone (no `-r` flag) AND `join_as_sudo_user` is on (default) AND `$SUDO_USER` is set, join as `$SUDO_USER`. This is a convenience for landing on your own machine as your own user: your own `$HOME`, dotfiles, shell, etc.
 2. Otherwise, join as root.
 
-`--user root` is the explicit "force root" form and always wins, even
-on a host-rootfs clone with `$SUDO_USER` set. Disable the implicit
-fall-through globally with `sdme config set join_as_sudo_user no`.
-`--user` is not persisted to container state: each `join`/`exec`
-recomputes the default and accepts its own `--user`.
+`--user root` is the explicit "force root" form and always wins, even on a host-rootfs clone with `$SUDO_USER` set. Disable the implicit fall-through globally with `sdme config set join_as_sudo_user no`. `--user` is not persisted to container state: each `join`/`exec` recomputes the default and accepts its own `--user`.
 
-**Opaque directories** are the key to making host clones usable.
-Without them, the container would inherit the host's systemd units and
-try to start all the same services. By default, sdme marks
-`/etc/systemd/system` and `/var/log` as overlayfs-opaque (via the
-`trusted.overlay.opaque` xattr), making the container see empty
-directories there. The host's units and logs are hidden; the container
-starts clean.
+**Opaque directories** are the key to making host clones usable. Without them, the container would inherit the host's systemd units and try to start all the same services. By default, sdme marks `/etc/systemd/system` and `/var/log` as overlayfs-opaque (via the `trusted.overlay.opaque` xattr), making the container see empty directories there. The host's units and logs are hidden; the container starts clean.
 
-**DNS** requires special treatment because containers share the host's
-network namespace by default. The host's `systemd-resolved` already
-owns `127.0.0.53`, so the container's copy would fail to bind. Service
-masking is handled at container create time (not import time) via the
-configurable `--masked-services` / `default_create_masked_services`
-mechanism. Import removes any pre-existing `systemd-resolved.service`
-masks from the rootfs so they don't leak through overlayfs.
+**DNS** requires special treatment because containers share the host's network namespace by default. The host's `systemd-resolved` already owns `127.0.0.53`, so the container's copy would fail to bind. Service masking is handled at container create time (not import time) via the configurable `--masked-services` / `default_create_masked_services` mechanism. Import removes any pre-existing `systemd-resolved.service` masks from the rootfs so they don't leak through overlayfs.
 
-For host-network and non-zone private-network containers, resolved is
-masked (symlink to `/dev/null` in `/etc/systemd/system/`), causing the
-container's NSS `resolve` module to return UNAVAIL, falling through to
-the `dns` module. A placeholder `/etc/resolv.conf` regular file is
-written so `systemd-nspawn --resolv-conf=auto` can populate it at boot.
+For host-network and non-zone private-network containers, resolved is masked (symlink to `/dev/null` in `/etc/systemd/system/`), causing the container's NSS `resolve` module to return UNAVAIL, falling through to the `dns` module. A placeholder `/etc/resolv.conf` regular file is written so `systemd-nspawn --resolv-conf=auto` can populate it at boot.
 
-For `--network-zone` containers (with config defaults), resolved is
-left unmasked and sdme configures it for inter-container discovery:
-`/etc/resolv.conf` is symlinked to the resolved stub
-(`../run/systemd/resolve/stub-resolv.conf`), an LLMNR/mDNS drop-in
-(`resolved.conf.d/zone-llmnr.conf`) is written, and any stale
-`systemd-resolved.service -> /dev/null` masks in the rootfs lower
-layer are actively overridden in the upper layer with a symlink to
-the real unit file.
+For `--network-zone` containers (with config defaults), resolved is left unmasked and sdme configures it for inter-container discovery: `/etc/resolv.conf` is symlinked to the resolved stub (`../run/systemd/resolve/stub-resolv.conf`), an LLMNR/mDNS drop-in (`resolved.conf.d/zone-llmnr.conf`) is written, and any stale `systemd-resolved.service -> /dev/null` masks in the rootfs lower layer are actively overridden in the upper layer with a symlink to the real unit file.
 
-**Per-submount overlayfs.** Overlayfs does not cross mount boundaries.
-On systems where directories under `/` live on separate filesystems
-(btrfs subvolumes like `/@home` mounted at `/home`, separate partitions,
-ZFS datasets), a single `lowerdir=/` overlay would
-see those directories as empty. The files live on a different mount and
-overlayfs has no visibility into it.
+**Per-submount overlayfs.** Overlayfs does not cross mount boundaries. On systems where directories under `/` live on separate filesystems (btrfs subvolumes like `/@home` mounted at `/home`, separate partitions, ZFS datasets), a single `lowerdir=/` overlay would see those directories as empty. The files live on a different mount and overlayfs has no visibility into it.
 
-sdme solves this by detecting real-filesystem submounts under `/` at
-container creation time, then mounting a separate overlayfs layer for
-each one inside the container's `merged/` directory. Detection works by
-parsing `/proc/self/mountinfo`: each line is checked against an
-allowlist of real filesystem types (ext4, btrfs, xfs, zfs, f2fs,
-bcachefs, etc.), and virtual or nspawn-managed paths (`/proc`, `/sys`,
-`/dev`, `/run`, `/tmp`, `/var/log`, `/var/tmp`) are excluded. Paths
-containing `..` or commas are rejected for safety, since they could
-break mount option parsing or enable path traversal.
+sdme solves this by detecting real-filesystem submounts under `/` at container creation time, then mounting a separate overlayfs layer for each one inside the container's `merged/` directory. Detection works by parsing `/proc/self/mountinfo`: each line is checked against an allowlist of real filesystem types (ext4, btrfs, xfs, zfs, f2fs, bcachefs, etc.), and virtual or nspawn-managed paths (`/proc`, `/sys`, `/dev`, `/run`, `/tmp`, `/var/log`, `/var/tmp`) are excluded. Paths containing `..` or commas are rejected for safety, since they could break mount option parsing or enable path traversal.
 
-For each detected submount (say `/home`), sdme creates a
-`submounts/home/{upper,work}` directory tree under the container
-directory and mounts an overlay with `lowerdir=/home` and the
-per-submount upper/work dirs. In read-only mode (e.g. `sdme cp --ro`),
-the submount overlay uses multi-lower `lowerdir=` with no `upperdir`.
+For each detected submount (say `/home`), sdme creates a `submounts/home/{upper,work}` directory tree under the container directory and mounts an overlay with `lowerdir=/home` and the per-submount upper/work dirs. In read-only mode (e.g. `sdme cp --ro`), the submount overlay uses multi-lower `lowerdir=` with no `upperdir`.
 
-Mount failures are logged as warnings but do not block container boot;
-a single broken submount should not prevent the rest of the container
-from working. Unmounting happens deepest-first by querying
-`/proc/self/mountinfo` for nested mounts under `merged/`.
+Mount failures are logged as warnings but do not block container boot; a single broken submount should not prevent the rest of the container from working. Unmounting happens deepest-first by querying `/proc/self/mountinfo` for nested mounts under `merged/`.
 
-This only applies to host-rootfs containers (`lowerdir=/`). Imported
-rootfs trees are single directory hierarchies with no submounts to
-worry about.
+This only applies to host-rootfs containers (`lowerdir=/`). Imported rootfs trees are single directory hierarchies with no submounts to worry about.
 
 ## 3. The Catalogue
 
-Everything sdme knows lives under `/var/lib/sdme` (the default
-`datadir`, configurable via `sdme config set datadir <path>`):
+Everything sdme knows lives under `/var/lib/sdme` (the default `datadir`, configurable via `sdme config set datadir <path>`):
 
 ```
   /var/lib/sdme/
@@ -219,49 +140,21 @@ Pod runtime state (volatile, recreated after reboot):
       +-- netns                # bind-mount of the pod's netns fd
 ```
 
-**State files** are flat KEY=VALUE text files under `state/`. They
-record everything about a container: name, rootfs, creation timestamp,
-resource limits, network configuration, bind mounts, environment
-variables, opaque directories, and pod membership (`POD` and/or
-`OCI_POD`). The format is intentionally simple: readable with `cat`,
-parseable with `grep`, editable with `sed` in an emergency. The `State`
-type in the code uses a `BTreeMap<String, String>` for deterministic
-key ordering.
+**State files** are flat KEY=VALUE text files under `state/`. They record everything about a container: name, rootfs, creation timestamp, resource limits, network configuration, bind mounts, environment variables, opaque directories, and pod membership (`POD` and/or `OCI_POD`). The format is intentionally simple: readable with `cat`, parseable with `grep`, editable with `sed` in an emergency. The `State` type in the code uses a `BTreeMap<String, String>` for deterministic key ordering.
 
-**Transactional operations** ensure that failed or interrupted mutations
-never leave a half-written artifact in place. All mutating filesystem
-operations use atomic staging directories with a rename-on-success
-pattern. See [Reliability](#15-reliability) for details on staging,
-locking, and interrupt handling.
+**Transactional operations** ensure that failed or interrupted mutations never leave a half-written artifact in place. All mutating filesystem operations use atomic staging directories with a rename-on-success pattern. See [Reliability](#15-reliability) for details on staging, locking, and interrupt handling.
 
-**Health detection** in `sdme ps` checks that a container's expected
-directories actually exist and that its rootfs (if specified) is
-present. A container whose rootfs has been removed shows as `broken`.
-OS detection uses a 5-step cascade to resolve the distro name shown
-in the listing:
+**Health detection** in `sdme ps` checks that a container's expected directories actually exist and that its rootfs (if specified) is present. A container whose rootfs has been removed shows as `broken`. OS detection uses a 5-step cascade to resolve the distro name shown in the listing:
 
-1. **merged/**: the overlayfs merged view (available when the
-   container is running; reflects both the base rootfs and any
-   upper-layer changes such as a distro upgrade).
-2. **upper/**: the overlayfs upper layer alone (works when the
-   container is stopped, since merged is not mounted).
-3. **{datadir}/fs/{rootfs}/**: the imported rootfs on disk (for
-   containers created with `-r`; useful when upper has no
-   os-release of its own).
-4. **/**: the host root filesystem (for host-rootfs containers
-   that have no imported rootfs).
-5. **"unknown"**: returned when none of the above paths contain
-   an os-release file.
+1. **merged/**: the overlayfs merged view (available when the container is running; reflects both the base rootfs and any upper-layer changes such as a distro upgrade).
+2. **upper/**: the overlayfs upper layer alone (works when the container is stopped, since merged is not mounted).
+3. **{datadir}/fs/{rootfs}/**: the imported rootfs on disk (for containers created with `-r`; useful when upper has no os-release of its own).
+4. **/**: the host root filesystem (for host-rootfs containers that have no imported rootfs).
+5. **"unknown"**: returned when none of the above paths contain an os-release file.
 
-This cascade ensures that `sdme ps` always shows a meaningful OS
-column regardless of whether the container is running, stopped, or
-based on the host rootfs.
+This cascade ensures that `sdme ps` always shows a meaningful OS column regardless of whether the container is running, stopped, or based on the host rootfs.
 
-**Conflict detection** checks three places before accepting a name: the
-sdme state directory, `/var/lib/machines/` (systemd's own machine
-directory), and the list of currently registered machines via D-Bus.
-This prevents collisions with both sdme containers and any other nspawn
-machines on the system.
+**Conflict detection** checks three places before accepting a name: the sdme state directory, `/var/lib/machines/` (systemd's own machine directory), and the list of currently registered machines via D-Bus. This prevents collisions with both sdme containers and any other nspawn machines on the system.
 
 ## 4. Container Lifecycle
 
@@ -283,172 +176,63 @@ machines on the system.
     +-- write state file
 ```
 
-**create** builds the overlayfs directory structure, sets up DNS,
-applies opaque directories, validates the umask (a restrictive umask
-would make overlayfs files inaccessible to non-root services like
-dbus-daemon), and writes the state file. It does not start the
-container. Pass `--started` to create and start in one step (the
-container is removed on start failure, same as `sdme new`).
+**create** builds the overlayfs directory structure, sets up DNS, applies opaque directories, validates the umask (a restrictive umask would make overlayfs files inaccessible to non-root services like dbus-daemon), and writes the state file. It does not start the container. Pass `--started` to create and start in one step (the container is removed on start failure, same as `sdme new`).
 
-**start** installs (or updates) a systemd template unit and
-per-container drop-in, then calls `StartUnit` over D-Bus. After the
-unit starts, sdme waits for the container to reach the `running` state
-by subscribing to `machined` D-Bus signals and polling the machine
-state. The boot timeout defaults to 60 seconds and is configurable.
+**start** installs (or updates) a systemd template unit and per-container drop-in, then calls `StartUnit` over D-Bus. After the unit starts, sdme waits for the container to reach the `running` state by subscribing to `machined` D-Bus signals and polling the machine state. The boot timeout defaults to 60 seconds and is configurable.
 
-**join** spawns `machinectl shell` as a child process and forwards its
-exit status. This was a deliberate choice: machinectl handles the
-namespace entry, PAM session setup, and environment correctly, and
-reimplementing that logic in Rust would buy nothing. Spawning (rather
-than exec'ing) keeps sdme alive so it can inspect the exit code and
-clean up on failure (particularly important for `sdme new`, which
-removes the container if the join fails). If machinectl fails to
-allocate a PTY (which can happen on certain VM or kernel configurations
-with user namespaces), sdme falls back to `nsenter`, entering the
-container's namespaces directly via the leader PID. When the container
-uses user namespace isolation (`--hardened`, `--userns`), nsenter also
-enters the user (`-U`) and cgroup (`-C`) namespaces so that
-`systemctl`, `journalctl`, and other tools that communicate over D-Bus
-can authenticate with the container's systemd instance. For interactive
-sessions, the nsenter fallback uses `script(1)` to allocate a PTY so
-the shell has proper line editing and job control.
+**join** spawns `machinectl shell` as a child process and forwards its exit status. This was a deliberate choice: machinectl handles the namespace entry, PAM session setup, and environment correctly, and reimplementing that logic in Rust would buy nothing. Spawning (rather than exec'ing) keeps sdme alive so it can inspect the exit code and clean up on failure (particularly important for `sdme new`, which removes the container if the join fails). If machinectl fails to allocate a PTY (which can happen on certain VM or kernel configurations with user namespaces), sdme falls back to `nsenter`, entering the container's namespaces directly via the leader PID. When the container uses user namespace isolation (`--hardened`, `--userns`), nsenter also enters the user (`-U`) and cgroup (`-C`) namespaces so that `systemctl`, `journalctl`, and other tools that communicate over D-Bus can authenticate with the container's systemd instance. For interactive sessions, the nsenter fallback uses `script(1)` to allocate a PTY so the shell has proper line editing and job control.
 
-**exec** uses `systemd-run --machine=NAME --pipe --wait --quiet
---collect` instead of `machinectl shell`. `--pipe` connects stdin,
-stdout, and stderr as pipes (not a PTY), so output captures correctly
-in shell pipelines (`sdme exec mybox -- foo | grep bar`); `--wait`
-forwards the command's exit status; `--collect` removes the transient
-unit even on failure. `machinectl shell` always allocates a PTY, which
-swallows stdout when the caller is a pipe. For an interactive PTY
-shell, use `sdme join`.
+**exec** uses `systemd-run --machine=NAME --pipe --wait --quiet --collect` instead of `machinectl shell`. `--pipe` connects stdin, stdout, and stderr as pipes (not a PTY), so output captures correctly in shell pipelines (`sdme exec mybox -- foo | grep bar`); `--wait` forwards the command's exit status; `--collect` removes the transient unit even on failure. `machinectl shell` always allocates a PTY, which swallows stdout when the caller is a pipe. For an interactive PTY shell, use `sdme join`.
 
-A subtle behaviour difference follows from this choice: `systemd-run`
-runs the command as a transient unit under the container's PID 1, not
-through a PAM login session. There is no `HOME`, `/etc/profile` is not
-sourced, and `.profile`/`.bashrc` are not evaluated. Programs that
-depend on a login environment (dotfile-driven tools, locale/PATH set
-by `pam_env`, etc.) should be run via `sdme join -- /path/to/cmd`
-instead, which goes through `machinectl shell` and gets a full PAM
-session.
+A subtle behaviour difference follows from this choice: `systemd-run` runs the command as a transient unit under the container's PID 1, not through a PAM login session. There is no `HOME`, `/etc/profile` is not sourced, and `.profile`/`.bashrc` are not evaluated. Programs that depend on a login environment (dotfile-driven tools, locale/PATH set by `pam_env`, etc.) should be run via `sdme join -- /path/to/cmd` instead, which goes through `machinectl shell` and gets a full PAM session.
 
-The balance struck is: use D-Bus where it gives us programmatic
-control (start, stop, status queries), shell out where the existing
-tool already does the job well (interactive shell sessions, running
-commands), and fall back to lower-level tools when the higher-level
-ones are unavailable.
+The balance struck is: use D-Bus where it gives us programmatic control (start, stop, status queries), shell out where the existing tool already does the job well (interactive shell sessions, running commands), and fall back to lower-level tools when the higher-level ones are unavailable.
 
-**stop** has three tiers: graceful (default) sends `SIGRTMIN+4` to the
-container leader via `KillMachine` (90s timeout), `--term` calls
-`TerminateMachine` which sends SIGTERM to the nspawn process (30s
-timeout), and `--kill` sends SIGKILL to all processes via `KillMachine`
-(15s timeout). Multiple containers can be stopped in one invocation.
+**stop** has three tiers: graceful (default) sends `SIGRTMIN+4` to the container leader via `KillMachine` (90s timeout), `--term` calls `TerminateMachine` which sends SIGTERM to the nspawn process (30s timeout), and `--kill` sends SIGKILL to all processes via `KillMachine` (15s timeout). Multiple containers can be stopped in one invocation.
 
-**restart** stops and then starts a container. It combines flags from
-stop (`--term`, `--kill`) and start (`--timeout`). Supports `--all`
-to restart every running container.
+**restart** stops and then starts a container. It combines flags from stop (`--term`, `--kill`) and start (`--timeout`). Supports `--all` to restart every running container.
 
-**rm** stops the container if running, removes the state file, and
-deletes the container's directories via `safe_remove_dir()`. This
-function guards against stale bind mounts that can survive a host
-crash or unclean shutdown:
+**rm** stops the container if running, removes the state file, and deletes the container's directories via `safe_remove_dir()`. This function guards against stale bind mounts that can survive a host crash or unclean shutdown:
 
-1. `make_removable()` recursively fixes directory permissions to
-   ensure owner read/write/execute (`0o700`), since containers can
-   create files owned by arbitrary UIDs with restrictive modes.
-2. `find_mounts_under()` reads `/proc/self/mountinfo` to discover
-   any filesystems still mounted under the directory. Mount paths
-   in mountinfo use kernel octal escapes (`\040` for space, etc.);
-   `decode_mountinfo_path()` decodes them before comparison.
-3. If mounts are found, they are sorted deepest-first by path
-   length and unmounted with `umount -R`.
-4. A second check verifies all mounts are gone. If any remain,
-   `safe_remove_dir()` refuses to delete the directory and returns
-   an error, preventing accidental removal of host filesystem
-   contents that were visible through a stale bind mount.
+1. `make_removable()` recursively fixes directory permissions to ensure owner read/write/execute (`0o700`), since containers can create files owned by arbitrary UIDs with restrictive modes.
+2. `find_mounts_under()` reads `/proc/self/mountinfo` to discover any filesystems still mounted under the directory. Mount paths in mountinfo use kernel octal escapes (`\040` for space, etc.); `decode_mountinfo_path()` decodes them before comparison.
+3. If mounts are found, they are sorted deepest-first by path length and unmounted with `umount -R`.
+4. A second check verifies all mounts are gone. If any remain, `safe_remove_dir()` refuses to delete the directory and returns an error, preventing accidental removal of host filesystem contents that were visible through a stale bind mount.
 
-**Boot failure cleanup.** If `sdme new`, `sdme kube apply`, or
-`sdme start` fails to boot (or is interrupted), the container is
-stopped but preserved on disk for debugging. See
-[Reliability](#15-reliability) for the interrupt handling details.
+**Boot failure cleanup.** If `sdme new`, `sdme kube apply`, or `sdme start` fails to boot (or is interrupted), the container is stopped but preserved on disk for debugging. See [Reliability](#15-reliability) for the interrupt handling details.
 
 ## 5. Container Names
 
-When you don't specify a name, sdme generates one from a wordlist of
-200 Tupi-Guarani words and variations. The wordlist draws from Tupi-Guarani,
-an indigenous language family of Brazil.
+When you don't specify a name, sdme generates one from a wordlist of 200 Tupi-Guarani words and variations. The wordlist draws from Tupi-Guarani, an indigenous language family of Brazil.
 
-Name generation shuffles the wordlist (Fisher-Yates, seeded from
-`/dev/urandom`), checks each candidate against the three-way conflict
-detection (state files, `/var/lib/machines/`, registered machines), and
-returns the first unused name. If all 200 base words are taken, it
-falls back to vowel mutations: consonants stay fixed while vowels are
-randomly substituted, producing names that sound like plausible
-Tupi-Guarani words but don't appear in the original list. Up to 200
-mutation attempts before giving up.
+Name generation shuffles the wordlist (Fisher-Yates, seeded from `/dev/urandom`), checks each candidate against the three-way conflict detection (state files, `/var/lib/machines/`, registered machines), and returns the first unused name. If all 200 base words are taken, it falls back to vowel mutations: consonants stay fixed while vowels are randomly substituted, producing names that sound like plausible Tupi-Guarani words but don't appear in the original list. Up to 200 mutation attempts before giving up.
 
 ## 6. The fs Subsystem: Managing Root Filesystems
 
-The `fs` subsystem manages the catalogue of root filesystems that
-containers are built from. Each rootfs is a plain directory under
-`/var/lib/sdme/fs/` containing a complete Linux filesystem tree.
-Containers reference them by name.
+The `fs` subsystem manages the catalogue of root filesystems that containers are built from. Each rootfs is a plain directory under `/var/lib/sdme/fs/` containing a complete Linux filesystem tree. Containers reference them by name.
 
 ### Import sources
 
 `sdme fs import` auto-detects the source type by probing in order:
 
-- **URL**: `http://` or `https://` prefix. Downloads the file, then
-  extracts as a tarball.
-- **OCI registry**: looks like a domain with a path
-  (e.g. `docker.io/ubuntu`, `quay.io/fedora/fedora`). Pulled via
-  the OCI Distribution Spec.
-- **Directory**: path is a directory. Copied with `copy_tree()`
-  preserving ownership, permissions, xattrs, hard links, and special
-  files.
-- **QCOW2 image**: magic bytes `QFI\xfb` at the start of the file.
-  Mounted read-only via `qemu-nbd`, then copied with `copy_tree()`.
-- **Raw disk image**: MBR/GPT signature or `.raw`/`.img` extension.
-  Same `qemu-nbd` path as QCOW2.
-- **Tarball**: default fallback for any other file. Extracted with
-  native Rust crates; compression is detected from magic bytes, not the
-  file name.
+- **URL**: `http://` or `https://` prefix. Downloads the file, then extracts as a tarball.
+- **OCI registry**: looks like a domain with a path (e.g. `docker.io/ubuntu`, `quay.io/fedora/fedora`). Pulled via the OCI Distribution Spec.
+- **Directory**: path is a directory. Copied with `copy_tree()` preserving ownership, permissions, xattrs, hard links, and special files.
+- **QCOW2 image**: magic bytes `QFI\xfb` at the start of the file. Mounted read-only via `qemu-nbd`, then copied with `copy_tree()`.
+- **Raw disk image**: MBR/GPT signature or `.raw`/`.img` extension. Same `qemu-nbd` path as QCOW2.
+- **Tarball**: default fallback for any other file. Extracted with native Rust crates; compression is detected from magic bytes, not the file name.
 
 ### The hard parts
 
-**Permissions and ownership** must be preserved exactly. A rootfs
-contains files owned by dozens of system UIDs (root, messagebus,
-systemd-network, nobody, etc.) with specific modes. The `copy_tree()`
-function uses `lchown()` for ownership, `chmod()` for permissions, and
-`utimensat()` with nanosecond precision for timestamps. All operations
-use `l`-prefixed variants (lstat, lchown, lgetxattr) to avoid following
-symlinks.
+**Permissions and ownership** must be preserved exactly. A rootfs contains files owned by dozens of system UIDs (root, messagebus, systemd-network, nobody, etc.) with specific modes. The `copy_tree()` function uses `lchown()` for ownership, `chmod()` for permissions, and `utimensat()` with nanosecond precision for timestamps. All operations use `l`-prefixed variants (lstat, lchown, lgetxattr) to avoid following symlinks.
 
-**Extended attributes** carry security and filesystem metadata.
-`read_xattrs()` lists all xattrs except `security.selinux`;
-`copy_xattrs()` calls it and writes each attribute to the destination.
-SELinux labels are skipped because they reference types and roles from
-the source system's installed policy, which may not exist on the
-destination. The correct practice is to relabel via `restorecon` or
-`/.autorelabel` against the active policy after import; this is what
-container runtimes (Docker, Podman) do as well. The overlayfs
-`trusted.overlay.opaque` xattr is preserved when present. The same
-`read_xattrs()` function is used by the tar export path to emit
-`SCHILY.xattr.*` PAX extended headers.
+**Extended attributes** carry security and filesystem metadata. `read_xattrs()` lists all xattrs except `security.selinux`; `copy_xattrs()` calls it and writes each attribute to the destination. SELinux labels are skipped because they reference types and roles from the source system's installed policy, which may not exist on the destination. The correct practice is to relabel via `restorecon` or `/.autorelabel` against the active policy after import; this is what container runtimes (Docker, Podman) do as well. The overlayfs `trusted.overlay.opaque` xattr is preserved when present. The same `read_xattrs()` function is used by the tar export path to emit `SCHILY.xattr.*` PAX extended headers.
 
-**Hard links** are preserved by `copy_tree()` via a `HardLinkMap` that
-tracks `(st_dev, st_ino)` to destination path. When a file with
-`st_nlink > 1` is encountered and its inode was already copied, a hard
-link is created instead of duplicating the data. This preserves link
-semantics and avoids doubling disk usage for packages that hard-link
-identical files (common in `/usr/share/doc`, locale data, etc.).
+**Hard links** are preserved by `copy_tree()` via a `HardLinkMap` that tracks `(st_dev, st_ino)` to destination path. When a file with `st_nlink > 1` is encountered and its inode was already copied, a hard link is created instead of duplicating the data. This preserves link semantics and avoids doubling disk usage for packages that hard-link identical files (common in `/usr/share/doc`, locale data, etc.).
 
-**Special files** (block devices, character devices, FIFOs, and Unix
-sockets) are recreated with `mknod()` and `mkfifo()` using the original
-mode and device numbers. This matters for rootfs that include
-`/dev/null`, `/dev/zero`, and friends.
+**Special files** (block devices, character devices, FIFOs, and Unix sockets) are recreated with `mknod()` and `mkfifo()` using the original mode and device numbers. This matters for rootfs that include `/dev/null`, `/dev/zero`, and friends.
 
-**Compression auto-detection** uses magic bytes rather than file
-extensions. The first few bytes of a file reveal its compression format:
+**Compression auto-detection** uses magic bytes rather than file extensions. The first few bytes of a file reveal its compression format:
 
 ```
 Magic bytes           Format
@@ -459,45 +243,17 @@ fd 37 7a 58 5a 00     xz
 28 b5 2f fd           zstd
 ```
 
-This means `sdme fs import ubuntu rootfs.tar.zst` works even if the
-file is named `rootfs.tar`, because the content, not the name,
-determines the decompressor.
+This means `sdme fs import ubuntu rootfs.tar.zst` works even if the file is named `rootfs.tar`, because the content, not the name, determines the decompressor.
 
-**Systemd detection** runs after import. If the rootfs doesn't contain
-systemd and dbus (both required for nspawn containers), sdme can install
-them automatically: it detects the distro family from `/etc/os-release`
-and runs the appropriate package manager (`apt`, `dnf`) in a chroot.
-The `--install-packages` flag controls this: `auto` prompts
-interactively, `yes` always installs, `no` refuses if systemd is
-absent.
+**Systemd detection** runs after import. If the rootfs doesn't contain systemd and dbus (both required for nspawn containers), sdme can install them automatically: it detects the distro family from `/etc/os-release` and runs the appropriate package manager (`apt`, `dnf`) in a chroot. The `--install-packages` flag controls this: `auto` prompts interactively, `yes` always installs, `no` refuses if systemd is absent.
 
-**Rootfs patching** runs after systemd detection. Even when systemd is
-present, sdme patches the rootfs for nspawn compatibility:
-pre-existing `systemd-resolved.service` masks (symlinks to `/dev/null`)
-are removed so they don't leak through overlayfs and interfere with
-zone containers that need resolved, `systemd-logind` is unmasked if
-masked (some OCI images like CentOS/AlmaLinux mask it, but
-`machinectl shell` requires logind), and missing packages needed by
-`machinectl shell` (e.g. `util-linux` and `pam` on RHEL-family, which
-provide `/etc/pam.d/login`) are installed via chroot. The chroot
-commands that make a rootfs bootable are per-distro and configurable
-via `distros.<family>.import_prehook` in `/etc/sdme.conf` (see
-[Configuration](#13-configuration) for the full list of prehook keys
-and family names). Absent means use built-in defaults; an empty array
-explicitly does nothing. Service masking (e.g. `systemd-resolved`) is
-handled at container create time via the configurable
-`--masked-services` / `default_create_masked_services` mechanism, not
-at import time.
+**Rootfs patching** runs after systemd detection. Even when systemd is present, sdme patches the rootfs for nspawn compatibility: pre-existing `systemd-resolved.service` masks (symlinks to `/dev/null`) are removed so they don't leak through overlayfs and interfere with zone containers that need resolved, `systemd-logind` is unmasked if masked (some OCI images like CentOS/AlmaLinux mask it, but `machinectl shell` requires logind), and missing packages needed by `machinectl shell` (e.g. `util-linux` and `pam` on RHEL-family, which provide `/etc/pam.d/login`) are installed via chroot. The chroot commands that make a rootfs bootable are per-distro and configurable via `distros.<family>.import_prehook` in `/etc/sdme.conf` (see [Configuration](#13-configuration) for the full list of prehook keys and family names). Absent means use built-in defaults; an empty array explicitly does nothing. Service masking (e.g. `systemd-resolved`) is handled at container create time via the configurable `--masked-services` / `default_create_masked_services` mechanism, not at import time.
 
-Import uses transactional staging and cooperative interrupt handling
-to ensure that a failed or interrupted import never leaves a
-half-written rootfs. Ctrl+C cleanly cancels multi-gigabyte downloads
-and extractions. See [Reliability](#15-reliability) for details.
+Import uses transactional staging and cooperative interrupt handling to ensure that a failed or interrupted import never leaves a half-written rootfs. Ctrl+C cleanly cancels multi-gigabyte downloads and extractions. See [Reliability](#15-reliability) for details.
 
 ## 7. fs build: Building Root Filesystems
 
-`sdme fs build` takes a Dockerfile-like config and produces a new
-rootfs:
+`sdme fs build` takes a Dockerfile-like config and produces a new rootfs:
 
 ```
 FROM ubuntu
@@ -508,70 +264,30 @@ RUN apt-get update && apt-get install -y libssl3
 RUN systemctl enable my-app.service
 ```
 
-The build engine creates a staging container from the FROM rootfs, then
-eagerly starts it before processing any operations. Both COPY and RUN
-execute against the running container:
+The build engine creates a staging container from the FROM rootfs, then eagerly starts it before processing any operations. Both COPY and RUN execute against the running container:
 
-- **COPY** writes through the merged overlayfs mount while the
-  container is running. This ensures the kernel's dcache stays
-  consistent and files are immediately visible inside the container.
-  Three source forms are supported: a host path (no prefix), an
-  imported rootfs (`fs:name:/path`), or another container
-  (`container-name:/path`).
-- **RUN** executes a command inside the container via
-  `systemd-run --machine=NAME --pipe --wait --quiet`.
+- **COPY** writes through the merged overlayfs mount while the container is running. This ensures the kernel's dcache stays consistent and files are immediately visible inside the container. Three source forms are supported: a host path (no prefix), an imported rootfs (`fs:name:/path`), or another container (`container-name:/path`).
+- **RUN** executes a command inside the container via `systemd-run --machine=NAME --pipe --wait --quiet`.
 
-Because the container is started once and stays running throughout the
-build, there are no stop/start cycles between COPY and RUN operations.
-`FROM` accepts an optional `fs:` prefix (`FROM fs:ubuntu` is equivalent
-to `FROM ubuntu`).
+Because the container is started once and stays running throughout the build, there are no stop/start cycles between COPY and RUN operations. `FROM` accepts an optional `fs:` prefix (`FROM fs:ubuntu` is equivalent to `FROM ubuntu`).
 
-**Path sanitisation** rejects COPY destinations under `/run` and
-`/dev/shm`, where systemd mounts tmpfs at boot. `/tmp` is allowed in
-builds because the build container bind-mounts `upper/tmp` over
-nspawn's default tmpfs, making `/tmp` persistent across all build
-steps. Destinations under overlayfs-opaque directories are also
-rejected. Errors include the config file path and line number for easy
-debugging.
+**Path sanitisation** rejects COPY destinations under `/run` and `/dev/shm`, where systemd mounts tmpfs at boot. `/tmp` is allowed in builds because the build container bind-mounts `upper/tmp` over nspawn's default tmpfs, making `/tmp` persistent across all build steps. Destinations under overlayfs-opaque directories are also rejected. Errors include the config file path and line number for easy debugging.
 
-**Resource locking.** Builds hold shared `flock` locks on the FROM
-rootfs and any COPY source containers/rootfs, preventing deletion while
-in use. See [Resource locking](#resource-locking) for the full locking
-model.
+**Resource locking.** Builds hold shared `flock` locks on the FROM rootfs and any COPY source containers/rootfs, preventing deletion while in use. See [Resource locking](#resource-locking) for the full locking model.
 
-**Resumable builds.** When a build fails at a RUN step, the build
-container's overlayfs upper layer is preserved. On re-run, if the
-config file hash matches (SHA-256 of file content), completed steps
-are skipped and execution resumes from the failed step. The state
-file stores `BUILD_CONFIG_HASH` and `BUILD_LAST_COMPLETED_OP` (0-based
-index). If the config changes, the stale build container is removed
-and a fresh build starts. `--no-cache` forces a clean build. COPY
-source file changes are not tracked; use `--no-cache` when sources
-change.
+**Resumable builds.** When a build fails at a RUN step, the build container's overlayfs upper layer is preserved. On re-run, if the config file hash matches (SHA-256 of file content), completed steps are skipped and execution resumes from the failed step. The state file stores `BUILD_CONFIG_HASH` and `BUILD_LAST_COMPLETED_OP` (0-based index). If the config changes, the stale build container is removed and a fresh build starts. `--no-cache` forces a clean build. COPY source file changes are not tracked; use `--no-cache` when sources change.
 
-**Stale build cleanup.** If a prior build was interrupted and cannot be
-resumed (config changed or `--no-cache`), the next `sdme fs build`
-removes the stale staging container before proceeding. Manual cleanup
-is also available via `sdme fs gc`. See
-[Reliability](#15-reliability) for the staging and cleanup model.
+**Stale build cleanup.** If a prior build was interrupted and cannot be resumed (config changed or `--no-cache`), the next `sdme fs build` removes the stale staging container before proceeding. Manual cleanup is also available via `sdme fs gc`. See [Reliability](#15-reliability) for the staging and cleanup model.
 
-After all operations complete, the engine mounts the overlayfs manually
-(the container is stopped), copies the merged view to a staging rootfs
-directory, and does an atomic rename to the final location. The staging
-container is cleaned up regardless of success or failure.
+After all operations complete, the engine mounts the overlayfs manually (the container is stopped), copies the merged view to a staging rootfs directory, and does an atomic rename to the final location. The staging container is cleaned up regardless of success or failure.
 
 ## 8. fs export: Exporting Root Filesystems
 
-`sdme fs export` is the inverse of import: it exports a container's
-merged overlayfs view (default) or an imported rootfs (with `fs:`
-prefix) to a directory, tarball, or raw disk image (ext4 or btrfs).
-The implementation lives in `src/export.rs`.
+`sdme fs export` is the inverse of import: it exports a container's merged overlayfs view (default) or an imported rootfs (with `fs:` prefix) to a directory, tarball, or raw disk image (ext4 or btrfs). The implementation lives in `src/export.rs`.
 
 ### Format detection
 
-The output format is determined by file extension, following the same
-convention as import's compression detection but using extensions
-instead of magic bytes (since we are creating, not reading):
+The output format is determined by file extension, following the same convention as import's compression detection but using extensions instead of magic bytes (since we are creating, not reading):
 
 ```
 Extension               Format
@@ -585,163 +301,69 @@ Extension               Format
 anything else           directory copy
 ```
 
-The `--fmt` flag overrides detection. Format names match the extension
-without the dot: `dir`, `tar`, `tar.gz`, `tar.bz2`, `tar.xz`,
-`tar.zst`, `raw`.
+The `--fmt` flag overrides detection. Format names match the extension without the dot: `dir`, `tar`, `tar.gz`, `tar.bz2`, `tar.xz`, `tar.zst`, `raw`.
 
 ### Directory export
 
-Delegates to `copy_tree()` (the same function used by import), so
-ownership, permissions, xattrs, hard links, and special files are
-preserved. The destination must not already exist.
+Delegates to `copy_tree()` (the same function used by import), so ownership, permissions, xattrs, hard links, and special files are preserved. The destination must not already exist.
 
 ### Tarball export
 
-Creates a tar archive using the Rust `tar` crate. Each entry preserves
-uid/gid, permissions, and symlink targets. Hard links are tracked via a
-`(dev, ino)` map; the second and subsequent occurrences of a
-multiply-linked inode are written as `EntryType::Link` entries pointing
-to the first path, matching standard tar semantics. Extended attributes
-are written as `SCHILY.xattr.*` PAX extended headers via
-`builder.append_pax_extensions()`, preserving file capabilities, ACLs,
-and custom xattrs across export/import round-trips. Compression uses the
-same Rust crates as import decompression (flate2, bzip2, xz2, zstd) but
-on the write side. Symlinks are stored as symlink entries (not
-followed). Block/char devices, FIFOs, and sockets are stored as
-header-only entries.
+Creates a tar archive using the Rust `tar` crate. Each entry preserves uid/gid, permissions, and symlink targets. Hard links are tracked via a `(dev, ino)` map; the second and subsequent occurrences of a multiply-linked inode are written as `EntryType::Link` entries pointing to the first path, matching standard tar semantics. Extended attributes are written as `SCHILY.xattr.*` PAX extended headers via `builder.append_pax_extensions()`, preserving file capabilities, ACLs, and custom xattrs across export/import round-trips. Compression uses the same Rust crates as import decompression (flate2, bzip2, xz2, zstd) but on the write side. Symlinks are stored as symlink entries (not followed). Block/char devices, FIFOs, and sockets are stored as header-only entries.
 
 ### Raw disk image export
 
-Creates a sparse file, formats it with `mkfs.ext4` (default) or
-`mkfs.btrfs` (`--filesystem btrfs`), loop-mounts it, copies the tree,
-and unmounts. The mount point is a temporary directory under `/tmp`. If
-the copy fails, the image file is cleaned up. For ext4, the `lost+found`
-directory created by mkfs is removed before copying; btrfs does not
-create one.
+Creates a sparse file, formats it with `mkfs.ext4` (default) or `mkfs.btrfs` (`--filesystem btrfs`), loop-mounts it, copies the tree, and unmounts. The mount point is a temporary directory under `/tmp`. If the copy fails, the image file is cleaned up. For ext4, the `lost+found` directory created by mkfs is removed before copying; btrfs does not create one.
 
-Size auto-calculation: `max(256 MiB, content_size * 1.5 + free_space)`.
-The 1.5x multiplier accounts for filesystem metadata overhead, and
-`free_space` guarantees extra room in the image (default 256 MiB, from
-the `default_export_free_space` config key). The `--size` flag overrides
-the calculation entirely with a fixed value (e.g. `2G`, `500M`); when
-set, `--free-space` is ignored.
+Size auto-calculation: `max(256 MiB, content_size * 1.5 + free_space)`. The 1.5x multiplier accounts for filesystem metadata overhead, and `free_space` guarantees extra room in the image (default 256 MiB, from the `default_export_free_space` config key). The `--size` flag overrides the calculation entirely with a fixed value (e.g. `2G`, `500M`); when set, `--free-space` is ignored.
 
 ### Container export (default)
 
-Container export is the default mode. A bare name (no `fs:` prefix)
-exports the named container. If the container is running, the export
-reads directly from `merged/` with a consistency warning. If stopped,
-it mounts a **read-only** overlayfs view via `mount_overlay_ro()`
-(multi-lower `lowerdir=upper:rootfs`; no upperdir/workdir needed)
-wrapped in an `OverlayGuard` that unmounts on drop.
+Container export is the default mode. A bare name (no `fs:` prefix) exports the named container. If the container is running, the export reads directly from `merged/` with a consistency warning. If stopped, it mounts a **read-only** overlayfs view via `mount_overlay_ro()` (multi-lower `lowerdir=upper:rootfs`; no upperdir/workdir needed) wrapped in an `OverlayGuard` that unmounts on drop.
 
-Exports hold shared `flock` locks on the container and/or rootfs to
-prevent deletion mid-export, and use transactional staging for the
-overlay mount lifetime. Partial tar output files are cleaned up on
-error. See [Reliability](#15-reliability) for the full locking and
-staging model.
+Exports hold shared `flock` locks on the container and/or rootfs to prevent deletion mid-export, and use transactional staging for the overlay mount lifetime. Partial tar output files are cleaned up on error. See [Reliability](#15-reliability) for the full locking and staging model.
 
 ### Timezone
 
-`--timezone` (e.g. `America/New_York`) sets the timezone in the exported
-rootfs by symlinking `/etc/localtime` to the corresponding zoneinfo file
-and writing `/etc/timezone`. The timezone is validated against the rootfs
-zoneinfo database before export begins. Works with all output formats
-(directory, tarball, raw image). Not needed for `sdme fs import` since
-`systemd-nspawn` handles timezone at container boot via `--timezone=copy`.
+`--timezone` (e.g. `America/New_York`) sets the timezone in the exported rootfs by symlinking `/etc/localtime` to the corresponding zoneinfo file and writing `/etc/timezone`. The timezone is validated against the rootfs zoneinfo database before export begins. Works with all output formats (directory, tarball, raw image). Not needed for `sdme fs import` since `systemd-nspawn` handles timezone at container boot via `--timezone=copy`.
 
 ### VM export
 
-When `--vm` is passed, the raw disk image is GPT-partitioned instead of
-a bare filesystem. A Linux root partition is created at 1 MiB offset
-(standard GPT alignment) via `sfdisk`, and the filesystem is formatted
-on the partition device (`/dev/loopNp1`). When `--swap <size>` is
-specified, a second GPT partition (type=swap) is created and formatted
-with `mkswap`; an `/etc/fstab` entry is written for `/dev/vda2`. The
-exported rootfs is then modified for standalone VM boot: serial console
-login (patched `serial-getty@.service`), `/etc/fstab` with a
-`/dev/vda1` root entry (and `/dev/vda2` swap if requested), DHCP
-networking via `systemd-networkd`, and a hostname. Optional additions
-include DNS configuration, a root password, and an SSH public key. If
-the rootfs lacks udev, it can be installed via chroot. See
-`sdme fs export --help` for the full set of options and hypervisor examples.
+When `--vm` is passed, the raw disk image is GPT-partitioned instead of a bare filesystem. A Linux root partition is created at 1 MiB offset (standard GPT alignment) via `sfdisk`, and the filesystem is formatted on the partition device (`/dev/loopNp1`). When `--swap <size>` is specified, a second GPT partition (type=swap) is created and formatted with `mkswap`; an `/etc/fstab` entry is written for `/dev/vda2`. The exported rootfs is then modified for standalone VM boot: serial console login (patched `serial-getty@.service`), `/etc/fstab` with a `/dev/vda1` root entry (and `/dev/vda2` swap if requested), DHCP networking via `systemd-networkd`, and a hostname. Optional additions include DNS configuration, a root password, and an SSH public key. If the rootfs lacks udev, it can be installed via chroot. See `sdme fs export --help` for the full set of options and hypervisor examples.
 
 ## 9. Networking
 
-By default, containers share the host's network namespace: same
-interfaces, same addresses, same ports. This is the simplest mode and
-what you get with `sdme new` out of the box.
+By default, containers share the host's network namespace: same interfaces, same addresses, same ports. This is the simplest mode and what you get with `sdme new` out of the box.
 
-For isolation, `--private-network` gives the container its own network
-namespace with no connectivity. The remaining network flags build on
-top of it and all imply `--private-network` automatically:
+For isolation, `--private-network` gives the container its own network namespace with no connectivity. The remaining network flags build on top of it and all imply `--private-network` automatically:
 
 - `--private-network`: isolated network namespace, no connectivity
-- `--network-veth`: creates a virtual ethernet link between host and
-  container
-- `--network-bridge <name>`: connects the container's veth to a host
-  bridge
-- `--network-zone <name>`: joins a named zone for inter-container
-  networking
-- `--port / -p <[PROTO:]HOST[:CONTAINER]>`: forwards a port (TCP by
-  default, repeatable)
+- `--network-veth`: creates a virtual ethernet link between host and container
+- `--network-bridge <name>`: connects the container's veth to a host bridge
+- `--network-zone <name>`: joins a named zone for inter-container networking
+- `--port / -p <[PROTO:]HOST[:CONTAINER]>`: forwards a port (TCP by default, repeatable)
 
-These flags are available on both `sdme create` and `sdme new`. They
-compose freely: you can combine `--network-zone` with `--port`, or use
-`--network-bridge` with `--network-veth`. Port forwarding requires a
-private network namespace because systemd-nspawn's `--port` flag only
-works when host and container have separate network stacks. The
-forwarding rules use nftables DNAT and apply to incoming traffic from
-the network and from the host via its external IP, but not via
-localhost (127.0.0.1). To reach a container from the host, use the
-container's IP directly (shown by `sdme ps`).
+These flags are available on both `sdme create` and `sdme new`. They compose freely: you can combine `--network-zone` with `--port`, or use `--network-bridge` with `--network-veth`. Port forwarding requires a private network namespace because systemd-nspawn's `--port` flag only works when host and container have separate network stacks. The forwarding rules use nftables DNAT and apply to incoming traffic from the network and from the host via its external IP, but not via localhost (127.0.0.1). To reach a container from the host, use the container's IP directly (shown by `sdme ps`).
 
-Under the hood, each flag translates directly to a systemd-nspawn
-argument. The network configuration is persisted in the container's
-state file (`PRIVATE_NETWORK`, `NETWORK_VETH`, `NETWORK_BRIDGE`,
-`NETWORK_ZONE`, `PORTS`) and written into the per-container nspawn
-drop-in at start time.
+Under the hood, each flag translates directly to a systemd-nspawn argument. The network configuration is persisted in the container's state file (`PRIVATE_NETWORK`, `NETWORK_VETH`, `NETWORK_BRIDGE`, `NETWORK_ZONE`, `PORTS`) and written into the per-container nspawn drop-in at start time.
 
-When `--network-veth`, `--network-zone`, or `--network-bridge` is
-used, sdme auto-enables both `systemd-networkd` and
-`systemd-resolved` in the overlayfs upper layer (symlinks into
-`multi-user.target.wants`) so the container-side interface (`host0`)
-gets an IP via DHCP and DNS works out of the box. No manual
-enablement is needed.
+When `--network-veth`, `--network-zone`, or `--network-bridge` is used, sdme auto-enables both `systemd-networkd` and `systemd-resolved` in the overlayfs upper layer (symlinks into `multi-user.target.wants`) so the container-side interface (`host0`) gets an IP via DHCP and DNS works out of the box. No manual enablement is needed.
 
-`--network-zone` additionally configures `systemd-resolved` for
-inter-container name resolution: `/etc/resolv.conf` is symlinked to
-the resolved stub, and an LLMNR/mDNS drop-in is written so
-containers on the same zone bridge can discover each other by
-hostname.
+`--network-zone` additionally configures `systemd-resolved` for inter-container name resolution: `/etc/resolv.conf` is symlinked to the resolved stub, and an LLMNR/mDNS drop-in is written so containers on the same zone bridge can discover each other by hostname.
 
-Bridge and zone names are validated (alphanumeric, hyphens,
-underscores). Port specs are validated for format
-(`[PROTO:]HOST[:CONTAINER]`) and range (1-65535).
+Bridge and zone names are validated (alphanumeric, hyphens, underscores). Port specs are validated for format (`[PROTO:]HOST[:CONTAINER]`) and range (1-65535).
 
 ## 10. Pods
 
-Pods give multiple containers a shared network namespace so they can
-reach each other on localhost. The pattern is the same as Kubernetes
-pods: one network namespace, multiple containers.
+Pods give multiple containers a shared network namespace so they can reach each other on localhost. The pattern is the same as Kubernetes pods: one network namespace, multiple containers.
 
 There are two mechanisms for joining a pod, serving different use cases:
 
-**`--pod` (whole-container):** The entire nspawn container runs in the
-pod's network namespace. All processes (init, services, everything)
-share the pod's network stack. This is the general-purpose option for
-any container type.
+**`--pod` (whole-container):** The entire nspawn container runs in the pod's network namespace. All processes (init, services, everything) share the pod's network stack. This is the general-purpose option for any container type.
 
-**`--oci-pod` (OCI app only):** The pod's netns is bind-mounted into
-the container and only the OCI app service process enters it via a
-systemd `NetworkNamespacePath=` drop-in. The container's init and other
-services remain in their own network namespace. This is for OCI app
-containers that need pod networking for their application process but
-want systemd's own networking to remain independent. Requires an OCI
-app rootfs.
+**`--oci-pod` (OCI app only):** The pod's netns is bind-mounted into the container and only the OCI app service process enters it via a systemd `NetworkNamespacePath=` drop-in. The container's init and other services remain in their own network namespace. This is for OCI app containers that need pod networking for their application process but want systemd's own networking to remain independent. Requires an OCI app rootfs.
 
-Both flags can be combined on the same container (e.g.
-`--pod=X --oci-pod=Y` with different pods).
+Both flags can be combined on the same container (e.g. `--pod=X --oci-pod=Y` with different pods).
 
 ```
   --pod (whole container in pod netns):
@@ -774,97 +396,52 @@ Both flags can be combined on the same container (e.g.
 1. Validates the name (same rules as container names).
 2. Calls `unshare(CLONE_NEWNET)` to create a new network namespace.
 3. Brings up the loopback interface (`ioctl SIOCSIFFLAGS IFF_UP`).
-4. Bind-mounts `/proc/self/ns/net` to
-   `/run/sdme/pods/<name>/netns`.
+4. Bind-mounts `/proc/self/ns/net` to `/run/sdme/pods/<name>/netns`.
 5. Restores the original network namespace via `setns()`.
-6. Writes a persistent state file at
-   `{datadir}/pods/<name>/state`.
+6. Writes a persistent state file at `{datadir}/pods/<name>/state`.
 
-The runtime bind-mount under `/run` is volatile and disappears on
-reboot. When a container referencing a pod is started,
-`ensure_runtime()` checks whether the bind-mount still exists and
-recreates the netns if needed.
+The runtime bind-mount under `/run` is volatile and disappears on reboot. When a container referencing a pod is started, `ensure_runtime()` checks whether the bind-mount still exists and recreates the netns if needed.
 
 `sdme pod ls` lists all pods with their active/inactive status.
 
-`sdme pod rm <name>` unmounts the netns, removes the runtime directory,
-and deletes the persistent state directory. Removal is refused if any
-container still references the pod via `POD` or `OCI_POD` keys
-(override with `--force`).
+`sdme pod rm <name>` unmounts the netns, removes the runtime directory, and deletes the persistent state directory. Removal is refused if any container still references the pod via `POD` or `OCI_POD` keys (override with `--force`).
 
 ### Container integration
 
 **`--pod=<name>`** on `sdme create` or `sdme new`:
 
 - Works with any container type (host-rootfs or imported rootfs).
-- Compatible with `--userns` and `--hardened`. The container is launched
-  via `nsenter --net=<netns> -- systemd-nspawn ...`, entering the pod's
-  network namespace before nspawn creates the user namespace. This
-  avoids the kernel's restriction on `setns(CLONE_NEWNET)` across user
-  namespace boundaries (see [systemd/systemd#36363]).
-- Compatible with `--private-network`: the pod's netns already provides
-  equivalent isolation (loopback only), so `--private-network` is
-  automatically omitted from the nspawn invocation when a pod is used.
+- Compatible with `--userns` and `--hardened`. The container is launched via `nsenter --net=<netns> -- systemd-nspawn ...`, entering the pod's network namespace before nspawn creates the user namespace. This avoids the kernel's restriction on `setns(CLONE_NEWNET)` across user namespace boundaries (see [systemd/systemd#36363]).
+- Compatible with `--private-network`: the pod's netns already provides equivalent isolation (loopback only), so `--private-network` is automatically omitted from the nspawn invocation when a pod is used.
 - Stores `POD=<name>` in the container's state file.
-- At start time, the nspawn drop-in launches the container via nsenter
-  to enter the pod's netns at `/run/sdme/pods/<name>/netns`. The entire
-  container (including init and all services) runs inside the pod's
-  network namespace.
+- At start time, the nspawn drop-in launches the container via nsenter to enter the pod's netns at `/run/sdme/pods/<name>/netns`. The entire container (including init and all services) runs inside the pod's network namespace.
 
 [systemd/systemd#36363]: https://github.com/systemd/systemd/issues/36363
 
 **`--oci-pod=<name>`** on `sdme create` or `sdme new`:
 
-- Requires an OCI app rootfs (an `sdme-oci-{name}.service` unit must exist in the
-  rootfs).
+- Requires an OCI app rootfs (an `sdme-oci-{name}.service` unit must exist in the rootfs).
 - Stores `OCI_POD=<name>` in the container's state file.
-- At create time, writes a systemd drop-in inside the overlayfs upper
-  layer at
-  `upper/etc/systemd/system/sdme-oci-{name}.service.d/oci-pod-netns.conf`
-  with `NetworkNamespacePath=/run/sdme/oci-pod-netns`.
-- At start time, the nspawn drop-in includes
-  `--bind-ro=/run/sdme/pods/<name>/netns:/run/sdme/oci-pod-netns`,
-  which makes the pod's netns available inside the container. The
-  inner drop-in makes only the OCI app service process enter the
-  pod's netns.
+- At create time, writes a systemd drop-in inside the overlayfs upper layer at `upper/etc/systemd/system/sdme-oci-{name}.service.d/oci-pod-netns.conf` with `NetworkNamespacePath=/run/sdme/oci-pod-netns`.
+- At start time, the nspawn drop-in includes `--bind-ro=/run/sdme/pods/<name>/netns:/run/sdme/oci-pod-netns`, which makes the pod's netns available inside the container. The inner drop-in makes only the OCI app service process enter the pod's netns.
 
-`sdme ps` shows a POD column when any container has a `--pod`
-assignment, an OCI-POD column when any container has an `--oci-pod`
-assignment, a USERNS column when any container has `--userns` enabled,
-and a BINDS column when any container has bind mounts configured.
+`sdme ps` shows a POD column when any container has a `--pod` assignment, an OCI-POD column when any container has an `--oci-pod` assignment, a USERNS column when any container has `--userns` enabled, and a BINDS column when any container has bind mounts configured.
 
 ### Isolation properties
 
-The pod netns contains only a loopback interface with no routes.
-Containers in the pod can communicate via localhost but have no external
-connectivity unless a veth or bridge is added to the netns externally.
+The pod netns contains only a loopback interface with no routes. Containers in the pod can communicate via localhost but have no external connectivity unless a veth or bridge is added to the netns externally.
 
-Inside the container, systemd-nspawn's default capability set drops
-`CAP_NET_ADMIN`, so the container's root cannot add interfaces or
-change routes in the shared netns. `CAP_SYS_ADMIN` is present
-(required by systemd inside nspawn) but the container's PID namespace
-prevents access to host process netns references. The OCI app process
-itself (running as a non-root UID) has zero effective capabilities.
+Inside the container, systemd-nspawn's default capability set drops `CAP_NET_ADMIN`, so the container's root cannot add interfaces or change routes in the shared netns. `CAP_SYS_ADMIN` is present (required by systemd inside nspawn) but the container's PID namespace prevents access to host process netns references. The OCI app process itself (running as a non-root UID) has zero effective capabilities.
 
 ### External connectivity
 
-Pods start with loopback-only networking. `sdme pod net attach` adds
-external connectivity by creating a veth pair between the pod's netns
-and the host. Attach and detach are live operations: running containers
-immediately see the interface appear or disappear. Both `--pod` and
-`--oci-pod` containers work with pod networking because they share the
-same netns.
+Pods start with loopback-only networking. `sdme pod net attach` adds external connectivity by creating a veth pair between the pod's netns and the host. Attach and detach are live operations: running containers immediately see the interface appear or disappear. Both `--pod` and `--oci-pod` containers work with pod networking because they share the same netns.
 
 Two modes are available:
 
-- **veth**: point-to-point virtual ethernet between the pod and the
-  host. The host-side interface is named `ve-{pod}` (following the
-  nspawn convention), and the pod-side interface is `host0`.
+- **veth**: point-to-point virtual ethernet between the pod and the host. The host-side interface is named `ve-{pod}` (following the nspawn convention), and the pod-side interface is `host0`.
 
-- **zone**: connects the pod to a shared zone bridge. The host-side
-  interface is `vb-{pod}`, connected to bridge `vz-{zone}`. Multiple
-  pods and regular containers on the same zone can reach each other
-  directly.
+- **zone**: connects the pod to a shared zone bridge. The host-side interface is `vb-{pod}`, connected to bridge `vz-{zone}`. Multiple pods and regular containers on the same zone can reach each other directly.
 
 ```
   veth mode:                         zone mode:
@@ -881,12 +458,7 @@ Two modes are available:
                                      +------+  +------+
 ```
 
-**How it works.** sdme creates the veth pair and moves the pod end
-into the netns using `ip link set host0 netns /run/sdme/pods/{name}/netns`.
-Interface names use a `pod` infix to avoid collisions with nspawn's
-per-container interfaces (`ve-{container}`, `vb-{container}`). The
-`ve-*` and `vb-*` prefixes are preserved so systemd-networkd's default
-`.network` files match automatically:
+**How it works.** sdme creates the veth pair and moves the pod end into the netns using `ip link set host0 netns /run/sdme/pods/{name}/netns`. Interface names use a `pod` infix to avoid collisions with nspawn's per-container interfaces (`ve-{container}`, `vb-{container}`). The `ve-*` and `vb-*` prefixes are preserved so systemd-networkd's default `.network` files match automatically:
 
 ```
 Mode   Host-side iface      networkd config
@@ -896,94 +468,37 @@ zone   vb-pod-{pod}         80-container-vb.network
 zone   vz-{zone} (bridge)   80-container-vz.network
 ```
 
-The host's networkd handles DHCP serving, NAT (`IPMasquerade=both`),
-and IP forwarding. sdme does not manage IP addresses, iptables, or
-sysctl settings.
+The host's networkd handles DHCP serving, NAT (`IPMasquerade=both`), and IP forwarding. sdme does not manage IP addresses, iptables, or sysctl settings.
 
-**DHCP client.** A host-managed systemd template service
-(`sdme-pod-net@.service`) runs `dhcpcd` inside the pod's netns using
-`NetworkNamespacePath=`. The host's systemd manages the process
-lifecycle (start, stop, lease renewal). The template unit lives under
-`/run/systemd/system/` (volatile, recreated after reboot).
+**DHCP client.** A host-managed systemd template service (`sdme-pod-net@.service`) runs `dhcpcd` inside the pod's netns using `NetworkNamespacePath=`. The host's systemd manages the process lifecycle (start, stop, lease renewal). The template unit lives under `/run/systemd/system/` (volatile, recreated after reboot).
 
-**DNS.** When `pod net attach` runs dhcpcd, sdme extracts DNS servers
-from the DHCP lease (`dhcpcd --dumplease`) and stores them in the pod
-state as `NET_DNS` and `NET_SEARCH`. All running containers in the pod
-get `/etc/resolv.conf` updated immediately (atomic write to the
-overlayfs merged directory). New containers joining the pod get DNS at
-start time (written to the upper layer before nspawn launches, with
-`--resolv-conf=off` so nspawn leaves it alone). On `pod net detach`,
-the generated resolv.conf is removed from running containers and the
-DNS keys are cleared from pod state. This gives pod containers the
-same DNS servers that veth/zone containers receive from their own DHCP.
+**DNS.** When `pod net attach` runs dhcpcd, sdme extracts DNS servers from the DHCP lease (`dhcpcd --dumplease`) and stores them in the pod state as `NET_DNS` and `NET_SEARCH`. All running containers in the pod get `/etc/resolv.conf` updated immediately (atomic write to the overlayfs merged directory). New containers joining the pod get DNS at start time (written to the upper layer before nspawn launches, with `--resolv-conf=off` so nspawn leaves it alone). On `pod net detach`, the generated resolv.conf is removed from running containers and the DNS keys are cleared from pod state. This gives pod containers the same DNS servers that veth/zone containers receive from their own DHCP.
 
-**State.** The pod state file tracks the network configuration:
-`NET_MODE` (veth or zone), `NET_HOST_IFACE` (host-side interface
-name), `NET_ZONE` (zone name, for zone mode), `NET_DNS` (space-separated
-nameserver IPs from the DHCP lease), and `NET_SEARCH` (space-separated
-search domains). These keys persist across reboots so `ensure_runtime`
-can restore the networking.
+**State.** The pod state file tracks the network configuration: `NET_MODE` (veth or zone), `NET_HOST_IFACE` (host-side interface name), `NET_ZONE` (zone name, for zone mode), `NET_DNS` (space-separated nameserver IPs from the DHCP lease), and `NET_SEARCH` (space-separated search domains). These keys persist across reboots so `ensure_runtime` can restore the networking.
 
-**Zone interop.** Regular containers using `--network-zone=NAME` and
-pods using `pod net attach ... zone NAME` share the same `vz-NAME`
-bridge and can reach each other. Pod interfaces use `vb-pod-{pod}` on
-the host while container interfaces use `vb-{container}` (assigned by
-nspawn), so there are no naming collisions.
+**Zone interop.** Regular containers using `--network-zone=NAME` and pods using `pod net attach ... zone NAME` share the same `vz-NAME` bridge and can reach each other. Pod interfaces use `vb-pod-{pod}` on the host while container interfaces use `vb-{container}` (assigned by nspawn), so there are no naming collisions.
 
-**Interrupt safety.** The attach sequence (create veth, move into
-netns, bring up interfaces, start DHCP service) completes in under a
-second. It runs as an atomic block without interrupt checks between
-commands. If any command fails mid-sequence, sdme cleans up by
-deleting the host-side veth and stopping the DHCP service. Detach is
-inherently interrupt-safe because each step (systemctl stop, ip link
-del, state file write) is independently atomic.
+**Interrupt safety.** The attach sequence (create veth, move into netns, bring up interfaces, start DHCP service) completes in under a second. It runs as an atomic block without interrupt checks between commands. If any command fails mid-sequence, sdme cleans up by deleting the host-side veth and stopping the DHCP service. Detach is inherently interrupt-safe because each step (systemctl stop, ip link del, state file write) is independently atomic.
 
-**Concurrency.** Both attach and detach acquire an exclusive flock on
-the pod name, serializing all operations on the same pod. Zone bridge
-creation is a cross-pod concern: concurrent attach operations on
-different pods with the same zone handle `EEXIST` gracefully (the
-bridge already exists from the first operation).
+**Concurrency.** Both attach and detach acquire an exclusive flock on the pod name, serializing all operations on the same pod. Zone bridge creation is a cross-pod concern: concurrent attach operations on different pods with the same zone handle `EEXIST` gracefully (the bridge already exists from the first operation).
 
-**Reboot recovery.** On reboot, the netns, veth, and bridge are all
-gone. When the first container referencing the pod starts,
-`ensure_runtime` recreates the netns and, if `NET_MODE` is set in the
-persistent state, also recreates the veth pair and restarts the DHCP
-service. The pod resumes with the same networking mode.
+**Reboot recovery.** On reboot, the netns, veth, and bridge are all gone. When the first container referencing the pod starts, `ensure_runtime` recreates the netns and, if `NET_MODE` is set in the persistent state, also recreates the veth pair and restarts the DHCP service. The pod resumes with the same networking mode.
 
-**systemd-networkd dependency.** Pod external connectivity relies on
-the host's systemd-networkd for DHCP serving and NAT. These are the
-same risks as any container using `--network-zone`:
+**systemd-networkd dependency.** Pod external connectivity relies on the host's systemd-networkd for DHCP serving and NAT. These are the same risks as any container using `--network-zone`:
 
-- networkd restart: brief disruption, auto-recovers. Existing kernel
-  routes survive. IPMasquerade nftables rules are re-applied on
-  restart. Pod-side DHCP is managed by dhcpcd independently.
-- networkd stopped: existing connections continue (kernel routing
-  intact). New DHCP requests from dhcpcd may fail (no server).
-  Masquerade rules may be cleaned up.
-- Admin changes to networkd `.network` files that override the default
-  `vz-*` or `ve-*` configs could change behavior.
+- networkd restart: brief disruption, auto-recovers. Existing kernel routes survive. IPMasquerade nftables rules are re-applied on restart. Pod-side DHCP is managed by dhcpcd independently.
+- networkd stopped: existing connections continue (kernel routing intact). New DHCP requests from dhcpcd may fail (no server). Masquerade rules may be cleaned up.
+- Admin changes to networkd `.network` files that override the default `vz-*` or `ve-*` configs could change behavior.
 
 ## 11. Bind Mounts and Environment Variables
 
-Custom bind mounts and environment variables are set at creation time
-with `-b`/`--bind` and `-e`/`--env`, available on both `sdme create`
-and `sdme new`.
+Custom bind mounts and environment variables are set at creation time with `-b`/`--bind` and `-e`/`--env`, available on both `sdme create` and `sdme new`.
 
-**Bind mounts** use the format `HOST:CONTAINER[:ro]`. Read-write is the
-default; append `:ro` for read-only. Both paths must be absolute with
-no `..` components, and the host path must exist at creation time. At
-start time, each bind becomes a `--bind=` or `--bind-ro=` argument to
-systemd-nspawn. When `--userns` is active, directory bind mounts get
-the `:idmap` suffix for transparent UID/GID mapping. Device node bind
-mounts are excluded from idmapping because the kernel does not support
-idmapped mounts on device files.
+**Bind mounts** use the format `HOST:CONTAINER[:ro]`. Read-write is the default; append `:ro` for read-only. Both paths must be absolute with no `..` components, and the host path must exist at creation time. At start time, each bind becomes a `--bind=` or `--bind-ro=` argument to systemd-nspawn. When `--userns` is active, directory bind mounts get the `:idmap` suffix for transparent UID/GID mapping. Device node bind mounts are excluded from idmapping because the kernel does not support idmapped mounts on device files.
 
-**Environment variables** use the format `KEY=VALUE`. Keys must be
-alphanumeric or underscore (no leading digit). At start time, each
-variable becomes a `--setenv=KEY=VALUE` argument to systemd-nspawn.
+**Environment variables** use the format `KEY=VALUE`. Keys must be alphanumeric or underscore (no leading digit). At start time, each variable becomes a `--setenv=KEY=VALUE` argument to systemd-nspawn.
 
-Both are stored in the container's state file (`BINDS=` and `ENVS=`,
-pipe-separated) and reconstituted into nspawn arguments on every start.
+Both are stored in the container's state file (`BINDS=` and `ENVS=`, pipe-separated) and reconstituted into nspawn arguments on every start.
 
 ## 12. Resource Limits
 
@@ -997,26 +512,15 @@ Flag                      systemd property  Example
 --cpu-weight <1-10000>    CPUWeight=        --cpu-weight 100
 ```
 
-These flags are available on `sdme create`, `sdme new`, and `sdme set`.
-They are applied via a systemd drop-in file (`limits.conf`) installed
-alongside the container's service unit. A `daemon-reload` is triggered
-when the drop-in changes.
+These flags are available on `sdme create`, `sdme new`, and `sdme set`. They are applied via a systemd drop-in file (`limits.conf`) installed alongside the container's service unit. A `daemon-reload` is triggered when the drop-in changes.
 
-`sdme set` replaces all limits at once: flags not specified are removed.
-If the container is running, sdme prints a note that a restart is needed
-for the new limits to take effect.
+`sdme set` replaces all limits at once: flags not specified are removed. If the container is running, sdme prints a note that a restart is needed for the new limits to take effect.
 
-Memory values accept K/M/G/T suffixes. CPU count is a positive float
-where `1` means one full core and `0.5` means half a core (converted to
-systemd's `CPUQuota=` percentage internally). CPU weight is an integer
-from 1 to 10000, controlling relative scheduling priority when CPUs are
-contended.
+Memory values accept K/M/G/T suffixes. CPU count is a positive float where `1` means one full core and `0.5` means half a core (converted to systemd's `CPUQuota=` percentage internally). CPU weight is an integer from 1 to 10000, controlling relative scheduling priority when CPUs are contended.
 
 ## 13. Configuration
 
-sdme stores its settings in a TOML file at `/etc/sdme.conf`, managed
-via `sdme config get` (show all settings) and `sdme config set KEY VALUE`
-(change a setting):
+sdme stores its settings in a TOML file at `/etc/sdme.conf`, managed via `sdme config get` (show all settings) and `sdme config set KEY VALUE` (change a setting):
 
 ```
 Setting                           Default
@@ -1057,76 +561,44 @@ update_check.check_interval_hours 24
 - `interactive`: enable interactive prompts.
 - `datadir`: root directory for all container and rootfs data.
 - `boot_timeout`: seconds to wait for container boot.
-- `join_as_sudo_user`: when no `--user` is given, join host-rootfs
-  containers as `$SUDO_USER` instead of root. `--user` on
-  `new`/`join`/`exec` always overrides this.
-- `host_rootfs_opaque_dirs`: default opaque dirs for host-rootfs
-  containers (empty string disables).
+- `join_as_sudo_user`: when no `--user` is given, join host-rootfs containers as `$SUDO_USER` instead of root. `--user` on `new`/`join`/`exec` always overrides this.
+- `host_rootfs_opaque_dirs`: default opaque dirs for host-rootfs containers (empty string disables).
 - `hardened_drop_caps`: capabilities dropped by `--hardened`.
 - `default_base_fs`: default base rootfs for OCI app images.
-- `default_output_format`: default output format for `ps` and
-  `fs ls` (empty = table, `json`, `json-pretty`).
-- `default_kube_registry`: default registry for unqualified image
-  names in Kubernetes Pod YAML (e.g. `nginx` resolves to
-  `docker.io/library/nginx`).
-- `default_export_fs`: filesystem type for raw disk image export
-  (`ext4` or `btrfs`).
-- `tasks_max`: maximum tasks (processes/threads) per container
-  in the systemd template unit.
+- `default_output_format`: default output format for `ps` and `fs ls` (empty = table, `json`, `json-pretty`).
+- `default_kube_registry`: default registry for unqualified image names in Kubernetes Pod YAML (e.g. `nginx` resolves to `docker.io/library/nginx`).
+- `default_export_fs`: filesystem type for raw disk image export (`ext4` or `btrfs`).
+- `tasks_max`: maximum tasks (processes/threads) per container in the systemd template unit.
 - `docker_user`: Docker Hub username for authenticated pulls.
 - `docker_token`: Docker Hub personal access token.
 - `oci_cache_dir`: OCI blob cache directory.
 - `oci_cache_max_size`: max cache size (`0` disables).
-- `oci_manifest_cache_ttl`: seconds to cache OCI manifests before
-  re-fetching from the registry (default 900; `0` disables).
-  `--no-cache` on `fs import`, `kube apply`, and `kube create`
-  overrides this to 0 for a single invocation.
-- `http_timeout`: HTTP connect/resolve timeout in seconds for
-  downloads and OCI registry pulls.
+- `oci_manifest_cache_ttl`: seconds to cache OCI manifests before re-fetching from the registry (default 900; `0` disables). `--no-cache` on `fs import`, `kube apply`, and `kube create` overrides this to 0 for a single invocation.
+- `http_timeout`: HTTP connect/resolve timeout in seconds for downloads and OCI registry pulls.
 - `http_body_timeout`: HTTP body receive timeout in seconds.
-- `max_download_size`: maximum download size for imports and
-  OCI pulls (e.g. `50G`; `0` = unlimited).
-- `default_create_masked_services`: comma-separated systemd units
-  to mask at container create time (empty string disables).
+- `max_download_size`: maximum download size for imports and OCI pulls (e.g. `50G`; `0` = unlimited).
+- `default_create_masked_services`: comma-separated systemd units to mask at container create time (empty string disables).
 - `stop_timeout_graceful`: seconds to wait during graceful stop.
 - `stop_timeout_terminate`: seconds to wait during terminate stop.
 - `stop_timeout_kill`: seconds to wait during force-kill stop.
-- `auto_fs_gc`: automatically clean stale transaction directories
-  before mutating operations.
-- `default_export_free_space`: extra free space for auto-calculated
-  raw disk image size.
-- `update_check.enabled`: run the background version probe and print
-  the update-available banner. See section 19.
-- `update_check.version_url`: URL returning JSON with a `tag_name`
-  field for the latest release (GitHub API compatible).
-- `update_check.binary_url_template`: URL template for the release
-  binary; `{version}` and `{arch}` are substituted. `{version}` has
-  no leading `v`; `{arch}` is `x86_64` or `aarch64`.
-- `update_check.checksums_url_template`: URL template for the
-  `SHA256SUMS` file; `{version}` is substituted.
-- `update_check.check_interval_hours`: minimum hours between
-  background probes; failures still update the timestamp to avoid
-  retry storms on air-gapped hosts.
-- `distros.<family>.import_prehook`: chroot commands to make a
-  rootfs bootable (install systemd, dbus, etc.). Family names:
-  `debian`, `fedora`, `arch`, `suse`, `nixos`, `unknown`. Absent =
-  built-in defaults; empty array = do nothing.
-- `distros.<family>.export_prehook`: chroot commands run before
-  container or rootfs export. Same semantics.
-- `distros.<family>.export_vm_prehook`: chroot commands to prepare
-  a rootfs for VM export (install udev, restore caps). Same semantics.
+- `auto_fs_gc`: automatically clean stale transaction directories before mutating operations.
+- `default_export_free_space`: extra free space for auto-calculated raw disk image size.
+- `update_check.enabled`: run the background version probe and print the update-available banner. See section 19.
+- `update_check.version_url`: URL returning JSON with a `tag_name` field for the latest release (GitHub API compatible).
+- `update_check.binary_url_template`: URL template for the release binary; `{version}` and `{arch}` are substituted. `{version}` has no leading `v`; `{arch}` is `x86_64` or `aarch64`.
+- `update_check.checksums_url_template`: URL template for the `SHA256SUMS` file; `{version}` is substituted.
+- `update_check.check_interval_hours`: minimum hours between background probes; failures still update the timestamp to avoid retry storms on air-gapped hosts.
+- `distros.<family>.import_prehook`: chroot commands to make a rootfs bootable (install systemd, dbus, etc.). Family names: `debian`, `fedora`, `arch`, `suse`, `nixos`, `unknown`. Absent = built-in defaults; empty array = do nothing.
+- `distros.<family>.export_prehook`: chroot commands run before container or rootfs export. Same semantics.
+- `distros.<family>.export_vm_prehook`: chroot commands to prepare a rootfs for VM export (install udev, restore caps). Same semantics.
 
-Settings are read with `sdme config get` and written with
-`sdme config set <key> <value>`.
+Settings are read with `sdme config get` and written with `sdme config set <key> <value>`.
 
 Config files are written with mode `0600`.
 
 ## 14. Security
 
-This section documents sdme's security implementation: capabilities,
-seccomp, AppArmor, the `--hardened` and `--strict` flags, and input
-sanitization. For comparisons with Docker and Podman, see
-[Security documentation](@/docs/security.md).
+This section documents sdme's security implementation: capabilities, seccomp, AppArmor, the `--hardened` and `--strict` flags, and input sanitization. For comparisons with Docker and Podman, see [Security documentation](@/docs/security.md).
 
 ### Capability bounding set
 
@@ -1144,53 +616,30 @@ CAP_SYS_CHROOT          CAP_SYS_NICE            CAP_SYS_PTRACE
 CAP_SYS_RESOURCE        CAP_SYS_TTY_CONFIG
 ```
 
-`CAP_NET_ADMIN` is added only when `--private-network` is active, since
-it is safe to grant when the container has its own network namespace
-(changes only affect the isolated namespace, not the host).
+`CAP_NET_ADMIN` is added only when `--private-network` is active, since it is safe to grant when the container has its own network namespace (changes only affect the isolated namespace, not the host).
 
-`CAP_SYS_ADMIN` is the most significant capability in this set. It is
-required for systemd to function inside the container: mounting
-filesystems, configuring cgroups, managing namespaces for its own
-services. This cannot be dropped without breaking the
-systemd-inside-nspawn model.
+`CAP_SYS_ADMIN` is the most significant capability in this set. It is required for systemd to function inside the container: mounting filesystems, configuring cgroups, managing namespaces for its own services. This cannot be dropped without breaking the systemd-inside-nspawn model.
 
-Notable exclusions: `CAP_SYS_MODULE` (no kernel module loading),
-`CAP_SYS_RAWIO` (no raw I/O port access), `CAP_SYS_TIME` (no system
-clock modification), `CAP_BPF` (no BPF program loading),
-`CAP_SYSLOG`, and `CAP_IPC_LOCK`.
+Notable exclusions: `CAP_SYS_MODULE` (no kernel module loading), `CAP_SYS_RAWIO` (no raw I/O port access), `CAP_SYS_TIME` (no system clock modification), `CAP_BPF` (no BPF program loading), `CAP_SYSLOG`, and `CAP_IPC_LOCK`.
 
 sdme provides fine-grained capability management:
 
-- `--drop-capability CAP_X`: drop individual capabilities from nspawn's
-  default set. Accepts names with or without the `CAP_` prefix.
-- `--capability CAP_X`: add capabilities not in the default set (e.g.
-  `CAP_NET_ADMIN` for containers with `--private-network`).
+- `--drop-capability CAP_X`: drop individual capabilities from nspawn's default set. Accepts names with or without the `CAP_` prefix.
+- `--capability CAP_X`: add capabilities not in the default set (e.g. `CAP_NET_ADMIN` for containers with `--private-network`).
 
-Both flags are repeatable and validated against a known set of Linux
-capabilities. Specifying the same capability in both is rejected as
-contradictory.
+Both flags are repeatable and validated against a known set of Linux capabilities. Specifying the same capability in both is rejected as contradictory.
 
 ### Seccomp filtering
 
-nspawn applies a built-in allowlist-based seccomp filter. Syscalls not
-on the allowlist are blocked with `EPERM` (for known syscalls) or
-`ENOSYS` (for unknown ones).
+nspawn applies a built-in allowlist-based seccomp filter. Syscalls not on the allowlist are blocked with `EPERM` (for known syscalls) or `ENOSYS` (for unknown ones).
 
-Allowed by default: `@basic-io`, `@file-system`, `@io-event`, `@ipc`,
-`@mount`, `@network-io`, `@process`, `@resources`, `@setuid`, `@signal`,
-`@sync`, `@timer`, and about 50 individual syscalls.
+Allowed by default: `@basic-io`, `@file-system`, `@io-event`, `@ipc`, `@mount`, `@network-io`, `@process`, `@resources`, `@setuid`, `@signal`, `@sync`, `@timer`, and about 50 individual syscalls.
 
-Blocked unconditionally: `kexec_load`, `kexec_file_load`,
-`perf_event_open`, `fanotify_init`, `open_by_handle_at`, `quotactl`,
-the `@swap` group, and the `@cpu-emulation` group.
+Blocked unconditionally: `kexec_load`, `kexec_file_load`, `perf_event_open`, `fanotify_init`, `open_by_handle_at`, `quotactl`, the `@swap` group, and the `@cpu-emulation` group.
 
-Capability-gated: `@clock` requires `CAP_SYS_TIME`, `@module` requires
-`CAP_SYS_MODULE`, `@raw-io` requires `CAP_SYS_RAWIO`. Since none of
-these capabilities are in the default bounding set, these syscall groups
-are effectively blocked.
+Capability-gated: `@clock` requires `CAP_SYS_TIME`, `@module` requires `CAP_SYS_MODULE`, `@raw-io` requires `CAP_SYS_RAWIO`. Since none of these capabilities are in the default bounding set, these syscall groups are effectively blocked.
 
-`--system-call-filter` layers additional seccomp filters on top of
-nspawn's baseline. It uses systemd's group syntax:
+`--system-call-filter` layers additional seccomp filters on top of nspawn's baseline. It uses systemd's group syntax:
 
 - `@group`: allow a syscall group
 - `~@group`: deny a syscall group
@@ -1200,20 +649,13 @@ sdme create mybox --system-call-filter ~@raw-io
 sdme create mybox --system-call-filter ~@cpu-emulation
 ```
 
-The flag is repeatable. Note that `~@mount` breaks systemd inside the
-container, the same reason nspawn allows it in the first place.
+The flag is repeatable. Note that `~@mount` breaks systemd inside the container, the same reason nspawn allows it in the first place.
 
 ### Mandatory access control
 
-sdme ships a default AppArmor profile (`sdme-default`) designed for
-systemd-nspawn system containers. The profile allows the operations
-required for systemd boot (mount, pivot_root, signal, unix sockets)
-while denying dangerous host-level access (raw device I/O, `/proc`
-sysctl writes, kernel module paths). It is applied via
-`AppArmorProfile=` in the systemd service unit drop-in.
+sdme ships a default AppArmor profile (`sdme-default`) designed for systemd-nspawn system containers. The profile allows the operations required for systemd boot (mount, pivot_root, signal, unix sockets) while denying dangerous host-level access (raw device I/O, `/proc` sysctl writes, kernel module paths). It is applied via `AppArmorProfile=` in the systemd service unit drop-in.
 
-The profile is automatically applied by `--strict`. It can also be used
-standalone:
+The profile is automatically applied by `--strict`. It can also be used standalone:
 
 ```
 sdme create mybox --apparmor-profile sdme-default
@@ -1228,74 +670,44 @@ apparmor_parser -r /etc/apparmor.d/sdme-default
 
 The deb and rpm packages install and load the profile automatically.
 
-**SELinux is not supported.** sdme has no SELinux integration. During
-rootfs import and copy operations, `security.selinux` extended
-attributes are explicitly skipped because they carry labels (types,
-roles, levels) from the source system's SELinux policy, which may not
-exist in the destination's policy. Preserving them would either be
-silently ignored or cause access denials on enforcing systems. The
-correct approach on SELinux-enabled hosts is to relabel after import
-via `restorecon -R` or by touching `/.autorelabel`.
+**SELinux is not supported.** sdme has no SELinux integration. During rootfs import and copy operations, `security.selinux` extended attributes are explicitly skipped because they carry labels (types, roles, levels) from the source system's SELinux policy, which may not exist in the destination's policy. Preserving them would either be silently ignored or cause access denials on enforcing systems. The correct approach on SELinux-enabled hosts is to relabel after import via `restorecon -R` or by touching `/.autorelabel`.
 
 ### Privilege escalation prevention
 
-**`--no-new-privileges`** passes `--no-new-privileges=yes` to nspawn.
-Off by default because interactive containers typically want `sudo`/`su`
-to work; `no_new_privs` blocks privilege escalation via setuid binaries
-and file capabilities. Enabled by `--hardened` and `--strict`.
+**`--no-new-privileges`** passes `--no-new-privileges=yes` to nspawn. Off by default because interactive containers typically want `sudo`/`su` to work; `no_new_privs` blocks privilege escalation via setuid binaries and file capabilities. Enabled by `--hardened` and `--strict`.
 
-**`--read-only`** makes the overlayfs merged view read-only.
-Applications needing writable areas use bind mounts (`-b`).
+**`--read-only`** makes the overlayfs merged view read-only. Applications needing writable areas use bind mounts (`-b`).
 
 ### The `--hardened` flag
 
-`--hardened` is sdme's one-flag defense-in-depth bundle. It enables
-multiple security layers at once:
+`--hardened` is sdme's one-flag defense-in-depth bundle. It enables multiple security layers at once:
 
-- **User namespace isolation** (`--private-users=pick
-  --private-users-ownership=auto`): container root maps to a high
-  unprivileged UID on the host.
-- **Private network namespace** (`--private-network`): the container
-  gets its own network namespace with loopback only.
-- **`--no-new-privileges=yes`**: blocks privilege escalation via setuid
-  binaries and file capabilities.
-- **Drops capabilities**: `CAP_SYS_PTRACE`, `CAP_NET_RAW`,
-  `CAP_SYS_RAWIO`, `CAP_SYS_BOOT`, dropping 4 capabilities (3 from
-  the active set; `CAP_SYS_RAWIO` is preventive since nspawn does not
-  grant it by default), leaving 23 retained capabilities.
+- **User namespace isolation** (`--private-users=pick --private-users-ownership=auto`): container root maps to a high unprivileged UID on the host.
+- **Private network namespace** (`--private-network`): the container gets its own network namespace with loopback only.
+- **`--no-new-privileges=yes`**: blocks privilege escalation via setuid binaries and file capabilities.
+- **Drops capabilities**: `CAP_SYS_PTRACE`, `CAP_NET_RAW`, `CAP_SYS_RAWIO`, `CAP_SYS_BOOT`, dropping 4 capabilities (3 from the active set; `CAP_SYS_RAWIO` is preventive since nspawn does not grant it by default), leaving 23 retained capabilities.
 
 ```
 sdme create mybox --hardened
 sdme new mybox --hardened
 ```
 
-**When cloning the host rootfs** (no `-r` flag), `--hardened` has
-several visible effects because the container inherits the host's
-installed binaries and enabled services:
+**When cloning the host rootfs** (no `-r` flag), `--hardened` has several visible effects because the container inherits the host's installed binaries and enabled services:
 
-- **No internet.** `--private-network` gives the container only a
-  loopback interface. Host services that assume network access (sshd,
-  NTP, avahi, etc.) will fail or retry indefinitely.
-- **`sudo`/`su` silently fail.** `--no-new-privileges` prevents setuid
-  escalation. The binaries exist and appear normal, but the kernel
-  blocks the privilege transition.
+- **No internet.** `--private-network` gives the container only a loopback interface. Host services that assume network access (sshd, NTP, avahi, etc.) will fail or retry indefinitely.
+- **`sudo`/`su` silently fail.** `--no-new-privileges` prevents setuid escalation. The binaries exist and appear normal, but the kernel blocks the privilege transition.
 - **`ping` and raw-socket tools fail.** `CAP_NET_RAW` is dropped.
 - **`strace`/`gdb` fail.** `CAP_SYS_PTRACE` is dropped.
 
-`sdme new` prints notes about `--private-network` and
-`--no-new-privileges` when cloning the host rootfs. For imported rootfs
-(e.g. `-r ubuntu`), these effects are less surprising because the rootfs
-was built for container use.
+`sdme new` prints notes about `--private-network` and `--no-new-privileges` when cloning the host rootfs. For imported rootfs (e.g. `-r ubuntu`), these effects are less surprising because the rootfs was built for container use.
 
-For a host-rootfs container where these side effects matter, apply
-individual flags instead:
+For a host-rootfs container where these side effects matter, apply individual flags instead:
 
 ```
 sdme create mybox --userns --drop-capability CAP_SYS_RAWIO
 ```
 
-**Composable with fine-grained flags.** `--hardened` sets a baseline
-that individual flags can override or extend:
+**Composable with fine-grained flags.** `--hardened` sets a baseline that individual flags can override or extend:
 
 ```
 sdme create mybox --hardened --capability CAP_NET_RAW       # re-enable a dropped cap
@@ -1304,8 +716,7 @@ sdme create mybox --hardened --apparmor-profile myprofile   # add MAC confinemen
 sdme create mybox --hardened --read-only                    # read-only rootfs
 ```
 
-**Configurable.** The capabilities dropped by `--hardened` are
-controlled by the `hardened_drop_caps` config key:
+**Configurable.** The capabilities dropped by `--hardened` are controlled by the `hardened_drop_caps` config key:
 
 ```
 sdme config set hardened_drop_caps CAP_SYS_PTRACE,CAP_NET_RAW
@@ -1313,57 +724,36 @@ sdme config set hardened_drop_caps CAP_SYS_PTRACE,CAP_NET_RAW
 
 ### The `--strict` flag
 
-`--strict` closes the gaps between `--hardened` and Docker/Podman
-defaults. It implies `--hardened` and adds:
+`--strict` closes the gaps between `--hardened` and Docker/Podman defaults. It implies `--hardened` and adds:
 
-- **Aggressive capability drops**: retains only the ~14 capabilities
-  Docker grants (AUDIT_WRITE, CHOWN, DAC_OVERRIDE, FOWNER, FSETID,
-  KILL, MKNOD, NET_BIND_SERVICE, SETFCAP, SETGID, SETPCAP, SETUID,
-  SYS_CHROOT) plus `CAP_SYS_ADMIN` (required for systemd init). Also
-  drops `CAP_NET_RAW` (carried over from `--hardened`, stricter than
-  Docker). Drops 27 capabilities total.
-- **Seccomp filters**: denies `@cpu-emulation`, `@debug`, `@obsolete`,
-  and `@raw-io` syscall groups on top of nspawn's baseline filter.
-- **AppArmor profile**: applies the `sdme-default` profile, which
-  confines `/proc`/`/sys` writes and raw device access at the MAC level.
+- **Aggressive capability drops**: retains only the ~14 capabilities Docker grants (AUDIT_WRITE, CHOWN, DAC_OVERRIDE, FOWNER, FSETID, KILL, MKNOD, NET_BIND_SERVICE, SETFCAP, SETGID, SETPCAP, SETUID, SYS_CHROOT) plus `CAP_SYS_ADMIN` (required for systemd init). Also drops `CAP_NET_RAW` (carried over from `--hardened`, stricter than Docker). Drops 27 capabilities total.
+- **Seccomp filters**: denies `@cpu-emulation`, `@debug`, `@obsolete`, and `@raw-io` syscall groups on top of nspawn's baseline filter.
+- **AppArmor profile**: applies the `sdme-default` profile, which confines `/proc`/`/sys` writes and raw device access at the MAC level.
 
 ```
 sdme create mybox --strict
 sdme new mybox --strict
 ```
 
-**When cloning the host rootfs**, `--strict` compounds the effects of
-`--hardened` with additional restrictions:
+**When cloning the host rootfs**, `--strict` compounds the effects of `--hardened` with additional restrictions:
 
-- **`systemd-networkd` and `NetworkManager` fail.**
-  `CAP_NET_ADMIN` is dropped.
-- **`systemd-timesyncd` cannot set the clock.** `CAP_SYS_TIME` is
-  dropped.
+- **`systemd-networkd` and `NetworkManager` fail.** `CAP_NET_ADMIN` is dropped.
+- **`systemd-timesyncd` cannot set the clock.** `CAP_SYS_TIME` is dropped.
 - **Logging to `/dev/kmsg` is denied.** `CAP_SYSLOG` is dropped.
 - **Nice/priority adjustments fail.** `CAP_SYS_NICE` is dropped.
-- **AppArmor profile must be installed first.** The `sdme-default`
-  profile is checked at `start` time; if it is not loaded, the
-  container fails to start with instructions for installation.
+- **AppArmor profile must be installed first.** The `sdme-default` profile is checked at `start` time; if it is not loaded, the container fails to start with instructions for installation.
 
-For host-rootfs use, `--hardened` with selective additions is often
-more practical than `--strict`:
+For host-rootfs use, `--hardened` with selective additions is often more practical than `--strict`:
 
 ```
 sdme create mybox --hardened --system-call-filter ~@raw-io
 ```
 
-`--strict` is best suited for imported rootfs images where the service
-set is known and controlled.
+`--strict` is best suited for imported rootfs images where the service set is known and controlled.
 
-**Why `CAP_SYS_ADMIN` is retained.** `CAP_SYS_ADMIN` is required for
-systemd to function inside the container. It needs to mount filesystems,
-configure cgroups, and manage namespaces for its own services. With user
-namespace isolation (enabled by `--strict`), `CAP_SYS_ADMIN` is scoped
-to the user namespace. It does not grant host-level SYS_ADMIN. A process
-that escapes the container lands in an unprivileged context on the host.
+**Why `CAP_SYS_ADMIN` is retained.** `CAP_SYS_ADMIN` is required for systemd to function inside the container. It needs to mount filesystems, configure cgroups, and manage namespaces for its own services. With user namespace isolation (enabled by `--strict`), `CAP_SYS_ADMIN` is scoped to the user namespace. It does not grant host-level SYS_ADMIN. A process that escapes the container lands in an unprivileged context on the host.
 
-**Composable with fine-grained flags.** Like `--hardened`, `--strict`
-sets a baseline that individual flags can override:
+**Composable with fine-grained flags.** Like `--hardened`, `--strict` sets a baseline that individual flags can override:
 
 ```
 sdme create mybox --strict --capability CAP_NET_RAW   # re-enable a dropped cap
@@ -1373,154 +763,69 @@ sdme create mybox --strict --apparmor-profile custom  # use a custom profile
 
 ### Input sanitization
 
-sdme runs as root and handles untrusted input: tarballs from the
-internet, OCI images from public registries, QCOW2 disk images from
-unknown sources. Several hardening measures are in place:
+sdme runs as root and handles untrusted input: tarballs from the internet, OCI images from public registries, QCOW2 disk images from unknown sources. Several hardening measures are in place:
 
-**Path traversal prevention.** OCI layer tar paths are sanitised before
-extraction: `..` components are rejected and leading `/` is stripped.
-Whiteout marker handling verifies (via `canonicalize()`) that the target
-path stays within the destination directory before deleting anything.
+**Path traversal prevention.** OCI layer tar paths are sanitised before extraction: `..` components are rejected and leading `/` is stripped. Whiteout marker handling verifies (via `canonicalize()`) that the target path stays within the destination directory before deleting anything.
 
-**Digest validation.** OCI blob digests (`sha256:abc123...`) are
-validated for safe characters (alphanumeric and hex only) and correct
-length (64 chars for SHA-256, 128 for SHA-512) before being used to
-construct filesystem paths. A malicious manifest cannot use the digest
-field for directory traversal.
+**Digest validation.** OCI blob digests (`sha256:abc123...`) are validated for safe characters (alphanumeric and hex only) and correct length (64 chars for SHA-256, 128 for SHA-512) before being used to construct filesystem paths. A malicious manifest cannot use the digest field for directory traversal.
 
-**Download size cap.** URL downloads are capped at 50 GiB
-(`MAX_DOWNLOAD_SIZE`), checked during streaming. A malicious or
-misbehaving server cannot fill the disk by sending an unbounded
-response.
+**Download size cap.** URL downloads are capped at 50 GiB (`MAX_DOWNLOAD_SIZE`), checked during streaming. A malicious or misbehaving server cannot fill the disk by sending an unbounded response.
 
-**Rootfs name validation.** The `-r`/`--fs` parameter (on `create` and
-`new`) is validated with `validate_name()` (alphanumeric, hyphens, no
-leading/trailing hyphens, no `..`) before being used to construct
-filesystem paths.
+**Rootfs name validation.** The `-r`/`--fs` parameter (on `create` and `new`) is validated with `validate_name()` (alphanumeric, hyphens, no leading/trailing hyphens, no `..`) before being used to construct filesystem paths.
 
-**Opaque directory validation.** Paths must be absolute, contain no
-`..` components, no empty strings, no duplicates. Normalised before
-storage.
+**Opaque directory validation.** Paths must be absolute, contain no `..` components, no empty strings, no duplicates. Normalised before storage.
 
-**Permission hardening.** Config files are written with mode `0o600`,
-config directories with `0o700`. Overlayfs work directories get mode
-`0o700`.
+**Permission hardening.** Config files are written with mode `0o600`, config directories with `0o700`. Overlayfs work directories get mode `0o700`.
 
-**Umask enforcement.** Container creation refuses to proceed if the
-process umask strips read or execute from "other"
-(`umask & 005 != 0`). A restrictive umask would make overlayfs
-upper-layer files inaccessible to non-root services like dbus-daemon,
-preventing container boot. This actually happened during development
-when setting umask to 007 before the `sdme create` command, would
-result in `sdme start` mysteriously misbehaving.
+**Umask enforcement.** Container creation refuses to proceed if the process umask strips read or execute from "other" (`umask & 005 != 0`). A restrictive umask would make overlayfs upper-layer files inaccessible to non-root services like dbus-daemon, preventing container boot. This actually happened during development when setting umask to 007 before the `sdme create` command, would result in `sdme start` mysteriously misbehaving.
 
-If you find a way to escape a container, traverse a path, or corrupt
-the host filesystem through sdme, please open an issue.
+If you find a way to escape a container, traverse a path, or corrupt the host filesystem through sdme, please open an issue.
 
 ## 15. Reliability
 
-Multi-step operations in sdme are designed to fail cleanly rather than
-leave broken state behind. This section is the single reference for
-transactional staging, signal handling, resource locking, and cleanup
-semantics; other sections link here rather than repeating the details.
+Multi-step operations in sdme are designed to fail cleanly rather than leave broken state behind. This section is the single reference for transactional staging, signal handling, resource locking, and cleanup semantics; other sections link here rather than repeating the details.
 
 ### Transactional staging
 
-Mutating filesystem operations (import, build, export, kube create)
-write to enumerated staging directories named
-`.{name}.{kind}-txn-{pid}` (e.g. `.ubuntu.import-txn-42195`), then do
-an atomic `rename()` to the final path on success. If the operation
-fails or is interrupted, the staging directory is left behind; no
-cleanup runs during signal handling.
+Mutating filesystem operations (import, build, export, kube create) write to enumerated staging directories named `.{name}.{kind}-txn-{pid}` (e.g. `.ubuntu.import-txn-42195`), then do an atomic `rename()` to the final path on success. If the operation fails or is interrupted, the staging directory is left behind; no cleanup runs during signal handling.
 
-Stale staging from dead PIDs is automatically cleaned up on the next
-mutating operation when `auto_fs_gc` is enabled (default `true`; see
-[Configuration](#13-configuration)), or manually via `sdme fs gc`. The
-`Txn` type in `src/txn.rs` encodes the operation kind and creator PID;
-`cleanup_stale_txns()` detects dead PIDs via `/proc/{pid}` and removes
-their artifacts.
+Stale staging from dead PIDs is automatically cleaned up on the next mutating operation when `auto_fs_gc` is enabled (default `true`; see [Configuration](#13-configuration)), or manually via `sdme fs gc`. The `Txn` type in `src/txn.rs` encodes the operation kind and creator PID; `cleanup_stale_txns()` detects dead PIDs via `/proc/{pid}` and removes their artifacts.
 
-Stopped container exports use a `Txn` with `TxnKind::Export` to mark
-the temporary read-only overlay mount lifetime, so `sdme fs gc` can
-detect and clean up stale mounts from interrupted exports.
+Stopped container exports use a `Txn` with `TxnKind::Export` to mark the temporary read-only overlay mount lifetime, so `sdme fs gc` can detect and clean up stale mounts from interrupted exports.
 
 ### Resource locking
 
-All operations that read or mutate containers, rootfs, pods, secrets,
-or configmaps use advisory `flock(2)` locks via `src/lock.rs`.
+All operations that read or mutate containers, rootfs, pods, secrets, or configmaps use advisory `flock(2)` locks via `src/lock.rs`.
 
-- **Shared locks** (read) allow concurrent operations (build, export,
-  cp, start, create) and coexist with each other.
-- **Exclusive locks** (write) protect destructive mutations (rm, fs rm,
-  import, kube delete, pod rm) and block all other lock holders.
+- **Shared locks** (read) allow concurrent operations (build, export, cp, start, create) and coexist with each other.
+- **Exclusive locks** (write) protect destructive mutations (rm, fs rm, import, kube delete, pod rm) and block all other lock holders.
 
-Lock files live at `{datadir}/locks/{kind}/{name}.lock`. All locks are
-**non-blocking** (`LOCK_NB`): if a lock cannot be acquired immediately,
-the operation fails with an error identifying the holder PID (read from
-the lock file). Lock ordering to prevent deadlocks:
-`fs -> containers -> pods -> secrets -> configmaps`. Within the same kind,
-acquire shared before exclusive on different names.
+Lock files live at `{datadir}/locks/{kind}/{name}.lock`. All locks are **non-blocking** (`LOCK_NB`): if a lock cannot be acquired immediately, the operation fails with an error identifying the holder PID (read from the lock file). Lock ordering to prevent deadlocks: `fs -> containers -> pods -> secrets -> configmaps`. Within the same kind, acquire shared before exclusive on different names.
 
-Locks are released automatically when the `ResourceLock` value is
-dropped (file descriptor closed). On process crash or `SIGKILL`, the
-kernel releases the lock. Flock semantics guarantee no stale locks.
+Locks are released automatically when the `ResourceLock` value is dropped (file descriptor closed). On process crash or `SIGKILL`, the kernel releases the lock. Flock semantics guarantee no stale locks.
 
 Examples:
 
-- `sdme fs build` holds shared locks on the FROM rootfs and any COPY
-  source rootfs or container. `sdme fs rm` and `sdme rm` acquire
-  exclusive locks, so they block while a build is using the resource.
-- `sdme fs export` holds shared locks on the container and/or rootfs
-  for the duration of the export, preventing `sdme rm` / `sdme fs rm`
-  from deleting resources mid-export.
-- `sdme cp` holds shared locks to prevent concurrent deletion during
-  copy.
-- `stop` operates via D-Bus (`KillMachine`/`TerminateMachine`) and
-  does **not** use flock, so stopping a container is never blocked by
-  any lock.
+- `sdme fs build` holds shared locks on the FROM rootfs and any COPY source rootfs or container. `sdme fs rm` and `sdme rm` acquire exclusive locks, so they block while a build is using the resource.
+- `sdme fs export` holds shared locks on the container and/or rootfs for the duration of the export, preventing `sdme rm` / `sdme fs rm` from deleting resources mid-export.
+- `sdme cp` holds shared locks to prevent concurrent deletion during copy.
+- `stop` operates via D-Bus (`KillMachine`/`TerminateMachine`) and does **not** use flock, so stopping a container is never blocked by any lock.
 
 ### Cooperative interrupt handling
 
-A global `INTERRUPTED` `AtomicBool` flag is set by a POSIX signal
-handler for both `SIGINT` and `SIGTERM` (installed via `sigaction`
-without `SA_RESTART`, so blocking system calls (file reads, network
-I/O) return `EINTR` immediately). `INTERRUPT_SIGNAL` records which
-signal fired for correct exit codes (128+signum).
+A global `INTERRUPTED` `AtomicBool` flag is set by a POSIX signal handler for both `SIGINT` and `SIGTERM` (installed via `sigaction` without `SA_RESTART`, so blocking system calls (file reads, network I/O) return `EINTR` immediately). `INTERRUPT_SIGNAL` records which signal fired for correct exit codes (128+signum).
 
-`check_interrupted()` is called after every subprocess `.status()` wait,
-not just between loop iterations, allowing Ctrl+C or SIGTERM to cancel
-cleanly at any point, including multi-gigabyte downloads, extractions,
-and blocked DNS resolution or TCP connection attempts. The handler
-restores `SIG_DFL` after the first delivery, so a second press of the
-same signal force-kills the process.
+`check_interrupted()` is called after every subprocess `.status()` wait, not just between loop iterations, allowing Ctrl+C or SIGTERM to cancel cleanly at any point, including multi-gigabyte downloads, extractions, and blocked DNS resolution or TCP connection attempts. The handler restores `SIG_DFL` after the first delivery, so a second press of the same signal force-kills the process.
 
-**Boot failure cleanup.** `sdme new`, `sdme kube apply`, and
-`sdme start` stop (but do not remove) the container on boot failure or
-interrupt, leaving it on disk for debugging or manual cleanup via
-`sdme rm`. All paths use `save_and_reset_interrupt()` before the stop
-operation so that `check_interrupted()` in the stop path does not
-short-circuit, then `restore_interrupt()` afterward so the interrupt
-propagates to callers.
+**Boot failure cleanup.** `sdme new`, `sdme kube apply`, and `sdme start` stop (but do not remove) the container on boot failure or interrupt, leaving it on disk for debugging or manual cleanup via `sdme rm`. All paths use `save_and_reset_interrupt()` before the stop operation so that `check_interrupted()` in the stop path does not short-circuit, then `restore_interrupt()` afterward so the interrupt propagates to callers.
 
-**Build failure cleanup.** If a build fails, the staging container is
-stopped on error. The overlayfs upper layer is preserved for resumable
-builds (see [fs build](#7-fs-build-building-root-filesystems)). Any
-partial rootfs is left behind for cleanup via `sdme fs gc`.
+**Build failure cleanup.** If a build fails, the staging container is stopped on error. The overlayfs upper layer is preserved for resumable builds (see [fs build](#7-fs-build-building-root-filesystems)). Any partial rootfs is left behind for cleanup via `sdme fs gc`.
 
-**Multi-container loop cancellation.** Batch operations (`rm -a`,
-`start --all`, `stop`, `enable`, `disable`, `pod rm`, `fs rm`) use
-`for_each_container` or equivalent loops that check the `INTERRUPTED`
-flag after every action and break immediately. A `check_interrupted()?`
-call before the final error summary ensures the process exits with code
-128+signum (e.g. 130 for SIGINT) and prints "interrupted, exiting".
-Cleanup paths (boot failure, build failure) use
-`save_and_reset_interrupt()` / `restore_interrupt()` so the flag
-survives the cleanup stop and propagates to the outer loop.
+**Multi-container loop cancellation.** Batch operations (`rm -a`, `start --all`, `stop`, `enable`, `disable`, `pod rm`, `fs rm`) use `for_each_container` or equivalent loops that check the `INTERRUPTED` flag after every action and break immediately. A `check_interrupted()?` call before the final error summary ensures the process exits with code 128+signum (e.g. 130 for SIGINT) and prints "interrupted, exiting". Cleanup paths (boot failure, build failure) use `save_and_reset_interrupt()` / `restore_interrupt()` so the flag survives the cleanup stop and propagates to the outer loop.
 
 ### Health checks
 
-The HEALTH column in `sdme ps` layers three signals, checked from the
-host inward; the first one that reports a problem wins:
+The HEALTH column in `sdme ps` layers three signals, checked from the host inward; the first one that reports a problem wins:
 
   1. State integrity. A missing container directory, missing rootfs,
      or unreadable state file is reported directly (`missing fs`,
@@ -1535,31 +840,19 @@ host inward; the first one that reports a problem wins:
      health is `unknown` rather than `ok`: an unreachable container is
      never reported healthy.
 
-A failed unit inside a running container (a web server that crashed at
-boot, for example) therefore surfaces as `degraded` in `sdme ps`
-without any per-container probe configuration. The query shells out to
-systemctl rather than using zbus because reaching a userns container's
-bus from the host requires a forked-helper connection that systemctl
-(like busctl) already implements; the full rationale is documented at
-`wait_for_dbus` in `src/systemd/dbus.rs`.
+A failed unit inside a running container (a web server that crashed at boot, for example) therefore surfaces as `degraded` in `sdme ps` without any per-container probe configuration. The query shells out to systemctl rather than using zbus because reaching a userns container's bus from the host requires a forked-helper connection that systemctl (like busctl) already implements; the full rationale is documented at `wait_for_dbus` in `src/systemd/dbus.rs`.
 
-Kube containers with readiness probes report `ready` / `not-ready`
-from the probe-ready files written by `sdme-kube-probe` instead of the
-in-container systemd state.
+Kube containers with readiness probes report `ready` / `not-ready` from the probe-ready files written by `sdme-kube-probe` instead of the in-container systemd state.
 
-OS detection uses the container's overlayfs layers (not the host
-root) to resolve the distro name.
+OS detection uses the container's overlayfs layers (not the host root) to resolve the distro name.
 
-If you find a way to leave sdme's state inconsistent (a container that
-can't be listed, removed, or recovered), please open an issue.
+If you find a way to leave sdme's state inconsistent (a container that can't be listed, removed, or recovered), please open an issue.
 
 ### Pruning unused resources
 
-`sdme prune` provides a single command to find and remove all unused
-resources. It runs in two phases: analyze, then execute.
+`sdme prune` provides a single command to find and remove all unused resources. It runs in two phases: analyze, then execute.
 
-The analysis phase is read-only. It scans every resource type and
-collects items that can be safely removed:
+The analysis phase is read-only. It scans every resource type and collects items that can be safely removed:
 
   - Filesystems with no containers using them (except the configured
     `default_base_fs`)
@@ -1576,24 +869,11 @@ collects items that can be safely removed:
     container binds reference
   - Stale transaction staging directories (same as `sdme fs gc`)
 
-After displaying a categorized summary, prune asks for confirmation
-in interactive mode. `--dry-run` shows the analysis without removing
-anything. `--except` excludes items by name, with optional
-`category:name` prefixes to disambiguate when a name appears in
-multiple categories.
+After displaying a categorized summary, prune asks for confirmation in interactive mode. `--dry-run` shows the analysis without removing anything. `--except` excludes items by name, with optional `category:name` prefixes to disambiguate when a name appears in multiple categories.
 
-The execution phase removes items in lock order (fs, containers, pods,
-secrets, configmaps) to prevent deadlocks. Each item's existing remove
-function is called, which acquires its own exclusive lock. Errors are
-collected rather than aborting; a final summary reports successes and
-failures.
+The execution phase removes items in lock order (fs, containers, pods, secrets, configmaps) to prevent deadlocks. Each item's existing remove function is called, which acquires its own exclusive lock. Errors are collected rather than aborting; a final summary reports successes and failures.
 
-The OCI blob cache is intentionally excluded from pruning. It has its
-own size-based management: LRU eviction when exceeding
-`oci_cache_max_size` (see [Configuration](#13-configuration)) and
-explicit cleanup via `sdme fs cache clean`. Blobs in the cache may be
-reused by future imports, so aggressive pruning would just force
-re-downloads.
+The OCI blob cache is intentionally excluded from pruning. It has its own size-based management: LRU eviction when exceeding `oci_cache_max_size` (see [Configuration](#13-configuration)) and explicit cleanup via `sdme fs cache clean`. Blobs in the cache may be reused by future imports, so aggressive pruning would just force re-downloads.
 
 Implementation: `src/prune.rs`.
 
@@ -1601,22 +881,13 @@ Implementation: `src/prune.rs`.
 
 ### Learning the spec
 
-OCI registry pulling implements the OCI Distribution Spec directly, no
-shelling out. The flow is: parse the image reference, probe the registry
-for auth requirements, obtain a bearer token if needed, fetch the
-manifest (resolving manifest lists by architecture), then download and
-extract layers in order.
+OCI registry pulling implements the OCI Distribution Spec directly, no shelling out. The flow is: parse the image reference, probe the registry for auth requirements, obtain a bearer token if needed, fetch the manifest (resolving manifest lists by architecture), then download and extract layers in order.
 
-Layer extraction handles OCI whiteout markers: `.wh.<name>` deletes a
-file from the previous layer, `.wh..wh..opq` clears an entire
-directory. Tar paths are sanitised (leading `/` is stripped and `..`
-components are rejected) to prevent path traversal escaping the
-destination directory.
+Layer extraction handles OCI whiteout markers: `.wh.<name>` deletes a file from the previous layer, `.wh..wh..opq` clears an entire directory. Tar paths are sanitised (leading `/` is stripped and `..` components are rejected) to prevent path traversal escaping the destination directory.
 
 ### Two modes: base OS and application
 
-When importing an OCI image, sdme classifies it as either a **base OS
-image** or an **application image** based on the image config:
+When importing an OCI image, sdme classifies it as either a **base OS image** or an **application image** based on the image config:
 
 ```
 Classification     Criteria
@@ -1626,8 +897,7 @@ Application image  Has entrypoint, non-shell cmd, or ports
 ```
 
 - **Base OS image**: extracted as a first-class sdme rootfs.
-- **Application image**: placed under `/oci/apps/{name}/root`
-  inside a base rootfs.
+- **Application image**: placed under `/oci/apps/{name}/root` inside a base rootfs.
 
 Application images require a base rootfs specified with `--base-fs`:
 
@@ -1652,18 +922,9 @@ Flag               Behavior
 --oci-mode=app     Force application mode (requires --base-fs)
 ```
 
-**Base OS import** (debian, ubuntu, fedora) is straightforward: extract
-the rootfs and install systemd if missing. The result is a first-class
-sdme rootfs.
+**Base OS import** (debian, ubuntu, fedora) is straightforward: extract the rootfs and install systemd if missing. The result is a first-class sdme rootfs.
 
-**Application import** produces what sdme calls a *capsule*: a copy of
-a base OS rootfs with the OCI application rootfs placed under
-`/oci/apps/{name}/root` and a generated systemd service unit
-(`sdme-oci-{name}.service`) that chroots into it. The app name is
-derived from the last path component of the registry repository
-(underscores replaced with hyphens) for registry images, or the rootfs
-name for non-registry imports. Stored as `OCI_APP={name}` in the
-container state file at create time.
+**Application import** produces what sdme calls a *capsule*: a copy of a base OS rootfs with the OCI application rootfs placed under `/oci/apps/{name}/root` and a generated systemd service unit (`sdme-oci-{name}.service`) that chroots into it. The app name is derived from the last path component of the registry repository (underscores replaced with hyphens) for registry images, or the rootfs name for non-registry imports. Stored as `OCI_APP={name}` in the container state file at create time.
 
 ```
   +------------------------------------------------------------+
@@ -1693,77 +954,39 @@ container state file at create time.
   +------------------------------------------------------------+
 ```
 
-The generated `sdme-oci-{name}.service` unit uses
-`RootDirectory=/oci/apps/{name}/root` to chroot the process,
-`MountAPIVFS=yes` to provide `/proc`, `/sys`, `/dev`, and
-`EnvironmentFile=-/oci/apps/{name}/env` to
-load the image's environment variables. The unit is enabled via symlink
-in `multi-user.target.wants/` so it starts automatically when the
-container boots.
+The generated `sdme-oci-{name}.service` unit uses `RootDirectory=/oci/apps/{name}/root` to chroot the process, `MountAPIVFS=yes` to provide `/proc`, `/sys`, `/dev`, and `EnvironmentFile=-/oci/apps/{name}/env` to load the image's environment variables. The unit is enabled via symlink in `multi-user.target.wants/` so it starts automatically when the container boots.
 
-The capsule model means OCI applications get the full systemd
-operational model for free: `journalctl -u sdme-oci-{name}` for logs,
-`systemctl restart` for restarts, cgroup resource limits from the host.
-The application doesn't know or care that it's inside an nspawn
-container; it sees a chroot with API filesystems, exactly what it
-expects.
+The capsule model means OCI applications get the full systemd operational model for free: `journalctl -u sdme-oci-{name}` for logs, `systemctl restart` for restarts, cgroup resource limits from the host. The application doesn't know or care that it's inside an nspawn container; it sees a chroot with API filesystems, exactly what it expects.
 
 ### Privilege dropping for non-root OCI users
 
-Many OCI application images declare a non-root `User` in their config
-(e.g. `nginx` runs as UID 101). systemd's `User=` directive resolves
-usernames via NSS **before** entering the `RootDirectory=` chroot, so
-users that only exist inside the OCI rootfs cause exit code 217/USER.
-This is a known upstream limitation (see
-[systemd#12498](https://github.com/systemd/systemd/issues/12498),
-[systemd#19781](https://github.com/systemd/systemd/issues/19781)).
+Many OCI application images declare a non-root `User` in their config (e.g. `nginx` runs as UID 101). systemd's `User=` directive resolves usernames via NSS **before** entering the `RootDirectory=` chroot, so users that only exist inside the OCI rootfs cause exit code 217/USER. This is a known upstream limitation (see [systemd#12498](https://github.com/systemd/systemd/issues/12498), [systemd#19781](https://github.com/systemd/systemd/issues/19781)).
 
-sdme solves this with a generated static ELF binary (`isolate`,
-under 2 KiB) that creates PID/IPC namespaces, remounts /proc, drops
-`CAP_SYS_ADMIN`, optionally drops privileges (`setgroups`/`setgid`/
-`setuid`), changes the working directory, and exec's the target, all
-via raw syscalls with no libc or NSS dependency. The binary is written
-to `/usr/sbin/sdme-isolate` inside the OCI root at import time (mode `0o111`,
-owned by root). The generated unit becomes:
+sdme solves this with a generated static ELF binary (`isolate`, under 2 KiB) that creates PID/IPC namespaces, remounts /proc, drops `CAP_SYS_ADMIN`, optionally drops privileges (`setgroups`/`setgid`/ `setuid`), changes the working directory, and exec's the target, all via raw syscalls with no libc or NSS dependency. The binary is written to `/usr/sbin/sdme-isolate` inside the OCI root at import time (mode `0o111`, owned by root). The generated unit becomes:
 
 ```ini
 ExecStart=/usr/sbin/sdme-isolate <uid> <gid> <workdir> <entrypoint> [args...]
 ```
 
-No `User=` or `WorkingDirectory=` directives are needed; the binary
-handles both. For root users, uid and gid are 0; the binary still
-creates PID/IPC namespaces for proper container isolation.
+No `User=` or `WorkingDirectory=` directives are needed; the binary handles both. For root users, uid and gid are 0; the binary still creates PID/IPC namespaces for proper container isolation.
 
-The OCI `User` field is resolved at import time against `etc/passwd`
-and `etc/group` inside the OCI rootfs, supporting named users, numeric
-UIDs, explicit groups, and `uid:gid` pairs.
+The OCI `User` field is resolved at import time against `etc/passwd` and `etc/group` inside the OCI rootfs, supporting named users, numeric UIDs, explicit groups, and `uid:gid` pairs.
 
 ### The isolate binary
 
-systemd's execution pipeline for a service unit with `RootDirectory=` runs
-in this order:
+systemd's execution pipeline for a service unit with `RootDirectory=` runs in this order:
 
 1. NSS lookup of `User=` against the host filesystem
 2. `RootDirectory=` chroot
 3. `execve()` of the service binary
 
-For OCI containers, steps 1 and 2 should be reversed: the user exists in
-the OCI rootfs, not on the host. This is a known upstream limitation:
+For OCI containers, steps 1 and 2 should be reversed: the user exists in the OCI rootfs, not on the host. This is a known upstream limitation:
 
-- [systemd#12498](https://github.com/systemd/systemd/issues/12498):
-  `RootDirectory` with `User` not working. Fixed the ordering for some
-  chroot operations, but NSS lookup still happens pre-chroot.
-- [systemd#19781](https://github.com/systemd/systemd/issues/19781):
-  RFE: allow exec units as uid without passwd entry. Open; upstream
-  position is to use NSS registration (nss-systemd, machined) instead.
-- [systemd#14806](https://github.com/systemd/systemd/issues/14806):
-  Support uid/gids from target rootfs with `--root`. Fixed for `tmpfiles`
-  via `fgetpwent`, but not for service execution.
+- [systemd#12498](https://github.com/systemd/systemd/issues/12498): `RootDirectory` with `User` not working. Fixed the ordering for some chroot operations, but NSS lookup still happens pre-chroot.
+- [systemd#19781](https://github.com/systemd/systemd/issues/19781): RFE: allow exec units as uid without passwd entry. Open; upstream position is to use NSS registration (nss-systemd, machined) instead.
+- [systemd#14806](https://github.com/systemd/systemd/issues/14806): Support uid/gids from target rootfs with `--root`. Fixed for `tmpfiles` via `fgetpwent`, but not for service execution.
 
-sdme generates a static ELF binary (`isolate`) that creates PID/IPC
-namespaces, remounts /proc, drops `CAP_SYS_ADMIN`, optionally drops
-privileges, and execs the target, all via raw syscalls with no libc
-dependency and no NSS. The binary is invoked as:
+sdme generates a static ELF binary (`isolate`) that creates PID/IPC namespaces, remounts /proc, drops `CAP_SYS_ADMIN`, optionally drops privileges, and execs the target, all via raw syscalls with no libc dependency and no NSS. The binary is invoked as:
 
 ```
 /usr/sbin/sdme-isolate <uid> <gid> <workdir> <command> [args...]
@@ -1781,13 +1004,9 @@ The syscall sequence:
 8. `chdir(workdir)`: change to the application's working directory
 9. `execve(command, args, envp)`: replace the process with the application
 
-Each syscall is checked for errors. On failure, a diagnostic message is
-written to stderr and the process exits with code 1. For root users
-(uid==0, gid==0), steps 5-7 are skipped but namespace isolation still
-applies.
+Each syscall is checked for errors. On failure, a diagnostic message is written to stderr and the process exits with code 1. For root users (uid==0, gid==0), steps 5-7 are skipped but namespace isolation still applies.
 
-**User resolution.** The OCI `User` field is resolved at import time
-against `etc/passwd` and `etc/group` inside the OCI rootfs:
+**User resolution.** The OCI `User` field is resolved at import time against `etc/passwd` and `etc/group` inside the OCI rootfs:
 
 ```
 Format             Behavior
@@ -1799,69 +1018,39 @@ Format             Behavior
 "uid:gid"          Both used directly
 ```
 
-**Security model.** The privilege-dropping sequence is designed to be
-irreversible:
+**Security model.** The privilege-dropping sequence is designed to be irreversible:
 
-- `setgroups(0, NULL)` clears all supplementary groups before any
-  uid/gid change.
-- `setgid(gid)` before `setuid(uid)`: correct order, since `setgid`
-  requires root and must happen first.
-- `setuid(uid)` for non-zero UIDs is irreversible (the kernel clears
-  all capabilities).
-- Binary permissions (`0o111`, execute-only): non-root users cannot read,
-  write, or delete the file.
+- `setgroups(0, NULL)` clears all supplementary groups before any uid/gid change.
+- `setgid(gid)` before `setuid(uid)`: correct order, since `setgid` requires root and must happen first.
+- `setuid(uid)` for non-zero UIDs is irreversible (the kernel clears all capabilities).
+- Binary permissions (`0o111`, execute-only): non-root users cannot read, write, or delete the file.
 - Binary ownership (root:root): only root can modify or remove it.
-- Parent directory (`/` inside the chroot) is owned by root, so non-root
-  cannot unlink files from it.
-- No SUID/SGID bit: the binary runs with the caller's privileges (root,
-  since no `User=` in the unit).
+- Parent directory (`/` inside the chroot) is owned by root, so non-root cannot unlink files from it.
+- No SUID/SGID bit: the binary runs with the caller's privileges (root, since no `User=` in the unit).
 - No file capabilities: no `security.capability` xattr is set.
-- The `atoi` implementation rejects values exceeding `u32::MAX` to
-  prevent wrap-around to UID 0.
+- The `atoi` implementation rejects values exceeding `u32::MAX` to prevent wrap-around to UID 0.
 
-After `execve`, the new process inherits the dropped uid/gid and cannot
-regain root.
+After `execve`, the new process inherits the dropped uid/gid and cannot regain root.
 
 ### The /dev/std* shim
 
-OCI images commonly create symlinks from log files to the standard
-file descriptors:
+OCI images commonly create symlinks from log files to the standard file descriptors:
 
 ```
 /var/log/nginx/error.log -> /dev/stderr -> /proc/self/fd/2
 ```
 
-When the application opens its log file, the kernel follows the symlink
-chain to `/proc/self/fd/N` and calls `open()` on the underlying file
-descriptor.
+When the application opens its log file, the kernel follows the symlink chain to `/proc/self/fd/N` and calls `open()` on the underlying file descriptor.
 
-Under Docker, fds 1/2 are pipes. The kernel allows `open()` on
-pipe-backed `/proc/self/fd/N`, and the call succeeds.
+Under Docker, fds 1/2 are pipes. The kernel allows `open()` on pipe-backed `/proc/self/fd/N`, and the call succeeds.
 
-Under systemd, fds 1/2 are journal sockets. The kernel rejects `open()`
-on socket-backed `/proc/self/fd/N` with ENXIO ("No such device or
-address"). This is a kernel limitation, not a systemd one.
+Under systemd, fds 1/2 are journal sockets. The kernel rejects `open()` on socket-backed `/proc/self/fd/N` with ENXIO ("No such device or address"). This is a kernel limitation, not a systemd one.
 
-The distinction matters: `write()` on a socket fd works fine. Only
-`open()` on `/proc/self/fd/N` fails. Applications that write directly
-to fd 1 or fd 2 have no problem. Applications that open a path that
-resolves to `/proc/self/fd/N` (like nginx opening its log symlinks) fail
-with ENXIO.
+The distinction matters: `write()` on a socket fd works fine. Only `open()` on `/proc/self/fd/N` fails. Applications that write directly to fd 1 or fd 2 have no problem. Applications that open a path that resolves to `/proc/self/fd/N` (like nginx opening its log symlinks) fail with ENXIO.
 
-**Alternatives considered.** eBPF cannot solve this. `bpf_override_return`
-can inject error codes, but it cannot fabricate file descriptors.
-Returning a valid fd from `open()` requires allocating a kernel
-`struct file` and installing it in the process's fd table. No eBPF hook
-is capable of this. Removing the symlinks works but means log output goes
-to files inside the chroot instead of the journal. Since the whole point
-of running under systemd is journal integration, losing log output to
-files defeats the purpose.
+**Alternatives considered.** eBPF cannot solve this. `bpf_override_return` can inject error codes, but it cannot fabricate file descriptors. Returning a valid fd from `open()` requires allocating a kernel `struct file` and installing it in the process's fd table. No eBPF hook is capable of this. Removing the symlinks works but means log output goes to files inside the chroot instead of the journal. Since the whole point of running under systemd is journal integration, losing log output to files defeats the purpose.
 
-sdme generates an LD_PRELOAD shared library that intercepts `open()`,
-`openat()`, `open64()`, and `openat64()` at the libc symbol level. When
-the path matches a standard fd path, the interceptor returns `dup(N)`
-instead of calling the real `open()`. All other paths fall through to the
-real `openat` syscall.
+sdme generates an LD_PRELOAD shared library that intercepts `open()`, `openat()`, `open64()`, and `openat64()` at the libc symbol level. When the path matches a standard fd path, the interceptor returns `dup(N)` instead of calling the real `open()`. All other paths fall through to the real `openat` syscall.
 
 Intercepted paths:
 
@@ -1879,54 +1068,30 @@ Path                Result
 /proc/self/fd/2     dup(2)
 ```
 
-**Why dup() instead of returning the raw fd.** Returning the raw fd
-number (0, 1, or 2) would work for simple cases, but callers expect
-`open()` to return a new, independently closeable fd. If we returned fd 2
-directly and the caller later called `close()`, stderr would be closed
-for the entire process. `dup()` gives the caller their own fd that they
-can close without affecting the original.
+**Why dup() instead of returning the raw fd.** Returning the raw fd number (0, 1, or 2) would work for simple cases, but callers expect `open()` to return a new, independently closeable fd. If we returned fd 2 directly and the caller later called `close()`, stderr would be closed for the entire process. `dup()` gives the caller their own fd that they can close without affecting the original.
 
-**Path matching.** The interceptor uses 8-byte loads and integer
-comparisons organized as a prefix tree. No string function calls:
+**Path matching.** The interceptor uses 8-byte loads and integer comparisons organized as a prefix tree. No string function calls:
 
 1. Load the first 8 bytes as a 64-bit integer.
-2. Compare against `/dev/std` (8 bytes). On match, check for `in\0`,
-   `out\0`, `err\0` at offset 8.
-3. Compare against `/dev/fd/` (8 bytes). On match, check for `0\0`,
-   `1\0`, `2\0` at offset 8.
-4. Compare against `/proc/se` (8 bytes). On match, check for
-   `lf/fd/0\0`, `lf/fd/1\0`, `lf/fd/2\0` at offset 8.
+2. Compare against `/dev/std` (8 bytes). On match, check for `in\0`, `out\0`, `err\0` at offset 8.
+3. Compare against `/dev/fd/` (8 bytes). On match, check for `0\0`, `1\0`, `2\0` at offset 8.
+4. Compare against `/proc/se` (8 bytes). On match, check for `lf/fd/0\0`, `lf/fd/1\0`, `lf/fd/2\0` at offset 8.
 5. No match: call the real `openat` syscall.
 
-**ENXIO fallback.** If the real `openat` syscall returns `-ENXIO`, the
-interceptor resolves one level of symlink via `readlinkat` and retries
-the path matching against the resolved target. This handles cases like
-nginx opening `/var/log/nginx/error.log`, which is a symlink to
-`/dev/stderr`. Without this fallback, only direct opens of `/dev/std*`
-paths would be intercepted.
+**ENXIO fallback.** If the real `openat` syscall returns `-ENXIO`, the interceptor resolves one level of symlink via `readlinkat` and retries the path matching against the resolved target. This handles cases like nginx opening `/var/log/nginx/error.log`, which is a symlink to `/dev/stderr`. Without this fallback, only direct opens of `/dev/std*` paths would be intercepted.
 
-On error (from `dup` or a non-ENXIO `openat` failure), the shim sets
-`errno` via `__errno_location()` (imported through the GOT, resolved by
-the dynamic linker at load time) and returns `-1` per C convention.
+On error (from `dup` or a non-ENXIO `openat` failure), the shim sets `errno` via `__errno_location()` (imported through the GOT, resolved by the dynamic linker at load time) and returns `-1` per C convention.
 
-The `open()` entry point rewrites its arguments to match the `openat()`
-calling convention (inserting `AT_FDCWD` as the directory fd) and jumps
-to the `openat` entry point. `open64` and `openat64` are aliases since
-they are identical on 64-bit Linux.
+The `open()` entry point rewrites its arguments to match the `openat()` calling convention (inserting `AT_FDCWD` as the directory fd) and jumps to the `openat` entry point. `open64` and `openat64` are aliases since they are identical on 64-bit Linux.
 
 ### Deployment
 
-Both binaries are deployed during `sdme fs import` of an OCI application
-image (one imported with `--base-fs`):
+Both binaries are deployed during `sdme fs import` of an OCI application image (one imported with `--base-fs`):
 
 1. The OCI image config's `User` field is parsed.
-2. The `devfd_shim` shared library is written to `/usr/lib/sdme-devfd-shim.so`
-   inside the OCI root (mode `0o555`).
-3. The `isolate` binary is written to `/usr/sbin/sdme-isolate` (mode `0o111`,
-   execute-only). If the user is non-root, the name is resolved against
-   `etc/passwd` and `etc/group` inside the OCI rootfs.
-4. A systemd service unit (`sdme-oci-{name}.service`) is generated with
-   both binaries wired in.
+2. The `devfd_shim` shared library is written to `/usr/lib/sdme-devfd-shim.so` inside the OCI root (mode `0o555`).
+3. The `isolate` binary is written to `/usr/sbin/sdme-isolate` (mode `0o111`, execute-only). If the user is non-root, the name is resolved against `etc/passwd` and `etc/group` inside the OCI rootfs.
+4. A systemd service unit (`sdme-oci-{name}.service`) is generated with both binaries wired in.
 
 Generated unit (non-root user):
 
@@ -1940,9 +1105,7 @@ EnvironmentFile=-/oci/apps/nginx/env
 ExecStart=/usr/sbin/sdme-isolate 101 101 / /docker-entrypoint.sh nginx -g 'daemon off;'
 ```
 
-`LD_PRELOAD` loads the devfd shim into the application's address space.
-`ExecStart` invokes the isolate binary, which creates PID/IPC namespaces,
-drops privileges to uid/gid, and then exec's the actual entrypoint.
+`LD_PRELOAD` loads the devfd shim into the application's address space. `ExecStart` invokes the isolate binary, which creates PID/IPC namespaces, drops privileges to uid/gid, and then exec's the actual entrypoint.
 
 Generated unit (root user):
 
@@ -1956,8 +1119,7 @@ EnvironmentFile=-/oci/apps/nginx/env
 ExecStart=/usr/sbin/sdme-isolate 0 0 / /docker-entrypoint.sh nginx -g 'daemon off;'
 ```
 
-For root users, the isolate binary still runs to provide namespace
-isolation, but privilege dropping is skipped.
+For root users, the isolate binary still runs to provide namespace isolation, but privilege dropping is skipped.
 
 ### Implementation notes
 
@@ -1970,11 +1132,7 @@ isolate       syscall, rax=nr    svc #0, x8=nr     < 2 KiB
 devfd_shim    syscall, rax=nr    svc #0, x8=nr     ~ 4 KiB
 ```
 
-Both are generated entirely in Rust with no assembler, no external tools,
-and no libc. Each architecture module contains its own `Asm` struct with
-a label/fixup system tailored to the ISA: x86_64 uses rel8/rel32 fixups
-for variable-length instructions; aarch64 uses BCond/Branch26 fixups for
-fixed 4-byte instructions.
+Both are generated entirely in Rust with no assembler, no external tools, and no libc. Each architecture module contains its own `Asm` struct with a label/fixup system tailored to the ISA: x86_64 uses rel8/rel32 fixups for variable-length instructions; aarch64 uses BCond/Branch26 fixups for fixed 4-byte instructions.
 
 **ELF structure.** `isolate` is a minimal ET_EXEC static ELF64 with:
 
@@ -1988,8 +1146,7 @@ fixed 4-byte instructions.
 - ELF header + 3 program headers (PT_LOAD RX, PT_LOAD RW, PT_DYNAMIC)
 - Machine code (the interceptor logic)
 - SysV hash table for symbol lookup by the dynamic linker
-- Dynamic symbol table: exported symbols (`open`, `openat`, `open64`,
-  `openat64`) and imported symbols (`__errno_location`)
+- Dynamic symbol table: exported symbols (`open`, `openat`, `open64`, `openat64`) and imported symbols (`__errno_location`)
 - RELA relocations pointing the dynamic linker at GOT slots
 - GOT entries (filled by the dynamic linker at load time)
 - Dynamic section (DT_HASH, DT_STRTAB, DT_SYMTAB, etc.)
@@ -2010,136 +1167,66 @@ src/devfd_shim/x86_64.rs     x86_64 emitter
 src/devfd_shim/aarch64.rs    AArch64 emitter
 ```
 
-Both architecture modules use the same pattern: an `Asm` struct that emits
-machine code bytes, a label system for forward references, and a fixup pass
-that patches relative offsets once all labels are defined. The `elf` module
-in each crate assembles the ELF headers, program headers, and metadata
-tables around the emitted code.
+Both architecture modules use the same pattern: an `Asm` struct that emits machine code bytes, a label system for forward references, and a fixup pass that patches relative offsets once all labels are defined. The `elf` module in each crate assembles the ELF headers, program headers, and metadata tables around the emitted code.
 
 ### OCI plumbing: ports and volumes
 
-OCI images declare exposed ports and volumes in their image config.
-sdme reads these from `/oci/apps/{name}/ports` and `/oci/apps/{name}/volumes` in the rootfs
-and auto-wires them at container creation time.
+OCI images declare exposed ports and volumes in their image config. sdme reads these from `/oci/apps/{name}/ports` and `/oci/apps/{name}/volumes` in the rootfs and auto-wires them at container creation time.
 
-**Port forwarding.** When the container uses a private network namespace
-(`--private-network`, `--hardened`, or `--strict`), sdme reads
-`/oci/apps/{name}/ports` and adds `--port` rules mapping each declared port to the
-same host port. User `--port` flags take priority; matching ports are
-skipped. On host-network containers, no forwarding is needed (services
-bind directly to the host), so sdme prints an informational message
-instead. Suppressed with `--no-oci-ports`.
+**Port forwarding.** When the container uses a private network namespace (`--private-network`, `--hardened`, or `--strict`), sdme reads `/oci/apps/{name}/ports` and adds `--port` rules mapping each declared port to the same host port. User `--port` flags take priority; matching ports are skipped. On host-network containers, no forwarding is needed (services bind directly to the host), so sdme prints an informational message instead. Suppressed with `--no-oci-ports`.
 
-**Volume mounts.** For each volume declared in `/oci/apps/{name}/volumes`, sdme
-creates a host-side directory at
-`{datadir}/volumes/{container}/{volume-name}` and adds a bind mount
-mapping it to `/oci/apps/{name}/root{volume-path}` inside the container. Volume
-data survives container removal (sdme prints the path but does not
-delete it). User `--bind` flags take priority: if the user binds to the
-same container path, the auto-mount is skipped. Suppressed with
-`--no-oci-volumes`.
+**Volume mounts.** For each volume declared in `/oci/apps/{name}/volumes`, sdme creates a host-side directory at `{datadir}/volumes/{container}/{volume-name}` and adds a bind mount mapping it to `/oci/apps/{name}/root{volume-path}` inside the container. Volume data survives container removal (sdme prints the path but does not delete it). User `--bind` flags take priority: if the user binds to the same container path, the auto-mount is skipped. Suppressed with `--no-oci-volumes`.
 
-**Remaining caveat.** User-specified bind mounts (`-b`) and environment
-variables (`-e`) on the container operate at the nspawn level, not
-inside the `RootDirectory=/oci/apps/{name}/root` chroot where the OCI application
-runs. OCI-declared volumes and ports are handled correctly because sdme
-maps volumes into the `/oci/apps/{name}/root` subtree and ports operate at the
-network namespace level.
+**Remaining caveat.** User-specified bind mounts (`-b`) and environment variables (`-e`) on the container operate at the nspawn level, not inside the `RootDirectory=/oci/apps/{name}/root` chroot where the OCI application runs. OCI-declared volumes and ports are handled correctly because sdme maps volumes into the `/oci/apps/{name}/root` subtree and ports operate at the network namespace level.
 
 ### Environment variables
 
-OCI image environment variables are stored in `/oci/apps/{name}/env` inside the
-rootfs (loaded via `EnvironmentFile=-/oci/apps/{name}/env` in the generated unit).
-Additional variables (e.g. `MYSQL_ROOT_PASSWORD`) can be set at creation time
-with `--oci-env`:
+OCI image environment variables are stored in `/oci/apps/{name}/env` inside the rootfs (loaded via `EnvironmentFile=-/oci/apps/{name}/env` in the generated unit). Additional variables (e.g. `MYSQL_ROOT_PASSWORD`) can be set at creation time with `--oci-env`:
 
 ```bash
 sudo sdme new -r mysql --oci-env MYSQL_ROOT_PASSWORD=secret
 ```
 
-The `--oci-env` flag appends to the existing env file from the OCI image,
-so image-defined variables are preserved unless explicitly overridden.
+The `--oci-env` flag appends to the existing env file from the OCI image, so image-defined variables are preserved unless explicitly overridden.
 
 ### Limitations
 
-- **One OCI service per container.** Each rootfs generates a single
-  `sdme-oci-{name}.service`.
-- **No OCI HEALTHCHECK support.** Docker HEALTHCHECK directives in OCI
-  image configs are ignored. (Kubernetes-style probes are supported for
-  kube pods; see Section 17.)
+- **One OCI service per container.** Each rootfs generates a single `sdme-oci-{name}.service`.
+- **No OCI HEALTHCHECK support.** Docker HEALTHCHECK directives in OCI image configs are ignored. (Kubernetes-style probes are supported for kube pods; see Section 17.)
 ### OCI namespace entry: cgroup discovery
 
-`sdme exec --oci` and `sdme join --oci` need to find the host PID of
-the OCI app process so they can call `nsenter`. The PID is discovered
-from the app's cgroup: `find_oci_service_cgroup()` searches for the
-`sdme-oci-{name}.service` cgroup directory under
-`/sys/fs/cgroup/machine.slice/`.
+`sdme exec --oci` and `sdme join --oci` need to find the host PID of the OCI app process so they can call `nsenter`. The PID is discovered from the app's cgroup: `find_oci_service_cgroup()` searches for the `sdme-oci-{name}.service` cgroup directory under `/sys/fs/cgroup/machine.slice/`.
 
-Three cgroup root patterns are tried, because systemd versions lay out
-the container's cgroup differently:
+Three cgroup root patterns are tried, because systemd versions lay out the container's cgroup differently:
 
-1. **`{name}.scope`**: systemd 259+ registers the machine scope
-   directly under the container name.
-2. **`sdme@{name}.service`**: older systemd versions (< 257) use
-   the template unit name as the cgroup path.
-3. **`machine-{escaped}.scope`**: systemd 257-258 use a
-   `machine-` prefix with hyphens escaped as `\x2d`.
+1. **`{name}.scope`**: systemd 259+ registers the machine scope directly under the container name.
+2. **`sdme@{name}.service`**: older systemd versions (< 257) use the template unit name as the cgroup path.
+3. **`machine-{escaped}.scope`**: systemd 257-258 use a `machine-` prefix with hyphens escaped as `\x2d`.
 
-Within each root, three inner path candidates are searched:
-`init.scope/system.slice`, `payload/system.slice`, and
-`system.slice`. The function retries for up to 3 seconds (30 * 100 ms)
-because the cgroup directory may not appear on the filesystem
-immediately after systemd reports the unit as active.
+Within each root, three inner path candidates are searched: `init.scope/system.slice`, `payload/system.slice`, and `system.slice`. The function retries for up to 3 seconds (30 * 100 ms) because the cgroup directory may not appear on the filesystem immediately after systemd reports the unit as active.
 
 ### OCI capability filtering for hardened containers
 
-When `--drop-capability` is used on a container that has OCI apps,
-`create()` writes a `hardening.conf` systemd drop-in into the
-overlayfs upper layer at
-`/etc/systemd/system/sdme-oci-{name}.service.d/hardening.conf`. The
-drop-in resets and re-sets `CapabilityBoundingSet`, filtering the
-dropped capabilities out of `OCI_DEFAULT_CAPS`. `CAP_SYS_ADMIN` is
-always preserved because the isolate binary needs it for
-`unshare()`/`mount()`.
+When `--drop-capability` is used on a container that has OCI apps, `create()` writes a `hardening.conf` systemd drop-in into the overlayfs upper layer at `/etc/systemd/system/sdme-oci-{name}.service.d/hardening.conf`. The drop-in resets and re-sets `CapabilityBoundingSet`, filtering the dropped capabilities out of `OCI_DEFAULT_CAPS`. `CAP_SYS_ADMIN` is always preserved because the isolate binary needs it for `unshare()`/`mount()`.
 
-Without this drop-in, the inner OCI service would inherit the full
-default capability set, which can conflict with the container-level
-capability restrictions and cause boot failures (systemd refuses to
-start a service whose bounding set includes capabilities the container
-does not have).
+Without this drop-in, the inner OCI service would inherit the full default capability set, which can conflict with the container-level capability restrictions and cause boot failures (systemd refuses to start a service whose bounding set includes capabilities the container does not have).
 
 ## 17. Kubernetes Pod Support
 
-`sdme kube apply` reads a Pod (or Deployment) YAML, pulls the specified
-OCI images, builds a combined rootfs on a base OS, and starts a single
-nspawn container with one systemd service per OCI image. All services in
-the pod share localhost, just like in Kubernetes.
+`sdme kube apply` reads a Pod (or Deployment) YAML, pulls the specified OCI images, builds a combined rootfs on a base OS, and starts a single nspawn container with one systemd service per OCI image. All services in the pod share localhost, just like in Kubernetes.
 
-The base OS is any imported rootfs; the same Pod YAML runs on Ubuntu,
-Fedora, Arch Linux, or any other supported distribution. Each OCI container
-becomes a separate systemd service isolated in its own PID/IPC namespaces
-and chrooted into its own rootfs under `/oci/apps/{name}/root`.
+The base OS is any imported rootfs; the same Pod YAML runs on Ubuntu, Fedora, Arch Linux, or any other supported distribution. Each OCI container becomes a separate systemd service isolated in its own PID/IPC namespaces and chrooted into its own rootfs under `/oci/apps/{name}/root`.
 
 For usage examples and CLI reference, see `sdme kube --help`.
 
 ### Pipeline
 
-1. **Parse & Validate**: reads the YAML, validates container names, volume
-   references, etc. Accepts `kind: Pod` (v1) and `kind: Deployment`
-   (apps/v1; extracts pod template).
+1. **Parse & Validate**: reads the YAML, validates container names, volume references, etc. Accepts `kind: Pod` (v1) and `kind: Deployment` (apps/v1; extracts pod template).
 2. **Pull Images**: downloads each container's OCI image from the registry.
-3. **Build Combined Rootfs**: copies the base rootfs, then places each
-   container's OCI rootfs under `/oci/apps/{name}/root` with a generated
-   systemd service unit.
-4. **Generate Volume Mounts**: if the pod has volume mounts, generates a
-   `sdme-kube-volumes.service` oneshot unit that bind-mounts
-   `/oci/volumes/{name}` into each app's root directory; app services
-   depend on this unit via `After=`/`Requires=`.
-5. **Create Container**: creates an sdme container using the combined
-   rootfs (hostPath volumes become nspawn `--bind=` mounts; emptyDir
-   volumes live inside the rootfs).
-6. **Start & Boot**: boots the container; the volume mount service runs
-   first, then all app services start.
+3. **Build Combined Rootfs**: copies the base rootfs, then places each container's OCI rootfs under `/oci/apps/{name}/root` with a generated systemd service unit.
+4. **Generate Volume Mounts**: if the pod has volume mounts, generates a `sdme-kube-volumes.service` oneshot unit that bind-mounts `/oci/volumes/{name}` into each app's root directory; app services depend on this unit via `After=`/`Requires=`.
+5. **Create Container**: creates an sdme container using the combined rootfs (hostPath volumes become nspawn `--bind=` mounts; emptyDir volumes live inside the rootfs).
+6. **Start & Boot**: boots the container; the volume mount service runs first, then all app services start.
 
 ### Supported Pod spec fields
 
@@ -2174,8 +1261,7 @@ securityContext.runAsGroup          Pod-level GID for all containers
 securityContext.runAsNonRoot        Validates runAsUser is non-zero
 ```
 
-Secret and configMap volumes support `items` for projected key
-paths and `defaultMode` for file permissions.
+Secret and configMap volumes support `items` for projected key paths and `defaultMode` for file permissions.
 
 ### Filesystem layout
 
@@ -2245,11 +1331,9 @@ ProcSubset=pid
 WantedBy=multi-user.target
 ```
 
-The `After=`/`Requires=` lines are only present when the pod has volume
-mounts.
+The `After=`/`Requires=` lines are only present when the pod has volume mounts.
 
-When shared volumes exist, a `sdme-kube-volumes.service` oneshot unit is
-also generated:
+When shared volumes exist, a `sdme-kube-volumes.service` oneshot unit is also generated:
 
 ```ini
 [Unit]
@@ -2267,50 +1351,28 @@ ExecStart=/bin/mount --bind /oci/volumes/shared-data /oci/apps/content-gen/root/
 WantedBy=multi-user.target
 ```
 
-This runs `mount --bind` in the container's PID 1 mount namespace before
-app services start, so all services see the same shared directories.
-Read-only mounts get an additional `remount,ro,bind` line.
+This runs `mount --bind` in the container's PID 1 mount namespace before app services start, so all services see the same shared directories. Read-only mounts get an additional `remount,ro,bind` line.
 
 ### Probes
 
-Startup, liveness, and readiness probes are implemented via an embedded
-`sdme-kube-probe` binary deployed at `/usr/bin/sdme-kube-probe` inside the
-container rootfs. The binary is automatically built by `build.rs` and
-embedded into sdme via `include_bytes!()` at compile time.
+Startup, liveness, and readiness probes are implemented via an embedded `sdme-kube-probe` binary deployed at `/usr/bin/sdme-kube-probe` inside the container rootfs. The binary is automatically built by `build.rs` and embedded into sdme via `include_bytes!()` at compile time.
 
-All three probe types use systemd timer + oneshot service pairs. No
-shell scripts are generated and no external tools are required (wget,
-bash, etc.).
+All three probe types use systemd timer + oneshot service pairs. No shell scripts are generated and no external tools are required (wget, bash, etc.).
 
 Four probe mechanisms are supported:
 
-- **exec**: runs a command inside the app rootfs via `chroot` + `Command`
-  (std only, no external deps)
-- **httpGet**: raw HTTP/1.0 GET via `TcpStream`, checks for 2xx/3xx
-  status (std only)
+- **exec**: runs a command inside the app rootfs via `chroot` + `Command` (std only, no external deps)
+- **httpGet**: raw HTTP/1.0 GET via `TcpStream`, checks for 2xx/3xx status (std only)
 - **tcpSocket**: `TcpStream::connect_timeout()` (std only)
-- **grpc**: gRPC Health Checking Protocol via tonic (optional `probe`
-  feature)
+- **grpc**: gRPC Health Checking Protocol via tonic (optional `probe` feature)
 
-Standard Kubernetes probe parameters are supported:
-`initialDelaySeconds`, `periodSeconds`, `timeoutSeconds`,
-`failureThreshold`, `successThreshold`.
+Standard Kubernetes probe parameters are supported: `initialDelaySeconds`, `periodSeconds`, `timeoutSeconds`, `failureThreshold`, `successThreshold`.
 
-**Probe lifecycle.** When a startup probe exists, it gates liveness
-and readiness probes: the liveness/readiness service units include
-`ConditionPathExists=/run/sdme-probe-startup-{name}.done`, so they
-silently skip until the startup probe writes its done file.
+**Probe lifecycle.** When a startup probe exists, it gates liveness and readiness probes: the liveness/readiness service units include `ConditionPathExists=/run/sdme-probe-startup-{name}.done`, so they silently skip until the startup probe writes its done file.
 
-On success, the startup probe writes
-`/run/sdme-probe-startup-{name}.done`; the readiness probe writes
-`ready` to `/oci/apps/{name}/probe-ready` (readable from the host
-via the overlayfs merged dir, shown in `sdme ps`). On failure
-threshold, startup/liveness probes restart the app service via
-`systemctl restart`; readiness probes write `not-ready`.
+On success, the startup probe writes `/run/sdme-probe-startup-{name}.done`; the readiness probe writes `ready` to `/oci/apps/{name}/probe-ready` (readable from the host via the overlayfs merged dir, shown in `sdme ps`). On failure threshold, startup/liveness probes restart the app service via `systemctl restart`; readiness probes write `not-ready`.
 
-The probe binary always exits 0 so systemd does not mark the
-oneshot service as failed. Failure counting is managed internally
-via counter files in `/run/`.
+The probe binary always exits 0 so systemd does not mark the oneshot service as failed. Failure counting is managed internally via counter files in `/run/`.
 
 **Generated units.** For an app named `nginx` with a liveness probe:
 
@@ -2319,32 +1381,17 @@ sdme-probe-liveness-nginx.timer     # fires periodically
 sdme-probe-liveness-nginx.service   # runs /usr/bin/sdme-kube-probe
 ```
 
-The timer binds to the main service (`BindsTo=sdme-oci-nginx.service`)
-and stops automatically when the app stops.
+The timer binds to the main service (`BindsTo=sdme-oci-nginx.service`) and stops automatically when the app stops.
 
 ### Two-layer security model
 
 Kube pods support security at two independent layers:
 
-- **Nspawn container level (outer sandbox)**: CLI flags `--strict`,
-  `--hardened`, `--userns`, `--drop-capability`, `--capability`,
-  `--no-new-privileges`, `--read-only`, `--system-call-filter`, and
-  `--apparmor-profile` apply to the nspawn container itself. These are
-  the same flags available on `sdme create` and `sdme new`. They are
-  stored in the container state file and applied at start time.
-  `--hardened` and `--strict` force `--private-network` on kube pods
-  just as they do on regular containers.
+- **Nspawn container level (outer sandbox)**: CLI flags `--strict`, `--hardened`, `--userns`, `--drop-capability`, `--capability`, `--no-new-privileges`, `--read-only`, `--system-call-filter`, and `--apparmor-profile` apply to the nspawn container itself. These are the same flags available on `sdme create` and `sdme new`. They are stored in the container state file and applied at start time. `--hardened` and `--strict` force `--private-network` on kube pods just as they do on regular containers.
 
-- **OCI app service level (inner units)**: Pod YAML `securityContext`
-  fields (`runAsUser`, `runAsGroup`, `runAsNonRoot`, capabilities,
-  seccomp, AppArmor) apply to individual OCI app service units inside
-  the container. These are enforced by systemd directives and the
-  `isolate` binary.
+- **OCI app service level (inner units)**: Pod YAML `securityContext` fields (`runAsUser`, `runAsGroup`, `runAsNonRoot`, capabilities, seccomp, AppArmor) apply to individual OCI app service units inside the container. These are enforced by systemd directives and the `isolate` binary.
 
-Both layers are complementary. For example, `--strict` on the CLI
-hardens the nspawn sandbox (user namespace, private network, reduced
-caps, seccomp, AppArmor), while the Pod YAML can independently set
-`runAsUser: 1000` and drop `CAP_NET_RAW` on individual app services.
+Both layers are complementary. For example, `--strict` on the CLI hardens the nspawn sandbox (user namespace, private network, reduced caps, seccomp, AppArmor), while the Pod YAML can independently set `runAsUser: 1000` and drop `CAP_NET_RAW` on individual app services.
 
 ### State management
 
@@ -2352,37 +1399,30 @@ Kube pods are tracked with additional state fields:
 
 - `KUBE=yes`: marks this as a kube pod
 - `KUBE_CONTAINERS=nginx,redis,...`: list of container names
-- `KUBE_YAML_HASH={sha256}`: hash of the source YAML (for future update
-  detection)
+- `KUBE_YAML_HASH={sha256}`: hash of the source YAML (for future update detection)
 - `HAS_PROBES=yes`: set when the pod has any probe definitions
 
 `sdme ps` shows kube pods with a KUBE column, e.g.: `kube:nginx,redis`
 
 ### Limitations
 
-- No idempotent re-apply: `kube apply` on an existing pod fails; delete
-  first, then re-apply
+- No idempotent re-apply: `kube apply` on an existing pod fails; delete first, then re-apply
 
 ## 18. Container Diff
 
-`sdme diff` shows filesystem changes in a container's overlayfs upper layer
-relative to its base rootfs (lower layer). It supports single-container diffs,
-range diffs between two containers, and path-scoped filtering.
+`sdme diff` shows filesystem changes in a container's overlayfs upper layer relative to its base rootfs (lower layer). It supports single-container diffs, range diffs between two containers, and path-scoped filtering.
 
 ### How it works
 
-Each container's overlayfs has an upper layer that records all modifications
-since creation. The diff engine walks this upper layer and classifies entries:
+Each container's overlayfs has an upper layer that records all modifications since creation. The diff engine walks this upper layer and classifies entries:
 
 - **Added (A)**: file exists in the upper layer but not in the lower layer
 - **Modified (M)**: file exists in both layers (upper shadows the lower)
 - **Deleted (D)**: overlayfs whiteout marker (character device 0,0)
 
-Opaque directories (`trusted.overlay.opaque` xattr) hide all lower layer
-contents, so everything beneath them is classified as Added.
+Opaque directories (`trusted.overlay.opaque` xattr) hide all lower layer contents, so everything beneath them is classified as Added.
 
-Binary files are detected by scanning for NUL bytes in the first 8 KiB and
-labeled `(binary)` in the output instead of showing byte differences.
+Binary files are detected by scanning for NUL bytes in the first 8 KiB and labeled `(binary)` in the output instead of showing byte differences.
 
 ### Target formats
 
@@ -2393,8 +1433,7 @@ labeled `(binary)` in the output instead of showing byte differences.
 
 ### Range diffs
 
-`sdme diff from..to` compares the upper layers of two containers and
-reports what changed going from one to the other:
+`sdme diff from..to` compares the upper layers of two containers and reports what changed going from one to the other:
 
 - Files only in `to`'s upper → Added
 - Files only in `from`'s upper → Deleted
@@ -2419,56 +1458,36 @@ sdme diff mybox -- /etc /var/log
 
 ## 19. Self-Update and Upgrade
 
-sdme ships as a single static musl binary and can check for new releases
-on its own. Three cooperating parts live in `src/update.rs`:
+sdme ships as a single static musl binary and can check for new releases on its own. Three cooperating parts live in `src/update.rs`:
 
-1. **Background probe**: a detached subprocess that fetches the latest
-   release metadata and records it to a state file.
-2. **Banner**: a single line printed to stderr at the end of a run when
-   a newer release is available.
-3. **`sdme upgrade`**: an explicit subcommand that downloads and
-   atomically replaces the running binary after SHA-256 verification.
+1. **Background probe**: a detached subprocess that fetches the latest release metadata and records it to a state file.
+2. **Banner**: a single line printed to stderr at the end of a run when a newer release is available.
+3. **`sdme upgrade`**: an explicit subcommand that downloads and atomically replaces the running binary after SHA-256 verification.
 
-All three obey the `[update_check]` section of `/etc/sdme.conf` and the
-`SDME_UPDATE_CHECK=0` environment variable. Mirror operators can point
-the three URL knobs at an internal release layout.
+All three obey the `[update_check]` section of `/etc/sdme.conf` and the `SDME_UPDATE_CHECK=0` environment variable. Mirror operators can point the three URL knobs at an internal release layout.
 
 ### Background probe
 
-After any non-config command, sdme evaluates four gates before launching
-the probe:
+After any non-config command, sdme evaluates four gates before launching the probe:
 
 1. `update_check.enabled` must be true.
 2. `SDME_UPDATE_CHECK` must not equal `0`.
-3. The command must not be in the skip list (all `sdme config ...`
-   subcommands, and `sdme upgrade` itself).
-4. The on-disk state file's `checked_at` must be older than
-   `check_interval_hours`.
+3. The command must not be in the skip list (all `sdme config ...` subcommands, and `sdme upgrade` itself).
+4. The on-disk state file's `checked_at` must be older than `check_interval_hours`.
 
-When all four pass, sdme spawns `/proc/self/exe __update-check` with
-stdin, stdout, and stderr connected to `/dev/null`, and calls
-`setsid(2)` in the child via `CommandExt::pre_exec` so the child joins
-a new session. The parent process does not `wait(2)`; it simply
-returns. The detached child:
+When all four pass, sdme spawns `/proc/self/exe __update-check` with stdin, stdout, and stderr connected to `/dev/null`, and calls `setsid(2)` in the child via `CommandExt::pre_exec` so the child joins a new session. The parent process does not `wait(2)`; it simply returns. The detached child:
 
-1. Fetches `update_check.version_url` with a 3-second connect and
-   5-second body timeout.
+1. Fetches `update_check.version_url` with a 3-second connect and 5-second body timeout.
 2. Parses the `tag_name` field out of the JSON response.
-3. Renders `binary_url_template` and `checksums_url_template` for
-   the current `{arch}` and the fetched `{version}`.
-4. Writes the state file atomically with mode `0644` via
-   `atomic_write_mode`.
-5. Sweeps any stale `.sdme.upgrade.<pid>` temp files next to the
-   running binary (see below).
+3. Renders `binary_url_template` and `checksums_url_template` for the current `{arch}` and the fetched `{version}`.
+4. Writes the state file atomically with mode `0644` via `atomic_write_mode`.
+5. Sweeps any stale `.sdme.upgrade.<pid>` temp files next to the running binary (see below).
 
-The hidden `__update-check` entry point is dispatched in `main.rs`
-before clap parses the argument vector, so it never appears in
-`--help` and does not interfere with shell-completion generation.
+The hidden `__update-check` entry point is dispatched in `main.rs` before clap parses the argument vector, so it never appears in `--help` and does not interfere with shell-completion generation.
 
 ### State file
 
-The state file lives at `{datadir}/update-check.json` (default
-`/var/lib/sdme/update-check.json`):
+The state file lives at `{datadir}/update-check.json` (default `/var/lib/sdme/update-check.json`):
 
 ```json
 {
@@ -2480,53 +1499,32 @@ The state file lives at `{datadir}/update-check.json` (default
 }
 ```
 
-`checked_at` is updated even when the HTTP fetch fails. An air-gapped
-host therefore retries at most once per interval, regardless of how
-often sdme is invoked.
+`checked_at` is updated even when the HTTP fetch fails. An air-gapped host therefore retries at most once per interval, regardless of how often sdme is invoked.
 
 ### Banner
 
-`main()` calls `maybe_print_banner_from_env()` after `run()` returns,
-outside the hot path. The banner prints only when every check holds:
+`main()` calls `maybe_print_banner_from_env()` after `run()` returns, outside the hot path. The banner prints only when every check holds:
 
 - `stderr` is a TTY (`isatty(STDERR_FILENO)`).
 - `update_check.enabled` is true and `SDME_UPDATE_CHECK != 0`.
-- The state file has a `latest_version` greater than the running
-  binary's `env!("CARGO_PKG_VERSION")` per a simple major/minor/patch
-  numeric comparison.
+- The state file has a `latest_version` greater than the running binary's `env!("CARGO_PKG_VERSION")` per a simple major/minor/patch numeric comparison.
 - The process was not interrupted by a signal.
 
-The banner is one line, goes to stderr, and directs the user to
-`sudo sdme upgrade` or `sdme config set update_check.enabled no`.
-Non-TTY output (scripts, pipelines) is never decorated.
+The banner is one line, goes to stderr, and directs the user to `sudo sdme upgrade` or `sdme config set update_check.enabled no`. Non-TTY output (scripts, pipelines) is never decorated.
 
 ### sdme upgrade
 
-`sdme upgrade` is explicit, requires root, and performs the following
-sequence in `run_upgrade`:
+`sdme upgrade` is explicit, requires root, and performs the following sequence in `run_upgrade`:
 
-1. Map the host architecture to the release artifact spelling
-   (`x86_64` or `aarch64`; see `detect_arch`).
-2. Resolve the target version. With `--version V`, `V` is trimmed and
-   any leading `v` is stripped; empty `V` is rejected. Without
-   `--version`, the latest tag is fetched from `version_url`. The
-   progress and success lines use "upgrading" / "upgraded" when the
-   target is newer than the running binary, and "downgrading" /
-   "downgraded" otherwise (see `action_words`).
+1. Map the host architecture to the release artifact spelling (`x86_64` or `aarch64`; see `detect_arch`).
+2. Resolve the target version. With `--version V`, `V` is trimmed and any leading `v` is stripped; empty `V` is rejected. Without `--version`, the latest tag is fetched from `version_url`. The progress and success lines use "upgrading" / "upgraded" when the target is newer than the running binary, and "downgrading" / "downgraded" otherwise (see `action_words`).
 3. If the target equals the running version, print and exit.
 4. With `--check`, print the comparison and exit.
-5. Canonicalize `/proc/self/exe` and its parent directory. The parent
-   directory must be writable; sdme probes by creating a short-lived
-   file `.sdme.upgrade-probe.<pid>`.
-6. Sweep stale `.sdme.upgrade.<pid>` temp files from previous failed
-   upgrades (see below).
+5. Canonicalize `/proc/self/exe` and its parent directory. The parent directory must be writable; sdme probes by creating a short-lived file `.sdme.upgrade-probe.<pid>`.
+6. Sweep stale `.sdme.upgrade.<pid>` temp files from previous failed upgrades (see below).
 7. Prompt the user unless `-y` is given.
-8. Render `binary_url_template` and `checksums_url_template`. Both
-   must start with `https://`; `http://` is refused.
-9. Download the binary to `.sdme.upgrade.<pid>` in the same directory
-   as the running binary (same filesystem guarantees atomic rename),
-   streaming through a SHA-256 hasher and enforcing a 128 MiB cap. A
-   drop-guard unlinks the temp on any early return.
+8. Render `binary_url_template` and `checksums_url_template`. Both must start with `https://`; `http://` is refused.
+9. Download the binary to `.sdme.upgrade.<pid>` in the same directory as the running binary (same filesystem guarantees atomic rename), streaming through a SHA-256 hasher and enforcing a 128 MiB cap. A drop-guard unlinks the temp on any early return.
 10. Fetch `SHA256SUMS`, parse the line matching `sdme-<arch>-linux`,
     and compare against the streamed hash. A mismatch aborts and the
     drop-guard removes the temp.
@@ -2542,37 +1540,24 @@ sequence in `run_upgrade`:
     the banner's None-path early return; the next background probe
     repopulates the fields authoritatively for the new binary.
 
-No signature verification is performed; trust anchors in HTTPS plus
-the hash comparison against `SHA256SUMS` from the same release. This
-matches the installer script at `site/static/install.sh`.
+No signature verification is performed; trust anchors in HTTPS plus the hash comparison against `SHA256SUMS` from the same release. This matches the installer script at `site/static/install.sh`.
 
 ### Stale temp cleanup
 
-Interrupted upgrades (SIGKILL, power loss, disk full) can leave a
-`.sdme.upgrade.<pid>` file next to the binary. `cleanup_stale_upgrade_temps`
-sweeps these from both the background probe and the start of every
-`sdme upgrade`. A temp file is removed only if:
+Interrupted upgrades (SIGKILL, power loss, disk full) can leave a `.sdme.upgrade.<pid>` file next to the binary. `cleanup_stale_upgrade_temps` sweeps these from both the background probe and the start of every `sdme upgrade`. A temp file is removed only if:
 
-- The filename matches `^\.sdme\.upgrade\.\d+$` exactly (the probe's
-  `.sdme.upgrade-probe.<pid>` prefix deliberately differs).
+- The filename matches `^\.sdme\.upgrade\.\d+$` exactly (the probe's `.sdme.upgrade-probe.<pid>` prefix deliberately differs).
 - The parsed PID is not the current process.
 - `kill(pid, 0)` reports the PID is not alive.
-- `symlink_metadata` shows a regular file (symlinks are never
-  followed, directories are never recursed into).
-- The mtime is at least 10 minutes in the past, guarding against PID
-  reuse.
+- `symlink_metadata` shows a regular file (symlinks are never followed, directories are never recursed into).
+- The mtime is at least 10 minutes in the past, guarding against PID reuse.
 
 ### Mirror and air-gap support
 
-All three URL knobs are independently overridable, so an internal
-release mirror needs only to serve the same three shapes:
+All three URL knobs are independently overridable, so an internal release mirror needs only to serve the same three shapes:
 
 - `version_url` returns JSON with a `tag_name` field.
-- `binary_url_template` resolves to the release binary for
-  `{version}` and `{arch}`.
-- `checksums_url_template` resolves to a GNU-format SHA-256 checksums
-  file where one line matches `sdme-<arch>-linux`.
+- `binary_url_template` resolves to the release binary for `{version}` and `{arch}`.
+- `checksums_url_template` resolves to a GNU-format SHA-256 checksums file where one line matches `sdme-<arch>-linux`.
 
-Air-gapped hosts can set `update_check.enabled = false`, or leave it
-on: the probe will fail, update `checked_at` silently, and retry no
-sooner than the next interval.
+Air-gapped hosts can set `update_check.enabled = false`, or leave it on: the probe will fail, update `checked_at` silently, and retry no sooner than the next interval.

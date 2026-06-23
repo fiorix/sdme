@@ -4,19 +4,13 @@ description = "Run PostgreSQL with automatically managed OCI volumes that persis
 weight = 8
 +++
 
-Some OCI images declare volumes for data directories that should
-persist independently from the container. sdme detects these
-declarations and automatically creates host-side directories that
-are bind-mounted into the container.
+Some OCI images declare volumes for data directories that should persist independently from the container. sdme detects these declarations and automatically creates host-side directories that are bind-mounted into the container.
 
-This tutorial demonstrates OCI auto-volumes using PostgreSQL,
-which declares `/var/lib/postgresql` as a volume.
+This tutorial demonstrates OCI auto-volumes using PostgreSQL, which declares `/var/lib/postgresql` as a volume.
 
 ## Import PostgreSQL
 
-Make sure you have a base rootfs imported (see the
-[different rootfs](@/tutorial/different-rootfs.md) tutorial). Then
-import PostgreSQL as an OCI application:
+Make sure you have a base rootfs imported (see the [different rootfs](@/tutorial/different-rootfs.md) tutorial). Then import PostgreSQL as an OCI application:
 
 ```sh
 sudo sdme fs import postgres docker.io/postgres --base-fs ubuntu
@@ -32,17 +26,13 @@ You should see `/var/lib/postgresql`.
 
 ## Create and start the container
 
-PostgreSQL requires a password to be set via the `POSTGRES_PASSWORD`
-environment variable. Use `--oci-env` to pass it:
+PostgreSQL requires a password to be set via the `POSTGRES_PASSWORD` environment variable. Use `--oci-env` to pass it:
 
 ```sh
 sudo sdme create mydb -r postgres --network-zone=services --hardened --oci-env POSTGRES_PASSWORD=secret --started
 ```
 
-sdme automatically creates a host directory at
-`/var/lib/sdme/volumes/mydb/var-lib-postgresql` and bind-mounts
-it into the container at
-`/oci/apps/postgres/root/var/lib/postgresql`.
+sdme automatically creates a host directory at `/var/lib/sdme/volumes/mydb/var-lib-postgresql` and bind-mounts it into the container at `/oci/apps/postgres/root/var/lib/postgresql`.
 
 You can verify the volume is mounted:
 
@@ -66,8 +56,7 @@ sudo sdme exec mydb --oci -- psql -U postgres -c 'SELECT version();'
 
 ## Data persistence
 
-The key benefit of OCI volumes is that data persists even when
-the container is removed.
+The key benefit of OCI volumes is that data persists even when the container is removed.
 
 Create a test table:
 
@@ -106,9 +95,7 @@ sudo sdme exec mydb --oci -- psql -U postgres -c 'SELECT * FROM test;'
 
 ## Where volumes live on the host
 
-OCI volume data is stored under `/var/lib/sdme/volumes/{container}/`.
-The volume path from the OCI image is sanitized (slashes replaced
-with dashes) to create the directory name:
+OCI volume data is stored under `/var/lib/sdme/volumes/{container}/`. The volume path from the OCI image is sanitized (slashes replaced with dashes) to create the directory name:
 
 ```
 /var/lib/postgresql  ->  /var/lib/sdme/volumes/mydb/var-lib-postgresql
@@ -116,28 +103,21 @@ with dashes) to create the directory name:
 
 ## Suppressing auto-volumes
 
-If you don't want sdme to auto-mount the declared volumes, use
-`--no-oci-volumes`:
+If you don't want sdme to auto-mount the declared volumes, use `--no-oci-volumes`:
 
 ```sh
 sudo sdme create mydb -r postgres --no-oci-volumes
 ```
 
-You can also use `--bind` to override a specific volume path with
-your own host directory. User `--bind` flags take priority over
-auto-volumes for the same container path.
+You can also use `--bind` to override a specific volume path with your own host directory. User `--bind` flags take priority over auto-volumes for the same container path.
 
 ## Other images with volumes
 
-Many database and stateful images declare volumes in their OCI
-config:
+Many database and stateful images declare volumes in their OCI config:
 
 - **mysql**: `/var/lib/mysql`
 - **mariadb**: `/var/lib/mysql`
 - **postgres**: `/var/lib/postgresql`
 - **mongo**: `/data/db`, `/data/configdb`
 
-Not all images declare volumes. For example, redis and nginx do not.
-Use `--bind` to manage data directories for those images manually.
-See the [bind mounts](@/tutorial/bind-mounts-volumes.md) tutorial for
-details.
+Not all images declare volumes. For example, redis and nginx do not. Use `--bind` to manage data directories for those images manually. See the [bind mounts](@/tutorial/bind-mounts-volumes.md) tutorial for details.
