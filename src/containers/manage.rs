@@ -109,12 +109,16 @@ pub fn set_limits(
 /// Controls how `stop()` shuts down a container.
 #[derive(Debug, Clone, Copy)]
 pub enum StopMode {
-    /// Send SIGRTMIN+4 to the container leader (graceful poweroff).
+    /// Send SIGRTMIN+3 to the container leader (graceful halt).
     Graceful,
     /// Call TerminateMachine (SIGTERM to nspawn leader).
     Terminate,
     /// Send SIGKILL to all processes in the container.
     Kill,
+}
+
+pub(super) fn graceful_stop_signal() -> i32 {
+    libc::SIGRTMIN() + 3
 }
 
 /// Stop a container using the specified mode (graceful, terminate, or kill).
@@ -128,9 +132,9 @@ pub fn stop(name: &str, mode: StopMode, timeout_secs: u64, verbose: bool) -> Res
     match mode {
         StopMode::Graceful => {
             if verbose {
-                eprintln!("powering off machine '{name}'");
+                eprintln!("halting machine '{name}'");
             }
-            let signal = libc::SIGRTMIN() + 4;
+            let signal = graceful_stop_signal();
             systemd::kill_machine(name, "leader", signal)?;
             systemd::wait_for_shutdown(name, timeout, verbose).with_context(|| {
                 if crate::INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed) {

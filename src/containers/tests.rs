@@ -17,6 +17,11 @@ fn tmp() -> TempDataDir {
 }
 
 #[test]
+fn test_graceful_stop_signal_requests_halt() {
+    assert_eq!(super::manage::graceful_stop_signal(), libc::SIGRTMIN() + 3);
+}
+
+#[test]
 fn test_validate_name_ok() {
     assert!(validate_name("mycontainer").is_ok());
     assert!(validate_name("test123").is_ok());

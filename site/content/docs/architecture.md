@@ -161,7 +161,7 @@ This cascade ensures that `sdme ps` always shows a meaningful OS column regardle
 ```
   create --> start --> join/exec --> stop --> rm
     |           |         ^           |       |
-    |     install/update  |      graceful: KillMachine SIGRTMIN+4
+    |     install/update  |      graceful: KillMachine SIGRTMIN+3
     |     template unit   |      --term:   TerminateMachine
     |     StartUnit       |      --kill:   KillMachine SIGKILL
     |     wait for boot   |
@@ -188,7 +188,7 @@ A subtle behaviour difference follows from this choice: `systemd-run` runs the c
 
 The balance struck is: use D-Bus where it gives us programmatic control (start, stop, status queries), shell out where the existing tool already does the job well (interactive shell sessions, running commands), and fall back to lower-level tools when the higher-level ones are unavailable.
 
-**stop** has three tiers: graceful (default) sends `SIGRTMIN+4` to the container leader via `KillMachine` (90s timeout), `--term` calls `TerminateMachine` which sends SIGTERM to the nspawn process (30s timeout), and `--kill` sends SIGKILL to all processes via `KillMachine` (15s timeout). Multiple containers can be stopped in one invocation.
+**stop** has three tiers. Graceful (default) intentionally follows `systemd-nspawn --boot` shutdown semantics rather than `machinectl poweroff`: it sends `SIGRTMIN+3` to guest systemd via the container leader using `KillMachine`, causing `halt.target` and clean nspawn exit (90s timeout). `--term` calls `TerminateMachine` as an escalation path through the manager (30s timeout), and `--kill` sends SIGKILL to all processes via `KillMachine` (15s timeout). Multiple containers can be stopped in one invocation.
 
 **restart** stops and then starts a container. It combines flags from stop (`--term`, `--kill`) and start (`--timeout`). Supports `--all` to restart every running container.
 

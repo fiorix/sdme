@@ -212,8 +212,8 @@ SERVICE MASKING:
 const STOP_HELP: &str = "\
 Three shutdown tiers, in order of escalation:
 
-  Default (graceful):  Sends SIGRTMIN+4 to the container leader, which
-                       tells systemd-nspawn to initiate a clean shutdown.
+  Default (graceful):  Sends SIGRTMIN+3 to guest systemd via the
+                       container leader, causing a clean halt.
                        Timeout: stop_timeout_graceful (default 90s).
 
   --term (terminate):  Sends SIGTERM to the nspawn leader via TerminateMachine.

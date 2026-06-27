@@ -155,7 +155,7 @@ pub struct Config {
     #[serde(default = "default_max_download_size")]
     pub max_download_size: String,
 
-    /// Graceful stop timeout in seconds (SIGRTMIN+4 to leader).
+    /// Graceful stop timeout in seconds (SIGRTMIN+3 to leader).
     #[serde(default = "default_stop_timeout_graceful")]
     pub stop_timeout_graceful: u64,
 
