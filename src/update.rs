@@ -505,6 +505,14 @@ fn action_words(target: &str, current: &str) -> (&'static str, &'static str) {
     }
 }
 
+/// Return whether the interactive upgrade prompt should default to yes.
+///
+/// Only parsed strict upgrades default to yes; downgrades and unknown
+/// directions stay opt-in.
+fn upgrade_prompt_default_yes(target: &str, current: &str) -> bool {
+    semver_newer(target, current)
+}
+
 /// Build the state to record after a successful upgrade.
 ///
 /// The running process is still the **old** binary; the replacement only
@@ -628,7 +636,12 @@ pub fn run_upgrade(cfg: &Config, opts: UpgradeOptions<'_>) -> Result<()> {
         if !opts.interactive {
             bail!("use -y to confirm upgrade in non-interactive mode");
         }
-        if !crate::confirm("proceed? [y/N] ")? {
+        let confirmed = if upgrade_prompt_default_yes(&target_version, &current) {
+            crate::confirm_default_yes("proceed? [Y/n] ")?
+        } else {
+            crate::confirm("proceed? [y/N] ")?
+        };
+        if !confirmed {
             bail!("aborted");
         }
     }
@@ -826,6 +839,15 @@ feedface00feedface00feedface00feedface00feedface00feedface00feed  unrelated.deb
         );
         // Unparseable inputs fall back to "upgrading" (legacy wording).
         assert_eq!(action_words("nonsense", "0.7.0"), ("upgrading", "upgraded"));
+    }
+
+    #[test]
+    fn test_upgrade_prompt_default_yes() {
+        assert!(upgrade_prompt_default_yes("0.10.1", "0.10.0"));
+        assert!(!upgrade_prompt_default_yes("0.9.9", "0.10.0"));
+        assert!(!upgrade_prompt_default_yes("0.10.0", "0.10.0"));
+        assert!(!upgrade_prompt_default_yes("nonsense", "0.10.0"));
+        assert!(!upgrade_prompt_default_yes("0.10.1", "nonsense"));
     }
 
     #[test]

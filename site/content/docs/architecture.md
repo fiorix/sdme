@@ -1522,7 +1522,7 @@ The banner is one line, goes to stderr, and directs the user to `sudo sdme upgra
 4. With `--check`, print the comparison and exit.
 5. Canonicalize `/proc/self/exe` and its parent directory. The parent directory must be writable; sdme probes by creating a short-lived file `.sdme.upgrade-probe.<pid>`.
 6. Sweep stale `.sdme.upgrade.<pid>` temp files from previous failed upgrades (see below).
-7. Prompt the user unless `-y` is given.
+7. Prompt the user unless `-y` is given. Strict upgrades default to yes (`[Y/n]`); downgrades and unparseable directions default to no (`[y/N]`).
 8. Render `binary_url_template` and `checksums_url_template`. Both must start with `https://`; `http://` is refused.
 9. Download the binary to `.sdme.upgrade.<pid>` in the same directory as the running binary (same filesystem guarantees atomic rename), streaming through a SHA-256 hasher and enforcing a 128 MiB cap. A drop-guard unlinks the temp on any early return.
 10. Fetch `SHA256SUMS`, parse the line matching `sdme-<arch>-linux`,
