@@ -22,6 +22,8 @@ use cli::*;
 // Help text constants (referenced by #[command(after_long_help = ...)])
 // ---------------------------------------------------------------------------
 
+const SDME_SKILL: &str = include_str!("../skills/sdme/SKILL.md");
+
 const CLI_HELP: &str = "\
 sdme boots systemd-nspawn containers using overlayfs copy-on-write layers.
 Each container gets its own upper layer; the base rootfs stays untouched.
@@ -53,6 +55,7 @@ COMMON COMMANDS:
     sdme logs <name>        View container logs
     sdme fs ls              List imported root filesystems
     sdme config get         Show configuration
+    sdme dump-skill          Print embedded AI agent skill
 
 ENVIRONMENT:
     SUDO_USER           For host-clone containers (rootfs=/), 'new', 'join',
@@ -1016,6 +1019,10 @@ enum Command {
     #[command(subcommand)]
     Config(ConfigCommand),
 
+    /// Print the embedded AI agent skill for sdme
+    #[command(name = "dump-skill")]
+    DumpSkill,
+
     /// Create a new container
     #[command(after_long_help = CREATE_HELP)]
     Create {
@@ -1884,6 +1891,10 @@ fn run() -> Result<()> {
         Command::Config(ConfigCommand::AppArmorProfile) => {
             return security::print_apparmor_profile();
         }
+        Command::DumpSkill => {
+            print!("{SDME_SKILL}");
+            return Ok(());
+        }
         _ => {}
     }
 
@@ -2192,6 +2203,7 @@ fn run() -> Result<()> {
             ConfigCommand::AppArmorProfile => unreachable!(),
             ConfigCommand::Completions { .. } => unreachable!(),
         },
+        Command::DumpSkill => unreachable!(),
         Command::Cp {
             source,
             destination,
@@ -3705,6 +3717,20 @@ mod tests {
         ));
         let _ = fs::remove_dir_all(&dir);
         dir
+    }
+
+    #[test]
+    fn test_embedded_skill_is_sdme_skill() {
+        assert!(SDME_SKILL.starts_with("---\nname: sdme\n"));
+        assert!(SDME_SKILL.contains("SIGRTMIN+3"));
+        assert!(SDME_SKILL.contains("sdme dump-skill"));
+        assert!(!SDME_SKILL.contains("TODO"));
+    }
+
+    #[test]
+    fn test_top_level_help_mentions_dump_skill() {
+        let help = Cli::command().render_long_help().to_string();
+        assert!(help.contains("dump-skill"));
     }
 
     #[test]
