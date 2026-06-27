@@ -345,8 +345,9 @@ EXAMPLES:
     sdme config set default_output_format json-pretty";
 
 const LOGS_HELP: &str = "\
-View container logs via journalctl inside the container. Extra arguments
-are passed through to journalctl.
+View container logs. By default this reads the host unit journal for
+sdme@NAME.service; with --oci it reads the OCI app service journal from
+inside the container. Extra arguments are passed through to journalctl.
 
 EXAMPLES:
     sdme logs mybox

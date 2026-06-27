@@ -102,7 +102,7 @@ Use `sdme join` for interactive login-like sessions. It prefers `machinectl shel
 
 Use `sdme exec` for non-interactive commands and scripts. It uses `systemd-run --machine=NAME --pipe --wait --quiet --collect`, so stdout/stderr are suitable for shell pipelines.
 
-Use `sdme logs` for container journals. For NixOS guests, sdme detects the NixOS `journalctl` path when possible.
+Use `sdme logs` for container journals. The default `sdme logs NAME` reads the host unit journal (`journalctl -u sdme@NAME.service`). The `--oci` form reads an OCI app service journal from inside the container and detects the NixOS `journalctl` path when possible.
 
 ## Rootfs And OCI Workflows
 
@@ -110,13 +110,15 @@ Use `sdme fs import` for root filesystems from OCI registries, tarballs, directo
 
 Use `sdme fs build` for repeatable rootfs customization from `FROM`, `RUN`, and `COPY` directives.
 
+Use `sdme fs export` to write a container or rootfs out as a directory, tarball, or disk image. Use `--vm` for a bootable raw image.
+
 For OCI application images, remember that sdme runs the app as a systemd service inside a full rootfs. App images generally need a base OS rootfs via `--base-fs` or `default_base_fs`.
 
-Inspect OCI app metadata under the rootfs `oci/apps/` directory when debugging env, ports, volumes, or entrypoint behavior.
+Inspect OCI app metadata under the rootfs `oci/apps/` directory when debugging env, ports, or volumes. The app filesystem is `oci/apps/{name}/root/`. The entrypoint (ExecStart) lives in the generated unit `/etc/systemd/system/sdme-oci-{name}.service`, not under `oci/apps/`.
 
 ## Networking Checks
 
-By default, sdme containers use the host network namespace. Port publishing is relevant only when a private/veth/zone/bridge network mode is used.
+By default, sdme containers use the host network namespace. Port publishing requires a private network plus an interface (`--network-veth`, `--network-bridge`, or `--network-zone`); `--private-network` alone gives only loopback and cannot forward ports.
 
 For networked containers, inspect:
 
@@ -129,9 +131,34 @@ sudo sdme exec NAME -- systemctl status systemd-networkd systemd-resolved --no-p
 
 For zones and pod networks, verify pod membership, bridge/veth names, DHCP leases, and whether `systemd-resolved` is intentionally masked or unmasked for that mode.
 
+## Pods And Kubernetes
+
+Use `sdme kube apply` to run Kubernetes Pod YAML, and `sdme pod` to manage pod lifecycle and networking. Pods and OCI workloads ultimately run as sdme containers, so the lifecycle, stop/start, and logs diagnostics above apply directly.
+
+For Kubernetes-specific failures, check Pod YAML parsing, probe readiness (`probe-ready` files under `/oci/apps/{name}/`), and `sdme kube secret`/`sdme kube configmap` data used for env references and projected volumes.
+
 ## Repository Work
 
-When changing sdme itself, read the relevant source and existing tests before editing. Keep CLI help, site docs, and this skill in sync when behavior changes.
+When changing sdme itself, start from the existing docs and source map instead of duplicating that material in the prompt or this skill:
+
+- `README.md`: project overview, install path, and user-facing positioning.
+- `site/content/docs/architecture.md`: main design and implementation map.
+- `site/content/docs/security.md`: security model and hardening trade-offs.
+- `site/content/tutorial/*.md`: user workflows and examples.
+- `test/README.md`: live and end-to-end validation notes.
+- `Cargo.toml`: crate metadata, binaries, features, and dependencies.
+
+Find code by responsibility:
+
+- `src/main.rs`: CLI definitions, long help text, and command dispatch.
+- `src/lib.rs`: module index plus shared state and utility helpers.
+- `src/containers/`: create, list, manage, stop, exec, and join behavior.
+- `src/systemd/`: D-Bus helpers and generated nspawn/systemd units.
+- `src/import/`, `src/export/`, `src/rootfs/`: rootfs import/build/export flows.
+- `src/kube/`, `src/pod.rs`, `src/network.rs`: Kubernetes pod support, pod networking, and network flags.
+- `src/security.rs`, `src/userns.rs`, `src/mounts.rs`: hardening, user namespaces, binds, and env handling.
+
+Read the relevant source and existing tests before editing. Tests usually live beside implementation in module test files or `#[cfg(test)]` modules. Keep CLI help, site docs, and this skill in sync when behavior changes.
 
 Run focused tests for the changed area, then prefer the full baseline when feasible:
 
