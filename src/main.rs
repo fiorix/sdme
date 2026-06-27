@@ -55,7 +55,6 @@ COMMON COMMANDS:
     sdme logs <name>        View container logs
     sdme fs ls              List imported root filesystems
     sdme config get         Show configuration
-    sdme dump-skill          Print embedded AI agent skill
 
 ENVIRONMENT:
     SUDO_USER           For host-clone containers (rootfs=/), 'new', 'join',
