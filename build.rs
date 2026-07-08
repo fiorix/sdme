@@ -100,7 +100,15 @@ fn try_build_probe(probe_dst: &str) -> bool {
         .arg("sdme-kube-probe")
         .arg("--manifest-path")
         .arg(format!("{manifest_dir}/Cargo.toml"))
-        .env("CARGO_TARGET_DIR", &inner_target);
+        .env("CARGO_TARGET_DIR", &inner_target)
+        // The probe is embedded as an opaque include_bytes! blob, so its debug
+        // info would bloat the final sdme binary and, in RPM builds, survive
+        // find-debuginfo (it cannot see sections inside a rodata blob). Strip it
+        // via cargo profile env, not an external strip, so cross-compiled
+        // (aarch64) probes strip too. Both profiles: the nested build uses
+        // release (with --release) or dev otherwise, never a custom profile.
+        .env("CARGO_PROFILE_RELEASE_STRIP", "symbols")
+        .env("CARGO_PROFILE_DEV_STRIP", "symbols");
 
     if profile == "release" {
         cmd.arg("--release");
