@@ -1,4 +1,5 @@
 /target
+/dev/
 /packaging/out/
 /test/reports/
 /verify-*.md

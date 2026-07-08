@@ -1,6 +1,6 @@
 [package]
 name = "sdme"
-version = "0.10.1"
+version = "0.10.2"
 edition = "2021"
 description = "The systemd machine editor"
 license = "MIT"
@@ -10,6 +10,9 @@ documentation = "https://docs.rs/sdme"
 readme = "README.md"
 keywords = ["systemd", "nspawn", "containers", "overlayfs"]
 categories = ["command-line-utilities"]
+# Never publish local scratch/build dirs. dev/ once leaked into 0.10.1; this is
+# a hard denylist so an untracked dir can never be swept into a crate again.
+exclude = ["dev/", "/dev", "*.crate"]
 
 [lib]
 name = "sdme"
