@@ -25,24 +25,24 @@ uninstall-completions:
 	rm -f $(DESTDIR)/share/zsh/site-functions/_sdme
 	rm -f $(DESTDIR)/share/fish/vendor_completions.d/sdme.fish
 
-dist/out/completions: all
-	mkdir -p dist/out/completions
-	target/release/sdme config completions bash > dist/out/completions/sdme.bash
-	target/release/sdme config completions zsh > dist/out/completions/_sdme
-	target/release/sdme config completions fish > dist/out/completions/sdme.fish
+packaging/out/completions: all
+	mkdir -p packaging/out/completions
+	target/release/sdme config completions bash > packaging/out/completions/sdme.bash
+	target/release/sdme config completions zsh > packaging/out/completions/_sdme
+	target/release/sdme config completions fish > packaging/out/completions/sdme.fish
 
-deb: dist/out/completions
+deb: packaging/out/completions
 	cargo deb --no-build
 
-rpm: dist/out/completions
+rpm: packaging/out/completions
 	cargo generate-rpm
 
-pkg: dist/out/completions
-	./dist/arch/build-pkg.sh
+pkg: packaging/out/completions
+	./packaging/arch/build-pkg.sh
 
 clean:
 	cargo clean
-	rm -rf dist/out
+	rm -rf packaging/out
 
 e2e:
 	sudo test/scripts/run-parallel.sh

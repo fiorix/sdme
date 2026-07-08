@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Build an Arch Linux .pkg.tar.zst package from pre-built artifacts.
-# Usage: ./dist/arch/build-pkg.sh [TARGET]
+# Usage: ./packaging/arch/build-pkg.sh [TARGET]
 #   Without TARGET, uses the native binary at target/release/sdme.
 #   With TARGET (e.g. x86_64-unknown-linux-musl), uses target/$TARGET/release/sdme.
 
@@ -30,9 +30,9 @@ PKGVER="${VERSION}-${PKGREL}"
 PKGNAME="sdme"
 
 # Locate pre-built artifacts
-COMPLETIONS_DIR="$PROJECT_DIR/dist/out/completions"
-APPARMOR_DIR="$PROJECT_DIR/dist/out/apparmor"
-INSTALL_FILE="$PROJECT_DIR/dist/arch/sdme.install"
+COMPLETIONS_DIR="$PROJECT_DIR/packaging/out/completions"
+APPARMOR_DIR="$PROJECT_DIR/packaging/out/apparmor"
+INSTALL_FILE="$PROJECT_DIR/packaging/arch/sdme.install"
 
 for f in "$BINARY" "$COMPLETIONS_DIR/sdme.bash" "$COMPLETIONS_DIR/_sdme" \
          "$COMPLETIONS_DIR/sdme.fish" "$APPARMOR_DIR/sdme-default" "$INSTALL_FILE"; do

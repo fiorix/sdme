@@ -1,5 +1,5 @@
 /target
-/dist/out/
+/packaging/out/
 /test/reports/
 /verify-*.md
 /site/public/

@@ -27,7 +27,7 @@ Staged parallel test suite in `test/scripts/`. Run with `sudo ./test/scripts/run
 
 ### Release
 
-Static musl binaries (x86_64 + aarch64) built with `cargo-zigbuild`: `./dist/build-release.sh`. Pushing a `v*` tag triggers `.github/workflows/release.yml`.
+Static musl binaries (x86_64 + aarch64) built with `cargo-zigbuild`: `./packaging/build-release.sh`. Pushing a `v*` tag triggers `.github/workflows/release.yml`.
 
 ## Project Principles
 
