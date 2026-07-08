@@ -18,10 +18,16 @@ Requires the sdme Fedora rootfs (`sudo sdme fs import fedora quay.io/fedora/fedo
 ```bash
 sudo mkdir -p dev/fedora-out
 sudo sdme new fedbuild -r fedora \
-    -b "$PWD:/src:ro" -b "$PWD/dev/fedora-out:/out"
-# inside the container:
-bash /src/packaging/fedora/build-in-container.sh
+    -b "$PWD:/src:ro" -b "$PWD/dev/fedora-out:/out" \
+    -- bash /src/packaging/fedora/build-in-container.sh
 ```
+
+By default the script builds the **published** crate: it fetches `Source0`
+from crates.io (matching the spec's `%{crates_source}`) and vendors from that
+crate's `Cargo.lock`, so the SRPM is exactly what COPR / official Fedora would
+build. To test unreleased working-tree changes instead, pass
+`-e SDME_SRPM_SOURCE=local` on the `sdme new` line (builds `git archive HEAD`;
+not a valid official artifact since the source is not on crates.io).
 
 Artifacts land in `dev/fedora-out/`: the binary RPM, the SRPM, the vendor
 tarball, and the spec. Install and smoke-test:
@@ -88,10 +94,11 @@ References:
 
 ## Prerequisites still missing
 
-- **No `v0.10.1` git tag** and **crates.io max is 0.8.0**. The local build uses
-  the working tree, but the official spec's `Source0` needs a canonical
-  downloadable tarball. Tag `v0.10.1` (and/or `cargo publish`) before the
-  Fedora review submission.
+- `Source0` uses `%{crates_source}` (the crates.io release tarball); sdme
+  0.10.1 is published there, so no git tag is required. The local container
+  build ignores `Source0` and builds from the working tree instead.
+  `rust2rpm sdme` now generates a canonical 0.10.1 spec you can diff against
+  this one.
 - The Debian/RPM apparmor asset is intentionally dropped here: Fedora uses
   SELinux, so shipping `/etc/apparmor.d/sdme-default` is a no-op and would draw
   review scrutiny.

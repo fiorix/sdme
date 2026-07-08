@@ -22,7 +22,8 @@ Summary:        The systemd machine editor
 # SPDX expression that %%cargo_license computes over the vendored tree.
 License:        MIT
 URL:            https://github.com/fiorix/sdme
-Source0:        %{url}/archive/v%{version}/%{crate}-%{version}.tar.gz
+# Canonical upstream source is the crates.io release tarball (no git tag needed).
+Source0:        %{crates_source}
 Source1:        %{crate}-%{version}-vendor.tar.xz
 
 ExclusiveArch:  %{rust_arches}
@@ -59,6 +60,10 @@ tar -xf %{SOURCE1}
 
 %install
 %cargo_install
+# sdme has a [lib], so %%cargo_install also stages the crate registry sources
+# for a -devel subpackage. This is an application-only package: drop them so the
+# unpackaged-files check passes and only the binary and completions ship.
+rm -rf %{buildroot}%{_datadir}/cargo/registry
 # Shell completions are emitted by the freshly built binary (no root needed).
 install -d %{buildroot}%{_datadir}/bash-completion/completions
 install -d %{buildroot}%{_datadir}/zsh/site-functions
