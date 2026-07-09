@@ -92,13 +92,13 @@ References:
 - Sponsor policy: <https://docs.fedoraproject.org/en-US/package-maintainers/How_to_Sponsor_a_New_Contributor/>
 - COPR user docs: <https://docs.pagure.org/copr.copr/user_documentation.html>
 
-## Prerequisites still missing
+## Notes
 
-- `Source0` uses `%{crates_source}` (the crates.io release tarball); sdme
-  0.10.1 is published there, so no git tag is required. The local container
-  build ignores `Source0` and builds from the working tree instead.
-  `rust2rpm sdme` now generates a canonical 0.10.1 spec you can diff against
-  this one.
-- The Debian/RPM apparmor asset is intentionally dropped here: Fedora uses
-  SELinux, so shipping `/etc/apparmor.d/sdme-default` is a no-op and would draw
-  review scrutiny.
+- `Source0` uses `%{crates_source}` (the crates.io release tarball), so the
+  default `crates` build needs no git tag. `rust2rpm sdme` also generates a
+  canonical spec from the published crate you can diff against this one.
+- The build runs `rpmbuild` as a non-root `builder` user (as mock/Koji do) and
+  runs the unit tests in `%check`. build.rs strips the embedded probe, keeping
+  the installed binary small (~11M rather than ~52M).
+- No AppArmor asset: Fedora uses SELinux, so shipping `/etc/apparmor.d/...`
+  would be a no-op and would draw review scrutiny.
