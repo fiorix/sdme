@@ -11,7 +11,7 @@
 %global crate sdme
 
 Name:           sdme
-Version:        0.10.1
+Version:        0.10.3
 Release:        1%{?dist}
 Summary:        The systemd machine editor
 
@@ -71,6 +71,11 @@ install -d %{buildroot}%{_datadir}/fish/vendor_completions.d
 %{buildroot}%{_bindir}/%{crate} config completions bash > %{buildroot}%{_datadir}/bash-completion/completions/%{crate}
 %{buildroot}%{_bindir}/%{crate} config completions zsh  > %{buildroot}%{_datadir}/zsh/site-functions/_%{crate}
 %{buildroot}%{_bindir}/%{crate} config completions fish > %{buildroot}%{_datadir}/fish/vendor_completions.d/%{crate}.fish
+
+%check
+# Run the unit tests during the build (unprivileged, offline against vendor).
+# build.rs skips the probe under CARGO_CFG_TEST, so no network or probe needed.
+%cargo_test
 
 %files
 %license LICENSE

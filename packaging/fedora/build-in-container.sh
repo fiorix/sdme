@@ -32,9 +32,27 @@ MODE=${SDME_SRPM_SOURCE:-crates}
 crate=sdme
 spec="$SRC/packaging/fedora/$crate.spec"
 
-# sdme exec/join leaves HOME unset; without this, rpm's %_topdir resolves to
-# /rpmbuild while the shell's ~ resolves to /root/rpmbuild, and they disagree.
-export HOME="${HOME:-/root}"
+# Install the toolchain (root), then drop to a non-root "builder" user and
+# re-exec. Real builders (Koji/mock/COPR) run unprivileged: rpmbuild as root is
+# discouraged, and several unit tests in %check assume a non-root builder (they
+# set SUDO_USER to the current user and expect it to resolve, which USER=root
+# defeats). A real user also gives a proper HOME and drops sudo's SUDO_* vars.
+# curl is needed by spectool / the crates.io fallback; shadow-utils for useradd.
+if [ "$(id -u)" -eq 0 ]; then
+    echo ">> installing build toolchain (root)"
+    dnf -y install rust cargo cargo-rpm-macros rpm-build rpmdevtools \
+        shadow-utils git tar xz curl >/dev/null
+    id builder &>/dev/null || useradd -m builder
+    mkdir -p "$OUT"; chmod 0777 "$OUT"   # let the builder write artifacts here
+    exec runuser -u builder -- env -u SUDO_USER -u SUDO_UID -u SUDO_GID \
+        -u SUDO_COMMAND HOME=/home/builder USER=builder LOGNAME=builder \
+        SRC="$SRC" OUT="$OUT" SDME_SRPM_SOURCE="$MODE" bash "$0"
+fi
+
+# ---- from here on we run as the unprivileged "builder" user ----
+export HOME="${HOME:-/home/builder}"
+# $SRC is a foreign-owned (host uid) read-only bind mount; let git operate on it.
+git config --global --add safe.directory "$SRC"
 
 [ -f "$spec" ] || { echo "error: spec not found at $spec" >&2; exit 1; }
 # The spec's Version: tag is the single source of truth (it also drives the
@@ -47,11 +65,8 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 srcdir="$work/$crate-$version"
 
-echo ">> building $crate $version ($MODE mode) -> $OUT"
+echo ">> building $crate $version ($MODE mode) as $(id -un) -> $OUT"
 
-# 1. Build toolchain (curl is needed by spectool / the crates.io fallback).
-echo ">> installing build toolchain"
-dnf -y install rust cargo cargo-rpm-macros rpm-build rpmdevtools git tar xz curl >/dev/null
 rpmdev-setuptree
 cp "$spec" ~/rpmbuild/SPECS/
 
@@ -105,11 +120,13 @@ tar -C "$srcdir" -caf ~/rpmbuild/SOURCES/"$crate-$version-vendor.tar.xz" vendor
 echo ">> rpmbuild"
 rpmbuild -ba ~/rpmbuild/SPECS/"$crate.spec"
 
-# 5. Collect artifacts.
+# 5. Collect artifacts. Force-overwrite: $OUT may hold stale, differently-owned
+#    files from earlier runs, and a plain cp cannot truncate a file it does not
+#    own even in a world-writable dir (cp -f unlinks and recreates instead).
 mkdir -p "$OUT"
-cp -v ~/rpmbuild/SOURCES/"$crate-$version-vendor.tar.xz" "$OUT/"
-cp "$spec" "$OUT/"
-find ~/rpmbuild/SRPMS ~/rpmbuild/RPMS -name '*.rpm' -exec cp -v {} "$OUT/" \;
+cp -vf ~/rpmbuild/SOURCES/"$crate-$version-vendor.tar.xz" "$OUT/"
+cp -f "$spec" "$OUT/"
+find ~/rpmbuild/SRPMS ~/rpmbuild/RPMS -name '*.rpm' -exec cp -vf {} "$OUT/" \;
 
 echo ">> done. artifacts in $OUT:"
 ls -1 "$OUT"
