@@ -12,7 +12,7 @@
 
 Name:           sdme
 Version:        0.10.3
-Release:        1%{?dist}
+Release:        2%{?dist}
 Summary:        The systemd machine editor
 
 # sdme itself is MIT. Bundled crates carry their own (MIT/Apache-2.0-family)
@@ -33,8 +33,11 @@ BuildRequires:  cargo-rpm-macros >= 25
 # systemd-nspawn and machinectl are provided by systemd-container.
 Requires:       systemd
 Requires:       systemd-container
-# qemu-img is used for raw/qcow image workflows, not for core container ops.
-Recommends:     qemu-img
+# qemu-nbd (from qemu-img) is only needed for QCOW2 image import; sdme checks
+# for it at runtime with a clear error. Suggests (not Recommends) so dnf does
+# not install it and its dependency chain by default; matches the Debian
+# package's Suggests: qemu-utils.
+Suggests:       qemu-img
 
 %description
 sdme boots systemd-nspawn containers using overlayfs copy-on-write layers,
@@ -88,5 +91,12 @@ install -d %{buildroot}%{_datadir}/fish/vendor_completions.d
 %{_datadir}/fish/vendor_completions.d/%{crate}.fish
 
 %changelog
+* Thu Jul 09 2026 Alexandre Fiori <fiorix@gmail.com> - 0.10.3-2
+- Demote qemu-img from Recommends to Suggests; only needed for QCOW2
+  image import, not core container operations.
+
+* Thu Jul 09 2026 Alexandre Fiori <fiorix@gmail.com> - 0.10.3-1
+- Update to 0.10.3.
+
 * Wed Jul 08 2026 Alexandre Fiori <fiorix@gmail.com> - 0.10.1-1
 - Initial Fedora package.
