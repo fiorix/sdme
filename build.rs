@@ -100,15 +100,7 @@ fn try_build_probe(probe_dst: &str) -> bool {
         .arg("sdme-kube-probe")
         .arg("--manifest-path")
         .arg(format!("{manifest_dir}/Cargo.toml"))
-        .env("CARGO_TARGET_DIR", &inner_target)
-        // The probe is embedded as an opaque include_bytes! blob, so its debug
-        // info would bloat the final sdme binary and, in RPM builds, survive
-        // find-debuginfo (it cannot see sections inside a rodata blob). Strip it
-        // via cargo profile env, not an external strip, so cross-compiled
-        // (aarch64) probes strip too. Both profiles: the nested build uses
-        // release (with --release) or dev otherwise, never a custom profile.
-        .env("CARGO_PROFILE_RELEASE_STRIP", "symbols")
-        .env("CARGO_PROFILE_DEV_STRIP", "symbols");
+        .env("CARGO_TARGET_DIR", &inner_target);
 
     if profile == "release" {
         cmd.arg("--release");
@@ -150,6 +142,7 @@ fn try_build_probe(probe_dst: &str) -> bool {
 
     if built_path.is_file() {
         std::fs::copy(&built_path, probe_dst).unwrap();
+        strip_probe_debug(probe_dst);
         // Rebuild when probe source changes.
         println!("cargo:rerun-if-changed=src/kube/probe/");
         return true;
@@ -160,4 +153,27 @@ fn try_build_probe(probe_dst: &str) -> bool {
         built_path.display()
     );
     false
+}
+
+/// Strip debug info from the built probe so the embedded blob stays small.
+///
+/// The probe is embedded verbatim via `include_bytes!`, and some builds (notably
+/// Fedora's rpm profile, which forces `-Cdebuginfo=2 -Cstrip=none` via rustflags
+/// that also override any cargo `strip` profile setting) leave tens of MB of
+/// DWARF in it. The outer `find-debuginfo` pass cannot reach it because it lives
+/// inside a rodata blob, so it survives into the shipped binary. Strip it here.
+///
+/// Native builds only: a cross-built probe uses the debug-free release profile
+/// anyway, and the host `strip` cannot process a foreign-arch ELF. Best effort;
+/// a missing or failing strip just leaves the probe as-is.
+fn strip_probe_debug(path: &str) {
+    let host = std::env::var("HOST").unwrap_or_default();
+    let target = std::env::var("TARGET").unwrap_or_default();
+    if !target.is_empty() && target != host {
+        return;
+    }
+    let _ = std::process::Command::new("strip")
+        .arg("--strip-all")
+        .arg(path)
+        .status();
 }
