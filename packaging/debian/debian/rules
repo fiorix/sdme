@@ -1,0 +1,38 @@
+#!/usr/bin/make -f
+
+# Build fully offline against the vendored crates (Launchpad builders have no
+# network). CARGO_NET_OFFLINE also reaches build.rs's nested probe build.
+export CARGO_NET_OFFLINE = true
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+
+%:
+	dh $@
+
+# Point cargo at the vendored crate sources and unpack them.
+override_dh_auto_configure:
+	mkdir -p .cargo
+	printf '[source.crates-io]\nreplace-with = "vendored-sources"\n\n[source.vendored-sources]\ndirectory = "vendor"\n' > .cargo/config.toml
+	tar xf debian/vendor.tar.xz
+
+override_dh_auto_build:
+	cargo build --release --frozen
+
+# The %check analog. Tests are pure/tempdir-isolated and offline; build.rs skips
+# the probe under CARGO_CFG_TEST. Runs unprivileged (Launchpad buildd), so the
+# SUDO_USER/user-resolution tests pass.
+override_dh_auto_test:
+	cargo test --release --frozen
+
+override_dh_auto_install:
+	install -Dm755 target/release/sdme debian/sdme/usr/bin/sdme
+	install -d debian/sdme/usr/share/bash-completion/completions \
+	          debian/sdme/usr/share/zsh/vendor-completions \
+	          debian/sdme/usr/share/fish/vendor_completions.d \
+	          debian/sdme/etc/apparmor.d
+	target/release/sdme config completions bash > debian/sdme/usr/share/bash-completion/completions/sdme
+	target/release/sdme config completions zsh  > debian/sdme/usr/share/zsh/vendor-completions/_sdme
+	target/release/sdme config completions fish > debian/sdme/usr/share/fish/vendor_completions.d/sdme.fish
+	target/release/sdme config apparmor-profile  > debian/sdme/etc/apparmor.d/sdme-default
+
+override_dh_auto_clean:
+	rm -rf .cargo vendor target

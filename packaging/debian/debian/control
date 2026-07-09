@@ -1,0 +1,33 @@
+Source: sdme
+Section: admin
+Priority: optional
+Maintainer: Alexandre Fiori <fiorix@gmail.com>
+# cargo/rustc must be >= 1.85 for edition-2024 vendored deps (e.g. zbus). Ubuntu
+# 24.04 LTS ships 1.75-1.80 and cannot build this; target 26.04 (resolute) or
+# newer. No version constraint here so the build fails with a clear rustc error
+# rather than an opaque dependency-resolution failure on older series.
+Build-Depends:
+ debhelper-compat (= 13),
+ cargo,
+ rustc,
+ xz-utils,
+Standards-Version: 4.7.0
+Homepage: https://sdme.io
+Rules-Requires-Root: no
+
+Package: sdme
+Architecture: amd64 arm64
+Depends:
+ ${shlibs:Depends},
+ ${misc:Depends},
+ systemd (>= 255),
+ systemd-container,
+Suggests: qemu-utils, apparmor
+Description: The systemd machine editor
+ sdme boots systemd-nspawn containers using overlayfs copy-on-write layers,
+ with OCI registry integration and Kubernetes Pod YAML support. Default
+ containers are overlayfs clones of the host root filesystem; rootfs images
+ from other distributions can be imported and booted instead.
+ .
+ sdme runs on Linux with systemd and requires root. It is useless without
+ systemd-nspawn and machinectl, hence the hard dependency on systemd-container.
