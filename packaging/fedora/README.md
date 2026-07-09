@@ -4,7 +4,15 @@ sdme is available from a Copr repository:
 
 ```bash
 sudo dnf copr enable fiorix/sdme
-sudo dnf install sdme
+sudo dnf install --setopt=install_weak_deps=False sdme
+```
+
+`--setopt=install_weak_deps=False` is optional but recommended: it keeps the install to sdme and systemd-container (~5 MiB). Without it, dnf also installs weak dependencies, and Fedora's systemd-container package Recommends qemu-kvm-core (for systemd-vmspawn), which pulls in the qemu system emulator stack (~40 packages). sdme does not use qemu for container operations, and weak dependencies skipped at install time are not added back by upgrades.
+
+To import QCOW2 disk images, also install qemu-img (provides qemu-nbd):
+
+```bash
+sudo dnf install qemu-img
 ```
 
 - Copr project: <https://copr.fedorainfracloud.org/coprs/fiorix/sdme/>
