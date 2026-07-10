@@ -12,7 +12,7 @@ keywords = ["systemd", "nspawn", "containers", "overlayfs"]
 categories = ["command-line-utilities"]
 # Never publish local scratch/build dirs. dev/ once leaked into 0.10.1; this is
 # a hard denylist so an untracked dir can never be swept into a crate again.
-exclude = ["dev/", "/dev", "*.crate"]
+exclude = ["dev/", "/dev", ".Drafts", "*.crate"]
 
 [lib]
 name = "sdme"
