@@ -53,8 +53,11 @@ $crate ($version-1~${series}1) $series; urgency=medium
  -- Alexandre Fiori <fiorix@gmail.com>  $(date -R)
 EOF
 
-# Source-only package (unsigned).
-( cd "$srcdir" && dpkg-buildpackage -S -sa -us -uc )
+# Source-only package (unsigned). -d skips the build-dependency check: assembling
+# the source does not compile, so cargo/rustc/debhelper need not be installed
+# here (Launchpad installs them for the actual build). Without -d, dpkg fails on
+# a runner that has cargo via rustup rather than the deb packages.
+( cd "$srcdir" && dpkg-buildpackage -S -sa -us -uc -d )
 
 cp -vf "$work"/${crate}_*.dsc "$work"/${crate}_*.tar.* \
        "$work"/${crate}_*_source.changes "$work"/${crate}_*_source.buildinfo \
