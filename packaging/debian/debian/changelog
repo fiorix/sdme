@@ -1,3 +1,9 @@
+sdme (0.11.0-1~resolute1) resolute; urgency=medium
+
+  * Release 0.11.0.
+
+ -- Alexandre Fiori <fiorix@gmail.com>  Fri, 10 Jul 2026 06:14:35 +0000
+
 sdme (0.10.3-1~resolute2) resolute; urgency=medium
 
   * Rebuild to trigger the arm64 build (arm64 enabled on the PPA after the

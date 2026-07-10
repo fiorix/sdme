@@ -11,8 +11,8 @@
 %global crate sdme
 
 Name:           sdme
-Version:        0.10.3
-Release:        2%{?dist}
+Version:        0.11.0
+Release:        1%{?dist}
 Summary:        The systemd machine editor
 
 # sdme itself is MIT. Bundled crates carry their own (MIT/Apache-2.0-family)
@@ -91,6 +91,9 @@ install -d %{buildroot}%{_datadir}/fish/vendor_completions.d
 %{_datadir}/fish/vendor_completions.d/%{crate}.fish
 
 %changelog
+* Fri Jul 10 2026 Alexandre Fiori <fiorix@gmail.com> - 0.11.0-1
+- Update to 0.11.0.
+
 * Thu Jul 09 2026 Alexandre Fiori <fiorix@gmail.com> - 0.10.3-2
 - Demote qemu-img from Recommends to Suggests; only needed for QCOW2
   image import, not core container operations.
