@@ -38,7 +38,7 @@ Copr and Launchpad both build from the **tag's tree** (git archive), so the vers
 ## Verify
 
 - **GitHub**: `gh run watch <id>` for the Release workflow; the release appears with `sdme-{x86_64,aarch64}-linux` + deb/rpm/pkg + SHA256SUMS. Confirm `gh api repos/fiorix/sdme/releases/latest --jq .tag_name` is the new tag.
-- **Copr**: the build on <https://copr.fedorainfracloud.org/coprs/fiorix/sdme/package/sdme/> goes green.
+- **Copr**: the build on <https://copr.fedorainfracloud.org/coprs/fiorix/sdme/package/sdme/> goes green. Verifying the install from a container: use `dnf upgrade sdme` (or `dnf install --refresh sdme` on a fresh box), not `dnf install`; under DNF5 (F41+) `install` on an already-installed package will not upgrade it and reports "nothing to do" even when the newer RPM is published and visible to `dnf check-update`.
 - **Launchpad**: the `launchpad` job is green, then the PPA accepts + builds at <https://launchpad.net/~fiorix/+archive/ubuntu/sdme>.
 - **crates.io**: `curl -sL -A x https://crates.io/api/v1/crates/sdme | jq -r .crate.max_version`.
 
