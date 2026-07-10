@@ -55,8 +55,7 @@ probe so the installed binary stays small (~11M). Artifacts land in
 copr-cli build sdme dev/fedora-out/sdme-*.src.rpm
 ```
 
-Or configure the Copr project's SCM/Package method to point at the git repo
-with spec `packaging/fedora/sdme.spec` and build automatically on new tags.
+Automatic rebuilds: the Copr project has an SCM package (build method `make_srpm`) pointed at this repo, so pushing a tag rebuilds sdme. `.copr/Makefile` runs `packaging/fedora/make-srpm.sh`, which vendors the crate closure (Copr's SRPM phase has network) and assembles a self-contained SRPM; Copr then builds the RPM offline. Bump `Version:`/`Release:` in `sdme.spec` as part of a release so the tag builds the right version.
 
 ### Official Fedora (base repos, no Copr)
 
