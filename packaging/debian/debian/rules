@@ -4,6 +4,9 @@
 # network). CARGO_NET_OFFLINE also reaches build.rs's nested probe build.
 export CARGO_NET_OFFLINE = true
 export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+# Mark this as a Launchpad/apt-managed build so `sdme upgrade` defers to the
+# package manager instead of overwriting the dpkg-owned binary.
+export SDME_CHANNEL = launchpad
 
 %:
 	dh $@

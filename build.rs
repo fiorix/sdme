@@ -11,6 +11,15 @@
 /// only needed at runtime. Set `SDME_BUILD_PROBE=1` to force building
 /// the probe during tests.
 fn main() {
+    // Provenance marker: distro package builds (Copr, Launchpad) set SDME_CHANNEL
+    // so the binary defers self-upgrade to the system package manager. Default
+    // "source" = built from source / install.sh musl binary, where self-upgrade
+    // is allowed. Emitted before any early return below so env!/option_env! in
+    // the crate always resolves it.
+    let channel = std::env::var("SDME_CHANNEL").unwrap_or_else(|_| "source".into());
+    println!("cargo:rustc-env=SDME_CHANNEL={channel}");
+    println!("cargo:rerun-if-env-changed=SDME_CHANNEL");
+
     let out_dir = std::env::var("OUT_DIR").unwrap();
     let probe_dst = format!("{out_dir}/sdme-kube-probe");
 

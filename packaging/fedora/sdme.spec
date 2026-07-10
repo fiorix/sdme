@@ -11,7 +11,7 @@
 %global crate sdme
 
 Name:           sdme
-Version:        0.11.0
+Version:        0.11.1
 Release:        1%{?dist}
 Summary:        The systemd machine editor
 
@@ -59,6 +59,9 @@ tar -xf %{SOURCE1}
 # build.rs compiles and embeds the sdme-kube-probe binary. It spawns a nested
 # cargo build that inherits the vendored, offline cargo config from
 # %%cargo_prep, so no network access is required.
+# Mark this as a Copr/dnf-managed build so `sdme upgrade` defers to the package
+# manager instead of overwriting the rpm-owned binary.
+export SDME_CHANNEL=copr
 %cargo_build
 
 %install
@@ -91,6 +94,12 @@ install -d %{buildroot}%{_datadir}/fish/vendor_completions.d
 %{_datadir}/fish/vendor_completions.d/%{crate}.fish
 
 %changelog
+* Fri Jul 10 2026 Alexandre Fiori <fiorix@gmail.com> - 0.11.1-1
+- Update to 0.11.1.
+- Disable self-upgrade on this Copr build: `sdme upgrade` now defers to dnf
+  instead of overwriting the rpm-managed binary, and the background update
+  check is suppressed.
+
 * Fri Jul 10 2026 Alexandre Fiori <fiorix@gmail.com> - 0.11.0-1
 - Update to 0.11.0.
 

@@ -41,6 +41,12 @@
 //! - Mirror: override the three URL knobs in `[update_check]` to point at
 //!   an internal release mirror.
 //!
+//! Distro package builds (Fedora Copr, Ubuntu Launchpad) disable all three
+//! pieces unconditionally: `build.rs` bakes in `SDME_CHANNEL` and, when it
+//! names a packaged channel, the probe and banner are suppressed and
+//! `sdme upgrade` prints guidance to use the system package manager instead of
+//! overwriting the dpkg/rpm-managed binary.
+//!
 //! [v]: crate::config::UpdateCheckConfig::version_url
 
 use std::env;
@@ -61,6 +67,60 @@ use crate::config::{self, Config};
 
 /// Environment override. Setting to `0` disables the probe regardless of config.
 const ENV_DISABLE: &str = "SDME_UPDATE_CHECK";
+
+/// Build channel, injected by `build.rs` from the `SDME_CHANNEL` env var.
+/// Defaults to `"source"` (built from source, or the install.sh musl binary),
+/// where self-upgrade is allowed. Distro package builds set `"copr"` /
+/// `"launchpad"`.
+fn build_channel() -> &'static str {
+    option_env!("SDME_CHANNEL").unwrap_or("source")
+}
+
+/// Whether `channel` is a distribution package build that must defer upgrades
+/// to the system package manager. Pure predicate (env-independent) so it can be
+/// unit-tested without depending on the ambient `SDME_CHANNEL`.
+fn channel_is_packaged(channel: &str) -> bool {
+    matches!(channel, "copr" | "launchpad")
+}
+
+/// Whether this binary came from a distribution package (Copr/Launchpad). When
+/// true, the background probe, the banner, and `sdme upgrade` are all disabled
+/// so sdme does not overwrite dpkg/rpm-managed files.
+fn is_packaged_build() -> bool {
+    channel_is_packaged(build_channel())
+}
+
+/// If this is a distribution package build, the guidance to show instead of
+/// self-upgrading; `None` on source builds (where self-upgrade is allowed).
+/// Callers print this before the root-privilege check so a non-root
+/// `sdme upgrade` gets the redirect rather than a "requires root" error.
+pub fn packaged_build_notice() -> Option<String> {
+    is_packaged_build().then(|| packaged_upgrade_notice(build_channel()))
+}
+
+/// Guidance printed when `sdme upgrade` runs on a distribution package build.
+/// Directs the user to their package manager, or to remove the distro package
+/// and reinstall the standalone build so `sdme upgrade` works without conflict.
+fn packaged_upgrade_notice(channel: &str) -> String {
+    let (pm_upgrade, pm_remove) = match channel {
+        "copr" => ("sudo dnf upgrade sdme", "sudo dnf remove sdme"),
+        "launchpad" => (
+            "sudo apt update && sudo apt upgrade sdme",
+            "sudo apt remove sdme",
+        ),
+        _ => ("your package manager", "your package manager"),
+    };
+    format!(
+        "sdme was installed from a distribution package and is managed by your \
+         package manager.\n\
+         Self-upgrade is disabled so it does not conflict with the packaged \
+         files.\n\n\
+         Upgrade with your package manager:\n    {pm_upgrade}\n\n\
+         Or, to self-manage sdme with 'sdme upgrade', remove the distro package \
+         and reinstall the standalone build:\n    {pm_remove}\n    \
+         curl -fsSL https://sdme.io/install.sh | sudo sh"
+    )
+}
 
 /// Filename of the state file under `Config::datadir`.
 const STATE_FILE: &str = "update-check.json";
@@ -304,7 +364,7 @@ fn is_stale_upgrade_temp(path: &Path, my_pid: u32, now: SystemTime) -> bool {
 /// `skip_command` short-circuits the whole mechanism for commands where a
 /// probe adds no value (e.g. `sdme config ...`, the probe itself).
 pub fn maybe_spawn_background_check(cfg: &Config, skip_command: bool, verbose: bool) {
-    if skip_command || !cfg.update_check.enabled || env_disabled() {
+    if skip_command || !cfg.update_check.enabled || env_disabled() || is_packaged_build() {
         return;
     }
     let interval_secs = cfg.update_check.check_interval_hours.saturating_mul(3600);
@@ -389,6 +449,11 @@ pub fn fetch_latest_version(agent: &ureq::Agent, version_url: &str) -> Result<St
 /// Fetches the latest version, records state, and sweeps stale upgrade
 /// temps. All errors are swallowed: this runs detached and must not raise.
 pub fn run_background_check(cfg: &Config) -> Result<()> {
+    // Distro package builds never probe; a manual `sdme __update-check` here
+    // writes no state so the banner can never fire.
+    if is_packaged_build() {
+        return Ok(());
+    }
     let checked_version = env!("CARGO_PKG_VERSION").to_string();
     let now = now_unix();
 
@@ -441,7 +506,7 @@ fn stderr_is_tty() -> bool {
 /// Loads config from the path stashed by [`set_config_override`] (falling
 /// back to the default if not set); swallows all errors.
 pub fn maybe_print_banner_from_env() {
-    if !stderr_is_tty() || env_disabled() {
+    if !stderr_is_tty() || env_disabled() || is_packaged_build() {
         return;
     }
     let config_path = CONFIG_OVERRIDE.get().and_then(|o| o.as_deref());
@@ -464,8 +529,10 @@ pub fn maybe_print_banner_from_env() {
     if !semver_newer(latest, current) {
         return;
     }
+    // Leading newline so the banner never glues onto a preceding command's
+    // output that lacked a trailing newline.
     eprintln!(
-        "sdme: update available: {latest} (you have {current}). \
+        "\nsdme: update available: {latest} (you have {current}). \
          Run 'sudo sdme upgrade' or disable with \
          'sdme config set update_check.enabled no'."
     );
@@ -546,6 +613,15 @@ pub struct UpgradeOptions<'a> {
 
 /// Execute `sdme upgrade`.
 pub fn run_upgrade(cfg: &Config, opts: UpgradeOptions<'_>) -> Result<()> {
+    // Distro package builds defer to the system package manager: never probe,
+    // never overwrite the packaged binary. Short-circuit before any arch
+    // detection or network access, so all of --check/-y/default just print
+    // guidance.
+    if is_packaged_build() {
+        println!("{}", packaged_upgrade_notice(build_channel()));
+        return Ok(());
+    }
+
     let arch = detect_arch()?;
     let current = env!("CARGO_PKG_VERSION").to_string();
 
@@ -750,6 +826,32 @@ mod tests {
             render_url(template, "1.2.3", "x86_64"),
             "https://example/v1.2.3/sdme-x86_64-linux"
         );
+    }
+
+    #[test]
+    fn test_channel_is_packaged() {
+        // Distro package channels defer to the system package manager.
+        assert!(channel_is_packaged("copr"));
+        assert!(channel_is_packaged("launchpad"));
+        // Everything else self-manages (install.sh musl binary, from-source,
+        // GitHub-release deb/rpm, unknown/future channels).
+        assert!(!channel_is_packaged("source"));
+        assert!(!channel_is_packaged(""));
+        assert!(!channel_is_packaged("github-musl"));
+        assert!(!channel_is_packaged("arch"));
+    }
+
+    #[test]
+    fn test_packaged_upgrade_notice_is_channel_specific() {
+        let copr = packaged_upgrade_notice("copr");
+        assert!(copr.contains("dnf upgrade sdme"));
+        assert!(copr.contains("dnf remove sdme"));
+        let lp = packaged_upgrade_notice("launchpad");
+        assert!(lp.contains("apt upgrade sdme"));
+        assert!(lp.contains("apt remove sdme"));
+        // Both point at the standalone installer as the escape hatch.
+        assert!(copr.contains("https://sdme.io/install.sh"));
+        assert!(lp.contains("https://sdme.io/install.sh"));
     }
 
     #[test]

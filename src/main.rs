@@ -978,6 +978,12 @@ EXAMPLES:
     sudo sdme upgrade --version 0.6.10 -y
 
 NOTES:
+    On distribution package builds (Fedora Copr, Ubuntu Launchpad) self-
+    upgrade is disabled: this command prints guidance to upgrade via the
+    system package manager (dnf/apt) instead of overwriting the packaged
+    binary, and the background update check is suppressed. To self-manage
+    sdme, remove the distro package and reinstall via install.sh.
+
     The current user must be root and the directory containing the sdme
     binary must be writable. HTTP responses are bounded and the download
     is rejected if it exceeds 128 MiB.
@@ -1894,6 +1900,15 @@ fn run() -> Result<()> {
         Command::DumpSkill => {
             print!("{SDME_SKILL}");
             return Ok(());
+        }
+        // On distro package builds, `sdme upgrade` (any form) prints guidance to
+        // use the system package manager. Handle it before the root check so a
+        // non-root invocation gets the redirect, not a "requires root" error.
+        Command::Upgrade { .. } => {
+            if let Some(msg) = sdme::update::packaged_build_notice() {
+                println!("{msg}");
+                return Ok(());
+            }
         }
         _ => {}
     }
