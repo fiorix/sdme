@@ -45,7 +45,7 @@ jobs:
           rm zig.tar.xz
 
       - name: Install cargo-zigbuild
-        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/rust-cross/cargo-zigbuild/releases/download/v0.22.1/cargo-zigbuild-installer.sh | sh
+        run: cargo install --locked cargo-zigbuild
 
       - name: Add rustup target
         run: rustup target add ${{ matrix.target }}
@@ -159,3 +159,46 @@ jobs:
             artifacts/*/*.rpm
             artifacts/*/*.pkg.tar.zst
             artifacts/SHA256SUMS
+
+  # Build the Debian source package from the tag and upload it to the Launchpad
+  # PPA (which then builds amd64 + arm64). Source-package assembly does not
+  # compile, so the stock runner is fine; the Launchpad build is offline against
+  # the vendored crates. No-ops without the signing secret (e.g. on forks).
+  launchpad:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install packaging tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq debhelper devscripts dpkg-dev dput gnupg xz-utils
+
+      - name: Build Debian source package
+        run: bash packaging/debian/make-source-package.sh "${GITHUB_REF_NAME#v}"
+
+      - name: Sign and upload to the PPA
+        env:
+          LP_KEY: ${{ secrets.LAUNCHPAD_GPG_PRIVATE_KEY }}
+          LP_PASS: ${{ secrets.LAUNCHPAD_GPG_PASSPHRASE }}
+        run: |
+          if [ -z "$LP_KEY" ]; then
+            echo "LAUNCHPAD_GPG_PRIVATE_KEY not set; skipping PPA upload."
+            exit 0
+          fi
+          GNUPGHOME=$(mktemp -d); chmod 700 "$GNUPGHOME"; export GNUPGHOME
+          printf 'allow-loopback-pinentry\nallow-preset-passphrase\n' > "$GNUPGHOME/gpg-agent.conf"
+          gpgconf --kill gpg-agent >/dev/null 2>&1 || true
+          echo "$LP_KEY" | gpg --batch --import
+          gpg-connect-agent /bye >/dev/null 2>&1 || true
+          KEYID=$(gpg --list-secret-keys --with-colons | awk -F: '/^sec:/{print $5; exit}')
+          if [ -n "$LP_PASS" ]; then
+            preset="$(gpgconf --list-dirs libexecdir)/gpg-preset-passphrase"
+            gpg --batch --with-colons --with-keygrip --list-secret-keys \
+              | awk -F: '/^grp:/{print $10}' \
+              | while read -r grip; do "$preset" --preset "$grip" <<<"$LP_PASS"; done
+          fi
+          cd deb-src-out
+          debsign -k"$KEYID" sdme_*_source.changes
+          dput ppa:fiorix/sdme sdme_*_source.changes
