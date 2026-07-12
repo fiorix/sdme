@@ -25,7 +25,8 @@ fn test_paths() -> UnitPaths {
 
 #[test]
 fn test_unit_template() {
-    let template = unit_template(16384, 60);
+    // systemd 259: DelegateSubgroup= is supported and should be emitted.
+    let template = unit_template(16384, 60, 259);
     assert!(template.contains("Description=sdme container %i"));
     assert!(template.contains("Type=notify"));
     assert!(!template.contains("Type=simple"));
@@ -39,6 +40,18 @@ fn test_unit_template() {
     assert!(template.contains("DevicePolicy=closed"));
     assert!(template.contains("DeviceAllow=/dev/net/tun rwm"));
     assert!(template.contains("DeviceAllow=char-pts rw"));
+    // --keep-unit places the container in this service unit's cgroup, so the
+    // unit is grouped under machine.slice with a supervisor subgroup (256+).
+    assert!(template.contains("Slice=machine.slice"));
+    assert!(template.contains("DelegateSubgroup=supervisor"));
+    // Ordering hygiene: container starts after its registration dependencies.
+    assert!(template
+        .contains("After=network.target local-fs.target systemd-machined.service dbus.service"));
+    assert!(template.contains("Wants=systemd-machined.service"));
+    // Restart policy is opt-in per container (Stage C), never in the template,
+    // and the start-rate limiter is never disabled.
+    assert!(!template.contains("StartLimitIntervalSec"));
+    assert!(!template.contains("\nRestart="));
     // Template should NOT contain per-container details.
     assert!(!template.contains("EnvironmentFile"));
     assert!(!template.contains("systemd-nspawn"));
@@ -47,9 +60,44 @@ fn test_unit_template() {
 
 #[test]
 fn test_unit_template_custom_boot_timeout() {
-    let template = unit_template(16384, 300);
+    let template = unit_template(16384, 300, 259);
     // 300 + 30 = 330
     assert!(template.contains("TimeoutStartSec=330s"));
+}
+
+#[test]
+fn test_unit_template_old_systemd_omits_delegate_subgroup() {
+    // systemd 255 predates DelegateSubgroup=; it must not be emitted, but the
+    // rest of the keep-unit layout (Slice=machine.slice) still applies.
+    let template = unit_template(16384, 60, 255);
+    assert!(template.contains("Slice=machine.slice"));
+    assert!(!template.contains("DelegateSubgroup"));
+}
+
+#[test]
+fn test_restart_directives() {
+    // on-failure is the only supported policy; it emits Restart= + RestartSec=.
+    assert_eq!(
+        units::restart_directives(Some("on-failure"), 2),
+        vec![
+            "Restart=on-failure".to_string(),
+            "RestartSec=2s".to_string()
+        ]
+    );
+    assert_eq!(
+        units::restart_directives(Some("on-failure"), 5),
+        vec![
+            "Restart=on-failure".to_string(),
+            "RestartSec=5s".to_string()
+        ]
+    );
+    // Default, unset, unsupported (always), and tampered tokens emit nothing
+    // (whitelist guards against a hand-edited state file injecting arbitrary
+    // [Service] directives and against the stop-unsafe `always` policy).
+    assert!(units::restart_directives(Some("no"), 2).is_empty());
+    assert!(units::restart_directives(Some("always"), 2).is_empty());
+    assert!(units::restart_directives(None, 2).is_empty());
+    assert!(units::restart_directives(Some("on-failure\nExecStart=/evil"), 2).is_empty());
 }
 
 #[test]
@@ -72,6 +120,7 @@ fn test_nspawn_dropin_host_rootfs() {
     assert!(content.contains("workdir=/var/lib/sdme/containers/mybox/work"));
     assert!(content.contains("/var/lib/sdme/containers/mybox/merged"));
     assert!(content.contains("--machine=mybox"));
+    assert!(content.contains("--keep-unit"));
     assert!(content.contains("--resolv-conf=auto"));
     assert!(content.contains("--boot"));
     assert!(content.contains("/usr/bin/systemd-nspawn"));

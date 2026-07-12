@@ -167,6 +167,16 @@ pub struct Config {
     #[serde(default = "default_stop_timeout_kill")]
     pub stop_timeout_kill: u64,
 
+    /// Delay before an opt-in `Restart=` policy retries a failed container unit.
+    ///
+    /// Kept small (default 2s) on purpose: with the systemd start-rate limiter
+    /// left at its default (never disabled), a fast crash-loop trips the limiter
+    /// and parks the unit in `failed`, while a slow transient failure (e.g. a
+    /// busy-boot registration timeout) still retries. Emitted as `RestartSec=`
+    /// only for containers created with a restart policy (`--restart`).
+    #[serde(default = "default_restart_sec")]
+    pub restart_sec: u64,
+
     /// Automatically clean up stale transactions before mutating operations.
     ///
     /// When `true` (default), operations like `import`, `build`, and `export`
@@ -265,6 +275,10 @@ fn default_stop_timeout_kill() -> u64 {
     15
 }
 
+fn default_restart_sec() -> u64 {
+    2
+}
+
 fn default_auto_fs_gc() -> bool {
     true
 }
@@ -319,6 +333,7 @@ impl Default for Config {
             stop_timeout_graceful: default_stop_timeout_graceful(),
             stop_timeout_terminate: default_stop_timeout_terminate(),
             stop_timeout_kill: default_stop_timeout_kill(),
+            restart_sec: default_restart_sec(),
             auto_fs_gc: default_auto_fs_gc(),
             default_create_masked_services: default_create_masked_services(),
             update_check: UpdateCheckConfig::default(),
@@ -395,6 +410,7 @@ impl Config {
         println!("stop_timeout_graceful = {}", self.stop_timeout_graceful);
         println!("stop_timeout_terminate = {}", self.stop_timeout_terminate);
         println!("stop_timeout_kill = {}", self.stop_timeout_kill);
+        println!("restart_sec = {}", self.restart_sec);
         let auto_fs_gc = if self.auto_fs_gc { "yes" } else { "no" };
         println!("auto_fs_gc = {auto_fs_gc}");
         println!(

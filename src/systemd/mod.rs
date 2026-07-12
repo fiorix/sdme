@@ -231,6 +231,22 @@ pub fn kill_machine(name: &str, who: &str, signal: i32) -> Result<()> {
     dbus::kill_machine(name, who, signal)
 }
 
+/// Issue a systemd StopUnit job for a container's unit (`systemctl stop`).
+///
+/// Creates a real stop job so systemd treats the shutdown as intentional and
+/// suppresses any `Restart=` policy (cancelling a pending auto-restart). sdme's
+/// normal stop goes through machined, which does not create a stop job on every
+/// systemd version, so force-kill and removal paths use this to stay
+/// restart-safe.
+pub fn stop_unit(name: &str) -> Result<()> {
+    dbus::stop_unit(&service_name(name))
+}
+
+/// Clear a container unit's failed state (`systemctl reset-failed`).
+pub fn reset_failed(name: &str) -> Result<()> {
+    dbus::reset_failed(&service_name(name))
+}
+
 /// Wait for a container's systemd unit to become inactive.
 pub fn wait_for_shutdown(name: &str, timeout: std::time::Duration, verbose: bool) -> Result<()> {
     dbus::wait_for_shutdown(name, timeout, verbose)

@@ -69,6 +69,30 @@ pub(super) fn start_unit(unit: &str) -> Result<()> {
     Ok(())
 }
 
+/// Issue a systemd `StopUnit` job for a unit (equivalent to `systemctl stop`).
+///
+/// Unlike the machined `TerminateMachine`/`KillMachine` calls, this creates a
+/// real stop job on the unit, so systemd treats the shutdown as intentional and
+/// suppresses any `Restart=` policy, cancelling a pending auto-restart.
+pub(super) fn stop_unit(unit: &str) -> Result<()> {
+    let conn = connect()?;
+    let proxy = systemd_manager(&conn)?;
+    proxy
+        .call_method("StopUnit", &(unit, "replace"))
+        .with_context(|| format!("systemctl stop {unit} failed"))?;
+    Ok(())
+}
+
+/// Clear the failed state of a unit (equivalent to `systemctl reset-failed`).
+pub(super) fn reset_failed(unit: &str) -> Result<()> {
+    let conn = connect()?;
+    let proxy = systemd_manager(&conn)?;
+    proxy
+        .call_method("ResetFailedUnit", &(unit,))
+        .with_context(|| format!("systemctl reset-failed {unit} failed"))?;
+    Ok(())
+}
+
 pub(super) fn enable_unit(unit: &str) -> Result<()> {
     let conn = connect()?;
     let proxy = systemd_manager(&conn)?;

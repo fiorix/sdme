@@ -50,12 +50,28 @@ pub fn resolve_paths() -> Result<UnitPaths> {
 /// `boot_timeout` is the Rust-side wait duration in seconds. The systemd
 /// `TimeoutStartSec` is set to `boot_timeout + 30` so that the Rust wait
 /// loop always expires before systemd kills the container.
-pub fn unit_template(tasks_max: u32, boot_timeout: u64) -> String {
+///
+/// `systemd_version` is the host systemd major version. `DelegateSubgroup=`
+/// (systemd 256+) is emitted only when supported; on older systemd it would be
+/// an unknown directive. With `--keep-unit` the container lives in this unit's
+/// cgroup, so `Slice=machine.slice` places it under machine.slice like the
+/// reference `systemd-nspawn@.service`.
+pub fn unit_template(tasks_max: u32, boot_timeout: u64, systemd_version: u32) -> String {
     let systemd_timeout = boot_timeout + 30;
+    // DelegateSubgroup= landed in systemd 256. It puts the container leader in
+    // <unit>/payload so machined's subgroup-aware Terminate/Kill (256+) targets
+    // the payload, matching upstream. nspawn creates the split itself under
+    // --keep-unit regardless, but declaring it keeps sdme byte-for-byte aligned.
+    let delegate_subgroup = if systemd_version >= 256 {
+        "DelegateSubgroup=supervisor\n"
+    } else {
+        ""
+    };
     format!(
         r#"[Unit]
 Description=sdme container %i
-After=network.target local-fs.target
+After=network.target local-fs.target systemd-machined.service dbus.service
+Wants=systemd-machined.service
 
 [Service]
 Type=notify
@@ -63,8 +79,9 @@ RestartForceExitStatus=133
 SuccessExitStatus=133
 ExecStart=/bin/false
 KillMode=mixed
+Slice=machine.slice
 Delegate=yes
-TasksMax={tasks_max}
+{delegate_subgroup}TasksMax={tasks_max}
 DevicePolicy=closed
 DeviceAllow=/dev/net/tun rwm
 DeviceAllow=char-pts rw
@@ -87,6 +104,26 @@ pub(super) fn escape_exec_arg(arg: &str) -> String {
     }
     let escaped = arg.replace('\\', "\\\\").replace('"', "\\\"");
     format!("\"{escaped}\"")
+}
+
+/// Build the opt-in restart-policy `[Service]` directives for a container.
+///
+/// Returns `Restart=`/`RestartSec=` lines for a whitelisted systemd token, or an
+/// empty vec for `no`/unset/unknown. The whitelist means a hand-edited state
+/// file cannot inject arbitrary directives into the generated unit. Kept as a
+/// pure function so the mapping is unit-testable without a live state file.
+pub(super) fn restart_directives(policy: Option<&str>, restart_sec: u64) -> Vec<String> {
+    // Only `on-failure` is supported (see cli::normalize_restart_policy for why
+    // `always` is excluded). The whitelist also blocks a tampered state file
+    // from injecting arbitrary directives.
+    let token = match policy {
+        Some("on-failure") => "on-failure",
+        _ => return Vec::new(),
+    };
+    vec![
+        format!("Restart={token}"),
+        format!("RestartSec={restart_sec}s"),
+    ]
 }
 
 /// Configuration for generating a per-container nspawn drop-in.
@@ -160,6 +197,13 @@ pub fn nspawn_dropin(cfg: &DropinConfig<'_>) -> String {
     }
     writeln!(out, "    --directory={datadir}/containers/{name}/merged \\").unwrap();
     writeln!(out, "    --machine={name} \\").unwrap();
+    // Register the machine against this service unit instead of letting machined
+    // create a separate machine-<name>.scope. This drops the StartTransientUnit
+    // call to PID 1 (the boot-storm stall point) and the second unit per
+    // container, and matches systemd's own systemd-nspawn@.service. --register
+    // stays on (default), so machinectl, nss-mymachines, and the machined D-Bus
+    // APIs sdme relies on keep working; only the cgroup home changes to this unit.
+    writeln!(out, "    --keep-unit \\").unwrap();
     for arg in cfg.nspawn_args {
         writeln!(out, "    {} \\", escape_exec_arg(arg)).unwrap();
     }
@@ -204,7 +248,11 @@ fn write_unit_if_changed(unit_path: &Path, content: &str, verbose: bool) -> Resu
 
 pub(super) fn ensure_template_unit(tasks_max: u32, boot_timeout: u64, verbose: bool) -> Result<()> {
     let unit_path = Path::new("/etc/systemd/system/sdme@.service");
-    let content = unit_template(tasks_max, boot_timeout);
+    // Host systemd version gates version-specific directives (DelegateSubgroup=).
+    // Same parse pattern used for nspawn arg generation in write_nspawn_dropin.
+    let sd_version =
+        crate::system_check::parse_systemd_version(&super::systemd_version()?).unwrap_or(0);
+    let content = unit_template(tasks_max, boot_timeout, sd_version);
     if write_unit_if_changed(unit_path, &content, verbose)? {
         super::dbus::daemon_reload()?;
     }
@@ -369,6 +417,22 @@ pub fn write_nspawn_dropin(datadir: &Path, name: &str, verbose: bool) -> Result<
             eprintln!("apparmor profile: {profile}");
         }
     }
+
+    // Opt-in restart policy. Emitted per container into this drop-in, never in
+    // the shared template, and the start-rate limiter is left at its systemd
+    // default (never disabled) so a genuinely broken container still parks in
+    // `failed` instead of thrashing forever.
+    let restart_sec = state
+        .get("RESTART_SEC")
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(2);
+    let restart = restart_directives(state.get_nonempty("RESTART_POLICY"), restart_sec);
+    if verbose {
+        for d in &restart {
+            eprintln!("restart directive: {d}");
+        }
+    }
+    service_directives.extend(restart);
 
     if verbose {
         for arg in &nspawn_args {

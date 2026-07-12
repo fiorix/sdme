@@ -177,6 +177,9 @@ EXAMPLES:
     # Create with auto-start on boot
     sdme create mybox -r ubuntu --enable
 
+    # Create a self-healing service container (restart on crash)
+    sdme create mybox -r ubuntu --enable --restart on-failure
+
     # Create and start immediately (removes on start failure)
     sdme create mybox -r ubuntu --started
 
@@ -199,6 +202,19 @@ EXAMPLES:
 
     # Read-only rootfs with dropped capabilities
     sdme create mybox -r ubuntu --read-only --drop-capability CAP_NET_RAW
+
+RESTART POLICY:
+    --restart controls whether systemd auto-restarts the container unit:
+      no          (default) never auto-restart; a failed start stays down.
+      on-failure  restart on crash, non-zero exit, or start timeout. Clean
+                  stops ('sdme stop') and in-guest poweroff are not restarted;
+                  in-guest reboot always works (exit 133).
+    Kubernetes names (Never, OnFailure) are accepted as aliases. 'always' is
+    not offered: sdme stops via machined, so a cleanly stopped Restart=always
+    container could be resurrected on newer systemd.
+    RestartSec (config restart_sec, default 2s) is the retry delay. The systemd
+    start-rate limiter is left at its default, so a container that keeps failing
+    fast parks in 'failed' rather than looping forever.
 
 SERVICE MASKING:
     At create time, services listed in default_create_masked_services are
@@ -1088,6 +1104,10 @@ enum Command {
         #[arg(long)]
         enable: bool,
 
+        /// Auto-restart policy for the container unit: no, on-failure
+        #[arg(long, value_name = "POLICY", default_value = "no")]
+        restart: String,
+
         /// Systemd services to mask in the overlayfs upper layer (comma-separated, overrides config default)
         #[arg(long, value_delimiter = ',')]
         masked_services: Option<Vec<String>>,
@@ -1254,6 +1274,10 @@ enum Command {
         /// Enable auto-start on boot
         #[arg(long)]
         enable: bool,
+
+        /// Auto-restart policy for the container unit: no, on-failure
+        #[arg(long, value_name = "POLICY", default_value = "no")]
+        restart: String,
 
         /// Systemd services to mask in the overlayfs upper layer (comma-separated, overrides config default)
         #[arg(long, value_delimiter = ',')]
@@ -2266,6 +2290,7 @@ fn run() -> Result<()> {
             no_oci_volumes,
             oci_env,
             enable,
+            restart,
             masked_services,
             started,
             timeout,
@@ -2276,6 +2301,7 @@ fn run() -> Result<()> {
             if let Some(ref level) = systemd_log_level {
                 validate_systemd_log_level(level)?;
             }
+            let restart_policy = normalize_restart_policy(&restart)?;
             let (mut sec, hardened) = parse_security(security, &cfg)?;
             let mut network = parse_network(network)?;
             if hardened && !network.private_network {
@@ -2341,15 +2367,17 @@ fn run() -> Result<()> {
             };
             let name = containers::create(&cfg.datadir, &opts, cli.verbose)?;
 
-            post_create_setup(
-                &cfg.datadir,
-                &name,
-                &lowerdir,
-                oci_app_name.as_deref(),
-                systemd_log_level.as_deref(),
+            post_create_setup(&PostCreateSetup {
+                datadir: &cfg.datadir,
+                name: &name,
+                lowerdir: &lowerdir,
+                oci_app_name: oci_app_name.as_deref(),
+                systemd_log_level: systemd_log_level.as_deref(),
+                restart_policy: Some(restart_policy.as_str()),
+                restart_sec: cfg.restart_sec,
                 userns_enabled,
-                cli.verbose,
-            )?;
+                verbose: cli.verbose,
+            })?;
 
             eprintln!("creating '{name}'");
             if enable {
@@ -2598,6 +2626,7 @@ fn run() -> Result<()> {
             no_oci_volumes,
             oci_env,
             enable,
+            restart,
             masked_services,
             command,
         } => {
@@ -2607,6 +2636,7 @@ fn run() -> Result<()> {
             if let Some(ref level) = systemd_log_level {
                 validate_systemd_log_level(level)?;
             }
+            let restart_policy = normalize_restart_policy(&restart)?;
             let (mut sec, hardened) = parse_security(security, &cfg)?;
             let mut network = parse_network(network)?;
             if hardened && !network.private_network {
@@ -2673,15 +2703,17 @@ fn run() -> Result<()> {
             let is_host_rootfs = opts.rootfs.is_none();
             let name = containers::create(&cfg.datadir, &opts, cli.verbose)?;
 
-            post_create_setup(
-                &cfg.datadir,
-                &name,
-                &lowerdir,
-                oci_app_name.as_deref(),
-                systemd_log_level.as_deref(),
+            post_create_setup(&PostCreateSetup {
+                datadir: &cfg.datadir,
+                name: &name,
+                lowerdir: &lowerdir,
+                oci_app_name: oci_app_name.as_deref(),
+                systemd_log_level: systemd_log_level.as_deref(),
+                restart_policy: Some(restart_policy.as_str()),
+                restart_sec: cfg.restart_sec,
                 userns_enabled,
-                cli.verbose,
-            )?;
+                verbose: cli.verbose,
+            })?;
 
             eprintln!("creating '{name}'");
 

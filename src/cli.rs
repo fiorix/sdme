@@ -285,20 +285,46 @@ pub(crate) fn create_and_start(cfg: &BootConfig) -> Result<()> {
     Ok(())
 }
 
+/// Parameters for [`post_create_setup`], shared by the `create` and `new` paths.
+pub(crate) struct PostCreateSetup<'a> {
+    /// Data directory containing container state.
+    pub datadir: &'a Path,
+    /// Container name.
+    pub name: &'a str,
+    /// Lower directory for the root overlay (used by the userns pre-chown).
+    pub lowerdir: &'a str,
+    /// OCI app name to record, if the rootfs is an OCI image.
+    pub oci_app_name: Option<&'a str>,
+    /// Optional `SYSTEMD_LOG_LEVEL` for the nspawn host process.
+    pub systemd_log_level: Option<&'a str>,
+    /// Optional restart policy (already-normalized systemd token).
+    pub restart_policy: Option<&'a str>,
+    /// Retry delay (seconds) stored alongside the restart policy.
+    pub restart_sec: u64,
+    /// Whether the container uses a private user namespace.
+    pub userns_enabled: bool,
+    /// Enable verbose output.
+    pub verbose: bool,
+}
+
 /// Post-create setup: store extra state and pre-chown if needed.
 ///
 /// Called after `containers::create()` for both `create` and `new`.
-/// Stores OCI_APP and SYSTEMD_LOG_LEVEL in the state file, then probes
-/// overlayfs idmap support and pre-chowns if the kernel lacks it.
-pub(crate) fn post_create_setup(
-    datadir: &Path,
-    name: &str,
-    lowerdir: &str,
-    oci_app_name: Option<&str>,
-    systemd_log_level: Option<&str>,
-    userns_enabled: bool,
-    verbose: bool,
-) -> Result<()> {
+/// Stores OCI_APP, SYSTEMD_LOG_LEVEL, and the opt-in restart policy in the
+/// state file, then probes overlayfs idmap support and pre-chowns if the
+/// kernel lacks it.
+pub(crate) fn post_create_setup(opts: &PostCreateSetup) -> Result<()> {
+    let PostCreateSetup {
+        datadir,
+        name,
+        lowerdir,
+        oci_app_name,
+        systemd_log_level,
+        restart_policy,
+        restart_sec,
+        userns_enabled,
+        verbose,
+    } = *opts;
     let state_path = datadir.join("state").join(name);
     let mut state = sdme::State::read_from(&state_path)?;
     let mut changed = false;
@@ -310,6 +336,16 @@ pub(crate) fn post_create_setup(
         state.set("SYSTEMD_LOG_LEVEL", level);
         changed = true;
     }
+    // Opt-in outer-container restart policy (systemd token, already normalized).
+    // `no` is the default, so no key is written for it. RestartSec is stored
+    // alongside so the drop-in writer stays state-driven and config-free.
+    if let Some(policy) = restart_policy {
+        if policy != "no" {
+            state.set("RESTART_POLICY", policy);
+            state.set("RESTART_SEC", restart_sec.to_string());
+            changed = true;
+        }
+    }
     if changed {
         state.write_to(&state_path)?;
     }
@@ -318,6 +354,28 @@ pub(crate) fn post_create_setup(
         probe_and_prechown(datadir, name, lowerdir, verbose)?;
     }
     Ok(())
+}
+
+/// Normalize a restart-policy string to a systemd `Restart=` token.
+///
+/// Accepts the systemd tokens `no` and `on-failure`, plus the equivalent
+/// Kubernetes names (`Never`, `OnFailure`) for consistency with the pod
+/// restartPolicy vocabulary. Returns the systemd token stored in state and
+/// emitted into the unit; the drop-in writer re-checks against a whitelist so a
+/// tampered state file cannot inject arbitrary directives.
+///
+/// `always` is deliberately not offered. sdme stops containers through machined,
+/// and on systemd >= 256 `TerminateMachine` is not a stop job, so a cleanly
+/// stopped `Restart=always` container would be resurrected (a `sdme stop` could
+/// never take it down). `on-failure` has no such hazard: a clean stop is not a
+/// failure, so it is never restarted, while a crash or force-kill still recovers.
+pub(crate) fn normalize_restart_policy(policy: &str) -> Result<String> {
+    let token = match policy {
+        "no" | "Never" | "never" => "no",
+        "on-failure" | "OnFailure" | "onfailure" => "on-failure",
+        other => bail!("invalid restart policy '{other}'; valid values: no, on-failure"),
+    };
+    Ok(token.to_string())
 }
 
 /// Validate a systemd log level string.
@@ -941,4 +999,28 @@ pub(crate) fn validate_kube_oci_pod_args(datadir: &Path, oci_pod: Option<&str>) 
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_restart_policy() {
+        // systemd tokens pass through.
+        assert_eq!(normalize_restart_policy("no").unwrap(), "no");
+        assert_eq!(
+            normalize_restart_policy("on-failure").unwrap(),
+            "on-failure"
+        );
+        // Kubernetes names map to the systemd tokens.
+        assert_eq!(normalize_restart_policy("Never").unwrap(), "no");
+        assert_eq!(normalize_restart_policy("OnFailure").unwrap(), "on-failure");
+        // `always` is intentionally unsupported (not stop-safe via machined on
+        // newer systemd); so are Docker-style and bogus values.
+        assert!(normalize_restart_policy("always").is_err());
+        assert!(normalize_restart_policy("Always").is_err());
+        assert!(normalize_restart_policy("unless-stopped").is_err());
+        assert!(normalize_restart_policy("").is_err());
+    }
 }

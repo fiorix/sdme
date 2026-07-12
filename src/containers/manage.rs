@@ -40,11 +40,29 @@ pub fn remove(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
         let _ = systemd::disable_unit_only(name);
     }
 
-    if systemd::is_active(name)? {
-        if verbose {
-            eprintln!("stopping container '{name}'");
+    // Stop the container before deleting its files. Check the raw unit state
+    // rather than is_active (which is true only for "active"): a container in an
+    // auto-restart window ("activating") or a failed/looping state must also be
+    // brought down, otherwise a pending Restart= would remount the overlay onto
+    // the directories we are about to delete. For the normal "active" case use
+    // the existing graceful Terminate stop; for the abnormal states issue a real
+    // StopUnit job (cancels the pending restart) and clear the failed latch.
+    match systemd::unit_active_state(name).as_deref() {
+        None | Some("inactive") => {}
+        Some("active") => {
+            if verbose {
+                eprintln!("stopping container '{name}'");
+            }
+            stop(name, StopMode::Terminate, 30, verbose)?;
         }
-        stop(name, StopMode::Terminate, 30, verbose)?;
+        Some(other) => {
+            if verbose {
+                eprintln!("stopping container '{name}' (unit state: {other})");
+            }
+            let _ = systemd::stop_unit(name);
+            systemd::wait_for_shutdown(name, std::time::Duration::from_secs(30), verbose)?;
+            let _ = systemd::reset_failed(name);
+        }
     }
 
     let container_dir = datadir.join("containers").join(name);
@@ -168,7 +186,19 @@ pub fn stop(name: &str, mode: StopMode, timeout_secs: u64, verbose: bool) -> Res
                 eprintln!("killing machine '{name}'");
             }
             systemd::kill_machine(name, "all", libc::SIGKILL)?;
-            systemd::wait_for_shutdown(name, timeout, verbose)
+            // sdme force-kills through machined, not `systemctl stop`, so systemd
+            // does not see the SIGKILL as an intentional stop. If the container
+            // has a Restart= policy, systemd would otherwise resurrect it. Issue
+            // a real StopUnit job to cancel any pending auto-restart. Best-effort:
+            // a container with no restart policy is already going down, and its
+            // unit may vanish before this lands.
+            let _ = systemd::stop_unit(name);
+            let result = systemd::wait_for_shutdown(name, timeout, verbose);
+            // Clear a lingering failed latch (e.g. from the crash that preceded
+            // the kill) so the unit reports cleanly and future starts are not
+            // blocked by the start-rate limiter.
+            let _ = systemd::reset_failed(name);
+            result
         }
     }
 }
