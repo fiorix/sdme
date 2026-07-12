@@ -153,6 +153,15 @@ Totals                      601     0     0  21 suites
 
 ## Log
 
+### keep-unit registration + opt-in restart policy (2026-07-12, aarch64)
+
+Branch feat/keep-unit-restart-safe (unreleased, sdme 0.11.1). Full parallel runner on Linux 7.0.0-27-generic (aarch64, lima-default), systemd 259, ubuntu base fs: 568 passed, 2 failed, 1 skipped across 21 suites, wall clock 11m22s. Both failures were load-induced flakiness under 8-way parallelism and PASS deterministically when re-run in isolation (verify-export 23/0/0; verify-security 30/0/0); both are in code paths this change does not touch:
+
+- verify-export flaked under concurrent I/O alongside distro-oci, kube-L2-probes, and nixos.
+- verify-security aborted at the --hardened test when probe_and_prechown could not stat 10 apt-cache .deb files mid-walk under load. Overlayfs idmap is unavailable on this kernel, so --hardened falls back to a recursive pre-chown; that file walk is not resilient to transient stat failures under heavy I/O (pre-existing, not from this change).
+
+1 skip: verify-kube-L2-security (pre-existing). The destructive verify-tutorial stage (batch stop-all/start-all/rm-all) passed 79/79. A targeted live smoke of the new behavior on the same host passed 16/16: keep-unit puts the container in /machine.slice/sdme@<name>.service with no separate machine-<name>.scope while machinectl and exec still work; sdme stop --kill stays down (no restart resurrection); --restart on-failure recovers a SIGKILL; rm is clean. This covers only the systemd >= 256 side; the 255 side (Ubuntu 24.04) is still pending because keep-unit's Terminate/Kill semantics split at v256. The Last verified table above is unchanged pending a clean cross-arch matrix and a version bump.
+
 ### 0.9.0 -- in-container health in ps (2026-06-12, x86_64)
 
 smoke: 12 passed, 0 failed, 0 skipped, including 3 new health assertions (ok on a running container, degraded after an injected unit failure, ok again after reset-failed). Run on Linux 6.8.0-117-generic (x86_64), systemd 255, ubuntu base fs. The full matrix was not re-run for this change: the affected paths (ps health, prune analysis) are covered by the smoke gate, cargo test (787 passed), and a read-only check of `ps` and `prune --dry-run` against a production host running five containers.
