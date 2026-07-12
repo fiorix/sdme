@@ -3,5 +3,6 @@
 /.Drafts/
 /packaging/out/
 /test/reports/
+/test-reports/
 /verify-*.md
 /site/public/

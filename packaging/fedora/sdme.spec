@@ -11,7 +11,7 @@
 %global crate sdme
 
 Name:           sdme
-Version:        0.11.1
+Version:        0.12.0
 Release:        1%{?dist}
 Summary:        The systemd machine editor
 
@@ -94,6 +94,14 @@ install -d %{buildroot}%{_datadir}/fish/vendor_completions.d
 %{_datadir}/fish/vendor_completions.d/%{crate}.fish
 
 %changelog
+* Sun Jul 12 2026 Alexandre Fiori <fiorix@gmail.com> - 0.12.0-1
+- Update to 0.12.0.
+- Register nspawn containers with systemd-nspawn --keep-unit (plus
+  Slice=machine.slice and DelegateSubgroup= on systemd 256+) to avoid the
+  boot-time machined scope-creation stall.
+- Add an opt-in per-container restart policy (--restart no|on-failure) and make
+  sdme stop --kill and sdme rm restart-safe.
+
 * Fri Jul 10 2026 Alexandre Fiori <fiorix@gmail.com> - 0.11.1-1
 - Update to 0.11.1.
 - Disable self-upgrade on this Copr build: `sdme upgrade` now defers to dnf
