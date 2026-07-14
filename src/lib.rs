@@ -28,6 +28,7 @@
 //! | [`mounts`] | Bind mount and environment variable config |
 //! | [`network`] | Network configuration and state serialization |
 //! | [`security`] | Capability, seccomp, AppArmor config |
+//! | [`storage`] | Container root storage backends (overlay, btrfs) |
 //! | [`system_check`] | Version and dependency checks |
 //! | [`userns`] | User namespace UID shift allocation and pre-chown |
 //! | [`pod`] | Shared network namespace management |
@@ -56,6 +57,7 @@ pub mod pod;
 pub mod prune;
 pub mod rootfs;
 pub mod security;
+pub mod storage;
 pub(crate) mod submounts;
 pub mod system_check;
 pub mod systemd;
