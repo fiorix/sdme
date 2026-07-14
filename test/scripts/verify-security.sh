@@ -19,7 +19,8 @@ set -euo pipefail
 #  11. --apparmor-profile enforcement: boots with sdme-default profile and verifies enforcement
 #  12. --hardened boot: container boots with full hardened profile
 #  13. sdme ps shows security info
-#  14. --userns boot: each distro boots with user namespace isolation
+#  14. --userns boot: each distro boots with user namespace isolation, and a
+#      pre-installed setuid binary keeps its bit (pre-chown regression guard)
 #  15. --userns OCI app: nginx on ubuntu with user namespace isolation
 
 source "$(dirname "$0")/lib.sh"
@@ -645,6 +646,35 @@ for distro in "${USERNS_DISTROS[@]}"; do
             fail "$distro userns: systemd not running: $output"
         fi
     fi
+
+    # Regression guard for the userns pre-chown setuid/setgid bug: a
+    # pre-installed setuid-root binary must keep its bit inside the container.
+    # chown clears S_ISUID/S_ISGID on Linux, so the pre-chown fallback must
+    # re-apply the mode afterward. On kernels with idmapped-overlayfs support
+    # the fast :idmap path runs and the bit is preserved regardless; on hosts
+    # that fall back to pre-chown this catches a chown that dropped the bit.
+    suid_out=$(timeout "$TIMEOUT_TEST" "$SDME" exec "$ct_name" /bin/sh -c '
+        found=""; withbit=""
+        for f in /usr/bin/passwd /usr/bin/sudo /bin/su /usr/bin/su /usr/bin/chsh; do
+            if [ -e "$f" ]; then
+                found="$found $f"
+                if [ -u "$f" ]; then withbit="$f"; break; fi
+            fi
+        done
+        if [ -n "$withbit" ]; then echo "SUIDOK:$withbit"
+        elif [ -n "$found" ]; then echo "SUIDSTRIPPED:$found"
+        else echo "SUIDNONE"; fi
+    ' 2>&1 || true)
+    case "$suid_out" in
+        *SUIDOK:*)
+            ok "$distro userns: setuid bit preserved (${suid_out##*SUIDOK:})" ;;
+        *SUIDSTRIPPED:*)
+            fail "$distro userns: setuid bit stripped from:${suid_out##*SUIDSTRIPPED:}" ;;
+        *SUIDNONE*)
+            skipped "$distro userns: no known setuid binary present" ;;
+        *)
+            fail "$distro userns: could not check setuid bit (out: '$suid_out')" ;;
+    esac
 
     cleanup_container "$ct_name"
 done

@@ -11,7 +11,7 @@
 %global crate sdme
 
 Name:           sdme
-Version:        0.12.0
+Version:        0.12.1
 Release:        1%{?dist}
 Summary:        The systemd machine editor
 
@@ -94,6 +94,13 @@ install -d %{buildroot}%{_datadir}/fish/vendor_completions.d
 %{_datadir}/fish/vendor_completions.d/%{crate}.fish
 
 %changelog
+* Mon Jul 14 2026 Alexandre Fiori <fiorix@gmail.com> - 0.12.1-1
+- Fix --userns pre-chown stripping setuid/setgid bits (e.g. sudo) when the
+  kernel lacks idmapped-mount support on overlayfs. The recursive UID/GID
+  shift ran lchown without re-applying the mode, so chown's kernel-side
+  clearing of S_ISUID/S_ISGID left setuid binaries broken after boot. The
+  mode is now restored after the shift.
+
 * Sun Jul 12 2026 Alexandre Fiori <fiorix@gmail.com> - 0.12.0-1
 - Update to 0.12.0.
 - Register nspawn containers with systemd-nspawn --keep-unit (plus

@@ -281,6 +281,22 @@ fn shift_ownership(path: &Path, shift: u32) -> Result<()> {
         let err = std::io::Error::last_os_error();
         bail!("lchown {}: {err}", path.display());
     }
+
+    // chown clears the setuid/setgid bits on Linux, even for root, so a
+    // pre-installed setuid binary (e.g. sudo, 04755) would come out 0755 and
+    // stop working once the container boots. Re-apply the original mode for
+    // files that carry those bits. Skip symlinks: they have no meaningful
+    // mode and chmod would follow to the target; they never carry suid/sgid
+    // anyway. Guarding on 0o6000 keeps the extra syscall off the vast majority
+    // of files in a full rootfs walk (chown only ever clears those two bits).
+    let mode = meta.mode();
+    if !meta.file_type().is_symlink() && mode & 0o6000 != 0 {
+        let ret = unsafe { libc::chmod(c_path.as_ptr(), (mode & 0o7777) as libc::mode_t) };
+        if ret != 0 {
+            let err = std::io::Error::last_os_error();
+            bail!("chmod {}: {err}", path.display());
+        }
+    }
     Ok(())
 }
 
@@ -474,5 +490,52 @@ mod tests {
             shift, 1678049280,
             "shift for 'iporakepaba' does not match nspawn's output"
         );
+    }
+
+    #[test]
+    fn test_shift_ownership_preserves_setuid_setgid() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // chown to a new UID requires CAP_CHOWN, so this can only exercise the
+        // real shift as root. Skip otherwise, mirroring the root-gating in
+        // import's test_import_preserves_permissions.
+        if unsafe { libc::geteuid() } != 0 {
+            return;
+        }
+
+        let dir = std::env::temp_dir().join(format!(
+            "sdme-test-userns-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let shift = 0x8_0000u32; // 524288: a valid 64K-aligned base.
+
+        for (name, mode) in [("suid", 0o4755u32), ("sgid", 0o2755u32)] {
+            let path = dir.join(name);
+            fs::write(&path, b"x").unwrap();
+
+            // Normalize ownership to 0:0 so the expected shifted owner is
+            // deterministic, then set the mode (chmod after chown restores the
+            // special bit that the normalizing lchown cleared).
+            let cpath = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+            assert_eq!(unsafe { libc::lchown(cpath.as_ptr(), 0, 0) }, 0);
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+
+            shift_ownership(&path, shift).unwrap();
+
+            let meta = fs::symlink_metadata(&path).unwrap();
+            assert_eq!(meta.uid(), shift, "{name}: uid not shifted");
+            assert_eq!(meta.gid(), shift, "{name}: gid not shifted");
+            assert_eq!(
+                meta.mode() & 0o7777,
+                mode,
+                "{name}: special bit dropped by pre-chown"
+            );
+        }
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }
