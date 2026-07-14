@@ -351,7 +351,13 @@ pub(crate) fn post_create_setup(opts: &PostCreateSetup) -> Result<()> {
     }
 
     if userns_enabled {
-        probe_and_prechown(datadir, name, lowerdir, verbose)?;
+        // The overlay idmap probe and its recursive-chown fallback are
+        // overlay-specific. A btrfs subvolume root supports native idmapped
+        // mounts, so nspawn's --private-users-ownership=auto shifts ownership at
+        // mount time with no chown pass (and no suid/xattr loss).
+        if sdme::storage::Backend::from_state(&state) == sdme::storage::Backend::Overlay {
+            probe_and_prechown(datadir, name, lowerdir, verbose)?;
+        }
     }
     Ok(())
 }

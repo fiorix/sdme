@@ -12,7 +12,7 @@ use clap_complete::Shell;
 use sdme::import::{ImportOptions, InstallPackages, OciMode};
 use sdme::{
     check_interrupted, config, confirm, containers, cp, export, kube, oci, pod, prune, rootfs,
-    security, system_check, systemd,
+    security, storage, system_check, systemd,
 };
 
 mod cli;
@@ -1112,6 +1112,10 @@ enum Command {
         #[arg(long, value_delimiter = ',')]
         masked_services: Option<Vec<String>>,
 
+        /// Storage backend for the container root: overlay (default) or btrfs
+        #[arg(long, value_name = "BACKEND")]
+        storage: Option<String>,
+
         /// Start the container after creating it (remove on start failure)
         #[arg(long)]
         started: bool,
@@ -1282,6 +1286,10 @@ enum Command {
         /// Systemd services to mask in the overlayfs upper layer (comma-separated, overrides config default)
         #[arg(long, value_delimiter = ',')]
         masked_services: Option<Vec<String>>,
+
+        /// Storage backend for the container root: overlay (default) or btrfs
+        #[arg(long, value_name = "BACKEND")]
+        storage: Option<String>,
 
         /// Command to run inside the container (default: login shell)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -2292,6 +2300,7 @@ fn run() -> Result<()> {
             enable,
             restart,
             masked_services,
+            storage,
             started,
             timeout,
         } => {
@@ -2350,10 +2359,16 @@ fn run() -> Result<()> {
             };
             let userns_enabled = sec.userns;
 
+            let backend = match storage.as_deref() {
+                Some(s) => storage::Backend::parse(s)?,
+                None => storage::Backend::parse(&cfg.default_storage_backend)?,
+            };
             let opts = containers::CreateOptions {
                 name,
                 rootfs: fs,
                 limits,
+                backend,
+                pool_size: cfg.btrfs_pool_size.clone(),
                 network,
                 opaque_dirs,
                 pod,
@@ -2628,6 +2643,7 @@ fn run() -> Result<()> {
             enable,
             restart,
             masked_services,
+            storage,
             command,
         } => {
             system_check::check_systemd_version(255)?;
@@ -2685,10 +2701,16 @@ fn run() -> Result<()> {
             };
             let userns_enabled = sec.userns;
 
+            let backend = match storage.as_deref() {
+                Some(s) => storage::Backend::parse(s)?,
+                None => storage::Backend::parse(&cfg.default_storage_backend)?,
+            };
             let opts = containers::CreateOptions {
                 name,
                 rootfs: fs,
                 limits,
+                backend,
+                pool_size: cfg.btrfs_pool_size.clone(),
                 network,
                 opaque_dirs,
                 pod,
