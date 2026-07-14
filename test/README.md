@@ -153,6 +153,12 @@ Totals                      601     0     0  21 suites
 
 ## Log
 
+### 0.12.1 -- userns pre-chown setuid/setgid fix (2026-07-14, x86_64)
+
+verify-security.sh standalone against the built 0.12.1 binary (SDME override, no system install) on Linux 7.0.0-22-generic (x86_64), systemd 259, ubuntu base fs: 37 passed, 1 failed, 0 skipped. Overlayfs idmap is unavailable on this kernel (mount_setattr(MOUNT_ATTR_IDMAP) returns EINVAL), so --userns and --hardened take the recursive pre-chown fallback, which is exactly the path this fix touches. The fix re-applies the mode after lchown so chown's clearing of S_ISUID/S_ISGID no longer strips setuid binaries; the new Test 14 assertion confirms a setuid-root binary keeps its bit inside a --userns container on all seven distros (debian, ubuntu, fedora, centos, almalinux, archlinux, opensuse show passwd or su at 4755). cargo test: 813 passed.
+
+The one failure is Test 15 (nginx OCI app under --userns), pre-existing and unrelated to this change: nginx could not bind port 80 in this host environment (the host is already using it). A fresh-import re-run in isolation reproduced it, and it cannot involve this fix because no OCI app file carries the setuid/setgid bits that the fix re-applies (the shim and app files are written 0o555/0o111/0o600/0o644/0o1777, and nginx's binary is 0o755). The Last verified table above is unchanged pending a full cross-arch matrix run.
+
 ### keep-unit registration + opt-in restart policy (2026-07-12, aarch64)
 
 Branch feat/keep-unit-restart-safe (unreleased, sdme 0.11.1). Full parallel runner on Linux 7.0.0-27-generic (aarch64, lima-default), systemd 259, ubuntu base fs: 568 passed, 2 failed, 1 skipped across 21 suites, wall clock 11m22s. Both failures were load-induced flakiness under 8-way parallelism and PASS deterministically when re-run in isolation (verify-export 23/0/0; verify-security 30/0/0); both are in code paths this change does not touch:
