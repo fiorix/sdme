@@ -94,9 +94,22 @@ pub fn ensure_ready(datadir: &Path, pool_size: &str, verbose: bool) -> Result<Pa
     // Mode B: loopback pool image.
     system_check::check_dependencies(&[("mkfs.btrfs", "btrfs-progs")], verbose)?;
     let (image, mount_dir) = mode_b_paths(datadir);
+
+    // Fast path: pool already created and mounted. No lock needed, so the
+    // common case (creating containers on an existing pool) stays concurrent.
+    if image.exists() && is_mounted(&mount_dir)? {
+        return Ok(mount_dir);
+    }
+
+    // Slow path: serialize create+mount of the shared pool. Without this, two
+    // concurrent first-time `create --storage btrfs` runs both see the image
+    // absent and both truncate + `mkfs.btrfs -f`, so one can reformat an image
+    // the other has already mounted and is writing to, destroying every btrfs
+    // container in the pool. Blocking so peers queue and then take the fast
+    // path above. Lock order: fs (held shared by create) -> storage.
+    let _pool_lock = crate::lock::lock_exclusive_blocking(datadir, "storage", "pool")?;
     fs::create_dir_all(&mount_dir)
         .with_context(|| format!("failed to create {}", mount_dir.display()))?;
-
     if !image.exists() {
         create_image(&image, pool_size, verbose)?;
     }
@@ -170,8 +183,13 @@ fn create_image(image: &Path, size: &str, verbose: bool) -> Result<()> {
             image.display()
         );
     }
-    let f =
-        fs::File::create(image).with_context(|| format!("failed to create {}", image.display()))?;
+    // create_new (O_EXCL) as defense in depth: even though ensure_ready holds
+    // the pool lock here, never truncate an existing image.
+    let f = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(image)
+        .with_context(|| format!("failed to create {}", image.display()))?;
     f.set_len(bytes)
         .with_context(|| format!("failed to size {}", image.display()))?;
     drop(f);

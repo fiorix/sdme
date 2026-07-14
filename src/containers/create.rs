@@ -159,6 +159,46 @@ pub fn create(datadir: &Path, opts: &CreateOptions, verbose: bool) -> Result<Str
     }
 }
 
+/// Reject a btrfs container whose base snapshot would redirect a customization
+/// write through a symlink. sdme writes /etc (and OCI) customization directly
+/// into the subvolume, so if any component of `rel` under `root` is an
+/// image-supplied symlink (e.g. `/var/lib` -> `/etc`, or `etc` itself), those
+/// writes/removals could escape the subvolume onto the host. The overlay
+/// backend is immune because it writes into a fresh, empty upper layer. Only
+/// applied for the btrfs backend.
+fn reject_symlinked_path(root: &Path, rel: &str) -> Result<()> {
+    let mut cur = root.to_path_buf();
+    for part in rel.split('/').filter(|s| !s.is_empty()) {
+        cur.push(part);
+        if let Ok(m) = fs::symlink_metadata(&cur) {
+            if m.file_type().is_symlink() {
+                bail!(
+                    "refusing btrfs container: {} is a symlink in the base rootfs; a \
+                     malformed or hostile image could redirect customization writes onto \
+                     the host filesystem",
+                    cur.display()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Remove a leaf path if it is a symlink, so a subsequent write creates a real
+/// file inside the subvolume rather than following the base image's symlink
+/// (e.g. a Debian `/etc/resolv.conf` -> systemd stub, or an absolute symlink
+/// that would escape onto the host). Mirrors how the overlay upper layer
+/// shadows a lower-layer symlink with a real file. Only applied for btrfs.
+fn shadow_symlink(path: &Path) -> Result<()> {
+    if let Ok(m) = fs::symlink_metadata(path) {
+        if m.file_type().is_symlink() {
+            fs::remove_file(path)
+                .with_context(|| format!("failed to replace symlink {}", path.display()))?;
+        }
+    }
+    Ok(())
+}
+
 fn do_create(
     datadir: &Path,
     name: &str,
@@ -217,6 +257,17 @@ fn do_create(
         eprintln!("container root: {}", root_dir.display());
     }
 
+    // btrfs writes customization directly into the (untrusted) base snapshot,
+    // so an image-supplied symlink at a customization ancestor could redirect
+    // create_dir_all / remove_dir_all / write onto the host. Reject such images
+    // up front. Overlay writes into a fresh empty upper layer and is immune.
+    if opts.backend == Backend::Btrfs {
+        reject_symlinked_path(&root_dir, "etc/systemd/system")?;
+        for dir in opaque_dirs {
+            reject_symlinked_path(&root_dir, dir.strip_prefix('/').unwrap_or(dir))?;
+        }
+    }
+
     // Set up opaque directories so they start empty. For overlay, the
     // trusted.overlay.opaque xattr hides all lower-layer contents. For btrfs
     // there is no lower layer, so the subvolume already holds the base tree;
@@ -244,6 +295,16 @@ fn do_create(
     let etc_dir = root_dir.join("etc");
     fs::create_dir_all(&etc_dir)
         .with_context(|| format!("failed to create {}", etc_dir.display()))?;
+
+    // btrfs: the base snapshot may ship these as symlinks (e.g. Debian's
+    // resolv.conf -> systemd stub). Replace them with real files so the writes
+    // below stay inside the subvolume, matching how the overlay upper layer
+    // shadows a lower-layer symlink. Overlay's upper starts empty, so no-op there.
+    if opts.backend == Backend::Btrfs {
+        for f in ["hostname", "hosts", "resolv.conf", "machine-id", "fstab"] {
+            shadow_symlink(&etc_dir.join(f))?;
+        }
+    }
 
     let hostname_path = etc_dir.join("hostname");
     fs::write(&hostname_path, format!("{name}\n"))
@@ -527,7 +588,11 @@ fn do_create(
         };
         let unit_rel = crate::oci::app::systemd_unit_dir(rootfs);
         for oci_app_name in &app_names {
-            let dropin_dir = root_dir.join(format!("{unit_rel}/sdme-oci-{oci_app_name}.service.d"));
+            let dropin_rel = format!("{unit_rel}/sdme-oci-{oci_app_name}.service.d");
+            if opts.backend == Backend::Btrfs {
+                reject_symlinked_path(&root_dir, &dropin_rel)?;
+            }
+            let dropin_dir = root_dir.join(&dropin_rel);
             fs::create_dir_all(&dropin_dir)
                 .with_context(|| format!("failed to create {}", dropin_dir.display()))?;
             let dropin_path = dropin_dir.join("oci-pod-netns.conf");
@@ -572,9 +637,11 @@ fn do_create(
 
             let unit_rel = crate::oci::app::systemd_unit_dir(rootfs);
             for oci_app_name in &app_names {
-                let dropin_dir = container_dir.join(format!(
-                    "upper/{unit_rel}/sdme-oci-{oci_app_name}.service.d"
-                ));
+                let dropin_rel = format!("{unit_rel}/sdme-oci-{oci_app_name}.service.d");
+                if opts.backend == Backend::Btrfs {
+                    reject_symlinked_path(&root_dir, &dropin_rel)?;
+                }
+                let dropin_dir = root_dir.join(&dropin_rel);
                 fs::create_dir_all(&dropin_dir)
                     .with_context(|| format!("failed to create {}", dropin_dir.display()))?;
                 let dropin_path = dropin_dir.join("hardening.conf");
@@ -606,10 +673,17 @@ fn do_create(
             })?;
         let lower_env = rootfs.join(format!("oci/apps/{oci_app_for_env}/env"));
         if lower_env.exists() {
-            let upper_oci = root_dir.join(format!("oci/apps/{oci_app_for_env}"));
+            let oci_rel = format!("oci/apps/{oci_app_for_env}");
+            if opts.backend == Backend::Btrfs {
+                reject_symlinked_path(&root_dir, &oci_rel)?;
+            }
+            let upper_oci = root_dir.join(&oci_rel);
             fs::create_dir_all(&upper_oci)
                 .with_context(|| format!("failed to create {}", upper_oci.display()))?;
             let upper_env = upper_oci.join("env");
+            if opts.backend == Backend::Btrfs {
+                shadow_symlink(&upper_env)?;
+            }
             let mut content = fs::read_to_string(&lower_env)
                 .with_context(|| format!("failed to read {}", lower_env.display()))?;
             for var in &opts.oci_envs {

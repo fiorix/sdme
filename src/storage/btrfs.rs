@@ -53,7 +53,7 @@ pub fn provision(
     verbose: bool,
 ) -> Result<PathBuf> {
     let pool_root = pool::ensure_ready(datadir, pool_size, verbose)?;
-    ensure_base(&pool_root, base_name, base_src, verbose)?;
+    ensure_base(datadir, &pool_root, base_name, base_src, verbose)?;
 
     let base = base_subvol(&pool_root, base_name);
     let dst = container_root(&pool_root, name);
@@ -62,7 +62,14 @@ pub fn provision(
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
     if dst.exists() {
-        bail!("container subvolume already exists: {}", dst.display());
+        // A leftover from a crashed create, or an rm whose teardown failed. The
+        // state file is claimed atomically (O_CREAT|O_EXCL) before do_create, so
+        // no live container can own this path; reclaim it rather than bail and
+        // block name reuse.
+        if verbose {
+            eprintln!("reclaiming stale container subvolume {}", dst.display());
+        }
+        delete_subvol(&dst, verbose)?;
     }
     snapshot(&base, &dst, false, verbose)?;
     Ok(dst)
@@ -80,6 +87,7 @@ pub fn teardown(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
 /// temporary subvolume that is atomically renamed into place, so a concurrent
 /// creator either wins the rename or finds the finished base.
 pub fn ensure_base(
+    datadir: &Path,
     pool_root: &Path,
     base_name: &str,
     src_dir: &Path,
@@ -89,9 +97,23 @@ pub fn ensure_base(
     if is_subvolume(&dst) {
         return Ok(dst);
     }
+
+    // Serialize base materialization: without this, N concurrent first-time
+    // creates from the same rootfs each copy_tree the whole base (wasted work,
+    // and spurious ENOSPC in a fixed-size pool). Blocking so peers queue and
+    // then take the double-check below. "storage" kind keeps btrfs pool locks
+    // together, acquired after the shared fs lock create already holds.
+    let _base_lock =
+        crate::lock::lock_exclusive_blocking(datadir, "storage", &format!("base-{base_name}"))?;
+    if is_subvolume(&dst) {
+        return Ok(dst);
+    }
+
     let fs_dir = pool_root.join(FS_SUBDIR);
     fs::create_dir_all(&fs_dir)
         .with_context(|| format!("failed to create {}", fs_dir.display()))?;
+    // Reclaim base temp subvolumes leaked by creators that died mid-copy.
+    sweep_stale_temps(&fs_dir, verbose);
 
     let tmp = fs_dir.join(format!(".{base_name}.tmp-{}", std::process::id()));
     if tmp.exists() {
@@ -189,6 +211,42 @@ fn run(cmd: &mut Command, what: &str) -> Result<()> {
         bail!("{what} failed");
     }
     Ok(())
+}
+
+/// Reclaim base temp subvolumes (`.{base}.tmp-{pid}`) left behind by creators
+/// that died mid-`copy_tree`. Best-effort; called under the base lock so it
+/// never races a live creator, and it skips temps whose PID is still alive.
+fn sweep_stale_temps(fs_dir: &Path, verbose: bool) {
+    let Ok(entries) = fs::read_dir(fs_dir) else {
+        return;
+    };
+    let self_pid = std::process::id();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some((_, pid_str)) = name
+            .strip_prefix('.')
+            .and_then(|rest| rest.rsplit_once(".tmp-"))
+        else {
+            continue;
+        };
+        let Ok(pid) = pid_str.parse::<u32>() else {
+            continue;
+        };
+        // Skip our own temp and any whose creating process is still running.
+        if pid == self_pid || Path::new(&format!("/proc/{pid}")).exists() {
+            continue;
+        }
+        let path = entry.path();
+        if is_subvolume(&path) {
+            if verbose {
+                eprintln!("reclaiming stale base temp subvolume {}", path.display());
+            }
+            let _ = delete_subvol(&path, verbose);
+        }
+    }
 }
 
 #[cfg(test)]

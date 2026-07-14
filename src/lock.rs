@@ -40,7 +40,7 @@ pub struct ResourceLock {
 /// Multiple shared locks can coexist. Returns `Err` if an exclusive
 /// lock is already held.
 pub fn lock_shared(datadir: &Path, kind: &str, name: &str) -> Result<ResourceLock> {
-    do_lock(datadir, kind, name, libc::LOCK_SH)
+    do_lock(datadir, kind, name, libc::LOCK_SH, false)
 }
 
 /// Acquire an exclusive (write) lock on a resource.
@@ -48,10 +48,27 @@ pub fn lock_shared(datadir: &Path, kind: &str, name: &str) -> Result<ResourceLoc
 /// No other locks (shared or exclusive) can coexist. Returns `Err` if
 /// any lock is already held.
 pub fn lock_exclusive(datadir: &Path, kind: &str, name: &str) -> Result<ResourceLock> {
-    do_lock(datadir, kind, name, libc::LOCK_EX)
+    do_lock(datadir, kind, name, libc::LOCK_EX, false)
 }
 
-fn do_lock(datadir: &Path, kind: &str, name: &str, operation: libc::c_int) -> Result<ResourceLock> {
+/// Acquire an exclusive lock, blocking until it becomes available.
+///
+/// Unlike [`lock_exclusive`], this waits for a contended lock rather than
+/// failing immediately. Use it to serialize one-time materialization of a
+/// shared resource (e.g. the btrfs pool image or a base subvolume) so
+/// concurrent creators queue and then observe the finished resource instead of
+/// erroring. The kernel releases the lock if the holder is killed.
+pub fn lock_exclusive_blocking(datadir: &Path, kind: &str, name: &str) -> Result<ResourceLock> {
+    do_lock(datadir, kind, name, libc::LOCK_EX, true)
+}
+
+fn do_lock(
+    datadir: &Path,
+    kind: &str,
+    name: &str,
+    operation: libc::c_int,
+    blocking: bool,
+) -> Result<ResourceLock> {
     let lock_dir = datadir.join("locks").join(kind);
     fs::create_dir_all(&lock_dir)
         .with_context(|| format!("failed to create lock directory {}", lock_dir.display()))?;
@@ -65,7 +82,12 @@ fn do_lock(datadir: &Path, kind: &str, name: &str, operation: libc::c_int) -> Re
         .open(&lock_path)
         .with_context(|| format!("failed to open lock file {}", lock_path.display()))?;
 
-    let ret = unsafe { libc::flock(file.as_raw_fd(), operation | libc::LOCK_NB) };
+    let op = if blocking {
+        operation
+    } else {
+        operation | libc::LOCK_NB
+    };
+    let ret = unsafe { libc::flock(file.as_raw_fd(), op) };
     if ret != 0 {
         let err = std::io::Error::last_os_error();
         if err.kind() == std::io::ErrorKind::WouldBlock {

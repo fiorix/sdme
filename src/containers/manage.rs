@@ -71,8 +71,20 @@ pub fn remove(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
     // hiccup never blocks removing the rest of the container's state.
     if let Ok(state) = State::read_from(&state_file) {
         if crate::storage::Backend::from_state(&state) == crate::storage::Backend::Btrfs {
-            if let Err(e) = crate::storage::btrfs::teardown(datadir, name, verbose) {
-                eprintln!("warning: failed to delete btrfs subvolume for '{name}': {e:#}");
+            let _ = crate::storage::btrfs::teardown(datadir, name, verbose);
+            // Verify the subvolume is actually gone before deleting state. If a
+            // teardown failure left it behind, abort rm and keep the state file
+            // so the command stays retryable and the leaked subvolume can never
+            // silently block reusing the name. If the pool itself is gone, there
+            // is nothing to leak, so proceed.
+            if let Ok(pool_root) = crate::storage::pool::ensure_mounted(datadir, verbose) {
+                let subvol = crate::storage::btrfs::container_root(&pool_root, name);
+                if crate::storage::btrfs::is_subvolume(&subvol) {
+                    anyhow::bail!(
+                        "failed to delete btrfs subvolume {}; container state kept for retry",
+                        subvol.display()
+                    );
+                }
             }
         }
     }
