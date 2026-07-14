@@ -28,6 +28,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
 
+use crate::storage::{self, Backend};
 use crate::validate_name;
 
 /// Read the current process umask. There is no "get umask" syscall, so
@@ -235,6 +236,124 @@ pub(crate) fn unmount_overlay(container_dir: &Path) {
     let _ = std::process::Command::new("umount")
         .arg(&merged_dir)
         .status();
+}
+
+/// A stopped container's root filesystem, opened read-only for offline access
+/// (cp source, export, `fs build` COPY --from).
+///
+/// For the overlay backend a temporary read-only overlay is mounted at
+/// `merged/`, and the guard unmounts it on drop. For the btrfs backend the
+/// container root is its own copy-on-write subvolume, already a real
+/// filesystem, so the pool is ensured mounted and the subvolume path is
+/// returned with no mount to tear down. Hold the value for as long as the
+/// returned path is in use; dropping it releases any overlay mount.
+pub(crate) struct ContainerRootRo {
+    root: PathBuf,
+    _guard: Option<OverlayGuard>,
+}
+
+impl ContainerRootRo {
+    /// The directory at which the container's root tree is readable. Join the
+    /// in-container path onto this to reach a specific file.
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
+}
+
+/// Open a stopped container's root filesystem read-only, dispatching on its
+/// storage `backend`. `rootfs_dir` is the resolved lower rootfs and is used
+/// only by the overlay backend (`/` for host-rootfs containers); the btrfs
+/// backend reads its own subvolume and ignores it.
+///
+/// The caller is responsible for holding the container (and, for overlay, the
+/// rootfs) locks for the duration of the access.
+pub(crate) fn open_root_ro(
+    datadir: &Path,
+    name: &str,
+    backend: Backend,
+    rootfs_dir: &Path,
+    verbose: bool,
+) -> Result<ContainerRootRo> {
+    let container_dir = datadir.join("containers").join(name);
+    match backend {
+        Backend::Overlay => {
+            if verbose {
+                eprintln!("mounting read-only overlay for container '{name}'");
+            }
+            mount_overlay_ro(rootfs_dir, &container_dir)?;
+            Ok(ContainerRootRo {
+                root: container_dir.join("merged"),
+                _guard: Some(OverlayGuard { container_dir }),
+            })
+        }
+        Backend::Btrfs => {
+            let pool_root = storage::pool::ensure_mounted(datadir, verbose)?;
+            let root = storage::btrfs::container_root(&pool_root, name);
+            if !root.exists() {
+                bail!(
+                    "btrfs container subvolume not found: {} \
+                     (container removed, or pool image missing)",
+                    root.display()
+                );
+            }
+            Ok(ContainerRootRo { root, _guard: None })
+        }
+    }
+}
+
+/// A stopped container's writable destination for `sdme cp`, dispatched on the
+/// storage backend.
+pub(crate) struct ContainerWriteDest {
+    /// Directory that files are written into. Overlay: the `upper/` layer (a
+    /// fresh copy-on-write layer). btrfs: the container subvolume itself.
+    pub(crate) write_dir: PathBuf,
+    /// Directory consulted to decide whether a destination path already exists.
+    /// Overlay: the lower rootfs (the base image). btrfs: the subvolume (same
+    /// as `write_dir`, a single layer).
+    pub(crate) check_dir: PathBuf,
+    /// Whether writes must be guarded against base-image symlinks escaping the
+    /// tree. True for btrfs (writes land in the base tree itself); false for
+    /// overlay (writes land in a fresh, empty upper layer).
+    pub(crate) protect_symlinks: bool,
+}
+
+/// Open a stopped container's writable destination for a copy, dispatching on
+/// its storage `backend`. `rootfs_dir` is the lower rootfs used as the overlay
+/// backend's existence-check layer (`/` for host-rootfs containers).
+///
+/// The caller is responsible for holding the container (and, for overlay, the
+/// rootfs) locks for the duration of the write.
+pub(crate) fn open_write_dest(
+    datadir: &Path,
+    name: &str,
+    backend: Backend,
+    rootfs_dir: &Path,
+    verbose: bool,
+) -> Result<ContainerWriteDest> {
+    let container_dir = datadir.join("containers").join(name);
+    match backend {
+        Backend::Overlay => Ok(ContainerWriteDest {
+            write_dir: container_dir.join("upper"),
+            check_dir: rootfs_dir.to_path_buf(),
+            protect_symlinks: false,
+        }),
+        Backend::Btrfs => {
+            let pool_root = storage::pool::ensure_mounted(datadir, verbose)?;
+            let subvol = storage::btrfs::container_root(&pool_root, name);
+            if !subvol.exists() {
+                bail!(
+                    "btrfs container subvolume not found: {} \
+                     (container removed, or pool image missing)",
+                    subvol.display()
+                );
+            }
+            Ok(ContainerWriteDest {
+                write_dir: subvol.clone(),
+                check_dir: subvol,
+                protect_symlinks: true,
+            })
+        }
+    }
 }
 
 /// Verify that a container's state file and directory exist.

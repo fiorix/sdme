@@ -110,6 +110,25 @@ fn parse_target(target: &str) -> Result<DiffTarget> {
     }
 }
 
+/// Reject a diff on a btrfs-backed container.
+///
+/// `diff` walks the overlay upper layer against its lower rootfs, a
+/// representation specific to the overlay backend: added/modified files live in
+/// `upper/` and deletions are whiteouts. A btrfs container's root is a
+/// copy-on-write subvolume snapshot with no upper layer and real deletions, so
+/// the change set must be computed as a base-vs-snapshot tree comparison. That
+/// btrfs-native diff is a separate, later change; until then, fail clearly
+/// instead of walking a nonexistent `upper/`.
+fn reject_btrfs(state: &crate::State, name: &str) -> Result<()> {
+    if crate::storage::Backend::from_state(state) == crate::storage::Backend::Btrfs {
+        bail!(
+            "sdme diff is not yet supported for btrfs container '{name}': its root is a \
+             subvolume snapshot, not an overlay upper layer; btrfs-native diff is planned"
+        );
+    }
+    Ok(())
+}
+
 /// Check if a metadata entry is an overlayfs whiteout file.
 ///
 /// Overlayfs represents deleted files as character devices with major 0,
@@ -551,6 +570,7 @@ pub fn diff(datadir: &Path, target: &str, paths: &[String], opts: &DiffOptions) 
                 .with_context(|| format!("cannot lock container '{name}' for diff"))?;
             let state_path = datadir.join("state").join(&name);
             let state = crate::State::read_from(&state_path)?;
+            reject_btrfs(&state, &name)?;
             let rootfs_name = state.rootfs();
             let rootfs = crate::containers::resolve_rootfs(
                 datadir,
@@ -588,6 +608,8 @@ pub fn diff(datadir: &Path, target: &str, paths: &[String], opts: &DiffOptions) 
 
             let from_state = crate::State::read_from(&datadir.join("state").join(&from))?;
             let to_state = crate::State::read_from(&datadir.join("state").join(&to))?;
+            reject_btrfs(&from_state, &from)?;
+            reject_btrfs(&to_state, &to)?;
             if from_state.rootfs() != to_state.rootfs() {
                 eprintln!(
                     "warning: containers use different base rootfs ('{}' vs '{}'); \
@@ -679,6 +701,22 @@ mod tests {
         fs::create_dir_all(&upper).unwrap();
         fs::create_dir_all(&lower).unwrap();
         (tmp, upper, lower)
+    }
+
+    #[test]
+    fn test_reject_btrfs() {
+        let mut state = crate::State::new();
+        // Overlay (unset or explicit) is allowed.
+        reject_btrfs(&state, "c").unwrap();
+        state.set("STORAGE", "overlay");
+        reject_btrfs(&state, "c").unwrap();
+        // btrfs is rejected with a clear, backend-specific message.
+        state.set("STORAGE", "btrfs");
+        let err = reject_btrfs(&state, "c").unwrap_err();
+        assert!(
+            err.to_string().contains("btrfs"),
+            "expected btrfs message, got: {err}"
+        );
     }
 
     #[test]

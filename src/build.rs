@@ -13,7 +13,9 @@ use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
 
 use crate::copy::sanitize_dest_path;
-use crate::{check_interrupted, containers, copy, lock, rootfs, systemd, validate_name, State};
+use crate::{
+    check_interrupted, containers, copy, lock, rootfs, storage, systemd, validate_name, State,
+};
 
 // --- Config types ---
 
@@ -238,8 +240,9 @@ fn parse_build_config(path: &Path) -> Result<BuildConfig> {
 
 struct ResolvedSource {
     path: PathBuf,
-    /// If we temporarily mounted overlayfs, this guard handles unmount on drop.
-    _mount_guard: Option<containers::OverlayGuard>,
+    /// Keeps a stopped container's root open (overlay mount held until drop;
+    /// inert for btrfs) for the duration of the copy.
+    _root: Option<containers::ContainerRootRo>,
     /// Resource lock held for the duration of the copy.
     _lock: Option<lock::ResourceLock>,
 }
@@ -248,7 +251,7 @@ fn resolve_copy_source(datadir: &Path, src: &CopySource, verbose: bool) -> Resul
     match src {
         CopySource::Host(path) => Ok(ResolvedSource {
             path: path.clone(),
-            _mount_guard: None,
+            _root: None,
             _lock: None,
         }),
         CopySource::Rootfs { name, path } => {
@@ -262,7 +265,7 @@ fn resolve_copy_source(datadir: &Path, src: &CopySource, verbose: bool) -> Resul
             let full_path = rootfs_dir.join(path.strip_prefix("/").unwrap_or(path));
             Ok(ResolvedSource {
                 path: full_path,
-                _mount_guard: None,
+                _root: None,
                 _lock: Some(lock),
             })
         }
@@ -270,45 +273,45 @@ fn resolve_copy_source(datadir: &Path, src: &CopySource, verbose: bool) -> Resul
             containers::ensure_exists(datadir, name)?;
             let lock = lock::lock_shared(datadir, "containers", name)
                 .with_context(|| format!("cannot read-lock container '{name}' for COPY"))?;
-            let container_dir = datadir.join("containers").join(name);
+            let state = State::read_from(&datadir.join("state").join(name))?;
+            let backend = storage::Backend::from_state(&state);
 
-            let (guard, resolved_path) = if systemd::is_active(name)? {
+            let (root, resolved_path) = if systemd::is_active(name)? {
+                // A running btrfs container's root is a subvolume mounted only
+                // inside its namespace; there is no host-side merged/ view.
+                if backend == storage::Backend::Btrfs {
+                    bail!(
+                        "cannot COPY --from running btrfs container '{name}'; \
+                         stop it first so its subvolume can be read offline"
+                    );
+                }
                 eprintln!(
                     "warning: copying from running container '{name}'; \
                      data may be inconsistent"
                 );
-                let full_path = container_dir
+                let full_path = datadir
+                    .join("containers")
+                    .join(name)
                     .join("merged")
                     .join(path.strip_prefix("/").unwrap_or(path));
                 (None, full_path)
             } else {
-                // Stopped: mount a read-only overlay view.
-                let state_path = datadir.join("state").join(name);
-                let state = State::read_from(&state_path)?;
+                // Stopped: open the container root read-only. Overlay mounts a
+                // temporary read-only overlay; btrfs reads its own subvolume.
                 let rootfs_name = state.rootfs();
                 let rootfs_dir = if rootfs_name.is_empty() {
                     PathBuf::from("/")
                 } else {
                     datadir.join("fs").join(rootfs_name)
                 };
-                if verbose {
-                    eprintln!("mounting read-only overlay for container '{name}'");
-                }
-                containers::mount_overlay_ro(&rootfs_dir, &container_dir)?;
-                let full_path = container_dir
-                    .join("merged")
-                    .join(path.strip_prefix("/").unwrap_or(path));
-                (
-                    Some(containers::OverlayGuard {
-                        container_dir: container_dir.clone(),
-                    }),
-                    full_path,
-                )
+                let root = containers::open_root_ro(datadir, name, backend, &rootfs_dir, verbose)?;
+                let full_path = root.root().join(path.strip_prefix("/").unwrap_or(path));
+                (Some(root), full_path)
             };
 
             Ok(ResolvedSource {
                 path: resolved_path,
-                _mount_guard: guard,
+                _root: root,
                 _lock: Some(lock),
             })
         }

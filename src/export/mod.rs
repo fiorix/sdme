@@ -23,7 +23,7 @@ use crate::config::DistroCommands;
 use crate::import::InstallPackages;
 use crate::lock;
 use crate::txn::{Txn, TxnKind};
-use crate::{containers, systemd, validate_name, State};
+use crate::{containers, storage, systemd, validate_name, State};
 
 /// Options for preparing a raw disk image for VM boot.
 pub struct VmOptions {
@@ -177,7 +177,36 @@ pub fn export(
             let container_dir = datadir.join("containers").join(name);
             let merged_dir = container_dir.join("merged");
 
+            // Read the backend up front so both the running and stopped paths
+            // can dispatch on it.
+            let state_file = datadir.join("state").join(name);
+            let state = State::read_from(&state_file)?;
+            let backend = storage::Backend::from_state(&state);
+            let rootfs_name = state.rootfs();
+
             let running = systemd::is_active(name)?;
+
+            // btrfs exports directly from the container's subvolume in either
+            // state: there is no overlay mount and no stale-mount txn marker to
+            // manage, and the subvolume is host-accessible whether or not the
+            // container is running. A running export carries the same
+            // live-filesystem inconsistency caveat as an overlay merged/ export.
+            if backend == storage::Backend::Btrfs {
+                if running {
+                    eprintln!(
+                        "warning: container '{name}' is running; filesystem is live and \
+                         consistency is not guaranteed"
+                    );
+                }
+                let root =
+                    containers::open_root_ro(datadir, name, backend, Path::new("/"), opts.verbose)?;
+                if let Some(tz) = opts.timezone {
+                    validate_timezone(root.root(), tz)?;
+                }
+                return export_from_dir(root.root(), output, opts);
+            }
+
+            // Overlay backend.
             if running {
                 eprintln!(
                     "warning: container '{name}' is running; filesystem is live and \
@@ -188,10 +217,6 @@ pub fn export(
                 }
                 export_from_dir(&merged_dir, output, opts)
             } else {
-                // Read state to find the rootfs.
-                let state_file = datadir.join("state").join(name);
-                let state = State::read_from(&state_file)?;
-                let rootfs_name = state.rootfs();
                 let rootfs_dir = containers::resolve_rootfs(
                     datadir,
                     if rootfs_name.is_empty() {
@@ -395,7 +420,32 @@ pub fn export_container(
     let container_dir = datadir.join("containers").join(name);
     let merged_dir = container_dir.join("merged");
 
+    // Read the backend up front so both the running and stopped paths dispatch
+    // on it.
+    let state_file = datadir.join("state").join(name);
+    let state = State::read_from(&state_file)?;
+    let backend = storage::Backend::from_state(&state);
+    let rootfs_name = state.rootfs();
+
     let running = systemd::is_active(name)?;
+
+    // btrfs exports directly from the container's subvolume in either state
+    // (no overlay mount; the subvolume is host-accessible while running too).
+    if backend == storage::Backend::Btrfs {
+        if running {
+            eprintln!(
+                "warning: container '{name}' is running; filesystem is live and \
+                 consistency is not guaranteed"
+            );
+        }
+        let root = containers::open_root_ro(datadir, name, backend, Path::new("/"), opts.verbose)?;
+        if let Some(tz) = opts.timezone {
+            validate_timezone(root.root(), tz)?;
+        }
+        return export_from_dir(root.root(), output, opts);
+    }
+
+    // Overlay backend.
     if running {
         eprintln!(
             "warning: container '{name}' is running; filesystem is live and \
@@ -406,10 +456,6 @@ pub fn export_container(
         }
         export_from_dir(&merged_dir, output, opts)
     } else {
-        // Read state to find the rootfs.
-        let state_file = datadir.join("state").join(name);
-        let state = State::read_from(&state_file)?;
-        let rootfs_name = state.rootfs();
         let rootfs_dir = containers::resolve_rootfs(
             datadir,
             if rootfs_name.is_empty() {

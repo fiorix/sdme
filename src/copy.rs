@@ -21,7 +21,20 @@ pub(crate) type HardLinkMap = HashMap<(u64, u64), PathBuf>;
 /// Recursively copy all entries from `src_dir` to `dst_dir`.
 pub(crate) fn copy_tree(src_dir: &Path, dst_dir: &Path, verbose: bool) -> Result<()> {
     let mut hardlinks = HardLinkMap::new();
-    copy_tree_inner(src_dir, dst_dir, verbose, &mut hardlinks)
+    copy_tree_inner(src_dir, dst_dir, verbose, &mut hardlinks, false)
+}
+
+/// Like [`copy_tree`], but symlink-safe for writing into a tree that may hold
+/// untrusted pre-existing entries (a btrfs container subvolume holding the base
+/// image). Before writing each destination entry, an existing symlink there is
+/// removed so the write cannot be redirected through it (in the worst case onto
+/// the host, since sdme runs as root and is not chrooted). Existing real
+/// directories are merged into rather than failed on. Use for `sdme cp` writes
+/// into a btrfs container; the overlay backend writes into a fresh upper layer
+/// and must use plain [`copy_tree`] (unchanged behavior).
+pub(crate) fn copy_tree_shadowed(src_dir: &Path, dst_dir: &Path, verbose: bool) -> Result<()> {
+    let mut hardlinks = HardLinkMap::new();
+    copy_tree_inner(src_dir, dst_dir, verbose, &mut hardlinks, true)
 }
 
 fn copy_tree_inner(
@@ -29,6 +42,7 @@ fn copy_tree_inner(
     dst_dir: &Path,
     verbose: bool,
     hardlinks: &mut HardLinkMap,
+    shadow: bool,
 ) -> Result<()> {
     let entries = fs::read_dir(src_dir)
         .with_context(|| format!("failed to read directory {}", src_dir.display()))?;
@@ -41,7 +55,7 @@ fn copy_tree_inner(
         let file_name = entry.file_name();
         let dst_path = dst_dir.join(&file_name);
 
-        copy_entry_inner(&src_path, &dst_path, verbose, hardlinks)
+        copy_entry_inner(&src_path, &dst_path, verbose, hardlinks, shadow)
             .with_context(|| format!("failed to copy {}", src_path.display()))?;
     }
 
@@ -51,7 +65,13 @@ fn copy_tree_inner(
 /// Copy a single filesystem entry (file, dir, symlink, device, fifo, socket).
 pub(crate) fn copy_entry(src: &Path, dst: &Path, verbose: bool) -> Result<()> {
     let mut hardlinks = HardLinkMap::new();
-    copy_entry_inner(src, dst, verbose, &mut hardlinks)
+    copy_entry_inner(src, dst, verbose, &mut hardlinks, false)
+}
+
+/// Symlink-safe variant of [`copy_entry`]; see [`copy_tree_shadowed`].
+pub(crate) fn copy_entry_shadowed(src: &Path, dst: &Path, verbose: bool) -> Result<()> {
+    let mut hardlinks = HardLinkMap::new();
+    copy_entry_inner(src, dst, verbose, &mut hardlinks, true)
 }
 
 fn copy_entry_inner(
@@ -59,17 +79,32 @@ fn copy_entry_inner(
     dst: &Path,
     verbose: bool,
     hardlinks: &mut HardLinkMap,
+    shadow: bool,
 ) -> Result<()> {
+    // When writing into a tree that may hold untrusted base-image symlinks,
+    // replace any pre-existing symlink at `dst` with the real entry so the
+    // write (and every recursive child write) cannot be redirected outside the
+    // tree. Without this, `fs::copy` opens the destination without O_NOFOLLOW
+    // and would follow a base-image symlink child onto the host.
+    if shadow {
+        shadow_symlink(dst)?;
+    }
+
     let stat = lstat_entry(src)?;
     let mode = stat.st_mode & libc::S_IFMT;
 
     match mode {
         libc::S_IFDIR => {
-            fs::create_dir(dst)
-                .with_context(|| format!("failed to create directory {}", dst.display()))?;
+            // In shadow mode an existing real directory (from the base image) is
+            // merged into rather than failed on; a symlink there was already
+            // removed above. Otherwise a fresh directory is expected.
+            if !(shadow && dst.is_dir()) {
+                fs::create_dir(dst)
+                    .with_context(|| format!("failed to create directory {}", dst.display()))?;
+            }
             copy_metadata_from_stat(dst, &stat)?;
             copy_xattrs(src, dst)?;
-            copy_tree_inner(src, dst, verbose, hardlinks)?;
+            copy_tree_inner(src, dst, verbose, hardlinks, shadow)?;
         }
         libc::S_IFREG => {
             if stat.st_nlink > 1 {
@@ -471,6 +506,52 @@ pub(crate) fn sanitize_dest_path(path: &Path) -> Result<PathBuf> {
     Ok(clean)
 }
 
+/// Reject a write whose path, resolved component by component under `root`,
+/// would traverse a symlink already present in the tree.
+///
+/// The overlay backend writes into a fresh, empty upper layer, so an
+/// image-supplied symlink in the base rootfs (e.g. `/var/lib` -> `/etc`, a
+/// merged-usr `/bin` -> `usr/bin`, or an absolute symlink that resolves onto
+/// the host) can never redirect the write. The btrfs backend writes directly
+/// into the container's subvolume, which already holds the base tree, so such
+/// a symlink ancestor could redirect `create_dir_all`/`write` outside the
+/// subvolume, in the worst case onto the host filesystem. This walks each
+/// existing component of `rel` under `root` and bails if any is a symlink, so
+/// only real directories are ever descended into.
+pub(crate) fn reject_symlinked_path(root: &Path, rel: &str) -> Result<()> {
+    let mut cur = root.to_path_buf();
+    for part in rel.split('/').filter(|s| !s.is_empty()) {
+        cur.push(part);
+        if let Ok(m) = fs::symlink_metadata(&cur) {
+            if m.file_type().is_symlink() {
+                bail!(
+                    "refusing to write through symlink {} in the container root; a \
+                     malformed or hostile base image could redirect the write outside \
+                     the container (use the symlink's real target path instead)",
+                    cur.display()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Remove a leaf path if it is a symlink, so a subsequent write creates a real
+/// file in place rather than following the base image's symlink (e.g. a Debian
+/// `/etc/resolv.conf` -> systemd stub, or an absolute symlink that would escape
+/// onto the host). Mirrors how the overlay upper layer shadows a lower-layer
+/// symlink with a real file. Intended for the btrfs backend, whose writes land
+/// in the base tree itself.
+pub(crate) fn shadow_symlink(path: &Path) -> Result<()> {
+    if let Ok(m) = fs::symlink_metadata(path) {
+        if m.file_type().is_symlink() {
+            fs::remove_file(path)
+                .with_context(|| format!("failed to replace symlink {}", path.display()))?;
+        }
+    }
+    Ok(())
+}
+
 /// Convert a path to a CString for use with libc functions.
 pub(crate) fn path_to_cstring(path: &Path) -> Result<CString> {
     CString::new(path.as_os_str().as_bytes())
@@ -529,6 +610,122 @@ mod tests {
         let ino_a = fs::metadata(out.join("dir1/a")).unwrap().ino();
         let ino_b = fs::metadata(out.join("dir2/b")).unwrap().ino();
         assert_eq!(ino_a, ino_b, "cross-dir hard links should share inode");
+    }
+
+    #[test]
+    fn test_reject_symlinked_path_real_dirs_ok() {
+        // A path whose every existing component is a real directory passes,
+        // and components that do not exist yet are fine (create_dir_all makes
+        // them real dirs).
+        let tmp = crate::testutil::TempDataDir::new("reject-ok");
+        fs::create_dir_all(tmp.path().join("usr/local/bin")).unwrap();
+        reject_symlinked_path(tmp.path(), "usr/local/bin/tool").unwrap();
+        reject_symlinked_path(tmp.path(), "etc/does/not/exist/yet").unwrap();
+    }
+
+    #[test]
+    fn test_reject_symlinked_path_ancestor_symlink_bails() {
+        // A merged-usr style symlink ancestor (/bin -> usr/bin) is rejected so a
+        // write can never be redirected through it.
+        let tmp = crate::testutil::TempDataDir::new("reject-sym");
+        fs::create_dir_all(tmp.path().join("usr/bin")).unwrap();
+        unix_fs::symlink("usr/bin", tmp.path().join("bin")).unwrap();
+        let err = reject_symlinked_path(tmp.path(), "bin/tool").unwrap_err();
+        assert!(
+            err.to_string().contains("symlink"),
+            "expected symlink rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_reject_symlinked_path_absolute_symlink_escape_bails() {
+        // An absolute symlink (data -> /) that would resolve onto the host is
+        // rejected before any component beneath it is touched.
+        let tmp = crate::testutil::TempDataDir::new("reject-abs");
+        unix_fs::symlink("/", tmp.path().join("data")).unwrap();
+        let err = reject_symlinked_path(tmp.path(), "data/etc/passwd").unwrap_err();
+        assert!(err.to_string().contains("symlink"), "got: {err}");
+    }
+
+    #[test]
+    fn test_copy_tree_shadowed_merges_and_shadows_nested() {
+        // Merges into an existing real directory and shadows a nested symlink
+        // child (an absolute symlink that must never be followed), while a plain
+        // copy_tree would follow it and write through onto the escape target.
+        let tmp = crate::testutil::TempDataDir::new("shadowed-merge");
+        let dst = tmp.path().join("dst");
+        fs::create_dir_all(dst.join("sub")).unwrap();
+        let escape = tmp.path().join("escape");
+        unix_fs::symlink(&escape, dst.join("sub/link")).unwrap();
+
+        let src = tmp.path().join("src");
+        fs::create_dir_all(src.join("sub")).unwrap();
+        fs::write(src.join("sub/link"), "real").unwrap(); // collides with the symlink
+        fs::write(src.join("new"), "added").unwrap();
+
+        copy_tree_shadowed(&src, &dst, false).unwrap();
+
+        // The colliding entry is now a real file in dst, not a followed symlink.
+        let landed = dst.join("sub/link");
+        assert!(landed.symlink_metadata().unwrap().file_type().is_file());
+        assert_eq!(fs::read_to_string(&landed).unwrap(), "real");
+        // New sibling merged in; existing dir preserved; escape target untouched.
+        assert_eq!(fs::read_to_string(dst.join("new")).unwrap(), "added");
+        assert!(
+            !escape.exists(),
+            "shadowed copy followed a symlink and escaped"
+        );
+    }
+
+    #[test]
+    fn test_copy_tree_shadowed_symlink_dir_ancestor() {
+        // A nested directory child that exists as a symlink in the destination
+        // is shadowed (replaced by a real dir) before descending, so files
+        // written beneath it stay inside dst.
+        let tmp = crate::testutil::TempDataDir::new("shadowed-dir");
+        let dst = tmp.path().join("dst");
+        fs::create_dir_all(&dst).unwrap();
+        let escape_dir = tmp.path().join("escape-dir");
+        fs::create_dir_all(&escape_dir).unwrap();
+        unix_fs::symlink(&escape_dir, dst.join("d")).unwrap(); // d -> outside dst
+
+        let src = tmp.path().join("src");
+        fs::create_dir_all(src.join("d")).unwrap();
+        fs::write(src.join("d/f"), "x").unwrap();
+
+        copy_tree_shadowed(&src, &dst, false).unwrap();
+
+        assert!(dst
+            .join("d")
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_dir());
+        assert_eq!(fs::read_to_string(dst.join("d/f")).unwrap(), "x");
+        assert!(
+            !escape_dir.join("f").exists(),
+            "descent followed a symlinked directory and escaped"
+        );
+    }
+
+    #[test]
+    fn test_shadow_symlink_removes_symlink_only() {
+        let tmp = crate::testutil::TempDataDir::new("shadow");
+        // A symlink leaf is removed so a later write creates a real file.
+        let link = tmp.path().join("resolv.conf");
+        unix_fs::symlink("../run/systemd/resolve/stub-resolv.conf", &link).unwrap();
+        shadow_symlink(&link).unwrap();
+        assert!(
+            link.symlink_metadata().is_err(),
+            "symlink should have been removed"
+        );
+        // A real file is left untouched.
+        let real = tmp.path().join("real");
+        fs::write(&real, "keep").unwrap();
+        shadow_symlink(&real).unwrap();
+        assert_eq!(fs::read_to_string(&real).unwrap(), "keep");
+        // A missing path is a no-op.
+        shadow_symlink(&tmp.path().join("missing")).unwrap();
     }
 
     #[test]
