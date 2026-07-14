@@ -193,6 +193,18 @@ pub struct Config {
     #[serde(default = "default_create_masked_services")]
     pub default_create_masked_services: String,
 
+    /// Default storage backend for new containers. "" or "overlay" selects
+    /// overlayfs (the default); "btrfs" selects btrfs subvolume snapshots.
+    /// Overridable per container with `--storage`.
+    #[serde(default)]
+    pub default_storage_backend: String,
+
+    /// Virtual size of the Mode B btrfs pool image (e.g. "20G"). The image is
+    /// sparse and can be grown on demand; ignored when the datadir is already
+    /// btrfs (Mode A).
+    #[serde(default = "default_btrfs_pool_size")]
+    pub btrfs_pool_size: String,
+
     /// Update-check and self-upgrade knobs.
     #[serde(default)]
     pub update_check: UpdateCheckConfig,
@@ -307,6 +319,10 @@ fn default_update_check_interval_hours() -> u64 {
     24
 }
 
+fn default_btrfs_pool_size() -> String {
+    crate::storage::pool::DEFAULT_POOL_SIZE.to_string()
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -336,6 +352,8 @@ impl Default for Config {
             restart_sec: default_restart_sec(),
             auto_fs_gc: default_auto_fs_gc(),
             default_create_masked_services: default_create_masked_services(),
+            default_storage_backend: String::new(),
+            btrfs_pool_size: default_btrfs_pool_size(),
             update_check: UpdateCheckConfig::default(),
             distros: HashMap::new(),
         }

@@ -7,6 +7,7 @@ use std::path::{Component, Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
+use crate::storage::{self, Backend};
 use crate::{
     names, rootfs, systemd, validate_name, BindConfig, EnvConfig, NetworkConfig, ResourceLimits,
     SecurityConfig, State,
@@ -43,6 +44,11 @@ pub struct CreateOptions {
     pub oci_envs: Vec<String>,
     /// Systemd services to mask in the overlayfs upper layer at create time.
     pub masked_services: Vec<String>,
+    /// Storage backend for the container root (overlay or btrfs).
+    pub backend: Backend,
+    /// Mode B btrfs pool image size (from config). Empty falls back to the
+    /// built-in default. Ignored for the overlay backend.
+    pub pool_size: String,
 }
 
 /// Create a new container with the given options, returning its name.
@@ -88,6 +94,16 @@ pub fn create(datadir: &Path, opts: &CreateOptions, verbose: bool) -> Result<Str
         eprintln!("rootfs: {}", rootfs.display());
     }
 
+    // The btrfs backend snapshots an imported rootfs into a subvolume; there is
+    // no cheap, correct way to snapshot the live host root, so host-rootfs
+    // containers stay on overlay.
+    if opts.backend == Backend::Btrfs && opts.rootfs.is_none() {
+        bail!(
+            "btrfs storage requires an imported rootfs (-r NAME); \
+             host-rootfs containers use the overlay backend"
+        );
+    }
+
     // Hold shared lock on rootfs to prevent deletion during container creation.
     let _rootfs_lock = match &opts.rootfs {
         Some(r) => Some(
@@ -130,6 +146,11 @@ pub fn create(datadir: &Path, opts: &CreateOptions, verbose: bool) -> Result<Str
     match do_create(datadir, &name, &rootfs, opts, &opaque_dirs, verbose) {
         Ok(()) => Ok(name),
         Err(e) => {
+            // A btrfs container root is a subvolume, which cannot be removed by
+            // remove_dir_all; delete it first (best effort).
+            if opts.backend == Backend::Btrfs {
+                let _ = storage::btrfs::teardown(datadir, &name, verbose);
+            }
             let container_dir = datadir.join("containers").join(&name);
             let _ = fs::remove_dir_all(&container_dir);
             let _ = fs::remove_file(&state_path);
@@ -152,40 +173,75 @@ fn do_create(
         .with_context(|| format!("failed to create {}", containers_dir.display()))?;
     set_dir_permissions(&containers_dir, 0o700)?;
 
-    // The upper directory becomes the root of the overlayfs merged view, so it
-    // must be world-readable (0o755); otherwise non-root services inside the
-    // container (e.g. dbus-daemon running as messagebus) cannot traverse the
-    // filesystem. The merged mount point also needs 0o755. The work directory
-    // is overlayfs-internal and can stay restricted.
-    for (sub, mode) in &[("upper", 0o755), ("work", 0o700), ("merged", 0o755)] {
-        let dir = container_dir.join(sub);
-        fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
-        set_dir_permissions(&dir, *mode)?;
-    }
+    // Provision the writable root and resolve `root_dir`: the directory where
+    // per-container customization (hostname, /etc, masked units, OCI drop-ins)
+    // is written. Overlay writes into the `upper` layer; btrfs writes directly
+    // into the container's subvolume.
+    let root_dir = match opts.backend {
+        Backend::Overlay => {
+            // The upper directory becomes the root of the overlayfs merged
+            // view, so it must be world-readable (0o755); otherwise non-root
+            // services inside the container (e.g. dbus-daemon running as
+            // messagebus) cannot traverse the filesystem. The merged mount
+            // point also needs 0o755. The work directory is overlayfs-internal
+            // and can stay restricted.
+            for (sub, mode) in &[("upper", 0o755), ("work", 0o700), ("merged", 0o755)] {
+                let dir = container_dir.join(sub);
+                fs::create_dir_all(&dir)
+                    .with_context(|| format!("failed to create {}", dir.display()))?;
+                set_dir_permissions(&dir, *mode)?;
+            }
+            container_dir.join("upper")
+        }
+        Backend::Btrfs => {
+            // Keep the bookkeeping dir (volumes, state anchoring); the actual
+            // root is a CoW subvolume snapshot of the base rootfs under the
+            // btrfs pool. The subvolume itself must be world-traversable.
+            fs::create_dir_all(&container_dir)
+                .with_context(|| format!("failed to create {}", container_dir.display()))?;
+            set_dir_permissions(&container_dir, 0o755)?;
+            let base_name = rootfs
+                .file_name()
+                .and_then(|n| n.to_str())
+                .context("btrfs backend requires a named rootfs")?;
+            let pool_size = if opts.pool_size.is_empty() {
+                storage::pool::DEFAULT_POOL_SIZE
+            } else {
+                opts.pool_size.as_str()
+            };
+            storage::btrfs::provision(datadir, name, base_name, rootfs, pool_size, verbose)?
+        }
+    };
 
     if verbose {
-        eprintln!("created container directory: {}", container_dir.display());
+        eprintln!("container root: {}", root_dir.display());
     }
 
-    // Set up opaque directories in the upper layer. Setting the
-    // trusted.overlay.opaque xattr to "y" on a directory makes overlayfs
-    // hide all lower-layer contents, so the directory starts empty.
-    let upper = container_dir.join("upper");
+    // Set up opaque directories so they start empty. For overlay, the
+    // trusted.overlay.opaque xattr hides all lower-layer contents. For btrfs
+    // there is no lower layer, so the subvolume already holds the base tree;
+    // emptying the directory reproduces the same "starts empty" semantics.
     for dir in opaque_dirs {
         let rel = dir.strip_prefix('/').unwrap_or(dir);
-        let target = upper.join(rel);
+        let target = root_dir.join(rel);
+        if opts.backend == Backend::Btrfs && target.exists() {
+            fs::remove_dir_all(&target)
+                .with_context(|| format!("failed to clear opaque dir {}", target.display()))?;
+        }
         fs::create_dir_all(&target)
             .with_context(|| format!("failed to create opaque dir {}", target.display()))?;
         fs::set_permissions(&target, fs::Permissions::from_mode(0o755))
             .with_context(|| format!("failed to set permissions on {}", target.display()))?;
-        set_opaque_xattr(&target)
-            .with_context(|| format!("failed to set opaque xattr on {}", target.display()))?;
+        if opts.backend == Backend::Overlay {
+            set_opaque_xattr(&target)
+                .with_context(|| format!("failed to set opaque xattr on {}", target.display()))?;
+        }
         if verbose {
             eprintln!("set opaque: {dir}");
         }
     }
 
-    let etc_dir = container_dir.join("upper").join("etc");
+    let etc_dir = root_dir.join("etc");
     fs::create_dir_all(&etc_dir)
         .with_context(|| format!("failed to create {}", etc_dir.display()))?;
 
@@ -406,6 +462,9 @@ fn do_create(
     state.set("CREATED", unix_timestamp().to_string());
     state.set("NAME", name);
     state.set("ROOTFS", rootfs_value);
+    if opts.backend != Backend::Overlay {
+        state.set("STORAGE", opts.backend.as_str());
+    }
     opts.limits.write_to_state(&mut state);
     opts.network.write_to_state(&mut state);
 
@@ -468,9 +527,7 @@ fn do_create(
         };
         let unit_rel = crate::oci::app::systemd_unit_dir(rootfs);
         for oci_app_name in &app_names {
-            let dropin_dir = container_dir.join(format!(
-                "upper/{unit_rel}/sdme-oci-{oci_app_name}.service.d"
-            ));
+            let dropin_dir = root_dir.join(format!("{unit_rel}/sdme-oci-{oci_app_name}.service.d"));
             fs::create_dir_all(&dropin_dir)
                 .with_context(|| format!("failed to create {}", dropin_dir.display()))?;
             let dropin_path = dropin_dir.join("oci-pod-netns.conf");
@@ -549,7 +606,7 @@ fn do_create(
             })?;
         let lower_env = rootfs.join(format!("oci/apps/{oci_app_for_env}/env"));
         if lower_env.exists() {
-            let upper_oci = container_dir.join(format!("upper/oci/apps/{oci_app_for_env}"));
+            let upper_oci = root_dir.join(format!("oci/apps/{oci_app_for_env}"));
             fs::create_dir_all(&upper_oci)
                 .with_context(|| format!("failed to create {}", upper_oci.display()))?;
             let upper_env = upper_oci.join("env");
