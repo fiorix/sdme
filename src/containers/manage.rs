@@ -65,6 +65,18 @@ pub fn remove(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
         }
     }
 
+    // A btrfs container root is a subvolume under the pool, not a directory in
+    // container_dir, and must be deleted with `btrfs subvolume delete`. Do this
+    // after the container is stopped (above) and best-effort, so a pool/mount
+    // hiccup never blocks removing the rest of the container's state.
+    if let Ok(state) = State::read_from(&state_file) {
+        if crate::storage::Backend::from_state(&state) == crate::storage::Backend::Btrfs {
+            if let Err(e) = crate::storage::btrfs::teardown(datadir, name, verbose) {
+                eprintln!("warning: failed to delete btrfs subvolume for '{name}': {e:#}");
+            }
+        }
+    }
+
     let container_dir = datadir.join("containers").join(name);
     if container_dir.exists() {
         crate::copy::safe_remove_dir(&container_dir)?;
