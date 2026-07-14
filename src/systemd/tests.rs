@@ -105,8 +105,11 @@ fn test_nspawn_dropin_host_rootfs() {
     let paths = test_paths();
     let args = vec!["--resolv-conf=auto".to_string()];
     let content = nspawn_dropin(&DropinConfig {
+        backend: crate::storage::Backend::Overlay,
         datadir: "/var/lib/sdme",
         name: "mybox",
+        root_dir: "/var/lib/sdme/containers/mybox/merged",
+        pool_mount: None,
         lowerdir: "/",
         paths: &paths,
         nspawn_args: &args,
@@ -137,8 +140,11 @@ fn test_nspawn_dropin_with_userns() {
         "--private-users-ownership=auto".to_string(),
     ];
     let content = nspawn_dropin(&DropinConfig {
+        backend: crate::storage::Backend::Overlay,
         datadir: "/var/lib/sdme",
         name: "mybox",
+        root_dir: "/var/lib/sdme/containers/mybox/merged",
+        pool_mount: None,
         lowerdir: "/",
         paths: &paths,
         nspawn_args: &args,
@@ -160,8 +166,11 @@ fn test_nspawn_dropin_with_pod_netns() {
         "--private-users-ownership=auto".to_string(),
     ];
     let content = nspawn_dropin(&DropinConfig {
+        backend: crate::storage::Backend::Overlay,
         datadir: "/var/lib/sdme",
         name: "podbox",
+        root_dir: "/var/lib/sdme/containers/podbox/merged",
+        pool_mount: None,
         lowerdir: "/",
         paths: &paths,
         nspawn_args: &args,
@@ -185,8 +194,11 @@ fn test_nspawn_dropin_without_pod_netns() {
     let paths = test_paths();
     let args = vec!["--resolv-conf=auto".to_string()];
     let content = nspawn_dropin(&DropinConfig {
+        backend: crate::storage::Backend::Overlay,
         datadir: "/var/lib/sdme",
         name: "mybox",
+        root_dir: "/var/lib/sdme/containers/mybox/merged",
+        pool_mount: None,
         lowerdir: "/",
         paths: &paths,
         nspawn_args: &args,
@@ -204,8 +216,11 @@ fn test_nspawn_dropin_explicit_rootfs() {
     let paths = test_paths();
     let args = vec!["--resolv-conf=auto".to_string()];
     let content = nspawn_dropin(&DropinConfig {
+        backend: crate::storage::Backend::Overlay,
         datadir: "/var/lib/sdme",
         name: "ubox",
+        root_dir: "/var/lib/sdme/containers/ubox/merged",
+        pool_mount: None,
         lowerdir: "/var/lib/sdme/fs/ubuntu",
         paths: &paths,
         nspawn_args: &args,
@@ -227,8 +242,11 @@ fn test_nspawn_dropin_with_binds_and_envs() {
         "--setenv=FOO=bar".to_string(),
     ];
     let content = nspawn_dropin(&DropinConfig {
+        backend: crate::storage::Backend::Overlay,
         datadir: "/var/lib/sdme",
         name: "mybox",
+        root_dir: "/var/lib/sdme/containers/mybox/merged",
+        pool_mount: None,
         lowerdir: "/",
         paths: &paths,
         nspawn_args: &args,
@@ -249,8 +267,11 @@ fn test_nspawn_dropin_escapes_spaces() {
         "--setenv=MSG=hello world".to_string(),
     ];
     let content = nspawn_dropin(&DropinConfig {
+        backend: crate::storage::Backend::Overlay,
         datadir: "/var/lib/sdme",
         name: "mybox",
+        root_dir: "/var/lib/sdme/containers/mybox/merged",
+        pool_mount: None,
         lowerdir: "/",
         paths: &paths,
         nspawn_args: &args,
@@ -259,6 +280,32 @@ fn test_nspawn_dropin_escapes_spaces() {
         pod_netns: None,
     });
     assert!(content.contains("\"--setenv=MSG=hello world\""));
+}
+
+#[test]
+fn test_nspawn_dropin_btrfs() {
+    let paths = test_paths();
+    let args = vec!["--resolv-conf=auto".to_string()];
+    let content = nspawn_dropin(&DropinConfig {
+        backend: crate::storage::Backend::Btrfs,
+        datadir: "/var/lib/sdme",
+        name: "btrbox",
+        root_dir: "/var/lib/sdme/pool/containers/btrbox",
+        pool_mount: Some("/var/lib/sdme/pool"),
+        lowerdir: "/var/lib/sdme/fs/debian",
+        paths: &paths,
+        nspawn_args: &args,
+        service_directives: &[],
+        submounts: &[],
+        pod_netns: None,
+    });
+    // btrfs uses no overlay root mount and no ExecStartPre/ExecStopPost.
+    assert!(!content.contains("-t overlay"));
+    assert!(!content.contains("ExecStartPre="));
+    assert!(!content.contains("ExecStopPost="));
+    // nspawn boots the subvolume directly, after the pool mount.
+    assert!(content.contains("--directory=/var/lib/sdme/pool/containers/btrbox \\"));
+    assert!(content.contains("RequiresMountsFor=/var/lib/sdme/pool"));
 }
 
 #[test]
@@ -332,8 +379,11 @@ fn test_nspawn_dropin_with_security() {
         "--system-call-filter=~@mount".to_string(),
     ];
     let content = nspawn_dropin(&DropinConfig {
+        backend: crate::storage::Backend::Overlay,
         datadir: "/var/lib/sdme",
         name: "secbox",
+        root_dir: "/var/lib/sdme/containers/secbox/merged",
+        pool_mount: None,
         lowerdir: "/",
         paths: &paths,
         nspawn_args: &args,
@@ -357,8 +407,11 @@ fn test_nspawn_dropin_with_apparmor() {
     let args = vec!["--resolv-conf=auto".to_string()];
     let service_directives = vec!["AppArmorProfile=sdme-default".to_string()];
     let content = nspawn_dropin(&DropinConfig {
+        backend: crate::storage::Backend::Overlay,
         datadir: "/var/lib/sdme",
         name: "aabox",
+        root_dir: "/var/lib/sdme/containers/aabox/merged",
+        pool_mount: None,
         lowerdir: "/",
         paths: &paths,
         nspawn_args: &args,
@@ -387,8 +440,11 @@ fn test_nspawn_dropin_with_submounts() {
         "data/deep".to_string(),
     ];
     let content = nspawn_dropin(&DropinConfig {
+        backend: crate::storage::Backend::Overlay,
         datadir: "/var/lib/sdme",
         name: "mybox",
+        root_dir: "/var/lib/sdme/containers/mybox/merged",
+        pool_mount: None,
         lowerdir: "/",
         paths: &paths,
         nspawn_args: &args,

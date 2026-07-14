@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+use crate::storage::{self, Backend};
 use crate::{BindConfig, EnvConfig, NetworkConfig, ResourceLimits, SecurityConfig, State};
 
 /// Return the systemd service unit name for a container.
@@ -128,10 +129,18 @@ pub(super) fn restart_directives(policy: Option<&str>, restart_sec: u64) -> Vec<
 
 /// Configuration for generating a per-container nspawn drop-in.
 pub struct DropinConfig<'a> {
+    /// Storage backend for the container root (overlay or btrfs).
+    pub backend: Backend,
     /// Data directory path (e.g. `/var/lib/sdme`).
     pub datadir: &'a str,
     /// Container name.
     pub name: &'a str,
+    /// The `systemd-nspawn --directory=` target: the overlay `merged` mount for
+    /// overlay, or the container subvolume path for btrfs.
+    pub root_dir: &'a str,
+    /// For a Mode B btrfs container, the pool mount point to require before
+    /// nspawn starts (`RequiresMountsFor=`). `None` for overlay and Mode A.
+    pub pool_mount: Option<&'a str>,
     /// Lower directory for the root overlayfs (e.g. `/` or a rootfs path).
     pub lowerdir: &'a str,
     /// Resolved paths to mount/umount/nspawn binaries.
@@ -167,23 +176,37 @@ pub fn nspawn_dropin(cfg: &DropinConfig<'_>) -> String {
         writeln!(out, "{directive}").unwrap();
     }
     writeln!(out, "ExecStart=").unwrap();
-    writeln!(out, "ExecStartPre={mount} -t overlay overlay \\").unwrap();
-    writeln!(
-        out,
-        "    -o lowerdir={lowerdir},upperdir={datadir}/containers/{name}/upper,workdir={datadir}/containers/{name}/work \\"
-    )
-    .unwrap();
-    writeln!(out, "    {datadir}/containers/{name}/merged").unwrap();
 
-    // Per-submount overlayfs layers (best-effort, =-).
-    for rel in cfg.submounts {
-        writeln!(out, "ExecStartPre=-{mount} -t overlay overlay \\").unwrap();
-        writeln!(
-            out,
-            "    -o lowerdir=/{rel},upperdir={datadir}/containers/{name}/submounts/{rel}/upper,workdir={datadir}/containers/{name}/submounts/{rel}/work \\"
-        )
-        .unwrap();
-        writeln!(out, "    {datadir}/containers/{name}/merged/{rel}").unwrap();
+    // Backend-specific root setup. Overlay mounts an overlayfs onto `merged`
+    // (plus per-submount overlays for host-rootfs containers). btrfs needs no
+    // root mount because the subvolume is a real directory, but in Mode B the
+    // pool image must be mounted before nspawn starts.
+    match cfg.backend {
+        Backend::Overlay => {
+            writeln!(out, "ExecStartPre={mount} -t overlay overlay \\").unwrap();
+            writeln!(
+                out,
+                "    -o lowerdir={lowerdir},upperdir={datadir}/containers/{name}/upper,workdir={datadir}/containers/{name}/work \\"
+            )
+            .unwrap();
+            writeln!(out, "    {datadir}/containers/{name}/merged").unwrap();
+
+            // Per-submount overlayfs layers (best-effort, =-).
+            for rel in cfg.submounts {
+                writeln!(out, "ExecStartPre=-{mount} -t overlay overlay \\").unwrap();
+                writeln!(
+                    out,
+                    "    -o lowerdir=/{rel},upperdir={datadir}/containers/{name}/submounts/{rel}/upper,workdir={datadir}/containers/{name}/submounts/{rel}/work \\"
+                )
+                .unwrap();
+                writeln!(out, "    {datadir}/containers/{name}/merged/{rel}").unwrap();
+            }
+        }
+        Backend::Btrfs => {
+            if let Some(pool_mount) = cfg.pool_mount {
+                writeln!(out, "RequiresMountsFor={pool_mount}").unwrap();
+            }
+        }
     }
 
     // When a pod provides the network namespace, launch nspawn via nsenter
@@ -195,7 +218,7 @@ pub fn nspawn_dropin(cfg: &DropinConfig<'_>) -> String {
     } else {
         writeln!(out, "ExecStart={nspawn} \\").unwrap();
     }
-    writeln!(out, "    --directory={datadir}/containers/{name}/merged \\").unwrap();
+    writeln!(out, "    --directory={} \\", cfg.root_dir).unwrap();
     writeln!(out, "    --machine={name} \\").unwrap();
     // Register the machine against this service unit instead of letting machined
     // create a separate machine-<name>.scope. This drops the StartTransientUnit
@@ -209,19 +232,22 @@ pub fn nspawn_dropin(cfg: &DropinConfig<'_>) -> String {
     }
     writeln!(out, "    --boot").unwrap();
 
-    // Unmount submounts in reverse order (deepest first), then the root overlay.
-    for rel in cfg.submounts.iter().rev() {
+    // Unmount overlay layers in reverse order (deepest first), then the root
+    // overlay. btrfs subvolumes need no teardown.
+    if cfg.backend == Backend::Overlay {
+        for rel in cfg.submounts.iter().rev() {
+            writeln!(
+                out,
+                "ExecStopPost=-{umount} {datadir}/containers/{name}/merged/{rel}"
+            )
+            .unwrap();
+        }
         writeln!(
             out,
-            "ExecStopPost=-{umount} {datadir}/containers/{name}/merged/{rel}"
+            "ExecStopPost=-{umount} {datadir}/containers/{name}/merged"
         )
         .unwrap();
     }
-    writeln!(
-        out,
-        "ExecStopPost=-{umount} {datadir}/containers/{name}/merged"
-    )
-    .unwrap();
     out
 }
 
@@ -457,9 +483,38 @@ pub fn write_nspawn_dropin(datadir: &Path, name: &str, verbose: bool) -> Result<
         Vec::new()
     };
 
+    // Resolve the nspawn root and (for Mode B btrfs) the pool mount to require.
+    let backend = Backend::from_state(&state);
+    let (root_dir, pool_mount) = match backend {
+        Backend::Overlay => (format!("{datadir_str}/containers/{name}/merged"), None),
+        Backend::Btrfs => {
+            let pool_root = storage::pool::root(datadir)?;
+            let root = storage::btrfs::container_root(&pool_root, name)
+                .to_str()
+                .context("btrfs subvolume path is not valid UTF-8")?
+                .to_string();
+            // Mode A (native btrfs datadir) needs no RequiresMountsFor; Mode B
+            // must wait for the loopback pool to mount.
+            let pool_mount = if storage::pool::is_btrfs(datadir)? {
+                None
+            } else {
+                Some(
+                    pool_root
+                        .to_str()
+                        .context("btrfs pool path is not valid UTF-8")?
+                        .to_string(),
+                )
+            };
+            (root, pool_mount)
+        }
+    };
+
     let content = nspawn_dropin(&DropinConfig {
+        backend,
         datadir: datadir_str,
         name,
+        root_dir: &root_dir,
+        pool_mount: pool_mount.as_deref(),
         lowerdir: &lowerdir,
         paths: &paths,
         nspawn_args: &nspawn_args,
