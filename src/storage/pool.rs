@@ -109,6 +109,24 @@ pub fn ensure_ready(datadir: &Path, pool_size: &str, verbose: bool) -> Result<Pa
     Ok(mount_dir)
 }
 
+/// Ensure an *existing* pool is mounted, returning the subvolume root. Unlike
+/// [`ensure_ready`], this never creates the pool image; it errors if a Mode B
+/// pool does not yet exist. Use for operations on existing containers
+/// (rm/cp/export/diff), where the pool must already have been created.
+pub fn ensure_mounted(datadir: &Path, verbose: bool) -> Result<PathBuf> {
+    if is_btrfs(datadir)? {
+        return Ok(datadir.join(BTRFS_SUBDIR));
+    }
+    let (image, mount_dir) = mode_b_paths(datadir);
+    if !image.exists() {
+        bail!("btrfs pool image not found: {}", image.display());
+    }
+    if !is_mounted(&mount_dir)? {
+        mount_pool(&image, &mount_dir, verbose)?;
+    }
+    Ok(mount_dir)
+}
+
 /// Grow the Mode B pool image by `extra` bytes and expand the btrfs filesystem
 /// online. No-op in Mode A (the datadir filesystem is grown by the operator).
 pub fn grow(datadir: &Path, extra: u64, verbose: bool) -> Result<()> {
