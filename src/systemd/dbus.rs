@@ -51,7 +51,7 @@ fn is_machine_not_found(e: &zbus::Error) -> bool {
         || msg.contains("no such object")
 }
 
-pub(super) fn daemon_reload() -> Result<()> {
+pub(crate) fn daemon_reload() -> Result<()> {
     let conn = connect()?;
     let proxy = systemd_manager(&conn)?;
     proxy

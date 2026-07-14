@@ -20,6 +20,8 @@
 //! before this key existed, and any with an empty value, resolve to
 //! [`Backend::Overlay`], so the abstraction is a no-op for existing containers.
 
+pub mod pool;
+
 use anyhow::{bail, Result};
 
 use crate::State;
