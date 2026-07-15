@@ -195,7 +195,10 @@ pub struct Config {
 
     /// Default storage backend for new containers. "" or "overlay" selects
     /// overlayfs (the default); "btrfs" selects btrfs subvolume snapshots.
-    /// Overridable per container with `--storage`.
+    /// Overridable per container with `--storage`. A "btrfs" default applies
+    /// only to imported/OCI rootfs; host-rootfs containers (no `-r`) fall back
+    /// to overlay, since the live host root cannot be snapshotted. An explicit
+    /// `--storage btrfs` on a host rootfs is still an error.
     #[serde(default)]
     pub default_storage_backend: String,
 

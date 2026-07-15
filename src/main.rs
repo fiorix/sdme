@@ -2392,10 +2392,11 @@ fn run() -> Result<()> {
             };
             let userns_enabled = sec.userns;
 
-            let backend = match storage.as_deref() {
-                Some(s) => storage::Backend::parse(s)?,
-                None => storage::Backend::parse(&cfg.default_storage_backend)?,
-            };
+            let backend = storage::Backend::resolve(
+                storage.as_deref(),
+                &cfg.default_storage_backend,
+                fs.is_none(),
+            )?;
             let opts = containers::CreateOptions {
                 name,
                 rootfs: fs,
@@ -2736,10 +2737,11 @@ fn run() -> Result<()> {
             };
             let userns_enabled = sec.userns;
 
-            let backend = match storage.as_deref() {
-                Some(s) => storage::Backend::parse(s)?,
-                None => storage::Backend::parse(&cfg.default_storage_backend)?,
-            };
+            let backend = storage::Backend::resolve(
+                storage.as_deref(),
+                &cfg.default_storage_backend,
+                fs.is_none(),
+            )?;
             let opts = containers::CreateOptions {
                 name,
                 rootfs: fs,

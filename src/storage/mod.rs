@@ -59,6 +59,26 @@ impl Backend {
         }
     }
 
+    /// Resolve the backend for a new container from the `--storage` flag (if
+    /// given) and the configured default. An explicit flag is honored verbatim;
+    /// create-time validation rejects btrfs on a host rootfs. A btrfs *default*
+    /// (from `default_storage_backend`) falls back to overlay for host-rootfs
+    /// containers, which cannot use btrfs, so setting the default to btrfs does
+    /// not break plain `sdme new`/`create`.
+    pub fn resolve(flag: Option<&str>, default: &str, host_rootfs: bool) -> Result<Backend> {
+        match flag {
+            Some(s) => Backend::parse(s),
+            None => {
+                let backend = Backend::parse(default)?;
+                Ok(if backend == Backend::Btrfs && host_rootfs {
+                    Backend::Overlay
+                } else {
+                    backend
+                })
+            }
+        }
+    }
+
     /// Resolve the backend recorded for a container. A missing or empty
     /// `STORAGE` key resolves to [`Backend::Overlay`], so pre-existing
     /// containers keep their original behavior.
@@ -88,6 +108,45 @@ mod tests {
         assert_eq!(
             Backend::parse(Backend::Btrfs.as_str()).unwrap(),
             Backend::Btrfs
+        );
+    }
+
+    #[test]
+    fn resolve_honors_flag_and_defaults() {
+        // Explicit flag wins verbatim, regardless of rootfs kind. btrfs on a
+        // host rootfs is left for create-time validation to reject.
+        assert_eq!(
+            Backend::resolve(Some("btrfs"), "overlay", false).unwrap(),
+            Backend::Btrfs
+        );
+        assert_eq!(
+            Backend::resolve(Some("btrfs"), "overlay", true).unwrap(),
+            Backend::Btrfs
+        );
+        assert_eq!(
+            Backend::resolve(Some("overlay"), "btrfs", false).unwrap(),
+            Backend::Overlay
+        );
+        assert!(Backend::resolve(Some("zfs"), "", false).is_err());
+    }
+
+    #[test]
+    fn resolve_btrfs_default_falls_back_on_host_rootfs() {
+        // btrfs default + imported rootfs -> btrfs.
+        assert_eq!(
+            Backend::resolve(None, "btrfs", false).unwrap(),
+            Backend::Btrfs
+        );
+        // btrfs default + host rootfs -> overlay fallback (no error).
+        assert_eq!(
+            Backend::resolve(None, "btrfs", true).unwrap(),
+            Backend::Overlay
+        );
+        // overlay/empty default is unaffected by rootfs kind.
+        assert_eq!(Backend::resolve(None, "", true).unwrap(), Backend::Overlay);
+        assert_eq!(
+            Backend::resolve(None, "overlay", false).unwrap(),
+            Backend::Overlay
         );
     }
 
