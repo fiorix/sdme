@@ -8,7 +8,7 @@
 //! - per-container subvolumes:    `{pool_root}/containers/{name}`
 //!
 //! The base subvolume is materialized once from an existing rootfs directory
-//! (via the shared [`crate::copy`] engine, which preserves hardlinks, device
+//! (via the shared `crate::copy` engine, which preserves hardlinks, device
 //! nodes, suid bits, and xattrs); every container is then an O(1) `btrfs
 //! subvolume snapshot` of it. On a native-btrfs datadir (Mode A) or inside the
 //! loopback pool (Mode B), the snapshot shares the base's blocks, so N
