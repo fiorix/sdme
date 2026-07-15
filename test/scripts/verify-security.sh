@@ -21,7 +21,7 @@ set -euo pipefail
 #  13. sdme ps shows security info
 #  14. --userns boot: each distro boots with user namespace isolation, and a
 #      pre-installed setuid binary keeps its bit (pre-chown regression guard)
-#  15. --userns OCI app: nginx on ubuntu with user namespace isolation
+#  15. --userns OCI app: unprivileged nginx (:8080) on ubuntu with userns
 
 source "$(dirname "$0")/lib.sh"
 
@@ -684,9 +684,13 @@ if ! $userns_any; then
 fi
 
 # ===========================================================================
-# Test 15: --userns OCI app (nginx on ubuntu)
+# Test 15: --userns OCI app (unprivileged nginx on ubuntu)
 # ===========================================================================
-echo "=== Test 15: --userns OCI app (nginx on ubuntu) ==="
+# Under --userns, nspawn drops CAP_NET_BIND_SERVICE and the netns keeps
+# ip_unprivileged_port_start=1024, so an app that binds a privileged port (stock
+# nginx on :80) cannot start. Use the unprivileged nginx image, which listens on
+# :8080 as a non-root user, to exercise an OCI app under userns realistically.
+echo "=== Test 15: --userns OCI app (unprivileged nginx :8080 on ubuntu) ==="
 
 fs_name="usrns-nginx-on-ubuntu"
 ct_name="usrns-oci-nginx"
@@ -700,7 +704,7 @@ else
     if "$SDME" fs ls 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "$fs_name"; then
         log "  $fs_name already exists, skipping import"
         import_ok=1
-    elif output=$(timeout 600 "$SDME" fs import "$fs_name" docker.io/nginx \
+    elif output=$(timeout 600 "$SDME" fs import "$fs_name" quay.io/nginx/nginx-unprivileged \
             --base-fs=vfy-ubuntu --oci-mode=app -v --install-packages=yes -f 2>&1); then
         import_ok=1
     else
@@ -717,10 +721,10 @@ else
                 sleep 3
 
                 if output=$(timeout "$TIMEOUT_TEST" "$SDME" exec "$ct_name" \
-                        /usr/bin/systemctl is-active sdme-oci-nginx.service 2>&1); then
-                    ok "nginx userns OCI: sdme-oci-nginx.service active"
+                        /usr/bin/systemctl is-active sdme-oci-nginx-unprivileged.service 2>&1); then
+                    ok "nginx userns OCI: sdme-oci-nginx-unprivileged.service active"
                 else
-                    fail "nginx userns OCI: sdme-oci-nginx.service not active: $output"
+                    fail "nginx userns OCI: sdme-oci-nginx-unprivileged.service not active: $output"
                 fi
             fi
 
