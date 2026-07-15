@@ -63,6 +63,7 @@ preflight.sh                 Environment validation (no containers)
 smoke.sh                     Container lifecycle gate test
 verify-interrupt.sh          SIGINT/SIGTERM abort handling
 verify-cp.sh                 File copy: host, containers, rootfs
+verify-storage.sh            btrfs backend: lifecycle, cp/export/diff, disk cap
 verify-export.sh             Export: dir, tar, raw image, xattrs
 verify-build.sh              sdme fs build, COPY, locking, resume
 verify-security.sh           Capabilities, seccomp, AppArmor, userns
@@ -146,12 +147,17 @@ verify-nixos                 26     0     0  PASS
 verify-oci                   18     0     0  PASS
 verify-pods                   9     0     0  PASS
 verify-security              30     0     0  PASS
+verify-storage               11     0     0  PASS
 verify-tutorial              79     0     0  PASS
 -------------------------  ----  ----  ----  ------
 Totals                      601     0     0  21 suites
 ```
 
 ## Log
+
+### btrfs storage backend (2026-07-15, x86_64)
+
+Branch feat/btrfs-storage-backend (unreleased, on sdme 0.12.1). New verify-storage.sh, standalone against the built debug binary (SDME override, no system install) on Linux 7.0.0-22-generic (x86_64), systemd 259, btrfs-progs 6.17.1, Mode B (ext4 datadir, loopback btrfs pool): 11 passed, 0 failed, 0 skipped. Covers the full btrfs surface: container lifecycle (create snapshots a subvolume, boot, exec, rm deletes the subvolume), offline cp into/out of a stopped container, offline export to tar, btrfs-native diff (added file detected), symlink-escape protection (a cp over a planted absolute base symlink is shadowed and never written through onto the host), the --disk cap (250M cap enforced with ENOSPC via btrfs simple quotas; sdme ps reports used/limit), and base subvolume invalidation on fs rm. cargo test: 815 passed. Adversarial multi-agent review across the offline-access, quota, base-invalidation, and diff changes found and fixed a critical directory-copy symlink escape, a set_limits state/quota desync, and a running-container export bug. Full cross-distro E2E (Mode A on a native btrfs datadir, plus the nested-container and suid/xattr-under-userns headline wins across the 8-distro matrix) still to run before a version bump.
 
 ### 0.12.1 -- userns pre-chown setuid/setgid fix (2026-07-14, x86_64)
 

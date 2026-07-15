@@ -251,6 +251,36 @@ This means `sdme fs import ubuntu rootfs.tar.zst` works even if the file is name
 
 Import uses transactional staging and cooperative interrupt handling to ensure that a failed or interrupted import never leaves a half-written rootfs. Ctrl+C cleanly cancels multi-gigabyte downloads and extractions. See [Reliability](#15-reliability) for details.
 
+### Storage backends: overlay and btrfs
+
+A container's writable root can be backed by one of two storage strategies, selected per container with `--storage` (default from `default_storage_backend` in the config). The choice is recorded in the `STORAGE` state key; a missing or empty value reads as `overlay`, so every pre-existing container keeps its original behavior and the abstraction is a no-op unless you opt in. sdme has no storage trait: `Backend` is a two-variant enum dispatched by `match`, the same enum-with-methods pattern used elsewhere (for example `export::RawFs`).
+
+**overlay** (the default) is the original model described throughout this document: an immutable lower rootfs, a per-container `upper`/`work`/`merged`, and a `merged` mount created in `ExecStartPre`. Clones are instant, but the container root is itself an overlayfs mount. That carries three inherent limits: the kernel forbids an overlayfs from being the `upperdir` of another overlay, so a nested Docker/podman/nspawn using overlay storage cannot create its writable layer ("not supported as upperdir"); under `--userns` a rootfs carrying `security.capability` xattrs forces a fallback recursive chown that can strip suid bits; and there is no per-container disk capacity limit (cgroups cap I/O bandwidth, not size).
+
+**btrfs** gives each container a real filesystem: a copy-on-write subvolume snapshot of the base rootfs. Because the root is a genuine filesystem rather than an overlay mount, nested containers work (a real `upperdir` is available), `--userns` uses native idmapped mounts that preserve suid bits and xattrs with no chown pass, and per-container disk quotas become available through btrfs qgroups. Snapshots are O(1) and share the base's blocks, so N containers cost roughly one base plus their divergence. Only imported/OCI rootfs can use btrfs; host-rootfs containers (`sdme new` with no `--fs`) always stay on overlay, because a live, tens-of-gigabyte `/` cannot be snapshotted into a pool cheaply or correctly, and the per-submount overlay machinery exists precisely for that case.
+
+The backend supports two host layouts, detected with `statfs(2)`:
+
+```
+Mode  Datadir filesystem  Subvolume location
+----  ------------------  ----------------------------------------
+A     btrfs               {datadir}/btrfs/ directly (no loop)
+B     ext4, xfs, other    {datadir}/btrfs-pool.img, a loopback
+                          btrfs image mounted at {datadir}/pool/
+```
+
+**Mode A** is the production-preferred layout: the datadir already sits on btrfs, so subvolumes live directly under it with no loop device. **Mode B** creates a single shared btrfs filesystem inside a sparse loopback image (a 20G pool costs almost nothing until containers write) and mounts it once via a generated systemd `.mount` unit, so the mount is tracked by systemd, ordered before container units, and re-established after a reboot. Ad-hoc operations (cp, export, diff, rm) that run outside a systemd start mount the pool on demand.
+
+**Snapshot lifecycle.** The base rootfs is materialized once into an immutable subvolume `{pool}/fs/{name}` (via the same `copy_tree()` engine, preserving hardlinks, devnodes, suid, and xattrs), serialized under a per-base lock so concurrent first-time creates do not each copy the whole tree. Each container is then `btrfs subvolume snapshot {pool}/fs/{name} {pool}/containers/{ctr}`, an instant CoW copy. sdme writes the per-container customization (hostname, hosts, resolv.conf, machine-id, fstab, masked-service symlinks) directly into the snapshot rather than an overlay upper layer. Because those writes land in an untrusted base tree, sdme refuses any customization path whose ancestor is an image-supplied symlink and shadows a leaf symlink with a real file, so a malformed or hostile image cannot redirect a write onto the host (see the [security model](@/docs/security.md)). The container's systemd drop-in points `--directory=` at the subvolume with no overlay mount, and rm deletes the subvolume with `btrfs subvolume delete`.
+
+**Offline access.** `sdme cp`, `sdme fs export`, and `sdme diff` operate on the container without booting it. For overlay this means a temporary read-only overlay mount of `merged`; for btrfs the container root already is a full filesystem, so those commands read (and, for `cp`, write) the subvolume directly. A `cp` into a stopped btrfs container writes into the subvolume itself, so it takes an exclusive lock, re-checks that the container is stopped, and runs through a symlink-safe copy that shadows any pre-existing base-image symlink at each destination before writing, preventing an escape out of the subvolume.
+
+**Base invalidation.** The `{pool}/fs/{name}` base subvolume is a cache of the imported rootfs at materialization time. Removing (`fs rm`) or replacing (`fs import -f`, and `fs build -f` via the same removal path) a rootfs deletes its base subvolume so the next container re-materializes from the current content instead of seeding from stale content. This is safe while container snapshots exist: btrfs snapshots are independent of their source after creation.
+
+**Disk quotas.** `--disk N` caps a btrfs container's root via a btrfs qgroup limit (see [Resource Limits](#12-resource-limits)). It has no cgroup equivalent and is ignored (with a warning) on overlay.
+
+**Caveats, surfaced honestly.** A Mode B pool is a single shared image: ENOSPC or corruption affects all btrfs containers at once, and there are two fsck layers (ext4 under, btrfs over the loop); steer production to Mode A, keep the pool in the datadir for backups, and run `btrfs scrub`. Enabling quotas is a whole-filesystem switch, so on a Mode A datadir it turns on quotas for the entire host btrfs filesystem, not just sdme's subtree; quotas stay off unless a `--disk` cap is requested. Simple quotas (`quota enable --simple`) require btrfs-progs and a kernel from the 6.7 series or newer, so `--disk` fails clearly on older hosts. Editing a shared rootfs in place with `cp fs:NAME:...` does not currently invalidate the btrfs base subvolume, so prefer `fs import -f` or `fs build` to change a rootfs that btrfs containers snapshot from.
+
 ## 7. fs build: Building Root Filesystems
 
 `sdme fs build` takes a Dockerfile-like config and produces a new rootfs:
@@ -517,6 +547,8 @@ These flags are available on `sdme create`, `sdme new`, and `sdme set`. They are
 `sdme set` replaces all limits at once: flags not specified are removed. If the container is running, sdme prints a note that a restart is needed for the new limits to take effect.
 
 Memory values accept K/M/G/T suffixes. CPU count is a positive float where `1` means one full core and `0.5` means half a core (converted to systemd's `CPUQuota=` percentage internally). CPU weight is an integer from 1 to 10000, controlling relative scheduling priority when CPUs are contended.
+
+A fourth limit, `--disk <size>`, caps root filesystem capacity, which cgroups cannot express (they throttle I/O bandwidth, not size). It applies only to btrfs containers: it is enforced as a btrfs qgroup limit on the container's subvolume, not a systemd directive, so `sdme set --disk` takes effect immediately with no restart. On overlay containers it is ignored with a warning. Because simple quotas are enabled after the base was snapshotted, the cap counts the container's own writes rather than blocks shared with the base, so it behaves as a limit on writable space; a write past it fails with ENOSPC. Enabling quotas is lazy and pool-wide (only the first `--disk` request turns them on), and `sdme ps` shows a `DISK` column of used/limit for capped containers. See [Storage backends](#storage-backends-overlay-and-btrfs) for the backend model and caveats.
 
 ## 13. Configuration
 
@@ -1423,6 +1455,8 @@ Each container's overlayfs has an upper layer that records all modifications sin
 Opaque directories (`trusted.overlay.opaque` xattr) hide all lower layer contents, so everything beneath them is classified as Added.
 
 Binary files are detected by scanning for NUL bytes in the first 8 KiB and labeled `(binary)` in the output instead of showing byte differences.
+
+A btrfs container has no upper layer: its root is a copy-on-write subvolume with real deletions and no whiteouts or opaque dirs. Its diff is a full tree walk of the imported rootfs against the container subvolume, producing the same A/M/D classification. Comparing against the rootfs directory (rather than the pool base subvolume, which `fs rm` and `import -f` can invalidate) keeps the reference stable and consistent with the overlay diff, which also compares against the lower rootfs. A range diff between two btrfs containers walks their two subvolumes; a range diff that mixes an overlay and a btrfs container is rejected, since the two sides are represented differently.
 
 ### Target formats
 

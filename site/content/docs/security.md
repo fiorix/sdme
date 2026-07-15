@@ -208,6 +208,14 @@ Without `--userns`, UID 0 inside the container is UID 0 on the host. The overlay
 
 Custom bind mounts (`-b`/`--bind`) expose host directories directly into the container. With `--userns`, directory bind mounts use idmapped mounts so UID/GID mappings are applied transparently. Device node bind mounts (e.g. `/dev/nvidia0`) are excluded from idmapping because the kernel does not support idmapped mounts on device files. A read-write bind mount gives container root full access to those host files. Use `:ro` for read-only mounts when the container does not need write access.
 
+### Storage backend surface
+
+The default overlay backend keeps the imported rootfs immutable in a read-only lower layer, and container writes land in a separate, initially empty upper layer. An image-supplied symlink therefore lives only in the read-only lower and can never redirect a write, because writes create real entries in the upper.
+
+The btrfs backend gives each container an independent copy-on-write subvolume, but that subvolume already holds the untrusted base image, and sdme writes into it directly: the per-container customization at create time (hostname, resolv.conf, masked units, and so on) and any `sdme cp` into a stopped container. Since sdme runs as root and is not chrooted, a followed absolute symlink resolves against the real host root, so an unguarded write through an image-supplied symlink could land on the host filesystem. sdme treats the base image as untrusted (consistent with the principle that rootfs data is never validated against host state) and keeps every such write inside the subvolume with three layers: it refuses any write whose ancestor path is a symlink already present in the tree; it shadows a symlink at the write target with a real file before writing; and for a recursive `cp` of a directory it uses a symlink-safe copy that repeats the shadow at every descendant, so a base-image symlink child cannot be followed by the underlying `copy(2)`. A `cp` into a stopped btrfs container additionally takes an exclusive lock and re-checks that the container is stopped, closing a race where a concurrent start would make the subvolume the live container root mid-copy.
+
+Under `--userns`, a btrfs container uses native idmapped mounts on its subvolume. It never takes the overlay backend's fallback recursive chown, so suid bits and `security.capability` xattrs are preserved on the container root rather than stripped. The base subvolume under the pool is only a materialization cache of the imported rootfs; it is invalidated when the rootfs is removed or replaced, so a stale base can never seed a new container with content that no longer matches its rootfs.
+
 ### Network surface
 
 In default mode (host networking), the container shares the host's full network stack. A compromised container process can:

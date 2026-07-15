@@ -116,6 +116,12 @@ For OCI application images, remember that sdme runs the app as a systemd service
 
 Inspect OCI app metadata under the rootfs `oci/apps/` directory when debugging env, ports, or volumes. The app filesystem is `oci/apps/{name}/root/`. The entrypoint (ExecStart) lives in the generated unit `/etc/systemd/system/sdme-oci-{name}.service`, not under `oci/apps/`.
 
+## Storage Backends
+
+A container's writable root uses one of two backends, chosen with `--storage` (default `overlay`). Overlay is the original model: an immutable lower rootfs and a per-container `upper`/`merged`. Btrfs gives each container a copy-on-write subvolume snapshot instead, which enables nested containers (a real upperdir is available), preserves suid and xattrs under `--userns` via native idmapped mounts, and supports a per-container disk cap. Only imported rootfs can use btrfs; host-rootfs containers (`sdme new` with no `--fs`) always stay on overlay.
+
+On a datadir that is already btrfs, subvolumes live under `{datadir}/btrfs/` (Mode A). Otherwise sdme keeps them in a loopback pool image `{datadir}/btrfs-pool.img` mounted at `{datadir}/pool/` (Mode B); its container subvolumes are `{datadir}/pool/containers/{name}` and bases are `{datadir}/pool/fs/{name}`. For stopped btrfs containers, inspect the subvolume directly instead of an overlay `upper`. `--storage btrfs` needs `btrfs-progs`, and `--disk` (a btrfs qgroup cap, shown in `sdme ps` as used/limit) additionally needs btrfs simple quotas from btrfs-progs and kernel 6.7 or newer.
+
 ## Networking Checks
 
 By default, sdme containers use the host network namespace. Port publishing requires a private network plus an interface (`--network-veth`, `--network-bridge`, or `--network-zone`); `--private-network` alone gives only loopback and cannot forward ports.
