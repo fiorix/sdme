@@ -753,6 +753,8 @@ CONFIG KEYS:
     stop_timeout_kill              u64      15        Force-kill stop timeout (seconds)
     auto_fs_gc                     bool     yes       Auto-clean stale transactions
     default_create_masked_services string   systemd-resolved.service
+    default_storage_backend        string   (empty)   Backend for new containers (overlay, btrfs)
+    btrfs_pool_size                string   20G       Mode B btrfs pool image size
     docker_user                    string   (empty)   Docker Hub username
     docker_token                   string   (empty)   Docker Hub access token
 
@@ -2258,6 +2260,19 @@ fn run() -> Result<()> {
                         } else {
                             Some(V::Array(vec![V::String(value)]))
                         };
+                    }
+                    "default_storage_backend" => {
+                        // Validate the token; empty resolves to overlay.
+                        storage::Backend::parse(&value)
+                            .with_context(|| format!("invalid default_storage_backend: {value}"))?;
+                        toml_key = key.clone();
+                        toml_val = Some(V::String(value));
+                    }
+                    "btrfs_pool_size" => {
+                        sdme::parse_size(&value)
+                            .with_context(|| format!("invalid btrfs_pool_size: {value}"))?;
+                        toml_key = key.clone();
+                        toml_val = Some(V::String(value));
                     }
                     _ => bail!("unknown config key: {key}"),
                 }

@@ -438,6 +438,8 @@ impl Config {
             "default_create_masked_services = {}",
             self.default_create_masked_services
         );
+        println!("default_storage_backend = {}", self.default_storage_backend);
+        println!("btrfs_pool_size = {}", self.btrfs_pool_size);
         let update_check_enabled = if self.update_check.enabled {
             "yes"
         } else {
