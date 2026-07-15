@@ -175,6 +175,40 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq debhelper devscripts dpkg-dev dput gnupg xz-utils
 
+      # Authenticate the PPA upload over SFTP with an SSH key registered on
+      # Launchpad, instead of dput's anonymous FTP default. No-op without the
+      # key secret (dput then keeps the ftp method).
+      - name: Configure dput sftp
+        env:
+          LP_SSH_KEY: ${{ secrets.LAUNCHPAD_SSH_PRIVATE_KEY }}
+        run: |
+          if [ -z "$LP_SSH_KEY" ]; then
+            echo "LAUNCHPAD_SSH_PRIVATE_KEY not set; dput keeps the ftp default."
+            exit 0
+          fi
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$LP_SSH_KEY" > ~/.ssh/launchpad
+          chmod 600 ~/.ssh/launchpad
+          ssh-keyscan -H ppa.launchpad.net >> ~/.ssh/known_hosts 2>/dev/null
+          cat >> ~/.ssh/config <<'SSHEOF'
+          Host ppa.launchpad.net
+            User fiorix
+            IdentityFile ~/.ssh/launchpad
+            IdentitiesOnly yes
+          SSHEOF
+          # Overrides the stock [ppa] stanza (method = ftp) host-wide; dput
+          # resolves ppa:owner/name through this section.
+          cat > ~/.dput.cf <<'DPUTEOF'
+          [ppa]
+          fqdn = ppa.launchpad.net
+          method = sftp
+          incoming = ~%(ppa)s/ubuntu
+          login = fiorix
+          allow_unsigned_uploads = 0
+          DPUTEOF
+          echo "dput will use sftp for the [ppa] host."
+
       - name: Build Debian source package
         run: bash packaging/debian/make-source-package.sh "${GITHUB_REF_NAME#v}"
 
@@ -201,4 +235,33 @@ jobs:
           fi
           cd deb-src-out
           debsign -k"$KEYID" sdme_*_source.changes
-          dput ppa:fiorix/sdme sdme_*_source.changes
+          # Retry the upload: sftp/ftp to Launchpad occasionally drops. Force
+          # (-f) on retries so a partially-recorded upload does not wedge.
+          uploaded=
+          for attempt in 1 2 3; do
+            force=(); [ "$attempt" -gt 1 ] && force=(-f)
+            if dput "${force[@]}" ppa:fiorix/sdme sdme_*_source.changes; then
+              uploaded=1
+              break
+            fi
+            [ "$attempt" -lt 3 ] && sleep 30
+          done
+          [ -n "$uploaded" ] || { echo "dput failed after 3 attempts"; exit 1; }
+
+  # Poke Fedora Copr to rebuild the SCM package. Copr builds its configured
+  # committish (the default branch), which equals the tag once the release
+  # procedure has pushed main before the tag. Makes the trigger visible in this
+  # workflow instead of relying on an external GitHub->Copr webhook. No-op
+  # without the webhook secret.
+  copr:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Copr build
+        env:
+          WEBHOOK: ${{ secrets.COPR_WEBHOOK }}
+        run: |
+          if [ -z "$WEBHOOK" ]; then
+            echo "COPR_WEBHOOK not set; skipping Copr trigger."
+            exit 0
+          fi
+          curl -sf -X POST "${WEBHOOK}sdme/"
