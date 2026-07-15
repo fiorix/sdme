@@ -104,6 +104,16 @@ pub fn create(datadir: &Path, opts: &CreateOptions, verbose: bool) -> Result<Str
         );
     }
 
+    // The disk cap is a btrfs subvolume quota; overlay has no capacity limit
+    // (systemd cgroups cap I/O bandwidth, not size), so surface that it will
+    // not be enforced rather than silently dropping it.
+    if opts.limits.disk.is_some() && opts.backend != Backend::Btrfs {
+        eprintln!(
+            "warning: --disk requires btrfs storage (--storage btrfs); \
+             the disk cap is not enforced for overlay containers"
+        );
+    }
+
     // Hold shared lock on rootfs to prevent deletion during container creation.
     let _rootfs_lock = match &opts.rootfs {
         Some(r) => Some(
@@ -209,7 +219,21 @@ fn do_create(
             } else {
                 opts.pool_size.as_str()
             };
-            storage::btrfs::provision(datadir, name, base_name, rootfs, pool_size, verbose)?
+            let subvol =
+                storage::btrfs::provision(datadir, name, base_name, rootfs, pool_size, verbose)?;
+
+            // Apply the per-container disk cap as a btrfs quota (enabling simple
+            // quotas on the pool lazily, the first time any container asks).
+            if let Some(disk) = &opts.limits.disk {
+                let bytes = crate::parse_size(disk)
+                    .with_context(|| format!("invalid --disk value {disk:?}"))?;
+                storage::pool::ensure_quota_enabled(datadir, verbose)?;
+                storage::btrfs::set_disk_limit(&subvol, bytes, verbose)?;
+                if verbose {
+                    eprintln!("applied disk cap {disk} to {}", subvol.display());
+                }
+            }
+            subvol
         }
     };
 
@@ -486,7 +510,13 @@ fn do_create(
     if opts.backend != Backend::Overlay {
         state.set("STORAGE", opts.backend.as_str());
     }
-    opts.limits.write_to_state(&mut state);
+    // The disk cap is only enforceable on btrfs; do not persist a phantom cap
+    // for overlay containers (it would show in ps/JSON as an unenforced limit).
+    let mut persisted_limits = opts.limits.clone();
+    if opts.backend != Backend::Btrfs {
+        persisted_limits.disk = None;
+    }
+    persisted_limits.write_to_state(&mut state);
     opts.network.write_to_state(&mut state);
 
     // Auto-wire OCI volume bind mounts. For each declared volume, create

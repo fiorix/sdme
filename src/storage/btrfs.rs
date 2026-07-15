@@ -200,6 +200,92 @@ pub fn delete_subvol(path: &Path, verbose: bool) -> Result<()> {
     run(&mut cmd, "btrfs subvolume delete")
 }
 
+/// Apply a disk cap to a container subvolume via its btrfs qgroup, as a limit
+/// on referenced bytes (`max_rfer`). Simple quotas (squota) are enabled lazily,
+/// after the base was already snapshotted, so blocks shared with the base
+/// predate quota accounting and do NOT count toward the cap: the limit bounds
+/// the data the container writes after creation (its own footprint), and
+/// [`qgroup_usage`] reports usage on the same basis. Quotas must already be
+/// enabled on the pool ([`super::pool::ensure_quota_enabled`]). Given a
+/// subvolume path with no explicit qgroup id, btrfs limits that subvolume's
+/// level-0 qgroup.
+pub fn set_disk_limit(subvol: &Path, bytes: u64, verbose: bool) -> Result<()> {
+    if verbose {
+        eprintln!("btrfs qgroup limit {bytes} {}", subvol.display());
+    }
+    let mut cmd = Command::new("btrfs");
+    cmd.args(["qgroup", "limit"])
+        .arg(bytes.to_string())
+        .arg(subvol);
+    run(&mut cmd, "btrfs qgroup limit")
+}
+
+/// Remove any disk cap from a container subvolume (`btrfs qgroup limit none`).
+pub fn clear_disk_limit(subvol: &Path, verbose: bool) -> Result<()> {
+    if verbose {
+        eprintln!("btrfs qgroup limit none {}", subvol.display());
+    }
+    let mut cmd = Command::new("btrfs");
+    cmd.args(["qgroup", "limit", "none"]).arg(subvol);
+    run(&mut cmd, "btrfs qgroup limit none")
+}
+
+/// Referenced (used) bytes for a container subvolume's btrfs qgroup, or `None`
+/// if quotas are off, the subvolume is missing, or the pool is not mounted.
+///
+/// Best-effort by design: `sdme ps` calls this per btrfs container and must not
+/// fail when a pool is offline, so every error path yields `None`.
+pub fn qgroup_usage(pool_root: &Path, subvol: &Path) -> Option<u64> {
+    let id = subvol_id(subvol)?;
+    let out = Command::new("btrfs")
+        .args(["qgroup", "show", "--raw"])
+        .arg(pool_root)
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_qgroup_referenced(&String::from_utf8_lossy(&out.stdout), id)
+}
+
+/// Read a subvolume's numeric id from `btrfs subvolume show`.
+fn subvol_id(subvol: &Path) -> Option<u64> {
+    let out = Command::new("btrfs")
+        .args(["subvolume", "show"])
+        .arg(subvol)
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_subvol_id(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Extract the numeric `Subvolume ID:` field from `btrfs subvolume show` output.
+fn parse_subvol_id(text: &str) -> Option<u64> {
+    for line in text.lines() {
+        if let Some(rest) = line.trim().strip_prefix("Subvolume ID:") {
+            return rest.trim().parse().ok();
+        }
+    }
+    None
+}
+
+/// Find the Referenced (used) bytes for qgroup `0/<id>` in the output of
+/// `btrfs qgroup show --raw`. Columns are: qgroupid, referenced, exclusive.
+fn parse_qgroup_referenced(text: &str, id: u64) -> Option<u64> {
+    let target = format!("0/{id}");
+    for line in text.lines() {
+        let mut cols = line.split_whitespace();
+        if cols.next() == Some(target.as_str()) {
+            return cols.next().and_then(|r| r.parse().ok());
+        }
+    }
+    None
+}
+
 /// Run a `btrfs` subcommand, mapping a non-zero exit to an error and honoring
 /// interrupt requests.
 fn run(cmd: &mut Command, what: &str) -> Result<()> {
@@ -252,6 +338,30 @@ fn sweep_stale_temps(fs_dir: &Path, verbose: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_subvol_id_reads_id() {
+        let out = "containers/web\n\
+                   \tName: \t\t\tweb\n\
+                   \tUUID: \t\t\t1234\n\
+                   \tSubvolume ID: \t\t264\n\
+                   \tGeneration: \t\t7\n";
+        assert_eq!(parse_subvol_id(out), Some(264));
+        assert_eq!(parse_subvol_id("no id here\n"), None);
+    }
+
+    #[test]
+    fn parse_qgroup_referenced_matches_level0() {
+        let out = "Qgroupid    Referenced    Exclusive \n\
+                   --------    ----------    --------- \n\
+                   0/5                  0            0 \n\
+                   0/256         16384000     16384000 \n\
+                   0/264        252305408    252305408 \n";
+        assert_eq!(parse_qgroup_referenced(out, 264), Some(252305408));
+        assert_eq!(parse_qgroup_referenced(out, 256), Some(16384000));
+        // A missing qgroup (no such subvolume) yields None, not a header match.
+        assert_eq!(parse_qgroup_referenced(out, 999), None);
+    }
 
     #[test]
     fn subvol_paths() {

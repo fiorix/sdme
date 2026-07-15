@@ -350,6 +350,7 @@ fn test_create_with_limits_state() {
         memory: Some("1G".to_string()),
         cpus: Some("2".to_string()),
         cpu_weight: Some("50".to_string()),
+        disk: None,
     };
     let opts = CreateOptions {
         name: Some("limitbox".to_string()),

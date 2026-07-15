@@ -457,11 +457,13 @@ pub(crate) fn parse_limits(
     memory: Option<String>,
     cpus: Option<String>,
     cpu_weight: Option<String>,
+    disk: Option<String>,
 ) -> Result<ResourceLimits> {
     let limits = ResourceLimits {
         memory,
         cpus,
         cpu_weight,
+        disk,
     };
     limits.validate()?;
     Ok(limits)

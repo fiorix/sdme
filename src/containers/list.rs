@@ -43,8 +43,12 @@ pub struct ContainerInfo {
     pub submounts: Vec<String>,
     /// Network configuration from the state file.
     pub network: NetworkConfig,
-    /// Resource limits (CPU, memory) from the state file.
+    /// Resource limits (CPU, memory, and the btrfs disk cap) from the state file.
     pub limits: ResourceLimits,
+    /// Current disk usage in bytes for a btrfs container with a `--disk` cap
+    /// (referenced bytes of its subvolume qgroup). `None` for overlay
+    /// containers, uncapped containers, or when the pool is offline.
+    pub disk_used: Option<u64>,
     /// Kube metadata, or null for non-kube containers.
     pub kube: Option<KubeInfo>,
     /// IP addresses assigned to the container's network interface.
@@ -322,6 +326,20 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
             }
         };
 
+        // Current disk usage for a capped btrfs container (best-effort; never
+        // mounts the pool as a side effect of ps). A DISK cap is only persisted
+        // for btrfs, so limits.disk implies a btrfs subvolume.
+        let disk_used = if limits.disk.is_some() {
+            crate::storage::pool::root(datadir)
+                .ok()
+                .and_then(|pool_root| {
+                    let subvol = crate::storage::btrfs::container_root(&pool_root, name);
+                    crate::storage::btrfs::qgroup_usage(&pool_root, &subvol)
+                })
+        } else {
+            None
+        };
+
         result.push(ContainerInfo {
             name: name.clone(),
             status: status.to_string(),
@@ -335,6 +353,7 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
             submounts,
             network,
             limits,
+            disk_used,
             kube,
             addresses,
         });

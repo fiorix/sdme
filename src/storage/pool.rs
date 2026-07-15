@@ -173,6 +173,37 @@ pub fn grow(datadir: &Path, extra: u64, verbose: bool) -> Result<()> {
     Ok(())
 }
 
+/// Basename of the marker recorded once simple quotas are enabled on the pool.
+const SQUOTA_MARKER: &str = ".btrfs-squota-enabled";
+
+/// Enable btrfs simple quotas (squota) on the pool the first time any container
+/// requests a disk cap, returning the pool root. Idempotent: a marker file in
+/// the datadir records that quotas are on, so the (whole-filesystem) enable
+/// runs at most once. squota keeps per-subvolume referenced-byte accounting
+/// without the backref-walk cost of classic qgroups.
+///
+/// Mode A caveat: on a native-btrfs datadir this enables quotas on the entire
+/// host filesystem, not just sdme's subtree; Mode B confines it to the loop
+/// pool image. Quotas stay off unless a `--disk` cap is requested.
+pub fn ensure_quota_enabled(datadir: &Path, verbose: bool) -> Result<PathBuf> {
+    let pool_root = ensure_mounted(datadir, verbose)?;
+    let marker = datadir.join(SQUOTA_MARKER);
+    if marker.exists() {
+        return Ok(pool_root);
+    }
+    run(
+        "btrfs",
+        &["quota", "enable", "--simple"],
+        &[pool_root.as_os_str()],
+        verbose,
+    )?;
+    fs::write(&marker, b"").with_context(|| format!("failed to write {}", marker.display()))?;
+    if verbose {
+        eprintln!("enabled btrfs simple quotas on {}", pool_root.display());
+    }
+    Ok(pool_root)
+}
+
 /// Create a sparse pool image of `size` and format it btrfs.
 fn create_image(image: &Path, size: &str, verbose: bool) -> Result<()> {
     let bytes =

@@ -454,12 +454,21 @@ pub struct ResourceLimits {
     pub cpus: Option<String>,
     /// `CPUWeight=`, integer 1-10000
     pub cpu_weight: Option<String>,
+    /// Per-container disk cap (e.g. "200M", "2G"), enforced by the btrfs
+    /// backend as a subvolume quota (`btrfs qgroup limit`, total referenced
+    /// bytes). Unlike the other limits this maps to no systemd cgroup directive
+    /// (cgroups cap I/O bandwidth, not capacity); it is applied by the storage
+    /// backend at provision time and ignored by the overlay backend.
+    pub disk: Option<String>,
 }
 
 impl ResourceLimits {
     /// Returns true if no limits are set.
     pub fn is_empty(&self) -> bool {
-        self.memory.is_none() && self.cpus.is_none() && self.cpu_weight.is_none()
+        self.memory.is_none()
+            && self.cpus.is_none()
+            && self.cpu_weight.is_none()
+            && self.disk.is_none()
     }
 
     /// Read limits from a state file's key-value pairs.
@@ -477,6 +486,10 @@ impl ResourceLimits {
                 .get("CPU_WEIGHT")
                 .filter(|s| !s.is_empty())
                 .map(String::from),
+            disk: state
+                .get("DISK")
+                .filter(|s| !s.is_empty())
+                .map(String::from),
         }
     }
 
@@ -488,6 +501,7 @@ impl ResourceLimits {
             ("MEMORY", &self.memory),
             ("CPUS", &self.cpus),
             ("CPU_WEIGHT", &self.cpu_weight),
+            ("DISK", &self.disk),
         ] {
             match val {
                 Some(v) => state.set(key, v.as_str()),
@@ -537,8 +551,26 @@ impl ResourceLimits {
         if let Some(w) = &self.cpu_weight {
             validate_cpu_weight(w)?;
         }
+        if let Some(d) = &self.disk {
+            validate_disk(d)?;
+        }
         Ok(())
     }
+}
+
+/// Validate a disk cap value. Must be a parseable size of at least 16 MiB
+/// (btrfs needs headroom for its own metadata; a smaller quota would make the
+/// subvolume unwritable rather than merely capped).
+fn validate_disk(s: &str) -> Result<()> {
+    if s.is_empty() {
+        bail!("--disk value cannot be empty");
+    }
+    let bytes = parse_size(s).with_context(|| format!("invalid --disk value {s:?}"))?;
+    const MIN_DISK: u64 = 16 * 1024 * 1024;
+    if bytes < MIN_DISK {
+        bail!("--disk must be at least 16M (got {s:?})");
+    }
+    Ok(())
 }
 
 /// Validate a memory value (systemd size: `<number>[K|M|G|T]`).
@@ -877,6 +909,25 @@ mod tests {
     }
 
     #[test]
+    fn test_limits_validate_disk() {
+        for v in &["16M", "200M", "2G", "1073741824"] {
+            let limits = ResourceLimits {
+                disk: Some(v.to_string()),
+                ..Default::default()
+            };
+            assert!(limits.validate().is_ok(), "should accept disk={v}");
+        }
+        // Empty, unparseable, or below the 16 MiB floor are rejected.
+        for v in &["", "abc", "1M", "15M"] {
+            let limits = ResourceLimits {
+                disk: Some(v.to_string()),
+                ..Default::default()
+            };
+            assert!(limits.validate().is_err(), "should reject disk={v}");
+        }
+    }
+
+    #[test]
     fn test_limits_dropin_content_memory_only() {
         let limits = ResourceLimits {
             memory: Some("2G".to_string()),
@@ -912,11 +963,18 @@ mod tests {
             memory: Some("1G".to_string()),
             cpus: Some("4".to_string()),
             cpu_weight: Some("50".to_string()),
+            disk: Some("2G".to_string()),
         };
         let content = limits.dropin_content().unwrap();
         assert!(content.contains("MemoryMax=1G"));
         assert!(content.contains("CPUQuota=400%"));
         assert!(content.contains("CPUWeight=50"));
+        // disk is a btrfs quota, not a cgroup directive; it must not appear in
+        // the systemd drop-in.
+        assert!(
+            !content.contains("2G"),
+            "disk must not leak into cgroup drop-in"
+        );
     }
 
     #[test]
@@ -925,6 +983,7 @@ mod tests {
             memory: Some("2G".to_string()),
             cpus: None,
             cpu_weight: None,
+            disk: None,
         };
         let content = limits.dropin_content().unwrap();
         assert!(content.contains("MemoryMax=2G"));
@@ -937,6 +996,7 @@ mod tests {
             memory: Some("2G".to_string()),
             cpus: Some("1.5".to_string()),
             cpu_weight: None,
+            disk: Some("500M".to_string()),
         };
         let mut state = State::new();
         state.set("NAME", "test");
@@ -949,6 +1009,7 @@ mod tests {
         assert_eq!(restored.memory, Some("2G".to_string()));
         assert_eq!(restored.cpus, Some("1.5".to_string()));
         assert_eq!(restored.cpu_weight, None);
+        assert_eq!(restored.disk, Some("500M".to_string()));
     }
 
     #[test]

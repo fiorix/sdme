@@ -132,7 +132,46 @@ pub fn set_limits(
 
     let state_path = datadir.join("state").join(name);
     let mut state = State::read_from(&state_path)?;
-    limits.write_to_state(&mut state);
+    let backend = crate::storage::Backend::from_state(&state);
+    // Whether a disk cap is currently recorded, so an update that leaves --disk
+    // unset only clears the quota when one existed. Read before any state write.
+    let had_disk = state.get_nonempty("DISK").is_some();
+
+    // Apply the btrfs disk quota BEFORE persisting state, so a quota failure
+    // aborts with the recorded limits unchanged (no state/qgroup desync, and a
+    // retry still sees the old DISK key). The pool is touched only when the cap
+    // actually changes, so memory/CPU-only edits never mount it. The quota takes
+    // effect immediately (no restart needed), unlike the memory/CPU limits.
+    if backend == crate::storage::Backend::Btrfs {
+        if limits.disk.is_some() || had_disk {
+            let pool_root = crate::storage::pool::ensure_mounted(datadir, verbose)?;
+            let subvol = crate::storage::btrfs::container_root(&pool_root, name);
+            match &limits.disk {
+                Some(disk) => {
+                    let bytes = crate::parse_size(disk)
+                        .with_context(|| format!("invalid --disk value {disk:?}"))?;
+                    crate::storage::pool::ensure_quota_enabled(datadir, verbose)?;
+                    crate::storage::btrfs::set_disk_limit(&subvol, bytes, verbose)?;
+                }
+                // Reached only when had_disk is true (guarded above).
+                None => crate::storage::btrfs::clear_disk_limit(&subvol, verbose)?,
+            }
+        }
+    } else if limits.disk.is_some() {
+        eprintln!(
+            "warning: --disk requires btrfs storage; the disk cap is not enforced \
+             for this container"
+        );
+    }
+
+    // Persist state and the cgroup drop-in only after the quota is in place.
+    // The disk cap is only enforceable on btrfs; do not persist a phantom cap
+    // for overlay containers.
+    let mut persisted = limits.clone();
+    if backend != crate::storage::Backend::Btrfs {
+        persisted.disk = None;
+    }
+    persisted.write_to_state(&mut state);
     state.write_to(&state_path)?;
 
     if verbose {

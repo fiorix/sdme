@@ -109,6 +109,9 @@ EXAMPLES:
     # Private network with virtual ethernet and resource limits
     sdme new dev -r ubuntu --network-veth --memory 2G --cpus 2
 
+    # btrfs storage with a per-container disk cap (also enables nested containers)
+    sdme new build -r ubuntu --storage btrfs --disk 4G
+
     # Network zone for inter-container DNS
     sdme new node1 -r ubuntu --network-zone myzone
     sdme new node2 -r ubuntu --network-zone myzone
@@ -1067,6 +1070,10 @@ enum Command {
         #[arg(long)]
         cpu_weight: Option<String>,
 
+        /// Disk cap for the container root, btrfs storage only (e.g. 200M, 2G)
+        #[arg(long)]
+        disk: Option<String>,
+
         /// Make directories opaque in overlayfs (hides lower layer contents, comma-separated or repeatable)
         #[arg(short = 'o', long = "overlayfs-opaque-dirs", value_delimiter = ',')]
         opaque_dirs: Vec<String>,
@@ -1242,6 +1249,10 @@ enum Command {
         #[arg(long)]
         cpu_weight: Option<String>,
 
+        /// Disk cap for the container root, btrfs storage only (e.g. 200M, 2G)
+        #[arg(long)]
+        disk: Option<String>,
+
         /// Make directories opaque in overlayfs (hides lower layer contents, comma-separated or repeatable)
         #[arg(short = 'o', long = "overlayfs-opaque-dirs", value_delimiter = ',')]
         opaque_dirs: Vec<String>,
@@ -1373,6 +1384,10 @@ enum Command {
         /// CPU weight 1-10000 (default: 100)
         #[arg(long)]
         cpu_weight: Option<String>,
+
+        /// Disk cap for the container root, btrfs storage only (e.g. 200M, 2G)
+        #[arg(long)]
+        disk: Option<String>,
     },
 
     /// Start one or more containers
@@ -1867,6 +1882,23 @@ fn parse_config_override(args: &[String]) -> Option<PathBuf> {
     None
 }
 
+/// Format a byte count compactly for the `ps` DISK column (e.g. "240M", "1.5G").
+/// Uses binary units and integer M/K to line up with `--disk` values like "250M".
+fn format_bytes_short(bytes: u64) -> String {
+    const K: u64 = 1024;
+    const M: u64 = K * 1024;
+    const G: u64 = M * 1024;
+    if bytes >= G {
+        format!("{:.1}G", bytes as f64 / G as f64)
+    } else if bytes >= M {
+        format!("{}M", bytes / M)
+    } else if bytes >= K {
+        format!("{}K", bytes / K)
+    } else {
+        format!("{bytes}B")
+    }
+}
+
 fn rootfs_os_release_has_id(rootfs: &Path, expected: &str) -> bool {
     for relative in ["etc/os-release", "usr/lib/os-release"] {
         let Ok(content) = std::fs::read_to_string(rootfs.join(relative)) else {
@@ -2288,6 +2320,7 @@ fn run() -> Result<()> {
             memory,
             cpus,
             cpu_weight,
+            disk,
             opaque_dirs,
             pod,
             oci_pod,
@@ -2305,7 +2338,7 @@ fn run() -> Result<()> {
             timeout,
         } => {
             system_check::check_systemd_version(255)?;
-            let limits = parse_limits(memory, cpus, cpu_weight)?;
+            let limits = parse_limits(memory, cpus, cpu_weight, disk)?;
             let systemd_log_level = security.systemd_log_level.clone();
             if let Some(ref level) = systemd_log_level {
                 validate_systemd_log_level(level)?;
@@ -2450,9 +2483,10 @@ fn run() -> Result<()> {
             memory,
             cpus,
             cpu_weight,
+            disk,
         } => {
             let name = containers::resolve_name(&cfg.datadir, &name)?;
-            let limits = parse_limits(memory, cpus, cpu_weight)?;
+            let limits = parse_limits(memory, cpus, cpu_weight, disk)?;
             containers::set_limits(&cfg.datadir, &name, &limits, cli.verbose)?;
         }
         Command::Start {
@@ -2631,6 +2665,7 @@ fn run() -> Result<()> {
             memory,
             cpus,
             cpu_weight,
+            disk,
             opaque_dirs,
             pod,
             oci_pod,
@@ -2647,7 +2682,7 @@ fn run() -> Result<()> {
             command,
         } => {
             system_check::check_systemd_version(255)?;
-            let limits = parse_limits(memory, cpus, cpu_weight)?;
+            let limits = parse_limits(memory, cpus, cpu_weight, disk)?;
             let systemd_log_level = security.systemd_log_level.clone();
             if let Some(ref level) = systemd_log_level {
                 validate_systemd_log_level(level)?;
@@ -2814,9 +2849,43 @@ fn run() -> Result<()> {
                     })
                     .collect();
                 let addr_w = addr_display.iter().map(|a| a.len()).max().unwrap().max(9);
+                // Optional DISK column (used/limit), shown only when at least
+                // one container has a btrfs --disk cap, so the common table is
+                // unchanged.
+                let any_disk = entries.iter().any(|e| e.limits.disk.is_some());
+                let disk_display: Vec<String> = entries
+                    .iter()
+                    .map(|e| match &e.limits.disk {
+                        Some(limit) => {
+                            let used = e
+                                .disk_used
+                                .map(format_bytes_short)
+                                .unwrap_or_else(|| "?".to_string());
+                            // Normalize the limit to the same units as `used`
+                            // (e.g. "1073741824" -> "1G"); fall back to the raw
+                            // string if it somehow does not parse.
+                            let limit = sdme::parse_size(limit)
+                                .map(format_bytes_short)
+                                .unwrap_or_else(|_| limit.clone());
+                            format!("{used}/{limit}")
+                        }
+                        None => "-".to_string(),
+                    })
+                    .collect();
+                let disk_w = disk_display
+                    .iter()
+                    .map(|d| d.len())
+                    .max()
+                    .unwrap_or(4)
+                    .max(4);
+                let disk_hdr = if any_disk {
+                    format!("{:<disk_w$}  ", "DISK")
+                } else {
+                    String::new()
+                };
                 // Header.
                 println!(
-                    "{:<name_w$}  {:<status_w$}  {:<health_w$}  {:<6}  {:<7}  {:<6}  {:<addr_w$}  OS",
+                    "{:<name_w$}  {:<status_w$}  {:<health_w$}  {:<6}  {:<7}  {:<6}  {disk_hdr}{:<addr_w$}  OS",
                     "NAME", "STATUS", "HEALTH", "USERNS", "ENABLED", "MOUNTS", "ADDRESSES"
                 );
                 // Rows.
@@ -2824,8 +2893,13 @@ fn run() -> Result<()> {
                     let has_mounts = !e.binds.is_empty()
                         || e.oci_apps.iter().any(|app| !app.volumes.is_empty())
                         || !e.submounts.is_empty();
+                    let disk_cell = if any_disk {
+                        format!("{:<disk_w$}  ", disk_display[i])
+                    } else {
+                        String::new()
+                    };
                     println!(
-                        "{:<name_w$}  {:<status_w$}  {:<health_w$}  {:<6}  {:<7}  {:<6}  {:<addr_w$}  {}",
+                        "{:<name_w$}  {:<status_w$}  {:<health_w$}  {:<6}  {:<7}  {:<6}  {disk_cell}{:<addr_w$}  {}",
                         e.name,
                         e.status,
                         e.health,

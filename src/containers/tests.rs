@@ -308,6 +308,7 @@ fn test_create_with_limits() {
         memory: Some("2G".to_string()),
         cpus: Some("4".to_string()),
         cpu_weight: None,
+        disk: None,
     };
     let opts = CreateOptions {
         name: Some("limited".to_string()),
