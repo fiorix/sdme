@@ -24,7 +24,7 @@ fn main() {
     let probe_dst = format!("{out_dir}/sdme-kube-probe");
 
     // When building the probe binary itself (inner build), the probe feature
-    // is enabled. Skip all probe embedding logic — just write an empty
+    // is enabled. Skip all probe embedding logic, just write an empty
     // placeholder since the probe binary doesn't embed itself.
     if cfg!(feature = "probe") {
         std::fs::write(&probe_dst, b"").unwrap();

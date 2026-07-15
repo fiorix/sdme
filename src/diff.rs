@@ -7,9 +7,9 @@
 //! changed at runtime. [`diff`] walks that upper layer and reports each
 //! path with a single-character status:
 //!
-//! - `A` — file exists only in the upper (Added)
-//! - `M` — file exists in both and differs (Modified)
-//! - `D` — file was removed via an overlayfs whiteout (Deleted)
+//! - `A`: file exists only in the upper (Added)
+//! - `M`: file exists in both and differs (Modified)
+//! - `D`: file was removed via an overlayfs whiteout (Deleted)
 //!
 //! Whiteouts are character devices with `rdev == 0`; opaque directories
 //! carry the `trusted.overlay.opaque=y` xattr and hide every lower-layer
@@ -168,7 +168,7 @@ fn is_binary_file(path: &Path) -> bool {
 ///
 /// Filters are compared as absolute path strings (e.g. `/etc`); the caller
 /// is expected to pass normalized absolute paths. No string conversion
-/// happens per entry — the input slice is consumed as-is.
+/// happens per entry; the input slice is consumed as-is.
 fn matches_filter(abs_path: &str, filters: &[String]) -> bool {
     if filters.is_empty() {
         return true;
@@ -603,7 +603,7 @@ fn files_differ(a: &Path, b: &Path) -> bool {
 /// Uses buffered readers and advances both sides by the min of the two
 /// buffered slice lengths so unequal `read(2)` chunk sizes never produce
 /// a false-positive "differ" result. Any I/O error or early EOF on one
-/// side is treated as "differ" — the caller can't rely on partial data.
+/// side is treated as "differ"; the caller can't rely on partial data.
 fn files_bytes_differ(a: &Path, b: &Path, a_len: u64, b_len: u64) -> bool {
     if a_len != b_len {
         return true;

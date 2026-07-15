@@ -2,7 +2,7 @@
 
 sdme is a command line tool for managing systemd-nspawn containers on Linux. It is distributed as a single static binary or in packages (deb, rpm, pkg) for x86_64 and aarch64.
 
-sdme configures and orchestrates systemd to run containers. Each container boots its own systemd init: services start, timers fire, journald collects logs. It works like a real machine. Containers use overlayfs copy-on-write layers, so each one gets its own writable filesystem on top of a shared base image, keeping the original intact.
+sdme configures and orchestrates systemd to run containers. Each container boots its own systemd init: services start, timers fire, journald collects logs. It works like a real machine. Containers use overlayfs copy-on-write layers by default, so each one gets its own writable filesystem on top of a shared base image, keeping the original intact. Imported and OCI rootfs can alternatively use a btrfs backend (copy-on-write subvolume snapshots), which adds nested containers, native user-namespace idmapping that preserves suid and xattrs, and per-container disk quotas.
 
 As part of the toolkit, sdme imports root filesystems from multiple sources including OCI registries (e.g. Docker images), tarballs, directories, and QCOW2 images. It also deploys multi-container pods from Kubernetes Pod YAML manifests.
 

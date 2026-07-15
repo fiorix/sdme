@@ -288,7 +288,7 @@ src_nlink=$(stat -c %h "$hl_src/original")
 if [[ "$src_nlink" -ne 2 ]]; then
     fail "hard link: source nlink=$src_nlink, expected 2"
 else
-    # Copy into rootfs (avoid /tmp — it's a shadowed dir).
+    # Copy into rootfs (avoid /tmp, it's a shadowed dir).
     if $SDME cp "$hl_src/" "fs:ubuntu:/var/lib/hl-test/" $VFLAG 2>/dev/null; then
         rootfs_dir="/var/lib/sdme/fs/ubuntu/var/lib/hl-test"
         if [[ -f "$rootfs_dir/original" ]] && [[ -f "$rootfs_dir/link" ]]; then

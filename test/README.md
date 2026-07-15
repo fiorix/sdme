@@ -155,9 +155,17 @@ Totals                      601     0     0  21 suites
 
 ## Log
 
-### btrfs storage backend (2026-07-15, x86_64)
+### btrfs storage backend, Mode A full-suite run (2026-07-15, x86_64)
 
-Branch feat/btrfs-storage-backend (unreleased, on sdme 0.12.1). New verify-storage.sh, standalone against the built debug binary (SDME override, no system install) on Linux 7.0.0-22-generic (x86_64), systemd 259, btrfs-progs 6.17.1, Mode B (ext4 datadir, loopback btrfs pool): 11 passed, 0 failed, 0 skipped. Covers the full btrfs surface: container lifecycle (create snapshots a subvolume, boot, exec, rm deletes the subvolume), offline cp into/out of a stopped container, offline export to tar, btrfs-native diff (added file detected), symlink-escape protection (a cp over a planted absolute base symlink is shadowed and never written through onto the host), the --disk cap (250M cap enforced with ENOSPC via btrfs simple quotas; sdme ps reports used/limit), and base subvolume invalidation on fs rm. cargo test: 815 passed. Adversarial multi-agent review across the offline-access, quota, base-invalidation, and diff changes found and fixed a critical directory-copy symlink escape, a set_limits state/quota desync, and a running-container export bug. Full cross-distro E2E (Mode A on a native btrfs datadir, plus the nested-container and suid/xattr-under-userns headline wins across the 8-distro matrix) still to run before a version bump.
+Branch feat/btrfs-storage-backend merged to main (on sdme 0.12.1). Full run-parallel.sh on a native-btrfs datadir host (Mode A; kernel 7.0.12-cachyos, systemd 260, x86_64), exercising the previously untested Mode A path: 637 passed, 2 failed, 2 skipped across 22 suites initially. Overlay default path showed zero regression (every non-storage suite green: build, cp, diff, distro-boot, distro-oci, export, kube L1-L6, network, nixos, oci, pods, tutorial). Both failures were triaged and fixed.
+
+Failure 1, verify-storage: the script assumed the Mode B pool path ({datadir}/pool/...) and could not run on a native btrfs datadir, where subvolumes live under {datadir}/btrfs/...; the product itself worked (boot, exec, offline cp/export/diff, symlink-escape all passed). Fixed by deriving the subvolume root from the datadir filesystem (stat -f), making the test mode-agnostic. Mode A re-run: 8 passed, 0 failed, 1 skipped.
+
+Failure 2, verify-security Test 15: an OCI app-mode nginx ran on privileged port 80 under --userns, which systemd-nspawn cannot bind (CAP_NET_BIND_SERVICE is dropped from the bounding set under userns, and the netns keeps ip_unprivileged_port_start=1024). Overlay container, unrelated to btrfs. Fixed by switching Test 15 to the quay.io/nginx/nginx-unprivileged image, which listens on :8080 as a non-root user. verify-security re-run: 32 passed, 0 failed, 2 skipped (the 2 skips are AppArmor-not-available on this host).
+
+Product finding, fixed: on a Mode A datadir whose btrfs simple quotas (squota) are enabled externally (a host root btrfs managed by snapper or btrfs-assistant), sdme's per-subvolume writes are not accounted, so a --disk qgroup limit never triggers and the cap is silently unenforced while sdme ps still reports it. Isolated the cause: a fresh sdme-owned btrfs enforces the cap exactly (dd stops at the limit), an externally-managed one does not. sdme now refuses --disk when it does not own the quota lifecycle rather than accepting a phantom cap; verify-storage Test 6 skips on such hosts. cargo test: 815 passed; clippy and fmt clean.
+
+Note: the periodic Results snapshot above is an aarch64, sdme 0.7.0-era table and is due for a fresh full green refresh on a clean single-run before the next version bump.
 
 ### 0.12.1 -- userns pre-chown setuid/setgid fix (2026-07-14, x86_64)
 
