@@ -30,6 +30,26 @@ sudo sdme new mybox -r ubuntu
 
 This creates a container using the imported Ubuntu rootfs instead of cloning the host. The imported rootfs is reusable: you can create multiple containers from the same base.
 
+## Storage backends
+
+Containers created from an imported rootfs use an overlayfs upper layer by default. On a host with btrfs available, you can back a container with a copy-on-write btrfs subvolume instead:
+
+```sh
+sudo sdme new mybox -r ubuntu --storage btrfs
+```
+
+The btrfs backend gives the container a real filesystem rather than an overlay mount. That lets you run nested containers inside it (Docker, podman, or another sdme), preserves setuid bits and file capabilities under `--userns`, and enables a per-container disk cap. Host clones (`sdme new` with no `-r`) always use overlay; only imported rootfs can use btrfs.
+
+Cap a btrfs container's disk usage with `--disk`:
+
+```sh
+sudo sdme new build -r ubuntu --storage btrfs --disk 4G
+```
+
+`sdme ps` then shows a `DISK` column with used and limit for capped containers, and a write past the cap fails with "No space left on device". You can change the cap later with `sudo sdme set build --disk 8G`.
+
+The btrfs backend needs `btrfs-progs` installed, and `--disk` additionally needs btrfs simple quotas (btrfs-progs and a kernel from the 6.7 series or newer). See the [architecture guide](@/docs/architecture.md) for the storage model and its trade-offs.
+
 ## List imported rootfs
 
 ```sh

@@ -232,6 +232,78 @@ test_different_rootfs() {
 }
 
 # =============================================================================
+# Tutorial: Storage backends (different-rootfs.md)
+# =============================================================================
+
+test_storage() {
+    log "Tutorial: Storage backends (btrfs)"
+
+    if ! command -v btrfs >/dev/null 2>&1 || ! command -v mkfs.btrfs >/dev/null 2>&1; then
+        record "storage/create-btrfs" SKIP "btrfs-progs not installed"
+        record "storage/diff" SKIP "btrfs-progs not installed"
+        record "storage/disk-cap" SKIP "btrfs-progs not installed"
+        return
+    fi
+
+    local output datadir
+    datadir=$($SDME config get 2>/dev/null | awk -F' = ' '/^datadir/{print $2}')
+    if ! ensure_base_fs "$BASE_FS" "$BASE_IMAGE"; then
+        record "storage/create-btrfs" FAIL "base rootfs setup failed"
+        return
+    fi
+
+    # sdme new mybox -r ubuntu --storage btrfs (create only, for a non-interactive test)
+    local ct="vfy-tut-btrfs"
+    $SDME rm -f "$ct" 2>/dev/null || true
+    if output=$(timeout "$TIMEOUT_BOOT" $SDME create -r "$BASE_FS" --storage btrfs "$ct" 2>&1); then
+        # The container root is a btrfs subvolume (Mode B pool or Mode A datadir).
+        if btrfs subvolume show "$datadir/pool/containers/$ct" >/dev/null 2>&1 || \
+           btrfs subvolume show "$datadir/btrfs/containers/$ct" >/dev/null 2>&1; then
+            record "storage/create-btrfs" PASS
+        else
+            record "storage/create-btrfs" FAIL "no container subvolume after create"
+        fi
+    else
+        record "storage/create-btrfs" FAIL "$output"
+        record "storage/diff" SKIP "create failed"
+        record "storage/disk-cap" SKIP "create failed"
+        $SDME rm -f "$ct" 2>/dev/null || true
+        return
+    fi
+
+    # sdme diff on the stopped btrfs container: a copied-in file shows as Added.
+    local marker
+    marker=$(mktemp)
+    echo "tutorial-storage" > "$marker"
+    $SDME cp "$marker" "$ct":/etc/vfy-tut-storage 2>/dev/null || true
+    if output=$($SDME diff "$ct" 2>&1) && \
+       echo "$output" | grep -qE '^A[[:space:]]+/etc/vfy-tut-storage$'; then
+        record "storage/diff" PASS
+    else
+        record "storage/diff" FAIL "diff missing the added file: $output"
+    fi
+    rm -f "$marker"
+    $SDME rm -f "$ct" 2>/dev/null || true
+
+    # sdme new build -r ubuntu --storage btrfs --disk N (a per-container disk cap)
+    local capped="vfy-tut-btrfs-disk"
+    $SDME rm -f "$capped" 2>/dev/null || true
+    if output=$($SDME create -r "$BASE_FS" --storage btrfs --disk 250M "$capped" 2>&1); then
+        if grep -q '^DISK=250M' "$datadir/state/$capped" 2>/dev/null && \
+           $SDME ps 2>/dev/null | awk -v n="$capped" '$1==n' | grep -qE '/250M'; then
+            record "storage/disk-cap" PASS
+        else
+            record "storage/disk-cap" FAIL "disk cap not reflected in state/ps"
+        fi
+    elif echo "$output" | grep -qi quota; then
+        record "storage/disk-cap" SKIP "btrfs simple quotas unavailable (needs btrfs-progs/kernel 6.7+)"
+    else
+        record "storage/disk-cap" FAIL "$output"
+    fi
+    $SDME rm -f "$capped" 2>/dev/null || true
+}
+
+# =============================================================================
 # Tutorial: Day-to-Day Management (management.md)
 # =============================================================================
 
@@ -1331,6 +1403,7 @@ main() {
 
     test_first_container
     test_different_rootfs
+    test_storage
     test_management
     test_services
     test_oci_apps
