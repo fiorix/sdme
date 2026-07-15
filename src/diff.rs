@@ -15,9 +15,15 @@
 //! carry the `trusted.overlay.opaque=y` xattr and hide every lower-layer
 //! entry underneath them. Both are handled transparently.
 //!
+//! A btrfs container has no upper layer: its root is a copy-on-write
+//! subvolume snapshot with real deletions and no whiteouts. Its diff is a
+//! full base-vs-snapshot tree walk of the imported rootfs against the
+//! container subvolume (same Added/Modified/Deleted semantics).
+//!
 //! Range diffs between two containers (`sdme diff from..to`) compare the
-//! two upper layers directly; files that exist in both but differ are
-//! reported as Modified, everything else is Added/Deleted as one-sided.
+//! two upper layers (overlay) or the two subvolumes (btrfs) directly;
+//! files that exist in both but differ are reported as Modified, everything
+//! else is Added/Deleted as one-sided. Cross-backend range diffs are rejected.
 //!
 //! # CLI examples
 //!
@@ -108,25 +114,6 @@ fn parse_target(target: &str) -> Result<DiffTarget> {
             name: target.to_string(),
         })
     }
-}
-
-/// Reject a diff on a btrfs-backed container.
-///
-/// `diff` walks the overlay upper layer against its lower rootfs, a
-/// representation specific to the overlay backend: added/modified files live in
-/// `upper/` and deletions are whiteouts. A btrfs container's root is a
-/// copy-on-write subvolume snapshot with no upper layer and real deletions, so
-/// the change set must be computed as a base-vs-snapshot tree comparison. That
-/// btrfs-native diff is a separate, later change; until then, fail clearly
-/// instead of walking a nonexistent `upper/`.
-fn reject_btrfs(state: &crate::State, name: &str) -> Result<()> {
-    if crate::storage::Backend::from_state(state) == crate::storage::Backend::Btrfs {
-        bail!(
-            "sdme diff is not yet supported for btrfs container '{name}': its root is a \
-             subvolume snapshot, not an overlay upper layer; btrfs-native diff is planned"
-        );
-    }
-    Ok(())
 }
 
 /// Check if a metadata entry is an overlayfs whiteout file.
@@ -460,6 +447,115 @@ fn collect_range_diff(
     Ok(())
 }
 
+/// Walk a btrfs `base` tree and a container `snap`shot tree, collecting what
+/// the container changed relative to its base.
+///
+/// Unlike the overlay upper-layer walk, both sides are full filesystem trees:
+/// there are no whiteouts (a removed file is simply absent from `snap`) and no
+/// opaque directories. `base` is the imported rootfs the container was
+/// snapshotted from (stable, always present), and `snap` is the container's
+/// subvolume; the difference is exactly the container's runtime changes. The
+/// semantics match [`collect_range_diff`] (from -> to) without the whiteout
+/// special cases.
+fn collect_btrfs_diff(
+    base: &Path,
+    snap: &Path,
+    prefix: &Path,
+    filters: &[String],
+    entries: &mut Vec<DiffEntry>,
+) -> Result<()> {
+    let base_dir = base.join(prefix);
+    let snap_dir = snap.join(prefix);
+    let all_names: BTreeSet<_> = list_dir_names(&base_dir)
+        .union(&list_dir_names(&snap_dir))
+        .cloned()
+        .collect();
+
+    for name in &all_names {
+        check_interrupted()?;
+        let rel = prefix.join(name);
+        let abs_path = format!("/{}", rel.display());
+        if !matches_filter(&abs_path, filters) {
+            continue;
+        }
+
+        let base_path = base_dir.join(name);
+        let snap_path = snap_dir.join(name);
+        let base_meta = base_path.symlink_metadata().ok();
+        let snap_meta = snap_path.symlink_metadata().ok();
+
+        match (base_meta, snap_meta) {
+            (Some(bm), Some(sm)) => {
+                let base_is_dir = bm.is_dir();
+                let snap_is_dir = sm.is_dir();
+                if base_is_dir && snap_is_dir {
+                    collect_btrfs_diff(base, snap, &rel, filters, entries)?;
+                } else if base_is_dir {
+                    // Was a directory, now a non-directory: the whole subtree is
+                    // removed and a new entry takes its place.
+                    collect_all_as(&base_path, &rel, ChangeKind::Deleted, filters, entries)?;
+                    let is_binary = sm.is_file() && is_binary_file(&snap_path);
+                    entries.push(DiffEntry {
+                        kind: ChangeKind::Added,
+                        path: abs_path,
+                        is_binary,
+                    });
+                } else if snap_is_dir {
+                    // Was a non-directory, now a directory.
+                    entries.push(DiffEntry {
+                        kind: ChangeKind::Deleted,
+                        path: abs_path.clone(),
+                        is_binary: false,
+                    });
+                    collect_all_as(&snap_path, &rel, ChangeKind::Added, filters, entries)?;
+                } else if files_differ(&base_path, &snap_path) {
+                    let is_binary = (bm.is_file() && is_binary_file(&base_path))
+                        || (sm.is_file() && is_binary_file(&snap_path));
+                    entries.push(DiffEntry {
+                        kind: ChangeKind::Modified,
+                        path: abs_path,
+                        is_binary,
+                    });
+                }
+            }
+            (None, Some(sm)) => {
+                // Only in the snapshot: added by the container.
+                if sm.is_dir() {
+                    collect_all_as(&snap_path, &rel, ChangeKind::Added, filters, entries)?;
+                } else {
+                    let is_binary = sm.is_file() && is_binary_file(&snap_path);
+                    entries.push(DiffEntry {
+                        kind: ChangeKind::Added,
+                        path: abs_path,
+                        is_binary,
+                    });
+                }
+            }
+            (Some(bm), None) => {
+                // Only in the base: removed by the container.
+                if bm.is_dir() {
+                    collect_all_as(&base_path, &rel, ChangeKind::Deleted, filters, entries)?;
+                } else {
+                    entries.push(DiffEntry {
+                        kind: ChangeKind::Deleted,
+                        path: abs_path,
+                        is_binary: false,
+                    });
+                }
+            }
+            (None, None) => {}
+        }
+    }
+
+    Ok(())
+}
+
+/// Resolve a btrfs container's subvolume path, ensuring the pool is mounted.
+fn btrfs_container_subvol(datadir: &Path, name: &str) -> Result<PathBuf> {
+    let pool_root = crate::storage::pool::ensure_mounted(datadir, false)?;
+    Ok(crate::storage::btrfs::container_root(&pool_root, name))
+}
+
 /// List directory entry names, returning an empty set if the dir doesn't exist.
 fn list_dir_names(dir: &Path) -> BTreeSet<String> {
     let Ok(rd) = fs::read_dir(dir) else {
@@ -570,7 +666,7 @@ pub fn diff(datadir: &Path, target: &str, paths: &[String], opts: &DiffOptions) 
                 .with_context(|| format!("cannot lock container '{name}' for diff"))?;
             let state_path = datadir.join("state").join(&name);
             let state = crate::State::read_from(&state_path)?;
-            reject_btrfs(&state, &name)?;
+            let backend = crate::storage::Backend::from_state(&state);
             let rootfs_name = state.rootfs();
             let rootfs = crate::containers::resolve_rootfs(
                 datadir,
@@ -588,13 +684,29 @@ pub fn diff(datadir: &Path, target: &str, paths: &[String], opts: &DiffOptions) 
             } else {
                 None
             };
-            let upper = datadir.join("containers").join(&name).join("upper");
-            if !upper.is_dir() {
-                bail!("container directory not found: {}", upper.display());
-            }
 
             let mut entries = Vec::new();
-            collect_upper_diff(&upper, &rootfs, Path::new(""), paths, &mut entries)?;
+            match backend {
+                crate::storage::Backend::Overlay => {
+                    let upper = datadir.join("containers").join(&name).join("upper");
+                    if !upper.is_dir() {
+                        bail!("container directory not found: {}", upper.display());
+                    }
+                    collect_upper_diff(&upper, &rootfs, Path::new(""), paths, &mut entries)?;
+                }
+                crate::storage::Backend::Btrfs => {
+                    // Diff the container subvolume against the imported rootfs it
+                    // was snapshotted from. The rootfs dir is stable and always
+                    // present (unlike the pool base subvolume, which fs rm /
+                    // import -f invalidate), so this stays consistent with the
+                    // overlay diff, which also compares against the lower rootfs.
+                    let subvol = btrfs_container_subvol(datadir, &name)?;
+                    if !subvol.exists() {
+                        bail!("btrfs container subvolume not found: {}", subvol.display());
+                    }
+                    collect_btrfs_diff(&rootfs, &subvol, Path::new(""), paths, &mut entries)?;
+                }
+            }
             entries
         }
         DiffTarget::Range { from, to } => {
@@ -608,29 +720,55 @@ pub fn diff(datadir: &Path, target: &str, paths: &[String], opts: &DiffOptions) 
 
             let from_state = crate::State::read_from(&datadir.join("state").join(&from))?;
             let to_state = crate::State::read_from(&datadir.join("state").join(&to))?;
-            reject_btrfs(&from_state, &from)?;
-            reject_btrfs(&to_state, &to)?;
+            let from_backend = crate::storage::Backend::from_state(&from_state);
+            let to_backend = crate::storage::Backend::from_state(&to_state);
+            // The two sides are represented differently per backend (an overlay
+            // upper layer vs a full btrfs subvolume), so a cross-backend range
+            // diff is not meaningful.
+            if from_backend != to_backend {
+                bail!(
+                    "cannot diff across storage backends: '{from}' is {} and '{to}' is {}",
+                    from_backend.as_str(),
+                    to_backend.as_str()
+                );
+            }
             if from_state.rootfs() != to_state.rootfs() {
                 eprintln!(
                     "warning: containers use different base rootfs ('{}' vs '{}'); \
-                     upper layers are relative to different lowers",
+                     the diff is relative to different bases",
                     from_state.rootfs(),
                     to_state.rootfs(),
                 );
             }
 
-            let from_upper = datadir.join("containers").join(&from).join("upper");
-            let to_upper = datadir.join("containers").join(&to).join("upper");
-
-            if !from_upper.is_dir() {
-                bail!("container directory not found: {}", from_upper.display());
-            }
-            if !to_upper.is_dir() {
-                bail!("container directory not found: {}", to_upper.display());
-            }
-
             let mut entries = Vec::new();
-            collect_range_diff(&from_upper, &to_upper, Path::new(""), paths, &mut entries)?;
+            match from_backend {
+                crate::storage::Backend::Overlay => {
+                    let from_upper = datadir.join("containers").join(&from).join("upper");
+                    let to_upper = datadir.join("containers").join(&to).join("upper");
+                    if !from_upper.is_dir() {
+                        bail!("container directory not found: {}", from_upper.display());
+                    }
+                    if !to_upper.is_dir() {
+                        bail!("container directory not found: {}", to_upper.display());
+                    }
+                    collect_range_diff(&from_upper, &to_upper, Path::new(""), paths, &mut entries)?;
+                }
+                crate::storage::Backend::Btrfs => {
+                    let from_sub = btrfs_container_subvol(datadir, &from)?;
+                    let to_sub = btrfs_container_subvol(datadir, &to)?;
+                    if !from_sub.exists() {
+                        bail!(
+                            "btrfs container subvolume not found: {}",
+                            from_sub.display()
+                        );
+                    }
+                    if !to_sub.exists() {
+                        bail!("btrfs container subvolume not found: {}", to_sub.display());
+                    }
+                    collect_btrfs_diff(&from_sub, &to_sub, Path::new(""), paths, &mut entries)?;
+                }
+            }
             entries
         }
     };
@@ -704,19 +842,73 @@ mod tests {
     }
 
     #[test]
-    fn test_reject_btrfs() {
-        let mut state = crate::State::new();
-        // Overlay (unset or explicit) is allowed.
-        reject_btrfs(&state, "c").unwrap();
-        state.set("STORAGE", "overlay");
-        reject_btrfs(&state, "c").unwrap();
-        // btrfs is rejected with a clear, backend-specific message.
-        state.set("STORAGE", "btrfs");
-        let err = reject_btrfs(&state, "c").unwrap_err();
+    fn test_collect_btrfs_diff() {
+        use std::collections::HashMap;
+        let tmp = TempDataDir::new("btrfs-diff");
+        let base = tmp.path().join("base");
+        let snap = tmp.path().join("snap");
+        fs::create_dir_all(base.join("etc")).unwrap();
+        fs::create_dir_all(snap.join("etc")).unwrap();
+
+        // Unchanged, modified, added, removed regular files.
+        fs::write(base.join("etc/keep"), "same").unwrap();
+        fs::write(snap.join("etc/keep"), "same").unwrap();
+        fs::write(base.join("etc/conf"), "old").unwrap();
+        fs::write(snap.join("etc/conf"), "new").unwrap();
+        fs::write(snap.join("etc/added"), "hello").unwrap();
+        fs::write(base.join("etc/removed"), "bye").unwrap();
+        // Added and removed directory subtrees.
+        fs::create_dir_all(snap.join("opt/app")).unwrap();
+        fs::write(snap.join("opt/app/bin"), "x").unwrap();
+        fs::create_dir_all(base.join("var/old")).unwrap();
+        fs::write(base.join("var/old/f"), "y").unwrap();
+        // Type change: file -> directory, and directory -> file.
+        fs::write(base.join("etc/tf"), "was-file").unwrap();
+        fs::create_dir_all(snap.join("etc/tf")).unwrap();
+        fs::write(snap.join("etc/tf/inner"), "z").unwrap();
+        fs::create_dir_all(base.join("etc/td")).unwrap();
+        fs::write(base.join("etc/td/inner"), "w").unwrap();
+        fs::write(snap.join("etc/td"), "now-file").unwrap();
+
+        let mut entries = Vec::new();
+        collect_btrfs_diff(&base, &snap, Path::new(""), &[], &mut entries).unwrap();
+        let by_path: HashMap<&str, ChangeKind> =
+            entries.iter().map(|e| (e.path.as_str(), e.kind)).collect();
+
+        assert_eq!(by_path.get("/etc/conf"), Some(&ChangeKind::Modified));
+        assert_eq!(by_path.get("/etc/added"), Some(&ChangeKind::Added));
+        assert_eq!(by_path.get("/etc/removed"), Some(&ChangeKind::Deleted));
+        assert_eq!(by_path.get("/opt/app/bin"), Some(&ChangeKind::Added));
+        assert_eq!(by_path.get("/var/old/f"), Some(&ChangeKind::Deleted));
+        // file -> dir: old file deleted, new subtree added.
+        assert_eq!(by_path.get("/etc/tf"), Some(&ChangeKind::Deleted));
+        assert_eq!(by_path.get("/etc/tf/inner"), Some(&ChangeKind::Added));
+        // dir -> file: old subtree deleted, new file added.
+        assert_eq!(by_path.get("/etc/td"), Some(&ChangeKind::Added));
+        assert_eq!(by_path.get("/etc/td/inner"), Some(&ChangeKind::Deleted));
+        // Unchanged file must not appear.
         assert!(
-            err.to_string().contains("btrfs"),
-            "expected btrfs message, got: {err}"
+            by_path.get("/etc/keep").is_none(),
+            "unchanged file should not appear in the diff"
         );
+    }
+
+    #[test]
+    fn test_collect_btrfs_diff_filter() {
+        let tmp = TempDataDir::new("btrfs-diff-filter");
+        let base = tmp.path().join("base");
+        let snap = tmp.path().join("snap");
+        fs::create_dir_all(snap.join("etc")).unwrap();
+        fs::create_dir_all(snap.join("var")).unwrap();
+        fs::create_dir_all(&base).unwrap();
+        fs::write(snap.join("etc/a"), "1").unwrap();
+        fs::write(snap.join("var/b"), "2").unwrap();
+
+        let filter = vec!["/etc".to_string()];
+        let mut entries = Vec::new();
+        collect_btrfs_diff(&base, &snap, Path::new(""), &filter, &mut entries).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, "/etc/a");
     }
 
     #[test]
