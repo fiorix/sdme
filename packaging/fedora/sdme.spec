@@ -11,7 +11,7 @@
 %global crate sdme
 
 Name:           sdme
-Version:        0.13.0
+Version:        0.13.1
 Release:        1%{?dist}
 Summary:        The systemd machine editor
 
@@ -94,6 +94,12 @@ install -d %{buildroot}%{_datadir}/fish/vendor_completions.d
 %{_datadir}/fish/vendor_completions.d/%{crate}.fish
 
 %changelog
+* Wed Jul 15 2026 Alexandre Fiori <fiorix@gmail.com> - 0.13.1-1
+- Make the btrfs storage default usable: expose default_storage_backend and
+  btrfs_pool_size in `sdme config get` and `sdme config set`, and fall back to
+  overlay for host-rootfs containers when btrfs is the configured default (an
+  explicit --storage btrfs on a host rootfs is still rejected).
+
 * Wed Jul 15 2026 Alexandre Fiori <fiorix@gmail.com> - 0.13.0-1
 - Add a btrfs storage backend (--storage btrfs) for imported and OCI rootfs:
   copy-on-write subvolume snapshots enabling nested containers, native
