@@ -155,9 +155,9 @@ Totals                      601     0     0  21 suites
 
 ## Log
 
-### btrfs storage backend, Mode A full-suite run (2026-07-15, x86_64)
+### btrfs storage backend, Mode A full-suite run (v0.13.0, 2026-07-15, x86_64)
 
-Branch feat/btrfs-storage-backend merged to main (on sdme 0.12.1). Full run-parallel.sh on a native-btrfs datadir host (Mode A; kernel 7.0.12-cachyos, systemd 260, x86_64), exercising the previously untested Mode A path: 637 passed, 2 failed, 2 skipped across 22 suites initially. Overlay default path showed zero regression (every non-storage suite green: build, cp, diff, distro-boot, distro-oci, export, kube L1-L6, network, nixos, oci, pods, tutorial). Both failures were triaged and fixed.
+Branch feat/btrfs-storage-backend merged to main for v0.13.0. Full run-parallel.sh on a native-btrfs datadir host (Mode A; kernel 7.0.12-cachyos, systemd 260, x86_64), exercising the previously untested Mode A path: 637 passed, 2 failed, 2 skipped across 22 suites initially. Overlay default path showed zero regression (every non-storage suite green: build, cp, diff, distro-boot, distro-oci, export, kube L1-L6, network, nixos, oci, pods, tutorial). Both failures were triaged and fixed.
 
 Failure 1, verify-storage: the script assumed the Mode B pool path ({datadir}/pool/...) and could not run on a native btrfs datadir, where subvolumes live under {datadir}/btrfs/...; the product itself worked (boot, exec, offline cp/export/diff, symlink-escape all passed). Fixed by deriving the subvolume root from the datadir filesystem (stat -f), making the test mode-agnostic. Mode A re-run: 8 passed, 0 failed, 1 skipped.
 

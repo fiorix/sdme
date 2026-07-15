@@ -11,7 +11,7 @@
 %global crate sdme
 
 Name:           sdme
-Version:        0.12.1
+Version:        0.13.0
 Release:        1%{?dist}
 Summary:        The systemd machine editor
 
@@ -94,6 +94,14 @@ install -d %{buildroot}%{_datadir}/fish/vendor_completions.d
 %{_datadir}/fish/vendor_completions.d/%{crate}.fish
 
 %changelog
+* Wed Jul 15 2026 Alexandre Fiori <fiorix@gmail.com> - 0.13.0-1
+- Add a btrfs storage backend (--storage btrfs) for imported and OCI rootfs:
+  copy-on-write subvolume snapshots enabling nested containers, native
+  user-namespace idmapping that preserves suid and xattrs, and per-container
+  disk quotas (--disk). Overlay remains the default backend. --disk is
+  refused when the datadir filesystem's btrfs quotas are managed externally,
+  since enforcement cannot be guaranteed there.
+
 * Mon Jul 14 2026 Alexandre Fiori <fiorix@gmail.com> - 0.12.1-1
 - Fix --userns pre-chown stripping setuid/setgid bits (e.g. sudo) when the
   kernel lacks idmapped-mount support on overlayfs. The recursive UID/GID
