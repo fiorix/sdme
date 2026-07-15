@@ -1210,6 +1210,10 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
         let _ = fs::remove_file(meta_path);
         let env_path = rootfs_dir.join(format!(".{name}.env"));
         let _ = fs::remove_file(env_path);
+        // Drop the cached btrfs base subvolume for the old content so the
+        // replacement is re-materialized on the next container create
+        // (best-effort; overlay-only hosts have no pool).
+        let _ = crate::storage::btrfs::invalidate_base(datadir, name, verbose);
     }
 
     fs::create_dir_all(&rootfs_dir)

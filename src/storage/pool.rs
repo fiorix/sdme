@@ -122,6 +122,18 @@ pub fn ensure_ready(datadir: &Path, pool_size: &str, verbose: bool) -> Result<Pa
     Ok(mount_dir)
 }
 
+/// Whether a btrfs pool backing store exists, without mounting it. Mode A: the
+/// subvolume root directory under a native-btrfs datadir; Mode B: the loopback
+/// pool image. Used to skip pool work entirely when no btrfs container was ever
+/// created.
+pub fn exists(datadir: &Path) -> Result<bool> {
+    if is_btrfs(datadir)? {
+        Ok(datadir.join(BTRFS_SUBDIR).exists())
+    } else {
+        Ok(datadir.join(POOL_IMAGE).exists())
+    }
+}
+
 /// Ensure an *existing* pool is mounted, returning the subvolume root. Unlike
 /// [`ensure_ready`], this never creates the pool image; it errors if a Mode B
 /// pool does not yet exist. Use for operations on existing containers

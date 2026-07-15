@@ -145,6 +145,33 @@ pub fn ensure_base(
     }
 }
 
+/// Invalidate the cached base subvolume for `base_name`, so a later container
+/// re-materializes it from the current rootfs. Call after the imported rootfs
+/// at `{datadir}/fs/{base_name}` is removed (`fs rm`) or replaced (`import -f`);
+/// otherwise a stale base would keep seeding new containers with the old
+/// content.
+///
+/// No-op when no pool exists (overlay-only host, or a Mode B pool never
+/// created). Safe even while container snapshots of the base exist: btrfs
+/// snapshots are independent of their source after creation, so deleting the
+/// base only frees its own metadata, not the snapshots' shared blocks. Callers
+/// hold the exclusive `fs` lock, which excludes concurrent base materialization
+/// (creates take the shared `fs` lock).
+pub fn invalidate_base(datadir: &Path, base_name: &str, verbose: bool) -> Result<()> {
+    if !pool::exists(datadir)? {
+        return Ok(());
+    }
+    let pool_root = pool::ensure_mounted(datadir, verbose)?;
+    let base = base_subvol(&pool_root, base_name);
+    if is_subvolume(&base) {
+        if verbose {
+            eprintln!("invalidating stale btrfs base subvolume {}", base.display());
+        }
+        delete_subvol(&base, verbose)?;
+    }
+    Ok(())
+}
+
 /// Returns `true` if `path` is a btrfs subvolume. `btrfs subvolume show` exits
 /// non-zero for a plain directory or a missing path.
 pub fn is_subvolume(path: &Path) -> bool {

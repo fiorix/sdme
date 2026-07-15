@@ -294,6 +294,10 @@ pub fn remove(datadir: &Path, name: &str, auto_gc: bool, verbose: bool) -> Resul
     crate::copy::safe_remove_dir(txn.path())?;
     txn.done();
 
+    // Drop any cached btrfs base subvolume for this rootfs so it is not reused
+    // by a future container (best-effort; overlay-only hosts have no pool).
+    let _ = crate::storage::btrfs::invalidate_base(datadir, name, verbose);
+
     let meta_path = datadir.join("fs").join(format!(".{name}.meta"));
     let _ = fs::remove_file(meta_path);
 
