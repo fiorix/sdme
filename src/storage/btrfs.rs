@@ -14,7 +14,9 @@
 //! loopback pool (Mode B), the snapshot shares the base's blocks, so N
 //! containers cost roughly one base plus their divergence.
 
+use std::ffi::OsStr;
 use std::fs;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -219,12 +221,63 @@ pub fn delete_subvol(path: &Path, verbose: bool) -> Result<()> {
     if !path.exists() {
         return Ok(());
     }
+    // Fast path: a plain delete succeeds unless the subvolume still contains
+    // nested subvolumes, so the common case (no nesting) pays nothing extra.
+    if delete_one_subvol(path, verbose).is_ok() {
+        return Ok(());
+    }
+    // Fallback: a container that ran a nested btrfs-backed engine (Docker or
+    // Podman with the btrfs driver) leaves child subvolumes under the root, and
+    // btrfs refuses to delete a subvolume that still contains them. Remove the
+    // children deepest-first, then retry the root.
+    for child in nested_subvols(path)? {
+        delete_one_subvol(&child, verbose)?;
+    }
+    delete_one_subvol(path, verbose)
+}
+
+/// Delete a single btrfs subvolume, with no handling of nested children.
+fn delete_one_subvol(path: &Path, verbose: bool) -> Result<()> {
     if verbose {
         eprintln!("btrfs subvolume delete {}", path.display());
     }
     let mut cmd = Command::new("btrfs");
     cmd.args(["subvolume", "delete"]).arg(path);
     run(&mut cmd, "btrfs subvolume delete")
+}
+
+/// Nested subvolume roots under `path`, deepest-first so children are removed
+/// before their parents. btrfs gives every subvolume root inode number 256, so
+/// `find -inum 256` locates them independently of the pool's mount layout (Mode
+/// A vs Mode B), where a `btrfs subvolume list` path would need remapping.
+fn nested_subvols(path: &Path) -> Result<Vec<PathBuf>> {
+    let out = Command::new("find")
+        .arg(path)
+        .args(["-mindepth", "1", "-inum", "256", "-print0"])
+        .output()
+        .context("failed to enumerate nested btrfs subvolumes")?;
+    check_interrupted()?;
+    if !out.status.success() {
+        bail!(
+            "enumerating nested subvolumes under {} failed: {}",
+            path.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    let mut subvols: Vec<PathBuf> = out
+        .stdout
+        .split(|&b| b == 0)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| PathBuf::from(OsStr::from_bytes(entry)))
+        .collect();
+    sort_deepest_first(&mut subvols);
+    Ok(subvols)
+}
+
+/// Order subvolume paths so the deepest come first: a child always has more path
+/// components than the parent that contains it.
+fn sort_deepest_first(subvols: &mut [PathBuf]) {
+    subvols.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
 }
 
 /// Apply a disk cap to a container subvolume via its btrfs qgroup, as a limit
@@ -375,6 +428,23 @@ mod tests {
                    \tGeneration: \t\t7\n";
         assert_eq!(parse_subvol_id(out), Some(264));
         assert_eq!(parse_subvol_id("no id here\n"), None);
+    }
+
+    #[test]
+    fn sort_deepest_first_orders_children_before_parents() {
+        // The container root, a mid-level dir, and a deep Docker layer subvolume,
+        // shuffled. Deleting deepest-first is what lets btrfs remove the root.
+        let mut v = vec![
+            PathBuf::from("/pool/containers/c"),
+            PathBuf::from("/pool/containers/c/var/lib/docker/btrfs/subvolumes/a"),
+            PathBuf::from("/pool/containers/c/var/lib/docker"),
+        ];
+        sort_deepest_first(&mut v);
+        assert_eq!(
+            v.first().unwrap(),
+            &PathBuf::from("/pool/containers/c/var/lib/docker/btrfs/subvolumes/a")
+        );
+        assert_eq!(v.last().unwrap(), &PathBuf::from("/pool/containers/c"));
     }
 
     #[test]

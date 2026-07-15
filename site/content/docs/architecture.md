@@ -652,7 +652,7 @@ CAP_SYS_RESOURCE        CAP_SYS_TTY_CONFIG
 
 `CAP_SYS_ADMIN` is the most significant capability in this set. It is required for systemd to function inside the container: mounting filesystems, configuring cgroups, managing namespaces for its own services. This cannot be dropped without breaking the systemd-inside-nspawn model.
 
-Notable exclusions: `CAP_SYS_MODULE` (no kernel module loading), `CAP_SYS_RAWIO` (no raw I/O port access), `CAP_SYS_TIME` (no system clock modification), `CAP_BPF` (no BPF program loading), `CAP_SYSLOG`, and `CAP_IPC_LOCK`.
+Notable exclusions: `CAP_SYS_MODULE` (no kernel module loading), `CAP_SYS_RAWIO` (no raw I/O port access), `CAP_SYS_TIME` (no system clock modification), `CAP_BPF` (BPF program loading; its function stays reachable via the retained `CAP_SYS_ADMIN`, so BPF is gated by the seccomp filter rather than this capability), `CAP_SYSLOG`, and `CAP_IPC_LOCK`.
 
 sdme provides fine-grained capability management:
 
@@ -671,17 +671,28 @@ Blocked unconditionally: `kexec_load`, `kexec_file_load`, `perf_event_open`, `fa
 
 Capability-gated: `@clock` requires `CAP_SYS_TIME`, `@module` requires `CAP_SYS_MODULE`, `@raw-io` requires `CAP_SYS_RAWIO`. Since none of these capabilities are in the default bounding set, these syscall groups are effectively blocked.
 
-`--system-call-filter` layers additional seccomp filters on top of nspawn's baseline. It uses systemd's group syntax:
+`--system-call-filter` layers additional seccomp filters on top of nspawn's baseline. Each value is one of:
 
-- `@group`: allow a syscall group
-- `~@group`: deny a syscall group
+- `@group`: allow a syscall group (e.g. `@keyring`)
+- `~@group`: deny a syscall group (e.g. `~@raw-io`)
+- `name`: allow an individual syscall (e.g. `bpf`)
+- `~name`: deny an individual syscall
 
 ```
 sdme create mybox --system-call-filter ~@raw-io
 sdme create mybox --system-call-filter ~@cpu-emulation
 ```
 
-The flag is repeatable. Note that `~@mount` breaks systemd inside the container, the same reason nspawn allows it in the first place.
+Bare syscall names let you open just the syscalls a nested container engine needs, instead of a whole `@group` or an extra capability. Running Docker or Podman inside a container needs `bpf` (runc programs the cgroup v2 device controller as an eBPF program), plus `keyctl` and `add_key` for images that use the kernel keyring. `CAP_SYS_ADMIN` (in nspawn's default set) already covers the operation, so no extra capability is required:
+
+```
+sdme create dbox -r ubuntu --storage btrfs \
+  --system-call-filter bpf \
+  --system-call-filter keyctl \
+  --system-call-filter add_key
+```
+
+The flag is repeatable. Note that `~@mount` breaks systemd inside the container, the same reason nspawn allows it in the first place. Passing any `--system-call-filter` replaces `--strict`'s default deny groups (`~@cpu-emulation`, `~@debug`, `~@obsolete`, `~@raw-io`), which are applied only when no filter is given, so pass them explicitly if you want both.
 
 ### Mandatory access control
 

@@ -1213,6 +1213,136 @@ _test_kube_secrets() {
 }
 
 # =============================================================================
+# Tutorial: Docker and a Registry Inside a Container (docker-in-container.md)
+# =============================================================================
+
+test_docker_in_container() {
+    log "Tutorial: Docker and a Registry Inside a Container"
+
+    local keys=(docker/create docker/boot docker/install \
+                docker/storage-btrfs docker/run-hello docker/registry \
+                docker/build docker/push docker/pull-run)
+
+    if ! need_base; then
+        for k in "${keys[@]}"; do record "$k" SKIP "base import failed"; done
+        return
+    fi
+
+    # --storage btrfs needs btrfs-progs on the host (native subvolume, or the
+    # loopback pool sdme creates when the datadir is not itself btrfs).
+    if ! command -v mkfs.btrfs >/dev/null 2>&1; then
+        for k in "${keys[@]}"; do record "$k" SKIP "btrfs-progs not available"; done
+        return
+    fi
+
+    local output
+    local ct="vfy-tut-docker"
+    # Steps that pull from Docker Hub (install, run, registry, build, push,
+    # pull) need the import-scale timeout, not the short per-test one.
+    local dt="$TIMEOUT_IMPORT"
+
+    # br_netfilter is used by Docker's bridge networking; the container cannot
+    # load kernel modules itself.
+    modprobe br_netfilter 2>/dev/null || true
+
+    _docker_teardown() {
+        stop_container "$ct" 2>/dev/null || true
+        $SDME rm -f "$ct" 2>/dev/null || true
+    }
+
+    # sdme create --storage btrfs --network-veth --capability CAP_NET_ADMIN
+    #   --system-call-filter bpf --system-call-filter keyctl --system-call-filter add_key
+    # No CAP_BPF: allowing the bpf syscall in seccomp is enough; CAP_SYS_ADMIN
+    # (in nspawn's default set) covers the operation.
+    if ! output=$(timeout "$TIMEOUT_BOOT" $SDME create -r "$BASE_FS" --storage btrfs \
+            --network-veth --capability CAP_NET_ADMIN \
+            --system-call-filter bpf --system-call-filter keyctl --system-call-filter add_key \
+            "$ct" 2>&1); then
+        record "docker/create" FAIL "$output"
+        for k in "${keys[@]:1}"; do record "$k" SKIP "create failed"; done
+        _docker_teardown
+        return
+    fi
+    record "docker/create" PASS
+
+    if ! output=$(timeout "$TIMEOUT_BOOT" $SDME start "$ct" -t 120 2>&1); then
+        record "docker/boot" FAIL "$output"
+        for k in "${keys[@]:2}"; do record "$k" SKIP "boot failed"; done
+        _docker_teardown
+        return
+    fi
+    record "docker/boot" PASS
+
+    # apt-get install -y docker.io
+    if output=$(timeout "$dt" $SDME exec "$ct" -- /bin/sh -c \
+            'apt-get update >/dev/null 2>&1 && DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io >/dev/null 2>&1 && echo installed' 2>&1) \
+            && [[ "$output" == *installed* ]]; then
+        record "docker/install" PASS
+    else
+        record "docker/install" FAIL "$output"
+        for k in "${keys[@]:3}"; do record "$k" SKIP "docker install failed"; done
+        _docker_teardown
+        return
+    fi
+
+    # Select the btrfs storage driver and start dockerd.
+    $SDME exec "$ct" -- /bin/sh -c \
+        'mkdir -p /etc/docker; printf "{\n  \"storage-driver\": \"btrfs\"\n}\n" > /etc/docker/daemon.json; systemctl enable --now docker' >/dev/null 2>&1
+    sleep 3
+
+    # docker info -> Storage Driver: btrfs
+    if output=$(timeout "$TIMEOUT_TEST" $SDME exec "$ct" -- docker info 2>/dev/null) \
+            && echo "$output" | grep -qi "Storage Driver: btrfs"; then
+        record "docker/storage-btrfs" PASS
+    else
+        record "docker/storage-btrfs" FAIL "$output"
+    fi
+
+    # docker run --rm hello-world (exercises the bpf-syscall device-cgroup path,
+    # unblocked via --system-call-filter bpf rather than CAP_BPF)
+    if output=$(timeout "$dt" $SDME exec "$ct" -- docker run --rm hello-world 2>&1) \
+            && echo "$output" | grep -qi "Hello from Docker"; then
+        record "docker/run-hello" PASS
+    else
+        record "docker/run-hello" FAIL "$output"
+    fi
+
+    # docker run -d -p 5000:5000 registry:2
+    if output=$(timeout "$dt" $SDME exec "$ct" -- \
+            docker run -d --restart=always -p 5000:5000 --name registry registry:2 2>&1); then
+        record "docker/registry" PASS
+    else
+        record "docker/registry" FAIL "$output"
+    fi
+
+    # docker build -t localhost:5000/hello:v1 .
+    local build_sh='mkdir -p /root/app && cd /root/app && printf "FROM alpine:3.20\nRUN echo built-in-sdme > /msg\nCMD cat /msg\n" > Dockerfile && docker build -t localhost:5000/hello:v1 .'
+    if output=$(timeout "$dt" $SDME exec "$ct" -- /bin/sh -c "$build_sh" 2>&1); then
+        record "docker/build" PASS
+    else
+        record "docker/build" FAIL "$output"
+    fi
+
+    # docker push localhost:5000/hello:v1
+    if output=$(timeout "$dt" $SDME exec "$ct" -- docker push localhost:5000/hello:v1 2>&1); then
+        record "docker/push" PASS
+    else
+        record "docker/push" FAIL "$output"
+    fi
+
+    # Remove local image, pull from the in-container registry, and run it.
+    local pull_sh='docker rmi localhost:5000/hello:v1 >/dev/null 2>&1; docker pull localhost:5000/hello:v1 >/dev/null 2>&1 && docker run --rm localhost:5000/hello:v1'
+    if output=$(timeout "$dt" $SDME exec "$ct" -- /bin/sh -c "$pull_sh" 2>&1) \
+            && echo "$output" | grep -q "built-in-sdme"; then
+        record "docker/pull-run" PASS
+    else
+        record "docker/pull-run" FAIL "$output"
+    fi
+
+    _docker_teardown
+}
+
+# =============================================================================
 # Batch operations (not a tutorial; retained for Stage 3 destructive testing)
 # =============================================================================
 
@@ -1343,6 +1473,9 @@ generate_report() {
             kube/secret-create kube/configmap-create \
             kube/secret-ls kube/configmap-ls \
             kube/delete kube/secret-rm kube/configmap-rm \
+            docker/create docker/boot docker/install \
+            docker/storage-btrfs docker/run-hello docker/registry \
+            docker/build docker/push docker/pull-run \
             batch/stop-all batch/start-all batch/rm-all; do
             if [[ -n "${RESULTS[$key]+x}" ]]; then
                 local section st msg
@@ -1412,6 +1545,7 @@ main() {
     test_networking
     test_pod_networking
     test_kubernetes_pods
+    test_docker_in_container
     test_batch_ops
     generate_report
 

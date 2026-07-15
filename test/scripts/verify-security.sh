@@ -72,12 +72,14 @@ else
     fi
 fi
 
-# 1b: invalid syscall filter → error
-if err=$("$SDME" create --system-call-filter=mount -r ubuntu sec-val2 2>&1); then
+# 1b: invalid syscall filter (bad chars in a bare name) → error.
+# Bare syscall names are accepted (see Test 7b), but must be [a-z0-9_]; an
+# uppercase token is rejected so it cannot break the nspawn ExecStart line.
+if err=$("$SDME" create --system-call-filter=Bad -r ubuntu sec-val2 2>&1); then
     fail "invalid syscall filter should error"
     cleanup_container sec-val2
 else
-    if echo "$err" | grep -qi "must start with @"; then
+    if echo "$err" | grep -qi "expected a syscall name"; then
         ok "invalid syscall filter rejected"
     else
         fail "invalid syscall filter: unexpected error: $err"
@@ -314,6 +316,58 @@ else
 fi
 
 cleanup_container sec-seccomp
+
+# ===========================================================================
+# Test 7b: --system-call-filter accepts bare syscall names (nested Docker set)
+# ===========================================================================
+echo "=== Test 7b: --system-call-filter bare names ==="
+
+cleanup_container sec-seccomp-bare
+
+# bpf/keyctl/add_key is the tight set needed to run Docker/Podman inside a
+# container (bpf gates the cgroup v2 device controller). Verify the bare names
+# are accepted, persist comma-joined in state, land in the drop-in, and survive
+# a stop/start regeneration (the regression a manual drop-in edit fails).
+"$SDME" create -r ubuntu \
+    --system-call-filter=bpf \
+    --system-call-filter=keyctl \
+    --system-call-filter=add_key \
+    sec-seccomp-bare "${VFLAG[@]}" 2>&1
+
+state_file="$DATADIR/state/sec-seccomp-bare"
+if grep -q "^SYSCALL_FILTER=bpf,keyctl,add_key$" "$state_file"; then
+    ok "bare syscall filters persisted in state"
+else
+    fail "bare syscall filters not in state: $(grep '^SYSCALL_FILTER=' "$state_file" 2>/dev/null)"
+fi
+
+# Boot and verify the drop-in carries all three --system-call-filter= flags.
+timeout "$TIMEOUT_BOOT" "$SDME" start sec-seccomp-bare -t "$TIMEOUT_BOOT" "${VFLAG[@]}" 2>&1
+
+dropin="/etc/systemd/system/sdme@sec-seccomp-bare.service.d/nspawn.conf"
+if [[ -f "$dropin" ]] \
+        && grep -q -- "--system-call-filter=bpf" "$dropin" \
+        && grep -q -- "--system-call-filter=keyctl" "$dropin" \
+        && grep -q -- "--system-call-filter=add_key" "$dropin"; then
+    ok "bare syscall filters in nspawn drop-in"
+else
+    fail "bare syscall filters not in nspawn drop-in ($dropin)"
+fi
+
+# Persistence: sdme stop/start regenerates the drop-in from state, so the
+# filters must still be present after a restart cycle.
+"$SDME" stop sec-seccomp-bare "${VFLAG[@]}" 2>&1 || true
+timeout "$TIMEOUT_BOOT" "$SDME" start sec-seccomp-bare -t "$TIMEOUT_BOOT" "${VFLAG[@]}" 2>&1
+if [[ -f "$dropin" ]] \
+        && grep -q -- "--system-call-filter=bpf" "$dropin" \
+        && grep -q -- "--system-call-filter=keyctl" "$dropin" \
+        && grep -q -- "--system-call-filter=add_key" "$dropin"; then
+    ok "bare syscall filters survive stop/start"
+else
+    fail "bare syscall filters lost after stop/start ($dropin)"
+fi
+
+cleanup_container sec-seccomp-bare
 
 # ===========================================================================
 # Test 8: --hardened bundle

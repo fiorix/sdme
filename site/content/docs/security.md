@@ -520,7 +520,7 @@ Pod networking        Per-container    --pod / --oci-pod
 ## 21. Kube Limitations
 
 - No `securityContext.privileged` support
-- Seccomp `Localhost` profile type not supported (custom BPF profiles cannot be loaded via systemd's `SystemCallFilter`)
+- Seccomp `Localhost` profile type not supported (a custom compiled BPF profile cannot be loaded via systemd's `SystemCallFilter`; allowing individual syscalls by name, e.g. `--system-call-filter bpf`, is supported)
 - No network policies
 - No service accounts or RBAC
 - Probe checks (exec, httpGet, tcpSocket, grpc) run inside the container's mount namespace via `/usr/bin/sdme-kube-probe`; exec probes chroot into the app rootfs before executing

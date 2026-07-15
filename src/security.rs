@@ -84,7 +84,8 @@ pub struct SecurityConfig {
     pub no_new_privileges: bool,
     /// Mount the rootfs read-only.
     pub read_only: bool,
-    /// Seccomp system call filter (e.g. `@system-service`, `~@mount`).
+    /// Seccomp system call filter (e.g. `@system-service`, `~@mount`, or a bare
+    /// syscall name like `bpf`).
     pub system_call_filter: Vec<String>,
     /// AppArmor profile name (applied as systemd unit directive).
     pub apparmor_profile: Option<String>,
@@ -256,26 +257,49 @@ pub fn normalize_cap(cap: &str) -> String {
 
 /// Validate a seccomp syscall filter specification.
 ///
-/// Accepts `@group-name` (allowlist) or `~@group-name` (denylist).
+/// Accepts, with an optional leading `~` (deny; no prefix allows):
+/// - `@group`: a systemd syscall set, e.g. `@system-service`, `~@raw-io`.
+/// - `name`: an individual syscall, e.g. `bpf`, `keyctl`, `add_key`.
+///
+/// Bare names let callers open just the syscalls a nested container engine needs
+/// (`bpf keyctl add_key` for Docker/Podman) instead of a whole `@group`. The token
+/// is passed to nspawn verbatim, so the character checks below are an injection
+/// guard for the generated unit `ExecStart`, not a syscall allowlist. Unrecognized
+/// names are skipped by systemd-nspawn during seccomp resolution, not rejected: an
+/// allow-form typo leaves the syscall blocked by the baseline (fail-safe), but a
+/// mistyped `~name` deny silently does not apply.
 fn validate_syscall_filter(filter: &str) -> Result<()> {
     if filter.is_empty() {
         bail!("system call filter cannot be empty");
     }
     let spec = filter.strip_prefix('~').unwrap_or(filter);
-    if !spec.starts_with('@') {
-        bail!(
-            "system call filter must start with @ (or ~@ for deny): {filter}\n\
-             examples: @system-service, ~@mount, ~@raw-io"
-        );
+    if spec.is_empty() {
+        bail!("system call filter cannot be just '~': {filter}");
     }
-    // Validate the group name: alphanumeric and hyphens only.
-    let group = &spec[1..];
-    if group.is_empty() {
-        bail!("system call filter group name cannot be empty: {filter}");
-    }
-    for ch in group.chars() {
-        if !ch.is_ascii_alphanumeric() && ch != '-' {
-            bail!("invalid character '{ch}' in system call filter group: {filter}");
+    match spec.strip_prefix('@') {
+        // Group name: systemd sets use ASCII alphanumerics and hyphens.
+        Some(group) => {
+            if group.is_empty() {
+                bail!("system call filter group name cannot be empty: {filter}");
+            }
+            for ch in group.chars() {
+                if !ch.is_ascii_alphanumeric() && ch != '-' {
+                    bail!("invalid character '{ch}' in system call filter group: {filter}");
+                }
+            }
+        }
+        // Bare syscall name: lowercase letters, digits, and underscores, which
+        // covers every Linux syscall name (bpf, add_key, io_uring_enter, _llseek,
+        // mmap2, ...) while rejecting anything that could break the ExecStart line.
+        None => {
+            for ch in spec.chars() {
+                if !(ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_') {
+                    bail!(
+                        "invalid system call filter: {filter}\n\
+                         expected a syscall name (e.g. bpf, keyctl, add_key) or an @group"
+                    );
+                }
+            }
         }
     }
     Ok(())
@@ -579,18 +603,33 @@ mod tests {
 
     #[test]
     fn test_validate_syscall_filter_ok() {
+        // Group form.
         assert!(validate_syscall_filter("@system-service").is_ok());
         assert!(validate_syscall_filter("~@mount").is_ok());
         assert!(validate_syscall_filter("~@raw-io").is_ok());
         assert!(validate_syscall_filter("@basic-io").is_ok());
+        // Bare syscall names, allow and deny (e.g. the nested-Docker set).
+        assert!(validate_syscall_filter("bpf").is_ok());
+        assert!(validate_syscall_filter("keyctl").is_ok());
+        assert!(validate_syscall_filter("add_key").is_ok());
+        assert!(validate_syscall_filter("request_key").is_ok());
+        assert!(validate_syscall_filter("~bpf").is_ok());
+        assert!(validate_syscall_filter("io_uring_enter").is_ok());
+        assert!(validate_syscall_filter("mmap2").is_ok());
     }
 
     #[test]
     fn test_validate_syscall_filter_bad() {
         assert!(validate_syscall_filter("").is_err());
-        assert!(validate_syscall_filter("mount").is_err());
+        assert!(validate_syscall_filter("~").is_err()); // lone deny prefix
         assert!(validate_syscall_filter("@").is_err());
+        assert!(validate_syscall_filter("~@").is_err());
         assert!(validate_syscall_filter("@foo/bar").is_err());
+        // Bare names must not carry anything that could break the ExecStart line.
+        assert!(validate_syscall_filter("BPF").is_err()); // uppercase
+        assert!(validate_syscall_filter("bad name").is_err()); // space
+        assert!(validate_syscall_filter("bpf!").is_err()); // punctuation
+        assert!(validate_syscall_filter("bpf\n@mount").is_err()); // newline injection
     }
 
     #[test]

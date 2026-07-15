@@ -122,6 +122,8 @@ A container's writable root uses one of two backends, chosen with `--storage` (d
 
 On a datadir that is already btrfs, subvolumes live under `{datadir}/btrfs/` (Mode A). Otherwise sdme keeps them in a loopback pool image `{datadir}/btrfs-pool.img` mounted at `{datadir}/pool/` (Mode B); its container subvolumes are `{datadir}/pool/containers/{name}` and bases are `{datadir}/pool/fs/{name}`. For stopped btrfs containers, inspect the subvolume directly instead of an overlay `upper`. `--storage btrfs` needs `btrfs-progs`, and `--disk` (a btrfs qgroup cap, shown in `sdme ps` as used/limit) additionally needs btrfs simple quotas from btrfs-progs and kernel 6.7 or newer.
 
+Running a container engine (Docker or Podman) inside a btrfs container needs the `bpf` syscall allowed in seccomp so runc can program the cgroup v2 device controller: `--system-call-filter bpf` (plus `keyctl add_key` for images that use the kernel keyring). `--system-call-filter` accepts bare syscall names and `~name` denies, not only `@group` sets; no `CAP_BPF` is needed because the retained `CAP_SYS_ADMIN` covers the operation. Add `--capability CAP_NET_ADMIN --network-veth` for the engine's own bridge and iptables, load `br_netfilter` on the host, and point the engine at its `btrfs` storage driver so image layers become nested subvolumes. `sdme rm` deletes those nested subvolumes recursively. See the docker-in-container tutorial.
+
 ## Networking Checks
 
 By default, sdme containers use the host network namespace. Port publishing requires a private network plus an interface (`--network-veth`, `--network-bridge`, or `--network-zone`); `--private-network` alone gives only loopback and cannot forward ports.

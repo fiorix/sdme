@@ -74,7 +74,7 @@ pub(crate) struct SecurityArgs {
     #[arg(long)]
     pub read_only: bool,
 
-    /// Seccomp system call filter (e.g. @system-service, ~@mount, repeatable)
+    /// Seccomp filter, repeatable: @group, ~@group, or a syscall name (e.g. bpf)
     #[arg(long = "system-call-filter")]
     pub system_call_filter: Vec<String>,
 
