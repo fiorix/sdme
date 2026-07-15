@@ -21,7 +21,7 @@ use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use anyhow::{bail, Context, Result};
 
@@ -203,6 +203,24 @@ pub fn ensure_quota_enabled(datadir: &Path, verbose: bool) -> Result<PathBuf> {
     if marker.exists() {
         return Ok(pool_root);
     }
+    // sdme only guarantees `--disk` enforcement when it owns the quota lifecycle.
+    // If quotas are already enabled on this filesystem before sdme touches it,
+    // they are managed externally (Mode A on a host root btrfs that ships with
+    // snapper/btrfs-assistant quotas is the common case). There, per-subvolume
+    // caps were observed to silently NOT enforce: sdme's writes are not accounted,
+    // so `qgroup limit` never triggers. Refuse rather than accept an unenforced
+    // cap. Mode B (fresh loopback pool) and a dedicated Mode A btrfs both start
+    // with quotas off, so sdme enables them here and this check passes.
+    if quota_already_enabled(&pool_root) {
+        bail!(
+            "--disk unsupported here: btrfs quotas are already enabled on the \
+             filesystem backing {} by something other than sdme, so per-container \
+             disk caps cannot be guaranteed to enforce. Use a dedicated btrfs \
+             datadir, or a non-btrfs datadir (Mode B loopback pool), whose quotas \
+             sdme manages.",
+            datadir.display()
+        );
+    }
     run(
         "btrfs",
         &["quota", "enable", "--simple"],
@@ -214,6 +232,22 @@ pub fn ensure_quota_enabled(datadir: &Path, verbose: bool) -> Result<PathBuf> {
         eprintln!("enabled btrfs simple quotas on {}", pool_root.display());
     }
     Ok(pool_root)
+}
+
+/// Whether btrfs quotas are already enabled on the filesystem containing
+/// `fs_root`. `btrfs qgroup show` exits 0 when quotas are on and non-zero
+/// ("quotas not enabled") when off. Any inability to run the probe is treated as
+/// "not enabled" so a genuine enable attempt (with its own error handling) can
+/// proceed; the false path here only ever relaxes the refusal in `ensure_quota_enabled`.
+fn quota_already_enabled(fs_root: &Path) -> bool {
+    Command::new("btrfs")
+        .args(["qgroup", "show"])
+        .arg(fs_root)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|st| st.success())
+        .unwrap_or(false)
 }
 
 /// Create a sparse pool image of `size` and format it btrfs.

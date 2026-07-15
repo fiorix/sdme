@@ -3,7 +3,9 @@ set -euo pipefail
 
 # verify-storage.sh - end-to-end test for the btrfs storage backend
 #
-# Tests (Mode B: loopback btrfs pool on a non-btrfs datadir):
+# Mode-agnostic: derives the subvolume root from the datadir filesystem (Mode A
+# native btrfs datadir under {datadir}/btrfs, Mode B loopback pool under
+# {datadir}/pool). Tests:
 #   1. Lifecycle: create --storage btrfs, boot, exec, stop, rm (subvol deleted)
 #   2. Offline cp into/from a stopped btrfs container
 #   3. Offline export of a stopped btrfs container (tar)
@@ -44,6 +46,15 @@ cleanup_prefix "${PREFIX}-"
 
 DATADIR=$($SDME config get | awk -F' = ' '/^datadir/{print $2}')
 
+# Subvolume root depends on the pool mode (see src/storage/pool.rs):
+#   Mode A: datadir is already on btrfs   -> subvols under {datadir}/btrfs
+#   Mode B: datadir is on another fs      -> subvols under {datadir}/pool (loopback)
+if [[ "$(stat -f -c %T "$DATADIR")" == "btrfs" ]]; then
+    SUBROOT="${DATADIR}/btrfs"
+else
+    SUBROOT="${DATADIR}/pool"
+fi
+
 # Import a small base rootfs to snapshot from (idempotent; OCI cache is fast).
 echo "=== Setup: importing base rootfs '$BASEFS' ==="
 if ! fs_exists "$BASEFS"; then
@@ -57,7 +68,7 @@ subvol_exists() { btrfs subvolume show "$1" >/dev/null 2>&1; }
 # ---------------------------------------------------------------------------
 echo "=== Test 1: btrfs container lifecycle ==="
 $SDME create "$CTR" -r "$BASEFS" --storage btrfs $VFLAG
-POOLSUB="${DATADIR}/pool/containers/${CTR}"
+POOLSUB="${SUBROOT}/containers/${CTR}"
 if subvol_exists "$POOLSUB"; then ok "create provisions a subvolume"; else fail "no container subvolume after create"; fi
 
 if timeout "$BOOT_TIMEOUT" $SDME start "$CTR" $VFLAG; then
@@ -145,7 +156,14 @@ if $SDME create "$CAP" -r "$BASEFS" --storage btrfs --disk 250M $VFLAG 2>"$TMPD/
     fi
     $SDME rm -f "$CAP" 2>/dev/null || true
 else
-    if grep -qi "quota" "$TMPD/caperr"; then
+    # sdme refuses --disk when it cannot guarantee enforcement. Two distinct
+    # cases, both a clean skip here (not a product failure):
+    #   a) btrfs-progs/kernel lacks simple quotas (needs >= 6.7)
+    #   b) quotas already enabled externally on the datadir fs (Mode A on a host
+    #      root btrfs with snapper/btrfs-assistant): sdme is not the quota owner
+    if grep -qi "something other than sdme\|already enabled" "$TMPD/caperr"; then
+        skipped "disk cap unsupported (quotas externally managed on the datadir fs)"
+    elif grep -qi "quota" "$TMPD/caperr"; then
         skipped "disk cap unsupported (btrfs-progs lacks simple quotas, needs >= 6.7)"
     else
         fail "create --disk failed: $(cat "$TMPD/caperr")"
@@ -159,7 +177,7 @@ echo "=== Test 7: teardown + base invalidation ==="
 $SDME rm -f "$CTR" 2>/dev/null || true
 if ! subvol_exists "$POOLSUB"; then ok "rm deleted the container subvolume"; else fail "container subvolume survived rm"; fi
 
-POOLBASE="${DATADIR}/pool/fs/${BASEFS}"
+POOLBASE="${SUBROOT}/fs/${BASEFS}"
 if subvol_exists "$POOLBASE"; then
     $SDME fs rm -f "$BASEFS" 2>/dev/null || true
     if ! subvol_exists "$POOLBASE"; then ok "fs rm invalidated the base subvolume"; else fail "base subvolume survived fs rm"; fi
