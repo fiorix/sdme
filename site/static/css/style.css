@@ -203,6 +203,8 @@ p code, li code {
 .card .distros { color: var(--text-secondary); font-size: 0.8rem; margin-bottom: 0.75rem; }
 .card .deps { color: var(--text-secondary); font-size: 0.8rem; margin-bottom: 0.75rem; }
 .card .deps strong { color: var(--text-heading); font-weight: 600; }
+.card .repo { color: var(--text-secondary); font-size: 0.8rem; margin-top: 0.75rem; margin-bottom: 0.75rem; }
+.card .repo strong { color: var(--text-heading); font-weight: 600; }
 .card .code-row { margin-top: 0.75rem; margin-bottom: 0; }
 .card .code-row pre { margin-bottom: 0; }
 

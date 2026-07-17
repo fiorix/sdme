@@ -14,6 +14,8 @@
       title: '.deb Packages',
       distros: 'Debian, Ubuntu, and derivatives',
       deps: 'Dependencies auto-resolved: <strong>systemd (&ge; 255)</strong>, <strong>systemd-container</strong>. Suggests: qemu-utils, apparmor',
+      repo: '<strong>Ubuntu</strong>: also available from the <a href="https://launchpad.net/~fiorix/+archive/ubuntu/sdme">Launchpad PPA</a>:',
+      repoCmd: 'sudo add-apt-repository ppa:fiorix/sdme && sudo apt install sdme',
       cmdTemplate: function(url, filename) {
         return 'curl -fSLO ' + url + ' && sudo apt install ./' + filename;
       }
@@ -23,6 +25,8 @@
       title: '.rpm Packages',
       distros: 'Fedora, CentOS Stream, AlmaLinux, openSUSE, RHEL, and derivatives',
       deps: 'Dependencies auto-resolved: <strong>systemd &ge; 255</strong>, <strong>systemd-container</strong>',
+      repo: '<strong>Fedora</strong>: also available from <a href="https://copr.fedorainfracloud.org/coprs/fiorix/sdme/">Copr</a>:',
+      repoCmd: 'sudo dnf copr enable fiorix/sdme && sudo dnf install --setopt=install_weak_deps=False sdme',
       cmdTemplate: function(url, filename) {
         return 'curl -fSLO ' + url + ' && sudo dnf install ./' + filename;
       }
@@ -106,6 +110,11 @@
         var cmd = cat.cmdTemplate(a.browser_download_url, a.name);
         html += '<pre><code>' + escapeHtml(cmd) + '</code></pre>';
       });
+
+      if (cat.repo) {
+        html += '<p class="repo">' + cat.repo + '</p>';
+        html += '<pre><code>' + escapeHtml(cat.repoCmd) + '</code></pre>';
+      }
 
       html += '</div>';
     });
