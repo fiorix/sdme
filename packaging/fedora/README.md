@@ -1,4 +1,4 @@
-# sdme on Fedora
+# sdme on Fedora and CentOS Stream
 
 sdme is available from a Copr repository:
 
@@ -16,8 +16,23 @@ sudo dnf install qemu-img
 ```
 
 - Copr project: <https://copr.fedorainfracloud.org/coprs/fiorix/sdme/>
-- Builds for Fedora 43, 44, and rawhide (x86_64 + aarch64).
+- Builds for Fedora 43, 44, and rawhide, and CentOS Stream 9 and 10 (x86_64 + aarch64).
 - sdme requires root on a systemd host.
+
+## CentOS Stream
+
+**Stream 10** works with the commands above; it ships systemd 257, comfortably over the 255 sdme needs.
+
+**Stream 9** ships systemd 252, so `dnf install sdme` refuses with "nothing provides systemd >= 255". That is the packaging doing its job rather than letting sdme fail at runtime. Enable the [CentOS Hyperscale SIG](https://sigs.centos.org/hyperscale/), which rebases systemd to 260.x on 9-stream:
+
+```bash
+sudo dnf install centos-release-hyperscale
+sudo dnf upgrade systemd     # 252 -> 260.x (.hs.el9); reboot, it is PID 1
+sudo dnf copr enable fiorix/sdme
+sudo dnf install --setopt=install_weak_deps=False sdme
+```
+
+`centos-release-hyperscale` comes from `extras-common`, which Stream enables by default. dnf would also pull the newer systemd in on its own to satisfy sdme's requirement, but doing it as its own step keeps the PID 1 upgrade (and the reboot it wants) separate from installing sdme.
 
 The rest of this document is for maintainers.
 
@@ -51,7 +66,11 @@ probe so the installed binary stays small (~11M). Artifacts land in
 
 ### Releases
 
-On a `v*` tag, Copr rebuilds automatically. The project has an SCM package (build method `make_srpm`) wired to this repo via a webhook; `.copr/Makefile` runs `packaging/fedora/make-srpm.sh`, which vendors the crate closure (Copr's SRPM phase has network) and assembles a self-contained SRPM, and Copr builds the RPM offline. Bump `Version:`/`Release:` in `sdme.spec` in the tagged commit so it builds the right version.
+On a `v*` tag, the `copr` job in `.github/workflows/release.yml` POSTs to the project's custom webhook. The project has an SCM package (build method `make_srpm`) pointed at this repo; `.copr/Makefile` runs `packaging/fedora/make-srpm.sh`, which vendors the crate closure (Copr's SRPM phase has network) and assembles a self-contained SRPM, and Copr builds the RPM offline. Copr builds `main` HEAD, so push `main` before the tag.
+
+Do not hand-edit `Version:`/`Release:`; run `packaging/bump-version.sh X.Y.Z` in the tagged commit. `make-srpm.sh` names the SRPM from the spec but builds `Source0` from the tree, so a spec lagging `Cargo.toml` ships new code under an old version, which is how v0.14.0 reached Copr labelled 0.13.1-1. `packaging/check-versions.sh` now guards that, both here and in the release workflow's `test` job.
+
+The el9 chroots need nothing special: no `BuildRequires` on systemd, `%check` runs only unit tests, Stream 9's AppStream has rust 1.95, and EPEL9 supplies `cargo-rpm-macros`. Hyperscale is a runtime concern for users, not a buildroot one.
 
 Manual fallback: `copr-cli build sdme dev/fedora-out/sdme-*.src.rpm`, or the **Rebuild** button on the Copr package page (builds the default branch).
 
