@@ -11,7 +11,7 @@
 %global crate sdme
 
 Name:           sdme
-Version:        0.14.0
+Version:        0.15.0
 Release:        1%{?dist}
 Summary:        The systemd machine editor
 
@@ -100,6 +100,9 @@ install -d %{buildroot}%{_datadir}/fish/vendor_completions.d
 %{_datadir}/fish/vendor_completions.d/%{crate}.fish
 
 %changelog
+* Fri Jul 17 2026 Alexandre Fiori <fiorix@gmail.com> - 0.15.0-1
+- Release 0.15.0.
+
 * Fri Jul 17 2026 Alexandre Fiori <fiorix@gmail.com> - 0.14.0-1
 - Accept bare syscall names in --system-call-filter, alongside the @group
   syntax systemd-nspawn already took, and make btrfs subvolume removal

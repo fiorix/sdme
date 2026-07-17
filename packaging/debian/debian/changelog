@@ -1,3 +1,9 @@
+sdme (0.15.0-1~resolute1) resolute; urgency=medium
+
+  * Release 0.15.0.
+
+ -- Alexandre Fiori <fiorix@gmail.com>  Fri, 17 Jul 2026 13:55:36 +0000
+
 sdme (0.14.0-1~resolute1) resolute; urgency=medium
 
   * Accept bare syscall names in --system-call-filter; recursive btrfs rm.
