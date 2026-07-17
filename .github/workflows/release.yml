@@ -306,21 +306,20 @@ jobs:
             echo "AUR_SSH_PRIVATE_KEY not set; skipping the AUR push."
             exit 0
           fi
-          mkdir -p ~/.ssh && chmod 700 ~/.ssh
-          printf '%s\n' "$AUR_SSH_KEY" > ~/.ssh/aur
-          chmod 600 ~/.ssh/aur
-          # Pinned, not ssh-keyscan'd: these are the fingerprints the AUR
-          # publishes at https://aur.archlinux.org/, so there is no reason to
-          # trust whatever answers on the day instead.
-          cat > ~/.ssh/known_hosts <<'EOF'
+          # Absolute paths, never ~. Bash expands ~ from $HOME, which the runner
+          # sets to /github/home for container jobs, but ssh expands it from the
+          # passwd entry (/root for this container). Writing to ~/.ssh therefore
+          # puts the key and known_hosts somewhere ssh never looks, which failed
+          # v0.15.0 with "Host key verification failed".
+          printf '%s\n' "$AUR_SSH_KEY" > /tmp/aur-key
+          chmod 600 /tmp/aur-key
+          # Pinned, not ssh-keyscan'd: this is the fingerprint the AUR publishes
+          # at https://aur.archlinux.org/, so there is no reason to trust
+          # whatever answers on the day instead.
+          cat > /tmp/aur-known-hosts <<'EOF'
           aur.archlinux.org ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEuBKrPzbawxA/k2g6NcyV5jmqwJ2s+zpgZGZ7tpLIcN
           EOF
-          cat > ~/.ssh/config <<'EOF'
-          Host aur.archlinux.org
-            User aur
-            IdentityFile ~/.ssh/aur
-            IdentitiesOnly yes
-          EOF
+          export GIT_SSH_COMMAND="ssh -i /tmp/aur-key -o IdentitiesOnly=yes -o UserKnownHostsFile=/tmp/aur-known-hosts -o StrictHostKeyChecking=yes"
           version="${GITHUB_REF_NAME#v}"
           git config --global user.name "Alexandre Fiori"
           git config --global user.email "fiorix@gmail.com"
