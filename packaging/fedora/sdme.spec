@@ -32,10 +32,11 @@ BuildRequires:  cargo-rpm-macros >= 25
 
 # systemd-nspawn and machinectl are provided by systemd-container.
 # The >= 255 floor matches every other channel (Debian control, both PKGBUILDs,
-# and the binary's own "Runs on Linux with systemd >= 255"). It is what keeps
-# the RPM off chroots that cannot run it: CentOS Stream 9 ships systemd 252, and
-# EPEL does not replace base packages, so without the floor dnf would install
-# sdme there and it would fail at runtime. Stream 10 ships 257.
+# and the binary's own "Runs on Linux with systemd >= 255"), so dnf decides at
+# install time instead of sdme failing at runtime. It earns its keep on el9:
+# Stream 9's base systemd is 252, but the CentOS Hyperscale SIG rebases it to
+# 260.x (.hs.el9), so one el9 RPM installs on a Hyperscale-enabled host and is
+# refused on a base Stream 9. Fedora and Stream 10 (257) clear it comfortably.
 Requires:       systemd >= 255
 Requires:       systemd-container
 # qemu-nbd (from qemu-img) is only needed for QCOW2 image import; sdme checks
