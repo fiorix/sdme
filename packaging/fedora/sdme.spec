@@ -101,7 +101,12 @@ install -d %{buildroot}%{_datadir}/fish/vendor_completions.d
 
 %changelog
 * Fri Jul 17 2026 Alexandre Fiori <fiorix@gmail.com> - 0.15.0-1
-- Release 0.15.0.
+- Require systemd >= 255 explicitly, which is the version sdme has always
+  needed, so dnf declines the install where it cannot run instead of letting
+  it fail at runtime. Fedora and CentOS Stream 10 are unaffected. On Stream 9
+  (systemd 252), enable the CentOS Hyperscale SIG, which rebases systemd to
+  260.x; dnf then pulls it in automatically.
+- Packaging release: no functional changes to sdme itself.
 
 * Fri Jul 17 2026 Alexandre Fiori <fiorix@gmail.com> - 0.14.0-1
 - Accept bare syscall names in --system-call-filter, alongside the @group

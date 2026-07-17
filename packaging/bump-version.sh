@@ -44,8 +44,10 @@ fi
 sed -i "0,/^version = \"$old\"/s//version = \"$version\"/" Cargo.toml
 
 # Cargo.lock: let cargo restate sdme's own entry. Not --locked, which would
-# refuse precisely because the lock is now out of date.
-cargo metadata --no-deps --format-version 1 >/dev/null
+# refuse precisely because the lock is now out of date, and NOT --no-deps, which
+# skips resolution entirely and so leaves the lock untouched: that shipped a
+# 0.15.0 Cargo.toml against a 0.14.0 Cargo.lock and broke every --locked build.
+cargo metadata --format-version 1 >/dev/null
 
 # Fedora spec: Version, a reset Release, and a new %changelog entry on top.
 sed -i "s/^Version:\(\s*\).*/Version:\1$version/" packaging/fedora/sdme.spec

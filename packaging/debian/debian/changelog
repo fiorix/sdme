@@ -1,6 +1,7 @@
 sdme (0.15.0-1~resolute1) resolute; urgency=medium
 
-  * Release 0.15.0.
+  * Packaging release: publish Arch Linux packages to the AUR. No functional
+    changes to sdme itself.
 
  -- Alexandre Fiori <fiorix@gmail.com>  Fri, 17 Jul 2026 13:55:36 +0000
 

@@ -39,6 +39,12 @@ report() {
 }
 
 echo "Cargo.toml version: $version"
+# Cargo.lock carries sdme's own version too, and a mismatch breaks every
+# --locked build (all of CI, Copr and Launchpad) rather than just mislabelling
+# a package. bump-version.sh once used `cargo metadata --no-deps`, which skips
+# resolution and left the lock behind; nothing here noticed.
+report "Cargo.lock" \
+    "$(awk '/^name = "sdme"$/{getline; if ($1=="version") {gsub(/"/,"",$3); print $3; exit}}' "$repo/Cargo.lock")"
 report "packaging/fedora/sdme.spec" \
     "$(grep -m1 '^Version:' "$repo/packaging/fedora/sdme.spec" | awk '{print $2}')"
 # The Debian changelog version is <upstream>-<debian revision>, e.g.
