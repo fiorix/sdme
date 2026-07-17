@@ -17,6 +17,12 @@ outdir="${1:?usage: make-srpm.sh <outdir>}"
 crate=sdme
 spec="packaging/fedora/$crate.spec"
 
+# Source0 below is built from the current tree, not downloaded, so the spec's
+# Version is the only thing naming the result. When it lags Cargo.toml the SRPM
+# ships new code under an old version, which is exactly how v0.14.0 reached Copr
+# labelled 0.13.1-1. Fail here rather than publish that again.
+bash packaging/check-versions.sh
+
 version=$(grep -m1 '^Version:' "$spec" | awk '{print $2}')
 [ -n "$version" ] || { echo "error: cannot read Version from $spec" >&2; exit 1; }
 

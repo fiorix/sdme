@@ -11,7 +11,7 @@
 %global crate sdme
 
 Name:           sdme
-Version:        0.13.1
+Version:        0.14.0
 Release:        1%{?dist}
 Summary:        The systemd machine editor
 
@@ -31,7 +31,12 @@ ExclusiveArch:  %{rust_arches}
 BuildRequires:  cargo-rpm-macros >= 25
 
 # systemd-nspawn and machinectl are provided by systemd-container.
-Requires:       systemd
+# The >= 255 floor matches every other channel (Debian control, both PKGBUILDs,
+# and the binary's own "Runs on Linux with systemd >= 255"). It is what keeps
+# the RPM off chroots that cannot run it: CentOS Stream 9 ships systemd 252, and
+# EPEL does not replace base packages, so without the floor dnf would install
+# sdme there and it would fail at runtime. Stream 10 ships 257.
+Requires:       systemd >= 255
 Requires:       systemd-container
 # qemu-nbd (from qemu-img) is only needed for QCOW2 image import; sdme checks
 # for it at runtime with a clear error. Suggests (not Recommends) so dnf does
@@ -94,6 +99,11 @@ install -d %{buildroot}%{_datadir}/fish/vendor_completions.d
 %{_datadir}/fish/vendor_completions.d/%{crate}.fish
 
 %changelog
+* Fri Jul 17 2026 Alexandre Fiori <fiorix@gmail.com> - 0.14.0-1
+- Accept bare syscall names in --system-call-filter, alongside the @group
+  syntax systemd-nspawn already took, and make btrfs subvolume removal
+  recursive so nested subvolumes no longer block `sdme rm`.
+
 * Wed Jul 15 2026 Alexandre Fiori <fiorix@gmail.com> - 0.13.1-1
 - Make the btrfs storage default usable: expose default_storage_backend and
   btrfs_pool_size in `sdme config get` and `sdme config set`, and fall back to

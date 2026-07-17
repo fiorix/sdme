@@ -36,6 +36,8 @@
       title: '.pkg.tar.zst Packages',
       distros: 'Arch Linux, CachyOS, and derivatives',
       deps: 'Requires <strong>systemd &ge; 255</strong> (includes systemd-nspawn on Arch)',
+      repo: '<strong>Arch Linux</strong>: also available from the AUR, as <a href="https://aur.archlinux.org/packages/sdme-bin">sdme-bin</a> (prebuilt) or <a href="https://aur.archlinux.org/packages/sdme">sdme</a> (built from source):',
+      repoCmd: 'yay -S sdme-bin',
       cmdTemplate: function(url, filename) {
         return 'curl -fSLO ' + url + ' && sudo pacman -U ' + filename;
       }

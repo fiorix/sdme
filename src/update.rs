@@ -41,11 +41,11 @@
 //! - Mirror: override the three URL knobs in `[update_check]` to point at
 //!   an internal release mirror.
 //!
-//! Distro package builds (Fedora Copr, Ubuntu Launchpad) disable all three
-//! pieces unconditionally: `build.rs` bakes in `SDME_CHANNEL` and, when it
-//! names a packaged channel, the probe and banner are suppressed and
-//! `sdme upgrade` prints guidance to use the system package manager instead of
-//! overwriting the dpkg/rpm-managed binary.
+//! Distro package builds (Fedora Copr, Ubuntu Launchpad, the AUR `sdme`
+//! package) disable all three pieces unconditionally: `build.rs` bakes in
+//! `SDME_CHANNEL` and, when it names a packaged channel, the probe and banner
+//! are suppressed and `sdme upgrade` prints guidance to use the system package
+//! manager instead of overwriting the dpkg/rpm/pacman-managed binary.
 //!
 //! [v]: crate::config::UpdateCheckConfig::version_url
 
@@ -71,7 +71,7 @@ const ENV_DISABLE: &str = "SDME_UPDATE_CHECK";
 /// Build channel, injected by `build.rs` from the `SDME_CHANNEL` env var.
 /// Defaults to `"source"` (built from source, or the install.sh musl binary),
 /// where self-upgrade is allowed. Distro package builds set `"copr"` /
-/// `"launchpad"`.
+/// `"launchpad"` / `"aur"`.
 fn build_channel() -> &'static str {
     option_env!("SDME_CHANNEL").unwrap_or("source")
 }
@@ -79,13 +79,17 @@ fn build_channel() -> &'static str {
 /// Whether `channel` is a distribution package build that must defer upgrades
 /// to the system package manager. Pure predicate (env-independent) so it can be
 /// unit-tested without depending on the ambient `SDME_CHANNEL`.
+///
+/// Only the AUR `sdme` package sets `"aur"`; `sdme-bin` repackages the release
+/// binary and cannot bake a channel in, so it self-manages like the other
+/// prebuilt packages.
 fn channel_is_packaged(channel: &str) -> bool {
-    matches!(channel, "copr" | "launchpad")
+    matches!(channel, "copr" | "launchpad" | "aur")
 }
 
-/// Whether this binary came from a distribution package (Copr/Launchpad). When
-/// true, the background probe, the banner, and `sdme upgrade` are all disabled
-/// so sdme does not overwrite dpkg/rpm-managed files.
+/// Whether this binary came from a distribution package (Copr/Launchpad/AUR).
+/// When true, the background probe, the banner, and `sdme upgrade` are all
+/// disabled so sdme does not overwrite dpkg/rpm/pacman-managed files.
 fn is_packaged_build() -> bool {
     channel_is_packaged(build_channel())
 }
@@ -108,6 +112,7 @@ fn packaged_upgrade_notice(channel: &str) -> String {
             "sudo apt update && sudo apt upgrade sdme",
             "sudo apt remove sdme",
         ),
+        "aur" => ("sudo pacman -Syu sdme", "sudo pacman -R sdme"),
         _ => ("your package manager", "your package manager"),
     };
     format!(
@@ -833,8 +838,10 @@ mod tests {
         // Distro package channels defer to the system package manager.
         assert!(channel_is_packaged("copr"));
         assert!(channel_is_packaged("launchpad"));
+        assert!(channel_is_packaged("aur"));
         // Everything else self-manages (install.sh musl binary, from-source,
-        // GitHub-release deb/rpm, unknown/future channels).
+        // GitHub-release deb/rpm, the AUR sdme-bin package, unknown/future
+        // channels).
         assert!(!channel_is_packaged("source"));
         assert!(!channel_is_packaged(""));
         assert!(!channel_is_packaged("github-musl"));
@@ -849,9 +856,13 @@ mod tests {
         let lp = packaged_upgrade_notice("launchpad");
         assert!(lp.contains("apt upgrade sdme"));
         assert!(lp.contains("apt remove sdme"));
-        // Both point at the standalone installer as the escape hatch.
+        let aur = packaged_upgrade_notice("aur");
+        assert!(aur.contains("pacman -Syu sdme"));
+        assert!(aur.contains("pacman -R sdme"));
+        // All point at the standalone installer as the escape hatch.
         assert!(copr.contains("https://sdme.io/install.sh"));
         assert!(lp.contains("https://sdme.io/install.sh"));
+        assert!(aur.contains("https://sdme.io/install.sh"));
     }
 
     #[test]

@@ -18,6 +18,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      # Every publishing job depends on this one, so a packaging version that
+      # lags Cargo.toml fails the release before anything ships. v0.14.0 went to
+      # Copr labelled 0.13.1 for want of this check.
+      - name: Check packaging versions
+        run: ./packaging/check-versions.sh
       - name: Run tests
         run: cargo test --locked --verbose
 
@@ -248,12 +253,102 @@ jobs:
           done
           [ -n "$uploaded" ] || { echo "dput failed after 3 attempts"; exit 1; }
 
+  # Publish both AUR packages: `sdme` (built from the tag tarball by the user)
+  # and `sdme-bin` (repackages this release's static binaries). The AUR has no
+  # build service, so a push IS the publish and nothing validates the PKGBUILD
+  # server-side: makepkg runs here first, and only a green build gets pushed.
+  # Needs `release` because sdme-bin sources the release assets, and because a
+  # release that failed to build is not one to hand to Arch users. No-ops
+  # without the SSH secret (e.g. on forks).
+  aur:
+    needs: release
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    strategy:
+      # Independent AUR repos, so let one publish even if the other breaks.
+      fail-fast: false
+      matrix:
+        pkgbase: [sdme, sdme-bin]
+    steps:
+      - name: Install build tools
+        # Refresh the keyring first: if the image predates a signing key rotation
+        # the subsequent -Su fails on "signature is unknown trust".
+        run: |
+          pacman -Sy --needed --noconfirm archlinux-keyring
+          pacman -Su --needed --noconfirm base-devel git rust openssh
+
+      - uses: actions/checkout@v5
+
+      # makepkg refuses to run as root, and the container runs steps as root.
+      - name: Create the builder user
+        run: |
+          useradd -m builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+
+      - name: Render the package
+        run: |
+          runuser -u builder -- env HOME=/home/builder \
+            bash packaging/arch/make-aur-package.sh \
+              "${{ matrix.pkgbase }}" "${GITHUB_REF_NAME#v}" "$GITHUB_WORKSPACE/aur-out"
+
+      - name: Test build
+        run: |
+          runuser -u builder -- env HOME=/home/builder \
+            bash -c 'cd "$0" && makepkg -f --noconfirm' \
+              "$GITHUB_WORKSPACE/aur-out/${{ matrix.pkgbase }}"
+
+      - name: Push to the AUR
+        env:
+          AUR_SSH_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          PKGBASE: ${{ matrix.pkgbase }}
+        run: |
+          if [ -z "$AUR_SSH_KEY" ]; then
+            echo "AUR_SSH_PRIVATE_KEY not set; skipping the AUR push."
+            exit 0
+          fi
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$AUR_SSH_KEY" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          # Pinned, not ssh-keyscan'd: these are the fingerprints the AUR
+          # publishes at https://aur.archlinux.org/, so there is no reason to
+          # trust whatever answers on the day instead.
+          cat > ~/.ssh/known_hosts <<'EOF'
+          aur.archlinux.org ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEuBKrPzbawxA/k2g6NcyV5jmqwJ2s+zpgZGZ7tpLIcN
+          EOF
+          cat > ~/.ssh/config <<'EOF'
+          Host aur.archlinux.org
+            User aur
+            IdentityFile ~/.ssh/aur
+            IdentitiesOnly yes
+          EOF
+          version="${GITHUB_REF_NAME#v}"
+          git config --global user.name "Alexandre Fiori"
+          git config --global user.email "fiorix@gmail.com"
+          git clone "ssh://aur@aur.archlinux.org/$PKGBASE.git" /tmp/aur
+          # Only these three files belong in an AUR repo; the test build left
+          # src/ and pkg/ behind next to them.
+          cp "$GITHUB_WORKSPACE/aur-out/$PKGBASE"/{PKGBUILD,.SRCINFO,sdme.install} /tmp/aur/
+          cd /tmp/aur
+          git add PKGBUILD .SRCINFO sdme.install
+          if git diff --cached --quiet; then
+            echo "$PKGBASE is already at $version on the AUR; nothing to push."
+            exit 0
+          fi
+          git commit -m "upgpkg: $PKGBASE $version-1"
+          # HEAD:master, not master: the local branch is whatever init.defaultBranch
+          # says, which is not necessarily what the AUR wants. Cloning an existing
+          # repo happens to give master, but an empty one (a package that does not
+          # exist yet) gives the default and then "push origin master" fails with
+          # "src refspec master does not match any".
+          git push origin HEAD:master
+
   # Poke Fedora Copr to rebuild the SCM package. Copr builds its configured
   # committish (the default branch), which equals the tag once the release
   # procedure has pushed main before the tag. Makes the trigger visible in this
   # workflow instead of relying on an external GitHub->Copr webhook. No-op
   # without the webhook secret.
   copr:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - name: Trigger Copr build
