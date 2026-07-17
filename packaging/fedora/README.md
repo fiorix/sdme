@@ -70,7 +70,16 @@ On a `v*` tag, the `copr` job in `.github/workflows/release.yml` POSTs to the pr
 
 Do not hand-edit `Version:`/`Release:`; run `packaging/bump-version.sh X.Y.Z` in the tagged commit. `make-srpm.sh` names the SRPM from the spec but builds `Source0` from the tree, so a spec lagging `Cargo.toml` ships new code under an old version, which is how v0.14.0 reached Copr labelled 0.13.1-1. `packaging/check-versions.sh` now guards that, both here and in the release workflow's `test` job.
 
-The el9 chroots need nothing special: no `BuildRequires` on systemd, `%check` runs only unit tests, Stream 9's AppStream has rust 1.95, and EPEL9 supplies `cargo-rpm-macros`. Hyperscale is a runtime concern for users, not a buildroot one.
+Nothing `BuildRequires` systemd and `%check` runs only unit tests, so the CentOS Stream buildroots turn only on the Rust toolchain being present. The `BuildRequires: cargo-rpm-macros >= 25` is the deciding dependency, and where it lives differs by chroot:
+
+- **`centos-stream+epel-next-9`** bundles EPEL, which supplies `cargo-rpm-macros` (Stream 9's AppStream has rust 1.95). Works out of the box.
+- **`centos-stream-10`** has `rust`/`cargo` in AppStream but **not** `cargo-rpm-macros`; Copr offers no `+epel-next-10` variant that would. So the Copr project carries EPEL 10 as an external repo:
+  ```
+  https://dl.fedoraproject.org/pub/epel/10/Everything/$basearch/
+  ```
+  Set under Copr -> the project -> Settings -> External Repositories. Without it the build fails at dependency install with `No matching package to install: 'cargo-rpm-macros >= 25'`, which is what happened to the first v0.15.0 build. This is a buildroot concern only; users installing the prebuilt RPM need no external repo.
+
+Hyperscale (see the CentOS Stream section above) is likewise a runtime concern for users, not a buildroot one.
 
 Manual fallback: `copr-cli build sdme dev/fedora-out/sdme-*.src.rpm`, or the **Rebuild** button on the Copr package page (builds the default branch).
 
