@@ -1,7 +1,7 @@
 +++
 title = "Running Docker and a Registry Inside a Container"
 description = "Run a full Docker engine and a private registry inside an sdme container, backed by btrfs storage."
-weight = 13
+weight = 14
 +++
 
 sdme containers run a full systemd init, which is enough to host a nested container engine. This tutorial runs a complete Docker install inside an sdme container: a private registry, an image build, and containers launched from that registry, all without touching the host's Docker (there does not need to be one).

@@ -51,9 +51,9 @@ For common operations like creating, joining, or stopping containers, you can ad
 alias sdme='limactl shell ubuntu sudo sdme'
 ```
 
-This lets you run commands like `sdme new`, `sdme join`, `sdme ps`, and `sdme stop` directly from the Mac terminal.
+This lets you run commands like `sdme new`, `sdme join`, `sdme ps`, and `sdme stop` directly from the Mac terminal. Filesystem operations such as `fs import`, `fs build`, and `cp` also work fine through the alias.
 
-For operations that interact with the filesystem more heavily (`fs import`, `fs export`, `fs build`, `cp`, etc.), enter the VM directly by running `limactl shell ubuntu` and work from inside it.
+The exception is `fs export`, which writes its output archive inside the VM. Run it from inside the VM (`limactl shell ubuntu`), then copy the archive out with `limactl copy`.
 
 ## Known limitations
 

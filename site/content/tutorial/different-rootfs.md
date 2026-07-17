@@ -1,7 +1,7 @@
 +++
 title = "Using a Different Root Filesystem"
 description = "Import other Linux distributions and create containers from them."
-weight = 3
+weight = 4
 +++
 
 By default, `sdme new` creates an overlayfs clone of your host root filesystem. You can also import and use other distributions.

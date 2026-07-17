@@ -1,7 +1,7 @@
 +++
 title = "Your First Container"
 description = "Create a container, manage it, and learn how to run background processes like tmux."
-weight = 2
+weight = 3
 +++
 
 sdme runs full Linux systems as containers, not just application processes. Each container boots its own [systemd](https://systemd.io/) init, has its own journal, and supports `systemctl`, `journalctl`, and everything you would expect on a real machine. If you are coming from Docker or Podman, think of it as a lightweight VM without the hypervisor overhead.

@@ -1,7 +1,7 @@
 +++
 title = "Running Kubernetes Pods"
 description = "Deploy OCI applications from Kubernetes Pod YAML manifests."
-weight = 11
+weight = 12
 +++
 
 sdme can create containers from Kubernetes Pod YAML manifests without requiring Kubernetes, Docker, Podman, or any OCI runtime. Everything is wired through sdme and systemd: OCI images are pulled directly from registries and run as systemd services inside nspawn containers.

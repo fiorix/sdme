@@ -1,7 +1,7 @@
 +++
 title = "Running Long-Lived Services"
 description = "Install and run services like nginx inside sdme containers."
-weight = 5
+weight = 6
 +++
 
 Since sdme containers boot a full systemd, you can install and run services the same way you would on a regular Linux system.

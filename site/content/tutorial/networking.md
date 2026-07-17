@@ -1,7 +1,7 @@
 +++
 title = "Network Configuration"
 description = "Configure container networking: host network, private network, veth, zones, bridges, and port forwarding."
-weight = 9
+weight = 10
 +++
 
 sdme containers share the host network by default. This tutorial covers all available network modes, from full isolation to multi-container networking.
@@ -153,7 +153,13 @@ The default masked services are controlled by the `default_create_masked_service
 ## Summary
 
 <pre class="diagram">
-Mode             Flag                Internet  Multi-container  Setup ---------------  ------------------  --------  ---------------  ---------- Host (default)   (none)              Yes       Shared ports     None Private          --private-network   No        No               None Veth             --network-veth      Yes       No               None Zone             --network-zone=X    Yes       Yes (auto DNS)   None Bridge           --network-bridge=X  Yes       Yes (manual IP)  Host bridge
+Mode             Flag                Internet  Multi-container  Setup
+---------------  ------------------  --------  ---------------  ----------
+Host (default)   (none)              Yes       Shared ports     None
+Private          --private-network   No        No               None
+Veth             --network-veth      Yes       No               None
+Zone             --network-zone=X    Yes       Yes (auto DNS)   None
+Bridge           --network-bridge=X  Yes       Yes (manual IP)  Host bridge
 </pre>
 
 Port forwarding (`--port`) works with veth, zone, and bridge modes for external access. From the host, use the container's IP directly.

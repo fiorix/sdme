@@ -1,7 +1,7 @@
 +++
 title = "Running an OCI Database with Volumes"
 description = "Run PostgreSQL with automatically managed OCI volumes that persist data across container removal and re-creation."
-weight = 8
+weight = 9
 +++
 
 Some OCI images declare volumes for data directories that should persist independently from the container. sdme detects these declarations and automatically creates host-side directories that are bind-mounted into the container.

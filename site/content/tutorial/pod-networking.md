@@ -1,7 +1,7 @@
 +++
 title = "Multi-Container Pod Networking"
 description = "Share a network namespace between containers so they communicate via localhost."
-weight = 10
+weight = 11
 +++
 
 Pods let multiple containers share a network namespace, so they can communicate over `127.0.0.1` without any port forwarding or bridge configuration. This is the same model used by Kubernetes pods.

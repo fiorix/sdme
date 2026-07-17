@@ -1,7 +1,7 @@
 +++
 title = "Day-to-Day Management"
 description = "Essential commands for managing containers: listing, logs, copying files, and troubleshooting."
-weight = 4
+weight = 5
 +++
 
 This tutorial covers the commands you'll use daily when working with sdme containers.
