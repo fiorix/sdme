@@ -132,7 +132,9 @@ mod tests {
 
     #[test]
     fn resolve_btrfs_default_falls_back_on_host_rootfs() {
-        // btrfs default + imported rootfs -> btrfs.
+        // btrfs default + imported rootfs -> btrfs. This is the kube pod path,
+        // which always uses an imported base rootfs and should honor a btrfs
+        // default from config.
         assert_eq!(
             Backend::resolve(None, "btrfs", false).unwrap(),
             Backend::Btrfs

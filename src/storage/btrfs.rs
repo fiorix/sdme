@@ -26,9 +26,9 @@ use super::pool;
 use crate::{check_interrupted, copy};
 
 /// Subdirectory under the pool root holding base (immutable) subvolumes.
-const FS_SUBDIR: &str = "fs";
+pub(crate) const FS_SUBDIR: &str = "fs";
 /// Subdirectory under the pool root holding per-container subvolumes.
-const CONTAINERS_SUBDIR: &str = "containers";
+pub(crate) const CONTAINERS_SUBDIR: &str = "containers";
 
 /// Path of the base subvolume for rootfs `base` under `pool_root`.
 pub fn base_subvol(pool_root: &Path, base: &str) -> PathBuf {

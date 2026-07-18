@@ -22,6 +22,9 @@ pub struct CreateOptions {
     pub name: Option<String>,
     /// Imported rootfs name; `None` means host rootfs.
     pub rootfs: Option<String>,
+    /// Explicit rootfs path; when set, overrides the `{datadir}/fs/{rootfs}`
+    /// lookup. Used by kube to point at a btrfs subvolume rootfs.
+    pub rootfs_path: Option<PathBuf>,
     /// Resource limits (memory, CPU).
     pub limits: ResourceLimits,
     /// Network configuration (private network, ports).
@@ -42,7 +45,7 @@ pub struct CreateOptions {
     pub oci_volumes: Vec<String>,
     /// OCI environment variables from the image.
     pub oci_envs: Vec<String>,
-    /// Systemd services to mask in the overlayfs upper layer at create time.
+    /// Systemd services to mask in the writable root layer at create time.
     pub masked_services: Vec<String>,
     /// Storage backend for the container root (overlay or btrfs).
     pub backend: Backend,
@@ -89,7 +92,10 @@ pub fn create(datadir: &Path, opts: &CreateOptions, verbose: bool) -> Result<Str
     if verbose {
         eprintln!("no conflicts found");
     }
-    let rootfs = resolve_rootfs(datadir, opts.rootfs.as_deref())?;
+    let rootfs = match &opts.rootfs_path {
+        Some(p) => p.clone(),
+        None => resolve_rootfs(datadir, opts.rootfs.as_deref())?,
+    };
     if verbose {
         eprintln!("rootfs: {}", rootfs.display());
     }

@@ -41,6 +41,12 @@ pub struct KubeCreateOptions<'a> {
     pub yaml_content: &'a str,
     /// Name of the base rootfs to use.
     pub base_fs: &'a str,
+    /// Storage backend for the pod root.
+    pub backend: crate::storage::Backend,
+    /// Resource limits (memory, CPU, disk). Disk is only enforced on btrfs.
+    pub limits: crate::ResourceLimits,
+    /// Mode B btrfs pool image size (ignored for overlay).
+    pub pool_size: String,
     /// Docker Hub credentials `(user, token)` for authenticated pulls.
     pub docker_credentials: Option<(&'a str, &'a str)>,
     /// OCI blob cache for registry downloads.
@@ -63,12 +69,14 @@ pub struct KubeCreateOptions<'a> {
     pub security: crate::SecurityConfig,
     /// Whether `--hardened` or `--strict` was specified (forces private network).
     pub hardened: bool,
-    /// Systemd services to mask in the overlayfs upper layer at create time.
+    /// Systemd services to mask in the writable root layer at create time.
     pub masked_services: Vec<String>,
 }
 
 /// Create a kube pod: parse YAML, pull images, build combined rootfs, create container.
 ///
+/// The combined rootfs is either a plain directory (overlay backend) or a btrfs
+/// subvolume snapshot (btrfs backend), depending on `opts.backend`.
 /// Returns the container name on success.
 pub fn kube_create(datadir: &Path, opts: &KubeCreateOptions<'_>) -> Result<String> {
     validate_name(opts.base_fs)?;
@@ -91,24 +99,17 @@ pub fn kube_create(datadir: &Path, opts: &KubeCreateOptions<'_>) -> Result<Strin
     // If a kube pod already exists with this name, delete it first (idempotent apply).
     // The kube rootfs lock is acquired AFTER this block to avoid self-deadlock
     // (kube_delete also acquires it).
-    if final_dir.exists() {
-        let state_path = datadir.join("state").join(&plan.pod_name);
-        if state_path.exists() {
-            let state = State::read_from(&state_path)?;
-            if state.is_yes("KUBE") {
-                eprintln!("replacing existing kube pod '{}'", plan.pod_name);
-                kube_delete(datadir, &plan.pod_name, false, opts.verbose)?;
-            } else {
-                bail!(
-                    "rootfs already exists: {rootfs_name}; \
-                     a non-kube container '{}' owns it (use --force with kube delete)",
-                    plan.pod_name
-                );
-            }
+    let state_path = datadir.join("state").join(&plan.pod_name);
+    if state_path.exists() {
+        let state = State::read_from(&state_path)?;
+        if state.is_yes("KUBE") {
+            eprintln!("replacing existing kube pod '{}'", plan.pod_name);
+            kube_delete(datadir, &plan.pod_name, false, opts.verbose)?;
         } else {
             bail!(
-                "rootfs already exists: {rootfs_name}; \
-                 no matching container found, remove it manually with: sdme fs rm {rootfs_name}"
+                "container '{}' already exists and is not a kube pod; \
+                 use --force with kube delete to remove it",
+                plan.pod_name
             );
         }
     }
@@ -117,23 +118,70 @@ pub fn kube_create(datadir: &Path, opts: &KubeCreateOptions<'_>) -> Result<Strin
     let _rootfs_lock = crate::lock::lock_exclusive(datadir, "fs", &rootfs_name)
         .with_context(|| format!("cannot lock rootfs '{rootfs_name}' for kube create"))?;
 
-    // 1. Copy base rootfs to staging dir.
-    let mut txn = crate::txn::Txn::new(
-        &rootfs_dir,
-        &rootfs_name,
-        crate::txn::TxnKind::Import,
-        opts.auto_gc,
-        opts.verbose,
-    );
-    txn.prepare()?;
-    let staging_dir = txn.path().to_path_buf();
+    // 1. Prepare the writable rootfs staging area. Overlay uses a plain directory
+    //    under {datadir}/fs; btrfs builds directly as a subvolume under the pool.
+    let mut txn: Option<crate::txn::Txn> = None;
+    let (staging_dir, rootfs_path, btrfs_staging) = match opts.backend {
+        crate::storage::Backend::Overlay => {
+            let t = crate::txn::Txn::new(
+                &rootfs_dir,
+                &rootfs_name,
+                crate::txn::TxnKind::Import,
+                opts.auto_gc,
+                opts.verbose,
+            );
+            t.prepare()?;
+            let staging = t.path().to_path_buf();
+            txn = Some(t);
+            (staging, None, None)
+        }
+        crate::storage::Backend::Btrfs => {
+            let pool_root =
+                crate::storage::pool::ensure_ready(datadir, &opts.pool_size, opts.verbose)?;
+            crate::storage::btrfs::ensure_base(
+                datadir,
+                &pool_root,
+                opts.base_fs,
+                &base_dir,
+                opts.verbose,
+            )?;
+            let fs_dir = pool_root.join(crate::storage::btrfs::FS_SUBDIR);
+            fs::create_dir_all(&fs_dir)
+                .with_context(|| format!("failed to create {}", fs_dir.display()))?;
+            let tmp = fs_dir.join(format!(".{rootfs_name}.tmp-{}", std::process::id()));
+            let final_subvol = fs_dir.join(&rootfs_name);
+            if tmp.exists() {
+                let _ = crate::storage::btrfs::delete_subvol(&tmp, opts.verbose);
+            }
+            if final_subvol.exists() {
+                // A leftover from a crashed previous create; reclaim it.
+                let _ = crate::storage::btrfs::delete_subvol(&final_subvol, opts.verbose);
+            }
+            crate::storage::btrfs::snapshot(&fs_dir.join(opts.base_fs), &tmp, false, opts.verbose)
+                .with_context(|| format!("failed to snapshot base rootfs for {rootfs_name}"))?;
+            (
+                tmp.clone(),
+                Some(final_subvol.clone()),
+                Some((tmp, final_subvol)),
+            )
+        }
+    };
 
-    eprintln!(
-        "copying base rootfs '{}' to staging directory",
-        opts.base_fs
-    );
-    crate::copy::copy_tree(&base_dir, &staging_dir, opts.verbose)
-        .with_context(|| format!("failed to copy base rootfs from {}", base_dir.display()))?;
+    // For overlay, copy the base rootfs into the empty staging directory.
+    // For btrfs, the staging directory is already a CoW snapshot of the base.
+    if opts.backend == crate::storage::Backend::Overlay {
+        eprintln!(
+            "copying base rootfs '{}' to staging directory",
+            opts.base_fs
+        );
+        crate::copy::copy_tree(&base_dir, &staging_dir, opts.verbose)
+            .with_context(|| format!("failed to copy base rootfs from {}", base_dir.display()))?;
+    } else if opts.verbose {
+        eprintln!(
+            "using btrfs subvolume snapshot of base rootfs '{}'",
+            opts.base_fs
+        );
+    }
 
     // 2. Create /oci/apps/ and /oci/volumes/ directories.
     let apps_dir = staging_dir.join("oci/apps");
@@ -405,8 +453,23 @@ WantedBy=multi-user.target
             .with_context(|| format!("failed to symlink {}", symlink_path.display()))?;
     }
 
-    // 5. Atomic rename.
-    txn.commit(&final_dir)?;
+    // 5. Atomic rename / subvolume commit.
+    match btrfs_staging {
+        Some((tmp, final_subvol)) => {
+            fs::rename(&tmp, &final_subvol).with_context(|| {
+                format!(
+                    "failed to rename {} to {}",
+                    tmp.display(),
+                    final_subvol.display()
+                )
+            })?;
+        }
+        None => {
+            if let Some(mut t) = txn.take() {
+                t.commit(&final_dir)?;
+            }
+        }
+    }
 
     // Release the exclusive rootfs lock before container creation.
     // containers::create() acquires a shared lock on the same rootfs,
@@ -478,6 +541,10 @@ WantedBy=multi-user.target
     let create_opts = crate::containers::CreateOptions {
         name: Some(plan.pod_name.clone()),
         rootfs: Some(rootfs_name.clone()),
+        rootfs_path: rootfs_path.clone(),
+        backend: opts.backend,
+        limits: opts.limits.clone(),
+        pool_size: opts.pool_size.clone(),
         network,
         binds,
         pod: opts.pod.map(String::from),
@@ -532,14 +599,29 @@ pub fn kube_delete(datadir: &Path, name: &str, force: bool, verbose: bool) -> Re
     // Stop and remove the container.
     crate::containers::remove(datadir, name, verbose)?;
 
-    // Remove the rootfs.
+    // Remove the rootfs. For btrfs it is a subvolume under the pool; for
+    // overlay it is a plain directory under {datadir}/fs.
     if !rootfs_name.is_empty() {
-        let rootfs_path = datadir.join("fs").join(&rootfs_name);
-        if rootfs_path.exists() {
-            eprintln!("removing rootfs: {rootfs_name}");
-            let _ = make_removable(&rootfs_path);
-            fs::remove_dir_all(&rootfs_path)
-                .with_context(|| format!("failed to remove {}", rootfs_path.display()))?;
+        let backend = crate::storage::Backend::from_state(&state);
+        if backend == crate::storage::Backend::Btrfs {
+            if let Ok(pool_root) = crate::storage::pool::ensure_mounted(datadir, verbose) {
+                let subvol = pool_root
+                    .join(crate::storage::btrfs::FS_SUBDIR)
+                    .join(&rootfs_name);
+                if crate::storage::btrfs::is_subvolume(&subvol) {
+                    eprintln!("removing rootfs: {rootfs_name}");
+                    crate::storage::btrfs::delete_subvol(&subvol, verbose)
+                        .with_context(|| format!("failed to remove {}", subvol.display()))?;
+                }
+            }
+        } else {
+            let rootfs_path = datadir.join("fs").join(&rootfs_name);
+            if rootfs_path.exists() {
+                eprintln!("removing rootfs: {rootfs_name}");
+                let _ = make_removable(&rootfs_path);
+                fs::remove_dir_all(&rootfs_path)
+                    .with_context(|| format!("failed to remove {}", rootfs_path.display()))?;
+            }
         }
     }
 

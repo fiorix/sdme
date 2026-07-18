@@ -7,7 +7,7 @@ description: Operational guidance for using sdme and troubleshooting sdme-manage
 
 ## Operating Model
 
-Treat sdme as a rootful systemd-nspawn and overlayfs manager. It creates containers with writable overlayfs upper layers, boots a full systemd as PID 1 inside each container, and drives host systemd/machined over D-Bus.
+Treat sdme as a rootful systemd-nspawn container manager. Containers use either an overlayfs upper layer or a btrfs subvolume snapshot as their writable root, boot a full systemd as PID 1, and drive host systemd/machined over D-Bus.
 
 Prefer the current binary as source of truth. Run `sdme --help`, `sdme <command> --help`, and `sdme dump-skill` when behavior may have changed. Prefer repository docs and source over memory when editing sdme.
 
@@ -142,6 +142,8 @@ For zones and pod networks, verify pod membership, bridge/veth names, DHCP lease
 ## Pods And Kubernetes
 
 Use `sdme kube apply` to run Kubernetes Pod YAML, and `sdme pod` to manage pod lifecycle and networking. Pods and OCI workloads ultimately run as sdme containers, so the lifecycle, stop/start, and logs diagnostics above apply directly.
+
+`sdme kube apply` and `sdme kube create` accept `--storage overlay|btrfs` and `--disk` with the same semantics as `sdme new`. On btrfs, the combined pod rootfs is built as a copy-on-write subvolume snapshot of `--base-fs`, so multi-container pods get the same fast CoW behavior and optional disk caps as regular btrfs containers.
 
 For Kubernetes-specific failures, check Pod YAML parsing, probe readiness (`probe-ready` files under `/oci/apps/{name}/`), and `sdme kube secret`/`sdme kube configmap` data used for env references and projected volumes.
 

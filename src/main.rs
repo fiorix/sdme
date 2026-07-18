@@ -876,6 +876,9 @@ WORKFLOW:
     # Apply a Pod YAML
     sdme kube apply -f pod.yaml --base-fs ubuntu
 
+    # Apply with btrfs storage and a disk cap
+    sdme kube apply -f pod.yaml --base-fs ubuntu --storage btrfs --disk 4G
+
     # Interact with the container
     sdme join <podname> --oci
     sdme exec <podname> --oci -- curl localhost:8080
@@ -1698,6 +1701,14 @@ enum KubeCommand {
         #[arg(long)]
         base_fs: Option<String>,
 
+        /// Storage backend for the pod root: overlay (default) or btrfs
+        #[arg(long)]
+        storage: Option<String>,
+
+        /// Disk cap for the pod root, btrfs storage only (e.g. 200M, 2G)
+        #[arg(long)]
+        disk: Option<String>,
+
         /// Boot timeout in seconds (overrides config, default: 60)
         #[arg(short, long)]
         timeout: Option<u64>,
@@ -1716,7 +1727,7 @@ enum KubeCommand {
         #[command(flatten)]
         security: SecurityArgs,
 
-        /// Systemd services to mask in the overlayfs upper layer (comma-separated, overrides config default)
+        /// Systemd services to mask in the writable root layer (comma-separated, overrides config default)
         #[arg(long, value_delimiter = ',')]
         masked_services: Option<Vec<String>>,
 
@@ -1734,6 +1745,14 @@ enum KubeCommand {
         #[arg(long)]
         base_fs: Option<String>,
 
+        /// Storage backend for the pod root: overlay (default) or btrfs
+        #[arg(long)]
+        storage: Option<String>,
+
+        /// Disk cap for the pod root, btrfs storage only (e.g. 200M, 2G)
+        #[arg(long)]
+        disk: Option<String>,
+
         /// Join a pod network namespace (entire container runs in the pod's netns)
         #[arg(long)]
         pod: Option<String>,
@@ -1748,7 +1767,7 @@ enum KubeCommand {
         #[command(flatten)]
         security: SecurityArgs,
 
-        /// Systemd services to mask in the overlayfs upper layer (comma-separated, overrides config default)
+        /// Systemd services to mask in the writable root layer (comma-separated, overrides config default)
         #[arg(long, value_delimiter = ',')]
         masked_services: Option<Vec<String>>,
 
@@ -2415,6 +2434,7 @@ fn run() -> Result<()> {
             let opts = containers::CreateOptions {
                 name,
                 rootfs: fs,
+                rootfs_path: None,
                 limits,
                 backend,
                 pool_size: cfg.btrfs_pool_size.clone(),
@@ -2760,6 +2780,7 @@ fn run() -> Result<()> {
             let opts = containers::CreateOptions {
                 name,
                 rootfs: fs,
+                rootfs_path: None,
                 limits,
                 backend,
                 pool_size: cfg.btrfs_pool_size.clone(),
@@ -3192,6 +3213,8 @@ fn run() -> Result<()> {
             KubeCommand::Apply {
                 file,
                 base_fs,
+                storage,
+                disk,
                 timeout,
                 pod,
                 oci_pod,
@@ -3216,6 +3239,14 @@ fn run() -> Result<()> {
                 let base_fs = effective_base_fs
                     .as_deref()
                     .context("--base-fs is required (or set default with: sdme config set default_base_fs <name>)")?;
+                let limits = cli::parse_limits(None, None, None, disk)?;
+                // Kube pods always use an imported base rootfs (--base-fs), so a
+                // configured btrfs default is honored without host-rootfs fallback.
+                let backend = storage::Backend::resolve(
+                    storage.as_deref(),
+                    &cfg.default_storage_backend,
+                    false,
+                )?;
                 let kube_network = parse_network(net_args)?;
                 retain_net_raw_for_dhcp(&mut sec, &kube_network);
                 let masked_services =
@@ -3231,6 +3262,9 @@ fn run() -> Result<()> {
                     &kube::KubeCreateOptions {
                         yaml_content: &yaml_content,
                         base_fs,
+                        backend,
+                        limits,
+                        pool_size: cfg.btrfs_pool_size.clone(),
                         docker_credentials: docker_creds_ref,
                         cache: &blob_cache,
                         pod: pod.as_deref(),
@@ -3271,6 +3305,8 @@ fn run() -> Result<()> {
             KubeCommand::Create {
                 file,
                 base_fs,
+                storage,
+                disk,
                 pod,
                 oci_pod,
                 network: net_args,
@@ -3294,6 +3330,14 @@ fn run() -> Result<()> {
                 let base_fs = effective_base_fs
                     .as_deref()
                     .context("--base-fs is required (or set default with: sdme config set default_base_fs <name>)")?;
+                let limits = cli::parse_limits(None, None, None, disk)?;
+                // Kube pods always use an imported base rootfs (--base-fs), so a
+                // configured btrfs default is honored without host-rootfs fallback.
+                let backend = storage::Backend::resolve(
+                    storage.as_deref(),
+                    &cfg.default_storage_backend,
+                    false,
+                )?;
                 let kube_network = parse_network(net_args)?;
                 retain_net_raw_for_dhcp(&mut sec, &kube_network);
                 let masked_services =
@@ -3309,6 +3353,9 @@ fn run() -> Result<()> {
                     &kube::KubeCreateOptions {
                         yaml_content: &yaml_content,
                         base_fs,
+                        backend,
+                        limits,
+                        pool_size: cfg.btrfs_pool_size.clone(),
                         docker_credentials: docker_creds_ref,
                         cache: &blob_cache,
                         pod: pod.as_deref(),
