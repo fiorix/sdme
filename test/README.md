@@ -83,6 +83,14 @@ verify-kube-L3-volumes.sh    emptyDir, hostPath, PVC, configMap, secret
 verify-kube-L4-networking.sh Inter-container localhost networking
 verify-kube-L5-redis-stack.sh Redis multi-container pod
 verify-kube-L6-gitea-stack.sh Gitea + MySQL + Nginx stack
+verify-nested-userns.sh      Nested UID/GID range reservation
+```
+
+Set `KUBE_STORAGE=btrfs` to run all kube suites against the btrfs storage backend instead of the default overlayfs:
+
+```bash
+sudo env KUBE_STORAGE=btrfs ./test/scripts/verify-kube-L1-basic.sh
+sudo env KUBE_STORAGE=btrfs make e2e
 ```
 
 ## Prerequisites
@@ -110,6 +118,10 @@ NixOS activation replaces /etc/systemd/system with an immutable symlink to the N
 
 Redis 8+ treats locale config failure as fatal. Set `LANG=C.UTF-8` via `--oci-env` or kube YAML `env`. The test suite applies this automatically via `fix_redis_oci()` in lib.sh.
 
+### Docker-in-container needs working veth DHCP
+
+The docker/registry tutorial test needs outbound internet inside a `--network-veth` container, which depends on the host's nspawn DHCP/NAT (systemd-networkd's `80-container-ve.network`). Hosts where the container never gets a lease (no default route on `host0`) skip the network-dependent steps (`docker/install` onward) instead of failing.
+
 ## Adding new tests
 
 1. Choose a unique prefix for artifacts. Use `cleanup_prefix "prefix-"` in the cleanup trap.
@@ -120,9 +132,9 @@ Redis 8+ treats locale config failure as fatal. Set `LANG=C.UTF-8` via `--oci-en
 
 ## Results
 
-Last verified: 2026-04-23
+Last verified: 2026-07-18
 
-System: Linux 7.0.0-14-generic (aarch64), systemd 259, sdme 0.7.0, AppArmor enabled. Archlinux skipped on aarch64 (no official ARM image); see filter_distros_by_arch() in lib.sh.
+System: Linux 7.0.12-1-cachyos (x86_64), systemd 260, sdme 0.16.0. Skips: 2 AppArmor (not active on this host), 1 qemu-nbd (not installed), 8 docker-in-container (host's nspawn veth provides no DHCP lease; see Known limitations).
 
 ```
 Test Suite                 Pass  Fail  Skip  Status
@@ -130,8 +142,8 @@ Test Suite                 Pass  Fail  Skip  Status
 verify-build                 11     0     0  PASS
 verify-cp                    17     0     0  PASS
 verify-diff                   9     0     0  PASS
-verify-distro-boot           54     0     0  PASS
-verify-distro-oci           150     0     0  PASS
+verify-distro-boot           63     0     0  PASS
+verify-distro-oci           175     0     0  PASS
 verify-export                23     0     0  PASS
 verify-kube-L1-basic         14     0     0  PASS
 verify-kube-L2-probes        41     0     0  PASS
@@ -142,18 +154,30 @@ verify-kube-L3-volumes       39     0     0  PASS
 verify-kube-L4-networking     6     0     0  PASS
 verify-kube-L5-redis-stack    6     0     0  PASS
 verify-kube-L6-gitea-stack   15     0     0  PASS
+verify-nested-userns          7     0     0  PASS
 verify-network                9     0     0  PASS
 verify-nixos                 26     0     0  PASS
 verify-oci                   18     0     0  PASS
 verify-pods                   9     0     0  PASS
-verify-security              30     0     0  PASS
-verify-storage               11     0     0  PASS
-verify-tutorial              79     0     0  PASS
+verify-security              35     0     2  PASS
+verify-storage                8     0     1  PASS
+verify-tutorial              83     0     8  PASS
 -------------------------  ----  ----  ----  ------
-Totals                      601     0     0  21 suites
+Totals                      659     0    11  23 suites
 ```
 
 ## Log
+
+### 0.16.0 -- kube pods on btrfs + nested user namespace ranges (2026-07-18, x86_64)
+
+Merged `kube-btrfs-storage` (`sdme kube apply/create --storage btrfs` and `--disk`) and `nested-userns` (`--userns-nested N`, `userns_nested_ranges` config) for v0.16.0. Full run-parallel.sh on Linux 7.0.12-1-cachyos (x86_64), systemd 260: 659 passed, 0 failed, 11 skipped across 23 suites, wall clock 9m06s (skips: 2 AppArmor not active, 1 qemu-nbd missing, 8 docker-in-container veth DHCP). The complete kube matrix (L1-L6) was additionally run against the btrfs backend (`KUBE_STORAGE=btrfs`, Mode A native-btrfs datadir): 166 passed, 0 failed, 0 skipped across 9 suites. cargo test: 823 passed, 3 ignored.
+
+Runtime bugs found by the new coverage and fixed:
+
+- systemd-nspawn rejects `--private-users-ownership=auto` for UID ranges larger than 64K, so `--userns-nested` containers would not boot; `SecurityConfig::to_nspawn_args` now takes the storage backend and emits `ownership=map` (btrfs idmapped mounts) or `ownership=off` (overlay, which cannot recursive-chown >64K).
+- `sdme ps` hardcoded overlay paths for OS detection, OCI app detection, probe readiness, and the `missing fs` health check, so btrfs kube pods showed empty `oci_apps` and a phantom `missing fs`. `list.rs` now resolves the container root from the `STORAGE` state key (overlay merged/upper, or the btrfs subvolume under the pool root) without mounting an offline Mode B pool.
+
+Test-infrastructure fixes (also in this release): kube suites honor `KUBE_STORAGE` and resolve rootfs/container paths through lib.sh helpers instead of hardcoded `$DATADIR/fs`; `sdme start` calls pass the scaled `-t` boot timeout (60s default was flaky under load); `cleanup_prefix` unmounts stale `/run/systemd/nspawn/unix-export` mounts left by SIGKILLed containers (a leftover mount makes the next same-name start fail with "Mount point exists already"); the PVC runtime check polls instead of racing the volume bind mount; the docker-in-container tutorial test skips its network-dependent steps when the host's veth DHCP hands out no lease. One environment note: a stale btrfs base subvolume (missing `python3`/`ss` relative to its imported rootfs) broke kube readiness checks until refreshed; btrfs bases are invalidated on `fs rm`/`import -f`/`fs build`, so this only happens when a rootfs is changed out of band.
 
 ### 0.14.0 -- --system-call-filter bare syscall names + recursive btrfs rm (2026-07-15, aarch64)
 

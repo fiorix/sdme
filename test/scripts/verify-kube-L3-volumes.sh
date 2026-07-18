@@ -17,6 +17,8 @@ set -uo pipefail
 
 source "$(dirname "$0")/lib.sh"
 
+KFLAG=$(kube_storage_args)
+
 BASE_FS="${BASE_FS:-ubuntu}"
 DATADIR="/var/lib/sdme"
 REPORT_DIR="."
@@ -281,7 +283,7 @@ test_create_secret_pod() {
 
     echo "--- $test_name: creating pod from test/kube/secret-pod.yaml ---"
     local output
-    if output=$(timeout "$TIMEOUT_CREATE" "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" -v 2>&1); then
+    if output=$(timeout "$TIMEOUT_CREATE" "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" $KFLAG -v 2>&1); then
         record "$test_name" PASS
         SECRET_POD_CREATED=1
     else
@@ -298,7 +300,7 @@ test_static_secret_all_keys() {
         return
     fi
 
-    local vol_dir="$DATADIR/fs/kube-$SECRET_POD/oci/volumes/secret-volume"
+    local vol_dir="$(kube_fs_dir "kube-$SECRET_POD")/oci/volumes/secret-volume"
     local fail=0
 
     if [[ ! -f "$vol_dir/username" ]]; then
@@ -331,7 +333,7 @@ test_static_secret_projected() {
         return
     fi
 
-    local vol_dir="$DATADIR/fs/kube-$SECRET_POD/oci/volumes/foo"
+    local vol_dir="$(kube_fs_dir "kube-$SECRET_POD")/oci/volumes/foo"
     local fail=0
 
     if [[ ! -f "$vol_dir/my-group/my-username" ]]; then
@@ -364,7 +366,7 @@ test_static_secret_permissions() {
     local fail=0
 
     # secret-volume: default mode (0644).
-    local all_dir="$DATADIR/fs/kube-$SECRET_POD/oci/volumes/secret-volume"
+    local all_dir="$(kube_fs_dir "kube-$SECRET_POD")/oci/volumes/secret-volume"
     for f in username password; do
         local mode
         mode=$(stat -c '%a' "$all_dir/$f" 2>/dev/null || echo "???")
@@ -375,7 +377,7 @@ test_static_secret_permissions() {
     done
 
     # foo: defaultMode 0400 (from K8s docs).
-    local proj_dir="$DATADIR/fs/kube-$SECRET_POD/oci/volumes/foo"
+    local proj_dir="$(kube_fs_dir "kube-$SECRET_POD")/oci/volumes/foo"
     local mode
     mode=$(stat -c '%a' "$proj_dir/my-group/my-username" 2>/dev/null || echo "???")
     if [[ "$mode" != "400" ]]; then
@@ -408,7 +410,7 @@ test_create_configmap_pod() {
 
     echo "--- $test_name: creating pod from test/kube/configmap-pod.yaml ---"
     local output
-    if output=$(timeout "$TIMEOUT_CREATE" "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" -v 2>&1); then
+    if output=$(timeout "$TIMEOUT_CREATE" "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" $KFLAG -v 2>&1); then
         record "$test_name" PASS
         CONFIGMAP_POD_CREATED=1
     else
@@ -425,7 +427,7 @@ test_static_configmap_all_keys() {
         return
     fi
 
-    local vol_dir="$DATADIR/fs/kube-$CONFIGMAP_POD/oci/volumes/config-volume"
+    local vol_dir="$(kube_fs_dir "kube-$CONFIGMAP_POD")/oci/volumes/config-volume"
     local fail=0
 
     if [[ ! -f "$vol_dir/database-url" ]]; then
@@ -458,7 +460,7 @@ test_static_configmap_projected() {
         return
     fi
 
-    local vol_dir="$DATADIR/fs/kube-$CONFIGMAP_POD/oci/volumes/config-projected"
+    local vol_dir="$(kube_fs_dir "kube-$CONFIGMAP_POD")/oci/volumes/config-projected"
     local fail=0
 
     if [[ ! -f "$vol_dir/db/connection-string" ]]; then
@@ -492,7 +494,7 @@ test_static_configmap_permissions() {
     local fail=0
 
     # config-volume: default mode (0644).
-    local all_dir="$DATADIR/fs/kube-$CONFIGMAP_POD/oci/volumes/config-volume"
+    local all_dir="$(kube_fs_dir "kube-$CONFIGMAP_POD")/oci/volumes/config-volume"
     for f in database-url log-level; do
         local mode
         mode=$(stat -c '%a' "$all_dir/$f" 2>/dev/null || echo "???")
@@ -503,7 +505,7 @@ test_static_configmap_permissions() {
     done
 
     # config-projected: defaultMode 0400.
-    local proj_dir="$DATADIR/fs/kube-$CONFIGMAP_POD/oci/volumes/config-projected"
+    local proj_dir="$(kube_fs_dir "kube-$CONFIGMAP_POD")/oci/volumes/config-projected"
     local mode
     mode=$(stat -c '%a' "$proj_dir/db/connection-string" 2>/dev/null || echo "???")
     if [[ "$mode" != "400" ]]; then
@@ -527,7 +529,7 @@ test_static_env_from_secret() {
         return
     fi
 
-    local env_file="$DATADIR/fs/kube-$CONFIGMAP_POD/oci/apps/test-container/env"
+    local env_file="$(kube_fs_dir "kube-$CONFIGMAP_POD")/oci/apps/test-container/env"
     if [[ ! -f "$env_file" ]]; then
         record "$test_name" FAIL "env file not found: $env_file"
         return
@@ -552,7 +554,7 @@ test_static_env_from_configmap() {
         return
     fi
 
-    local env_file="$DATADIR/fs/kube-$CONFIGMAP_POD/oci/apps/test-container/env"
+    local env_file="$(kube_fs_dir "kube-$CONFIGMAP_POD")/oci/apps/test-container/env"
     if [[ ! -f "$env_file" ]]; then
         record "$test_name" FAIL "env file not found: $env_file"
         return
@@ -581,7 +583,7 @@ test_start_secret_pod() {
 
     echo "--- $test_name: starting pod ---"
     local output
-    if output=$(timeout "$TIMEOUT_BOOT" "$SDME" start "$SECRET_POD" -v 2>&1); then
+    if output=$(timeout "$TIMEOUT_BOOT" "$SDME" start "$SECRET_POD" -t "$TIMEOUT_BOOT" -v 2>&1); then
         record "$test_name" PASS
         SECRET_POD_RUNNING=1
         echo "    waiting 5s for services to settle..."
@@ -653,7 +655,7 @@ test_create_pvc_pod() {
 
     echo "--- $test_name: creating pod from test/kube/pvc-pod.yaml ---"
     local output
-    if output=$(timeout "$TIMEOUT_CREATE" "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" -v 2>&1); then
+    if output=$(timeout "$TIMEOUT_CREATE" "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" $KFLAG -v 2>&1); then
         record "$test_name" PASS
         PVC_POD_CREATED=1
     else
@@ -682,7 +684,7 @@ test_static_pvc_volume_dir() {
         return
     fi
 
-    local vol_dir="$DATADIR/fs/kube-$PVC_POD/oci/volumes/data-volume"
+    local vol_dir="$(kube_fs_dir "kube-$PVC_POD")/oci/volumes/data-volume"
     if [[ -d "$vol_dir" ]]; then
         record "$test_name" PASS
     else
@@ -699,7 +701,7 @@ test_pvc_start_runtime() {
 
     echo "--- $test_name: starting pvc pod ---"
     local output
-    if output=$(timeout "$TIMEOUT_BOOT" "$SDME" start "$PVC_POD" -v 2>&1); then
+    if output=$(timeout "$TIMEOUT_BOOT" "$SDME" start "$PVC_POD" -t "$TIMEOUT_BOOT" -v 2>&1); then
         PVC_POD_RUNNING=1
         echo "    waiting 5s for services to settle..."
         sleep 5
@@ -711,10 +713,19 @@ test_pvc_start_runtime() {
     # Write a file to the PVC from the host side.
     echo "pvc-test-marker" > "$DATADIR/volumes/test-data/marker.txt"
 
-    # Read it from inside the container.
-    output=$("$SDME" exec "$PVC_POD" --oci -- \
-        cat /data/marker.txt 2>/dev/null || echo "")
-    if echo "$output" | grep -q 'pvc-test-marker'; then
+    # Read it from inside the container. The volume bind mount can lag behind
+    # app start on slower backends, so poll instead of reading once.
+    local ok=0
+    for _ in $(seq 1 10); do
+        output=$("$SDME" exec "$PVC_POD" --oci -- \
+            cat /data/marker.txt 2>/dev/null || echo "")
+        if echo "$output" | grep -q 'pvc-test-marker'; then
+            ok=1
+            break
+        fi
+        sleep 3
+    done
+    if [[ $ok -eq 1 ]]; then
         record "$test_name" PASS
     else
         record "$test_name" FAIL "expected 'pvc-test-marker' inside container, got: $output"
@@ -783,7 +794,7 @@ YAML
 
     echo "--- $test_name: creating pod ---"
     local output
-    if output=$(timeout "$TIMEOUT_CREATE" "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" -v 2>&1); then
+    if output=$(timeout "$TIMEOUT_CREATE" "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" $KFLAG -v 2>&1); then
         record "$test_name" PASS
         ENVFROM_POD_CREATED=1
     else
@@ -799,7 +810,7 @@ test_static_envfrom_configmap_keys() {
         return
     fi
 
-    local env_file="$DATADIR/fs/kube-$ENVFROM_POD/oci/apps/app/env"
+    local env_file="$(kube_fs_dir "kube-$ENVFROM_POD")/oci/apps/app/env"
     if [[ ! -f "$env_file" ]]; then
         record "$test_name" FAIL "env file not found: $env_file"
         return
@@ -831,7 +842,7 @@ test_static_envfrom_secret_keys() {
         return
     fi
 
-    local env_file="$DATADIR/fs/kube-$ENVFROM_POD/oci/apps/app/env"
+    local env_file="$(kube_fs_dir "kube-$ENVFROM_POD")/oci/apps/app/env"
     local content
     content=$(cat "$env_file")
     local fail=0
@@ -862,7 +873,7 @@ test_static_envfrom_explicit_override() {
         return
     fi
 
-    local env_file="$DATADIR/fs/kube-$ENVFROM_POD/oci/apps/app/env"
+    local env_file="$(kube_fs_dir "kube-$ENVFROM_POD")/oci/apps/app/env"
     local content
     content=$(cat "$env_file")
 
@@ -913,7 +924,7 @@ YAML
 
     echo "--- $test_name: creating pod ---"
     local output
-    if output=$(timeout "$TIMEOUT_CREATE" "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" -v 2>&1); then
+    if output=$(timeout "$TIMEOUT_CREATE" "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" $KFLAG -v 2>&1); then
         record "$test_name" PASS
         RONLY_POD_CREATED=1
     else
@@ -929,7 +940,7 @@ test_static_ronly_volume_service() {
         return
     fi
 
-    local unit_path="$DATADIR/fs/kube-$RONLY_POD/etc/systemd/system/sdme-kube-volumes.service"
+    local unit_path="$(kube_fs_dir "kube-$RONLY_POD")/etc/systemd/system/sdme-kube-volumes.service"
     if [[ ! -f "$unit_path" ]]; then
         record "$test_name" FAIL "sdme-kube-volumes.service not found"
         return
@@ -979,7 +990,7 @@ test_ronly_start_runtime() {
 
     echo "--- $test_name: starting pod ---"
     local output
-    if output=$(timeout "$TIMEOUT_BOOT" "$SDME" start "$RONLY_POD" -v 2>&1); then
+    if output=$(timeout "$TIMEOUT_BOOT" "$SDME" start "$RONLY_POD" -t "$TIMEOUT_BOOT" -v 2>&1); then
         RONLY_POD_RUNNING=1
     else
         record "$test_name" FAIL "failed to start: $output"
@@ -1114,7 +1125,7 @@ spec:
 YAML
 
     local output
-    if output=$(timeout "$TIMEOUT_CREATE" "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" 2>&1); then
+    if output=$(timeout "$TIMEOUT_CREATE" "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" $KFLAG 2>&1); then
         record "$test_name" FAIL "should have failed for missing secret"
         "$SDME" kube delete "vfy-ks-miss" --force 2>/dev/null || true
     else
@@ -1152,7 +1163,7 @@ spec:
 YAML
 
     local output
-    if output=$(timeout "$TIMEOUT_CREATE" "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" 2>&1); then
+    if output=$(timeout "$TIMEOUT_CREATE" "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" $KFLAG 2>&1); then
         record "$test_name" FAIL "should have failed for missing configmap"
         "$SDME" kube delete "vfy-cm-miss" --force 2>/dev/null || true
     else

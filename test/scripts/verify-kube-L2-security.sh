@@ -18,6 +18,8 @@ set -uo pipefail
 
 source "$(dirname "$0")/lib.sh"
 
+KFLAG=$(kube_storage_args)
+
 BASE_FS="${BASE_FS:-ubuntu}"
 DATADIR="/var/lib/sdme"
 REPORT_DIR="."
@@ -35,7 +37,7 @@ POD_RUNNING=0
 # Read a unit file from the kube rootfs.
 read_unit() {
     local app_name="$1"
-    cat "$DATADIR/fs/kube-$POD_NAME/etc/systemd/system/sdme-oci-${app_name}.service" 2>/dev/null || echo ""
+    cat "$(kube_fs_dir "kube-$POD_NAME")/etc/systemd/system/sdme-oci-${app_name}.service" 2>/dev/null || echo ""
 }
 
 # --- Cleanup ------------------------------------------------------------------
@@ -106,7 +108,7 @@ YAML
 
     echo "--- $test_name: creating pod ---"
     local output
-    if output=$(timeout "$TIMEOUT_CREATE" "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" -v 2>&1); then
+    if output=$(timeout "$TIMEOUT_CREATE" "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" $KFLAG -v 2>&1); then
         record "$test_name" PASS
         POD_CREATED=1
     else
@@ -409,7 +411,7 @@ test_start_pod() {
 
     echo "--- $test_name: starting pod ---"
     local output
-    if output=$(timeout "$TIMEOUT_BOOT" "$SDME" start "$POD_NAME" -v 2>&1); then
+    if output=$(timeout "$TIMEOUT_BOOT" "$SDME" start "$POD_NAME" -t "$TIMEOUT_BOOT" -v 2>&1); then
         record "$test_name" PASS
         POD_RUNNING=1
         echo "    waiting 5s for services to settle..."

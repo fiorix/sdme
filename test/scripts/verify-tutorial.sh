@@ -1273,6 +1273,19 @@ test_docker_in_container() {
     fi
     record "docker/boot" PASS
 
+    # The install and registry steps need outbound internet, which on
+    # --network-veth depends on the host's nspawn DHCP/NAT. Some hosts never
+    # hand out a lease (no default route on host0), so the network-dependent
+    # steps are skipped there instead of failing on an environment limitation.
+    if ! $SDME exec "$ct" -- /bin/sh -c \
+            'awk "\$2==\"00000000\"{f=1} END{exit !f}" /proc/net/route' 2>/dev/null; then
+        for k in "${keys[@]:2}"; do
+            record "$k" SKIP "no default route on host0 (veth DHCP unavailable)"
+        done
+        _docker_teardown
+        return
+    fi
+
     # apt-get install -y docker.io
     if output=$(timeout "$dt" $SDME exec "$ct" -- /bin/sh -c \
             'apt-get update >/dev/null 2>&1 && DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io >/dev/null 2>&1 && echo installed' 2>&1) \

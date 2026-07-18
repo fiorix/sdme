@@ -12,6 +12,8 @@ set -uo pipefail
 
 source "$(dirname "$0")/lib.sh"
 
+KFLAG=$(kube_storage_args)
+
 BASE_FS="${BASE_FS:-ubuntu}"
 DATADIR="/var/lib/sdme"
 REPORT_DIR="."
@@ -52,7 +54,7 @@ test_create_pod() {
     fi
 
     local output
-    if output=$(timeout "$TIMEOUT_CREATE" "$SDME" kube create -f "$YAML_FILE" --base-fs "$BASE_FS" -v 2>&1); then
+    if output=$(timeout "$TIMEOUT_CREATE" "$SDME" kube create -f "$YAML_FILE" --base-fs "$BASE_FS" $KFLAG -v 2>&1); then
         record "$test_name" PASS
         POD_CREATED=1
     else
@@ -70,7 +72,7 @@ test_setup_nginx_config() {
     fi
 
     echo "--- $test_name: writing nginx reverse proxy config ---"
-    local conf_dir="$DATADIR/containers/$POD_NAME/upper/oci/apps/nginx-unprivileged/root/etc/nginx/conf.d"
+    local conf_dir="$(kube_container_root "$POD_NAME")/oci/apps/nginx-unprivileged/root/etc/nginx/conf.d"
     mkdir -p "$conf_dir"
 
     cat > "$conf_dir/default.conf" <<'NGINXEOF'
@@ -103,7 +105,7 @@ test_setup_validate_script() {
     fi
 
     echo "--- $test_name: writing validation script ---"
-    local script_dir="$DATADIR/containers/$POD_NAME/upper/opt/sdme-test"
+    local script_dir="$(kube_container_root "$POD_NAME")/opt/sdme-test"
     mkdir -p "$script_dir"
 
     cat > "$script_dir/validate.py" <<'PYEOF'
@@ -246,7 +248,7 @@ test_start_pod() {
 
     echo "--- $test_name: starting pod ---"
     local output
-    if output=$(timeout "$TIMEOUT_BOOT" "$SDME" start "$POD_NAME" -t 120 -v 2>&1); then
+    if output=$(timeout "$TIMEOUT_BOOT" "$SDME" start "$POD_NAME" -t "$TIMEOUT_BOOT" -v 2>&1); then
         record "$test_name" PASS
         POD_RUNNING=1
         echo "    waiting 10s for services to settle..."

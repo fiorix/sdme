@@ -52,6 +52,7 @@ KNOWN_PREFIXES=(
     vfy-kp-
     vfy-ks-
     vfy-kf-
+    vfy-nested-userns-
     kube-vfy-
     kube-readonly-
     secret-test-
@@ -468,6 +469,7 @@ main() {
         verify-export.sh
         verify-build.sh
         verify-security.sh
+        verify-nested-userns.sh
         verify-pods.sh
         verify-network.sh
         verify-oci.sh

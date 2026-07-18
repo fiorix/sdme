@@ -17,6 +17,8 @@ set -uo pipefail
 
 source "$(dirname "$0")/lib.sh"
 
+KFLAG=$(kube_storage_args)
+
 BASE_FS="${BASE_FS:-ubuntu}"
 DATADIR="/var/lib/sdme"
 REPORT_DIR="."
@@ -178,7 +180,7 @@ test_create_pod() {
 
     echo "--- $test_name: creating pod from test/kube/secret-pod.yaml ---"
     local output
-    if output=$(timeout "$TIMEOUT_CREATE" "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" -v 2>&1); then
+    if output=$(timeout "$TIMEOUT_CREATE" "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" $KFLAG -v 2>&1); then
         record "$test_name" PASS
         POD_CREATED=1
     else
@@ -197,7 +199,7 @@ test_static_secret_all_keys() {
         return
     fi
 
-    local vol_dir="$DATADIR/fs/kube-$POD_NAME/oci/volumes/secret-volume"
+    local vol_dir="$(kube_fs_dir "kube-$POD_NAME")/oci/volumes/secret-volume"
     local fail=0
 
     if [[ ! -f "$vol_dir/username" ]]; then
@@ -232,7 +234,7 @@ test_static_secret_projected() {
         return
     fi
 
-    local vol_dir="$DATADIR/fs/kube-$POD_NAME/oci/volumes/foo"
+    local vol_dir="$(kube_fs_dir "kube-$POD_NAME")/oci/volumes/foo"
     local fail=0
 
     # Should have my-group/my-username (projected path from docs).
@@ -269,7 +271,7 @@ test_static_secret_permissions() {
     local fail=0
 
     # secret-volume: default mode (0644).
-    local all_dir="$DATADIR/fs/kube-$POD_NAME/oci/volumes/secret-volume"
+    local all_dir="$(kube_fs_dir "kube-$POD_NAME")/oci/volumes/secret-volume"
     for f in username password; do
         local mode
         mode=$(stat -c '%a' "$all_dir/$f" 2>/dev/null || echo "???")
@@ -280,7 +282,7 @@ test_static_secret_permissions() {
     done
 
     # foo: defaultMode 0400 (from K8s docs).
-    local proj_dir="$DATADIR/fs/kube-$POD_NAME/oci/volumes/foo"
+    local proj_dir="$(kube_fs_dir "kube-$POD_NAME")/oci/volumes/foo"
     local mode
     mode=$(stat -c '%a' "$proj_dir/my-group/my-username" 2>/dev/null || echo "???")
     if [[ "$mode" != "400" ]]; then
@@ -303,7 +305,7 @@ test_static_volume_mount_dirs() {
     fi
 
     local fail=0
-    local app_root="$DATADIR/fs/kube-$POD_NAME/oci/apps/test-container/root"
+    local app_root="$(kube_fs_dir "kube-$POD_NAME")/oci/apps/test-container/root"
 
     if [[ ! -d "$app_root/etc/secret-volume" ]]; then
         echo "    missing mount point: $app_root/etc/secret-volume"
@@ -328,7 +330,7 @@ test_static_volume_service() {
         return
     fi
 
-    local unit_path="$DATADIR/fs/kube-$POD_NAME/etc/systemd/system/sdme-kube-volumes.service"
+    local unit_path="$(kube_fs_dir "kube-$POD_NAME")/etc/systemd/system/sdme-kube-volumes.service"
     if [[ ! -f "$unit_path" ]]; then
         record "$test_name" FAIL "sdme-kube-volumes.service not found"
         return
@@ -367,7 +369,7 @@ test_start_pod() {
 
     echo "--- $test_name: starting pod ---"
     local output
-    if output=$(timeout "$TIMEOUT_BOOT" "$SDME" start "$POD_NAME" -v 2>&1); then
+    if output=$(timeout "$TIMEOUT_BOOT" "$SDME" start "$POD_NAME" -t "$TIMEOUT_BOOT" -v 2>&1); then
         record "$test_name" PASS
         POD_RUNNING=1
         echo "    waiting 5s for services to settle..."
@@ -492,7 +494,7 @@ spec:
 YAML
 
     local output
-    if output=$(timeout "$TIMEOUT_CREATE" "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" 2>&1); then
+    if output=$(timeout "$TIMEOUT_CREATE" "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" $KFLAG 2>&1); then
         record "$test_name" FAIL "should have failed for missing secret"
         "$SDME" kube delete "vfy-ks-miss" --force 2>/dev/null || true
     else

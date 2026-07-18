@@ -18,6 +18,8 @@ set -uo pipefail
 
 source "$(dirname "$0")/lib.sh"
 
+KFLAG=$(kube_storage_args)
+
 BASE_FS="${BASE_FS:-ubuntu}"
 DATADIR="/var/lib/sdme"
 REPORT_DIR="."
@@ -31,25 +33,25 @@ TIMEOUT_BOOT=$(scale_timeout 120)
 # Check if the probe binary exists in the kube rootfs.
 probe_binary_exists() {
     local pod_name="$1"
-    test -x "$DATADIR/fs/kube-$pod_name/usr/bin/sdme-kube-probe"
+    test -x "$(kube_fs_dir "kube-$pod_name")/usr/bin/sdme-kube-probe"
 }
 
 # Read a unit file from the kube rootfs.
 read_unit() {
     local pod_name="$1" app_name="$2"
-    cat "$DATADIR/fs/kube-$pod_name/etc/systemd/system/sdme-oci-${app_name}.service" 2>/dev/null || echo ""
+    cat "$(kube_fs_dir "kube-$pod_name")/etc/systemd/system/sdme-oci-${app_name}.service" 2>/dev/null || echo ""
 }
 
 # Read a probe unit file (timer or service) from the kube rootfs.
 read_probe_unit() {
     local pod_name="$1" filename="$2"
-    cat "$DATADIR/fs/kube-$pod_name/etc/systemd/system/${filename}" 2>/dev/null || echo ""
+    cat "$(kube_fs_dir "kube-$pod_name")/etc/systemd/system/${filename}" 2>/dev/null || echo ""
 }
 
 # Check if a timer symlink exists in multi-user.target.wants.
 timer_enabled() {
     local pod_name="$1" timer_name="$2"
-    test -L "$DATADIR/fs/kube-$pod_name/etc/systemd/system/multi-user.target.wants/${timer_name}"
+    test -L "$(kube_fs_dir "kube-$pod_name")/etc/systemd/system/multi-user.target.wants/${timer_name}"
 }
 
 # --- Cleanup ------------------------------------------------------------------
@@ -98,7 +100,7 @@ YAML
 
     # Create.
     local output
-    if ! output=$(timeout "$TIMEOUT_CREATE" "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" $VFLAG 2>&1); then
+    if ! output=$(timeout "$TIMEOUT_CREATE" "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" $KFLAG $VFLAG 2>&1); then
         record "${test_prefix}-create" FAIL "$output"
         rm -f "$yaml_file"
         return
@@ -129,7 +131,7 @@ YAML
     fi
 
     # Boot and verify service is active (meaning startup probe passed).
-    if ! output=$(timeout "$TIMEOUT_BOOT" "$SDME" start "$pod_name" $VFLAG 2>&1); then
+    if ! output=$(timeout "$TIMEOUT_BOOT" "$SDME" start "$pod_name" -t "$TIMEOUT_BOOT" $VFLAG 2>&1); then
         record "${test_prefix}-boot" FAIL "$output"
         return
     fi
@@ -194,7 +196,7 @@ YAML
 
     # Create.
     local output
-    if ! output=$(timeout "$TIMEOUT_CREATE" "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" $VFLAG 2>&1); then
+    if ! output=$(timeout "$TIMEOUT_CREATE" "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" $KFLAG $VFLAG 2>&1); then
         record "${test_prefix}-create" FAIL "$output"
         rm -f "$yaml_file"
         return
@@ -253,7 +255,7 @@ YAML
     fi
 
     # Boot and verify timer is active at runtime.
-    if ! output=$(timeout "$TIMEOUT_BOOT" "$SDME" start "$pod_name" $VFLAG 2>&1); then
+    if ! output=$(timeout "$TIMEOUT_BOOT" "$SDME" start "$pod_name" -t "$TIMEOUT_BOOT" $VFLAG 2>&1); then
         record "${test_prefix}-boot" FAIL "$output"
         return
     fi
@@ -321,7 +323,7 @@ YAML
 
     # Create.
     local output
-    if ! output=$(timeout "$TIMEOUT_CREATE" "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" $VFLAG 2>&1); then
+    if ! output=$(timeout "$TIMEOUT_CREATE" "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" $KFLAG $VFLAG 2>&1); then
         record "${test_prefix}-create" FAIL "$output"
         rm -f "$yaml_file"
         return
@@ -353,7 +355,7 @@ YAML
     fi
 
     # Boot.
-    if ! output=$(timeout "$TIMEOUT_BOOT" "$SDME" start "$pod_name" $VFLAG 2>&1); then
+    if ! output=$(timeout "$TIMEOUT_BOOT" "$SDME" start "$pod_name" -t "$TIMEOUT_BOOT" $VFLAG 2>&1); then
         record "${test_prefix}-boot" FAIL "$output"
         return
     fi
@@ -364,7 +366,7 @@ YAML
     local ready=""
     for i in $(seq 1 15); do
         sleep 2
-        ready=$(cat "$DATADIR/containers/$pod_name/merged/oci/apps/app/probe-ready" 2>/dev/null || echo "")
+        ready=$(cat "$(kube_container_merged "$pod_name")/oci/apps/app/probe-ready" 2>/dev/null || echo "")
         if [[ "$ready" == "ready" ]]; then
             break
         fi
@@ -428,7 +430,7 @@ YAML
 
     # Create.
     local output
-    if ! output=$(timeout "$TIMEOUT_CREATE" "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" $VFLAG 2>&1); then
+    if ! output=$(timeout "$TIMEOUT_CREATE" "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" $KFLAG $VFLAG 2>&1); then
         record "${test_prefix}-create" FAIL "$output"
         rm -f "$yaml_file"
         return
@@ -448,7 +450,7 @@ YAML
     fi
 
     # Boot and verify timer is active.
-    if ! output=$(timeout "$TIMEOUT_BOOT" "$SDME" start "$pod_name" $VFLAG 2>&1); then
+    if ! output=$(timeout "$TIMEOUT_BOOT" "$SDME" start "$pod_name" -t "$TIMEOUT_BOOT" $VFLAG 2>&1); then
         record "${test_prefix}-boot" FAIL "$output"
         return
     fi
@@ -515,7 +517,7 @@ YAML
 
     # Create.
     local output
-    if ! output=$(timeout "$TIMEOUT_CREATE" "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" $VFLAG 2>&1); then
+    if ! output=$(timeout "$TIMEOUT_CREATE" "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" $KFLAG $VFLAG 2>&1); then
         record "${test_prefix}-create" FAIL "$output"
         rm -f "$yaml_file"
         return
@@ -535,7 +537,7 @@ YAML
     fi
 
     # Boot.
-    if ! output=$(timeout "$TIMEOUT_BOOT" "$SDME" start "$pod_name" $VFLAG 2>&1); then
+    if ! output=$(timeout "$TIMEOUT_BOOT" "$SDME" start "$pod_name" -t "$TIMEOUT_BOOT" $VFLAG 2>&1); then
         record "${test_prefix}-boot" FAIL "$output"
         return
     fi
@@ -546,7 +548,7 @@ YAML
     local ready=""
     for i in $(seq 1 15); do
         sleep 2
-        ready=$(cat "$DATADIR/containers/$pod_name/merged/oci/apps/app/probe-ready" 2>/dev/null || echo "")
+        ready=$(cat "$(kube_container_merged "$pod_name")/oci/apps/app/probe-ready" 2>/dev/null || echo "")
         if [[ "$ready" == "ready" ]]; then
             break
         fi
@@ -607,7 +609,7 @@ YAML
 
     # Create.
     local output
-    if ! output=$(timeout "$TIMEOUT_CREATE" "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" $VFLAG 2>&1); then
+    if ! output=$(timeout "$TIMEOUT_CREATE" "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" $KFLAG $VFLAG 2>&1); then
         record "${test_prefix}-create" FAIL "$output"
         rm -f "$yaml_file"
         return
@@ -656,7 +658,7 @@ YAML
     fi
 
     # Boot and verify everything converges.
-    if ! output=$(timeout "$TIMEOUT_BOOT" "$SDME" start "$pod_name" $VFLAG 2>&1); then
+    if ! output=$(timeout "$TIMEOUT_BOOT" "$SDME" start "$pod_name" -t "$TIMEOUT_BOOT" $VFLAG 2>&1); then
         record "${test_prefix}-boot" FAIL "$output"
         return
     fi
@@ -701,7 +703,7 @@ YAML
 
     # Check readiness state file.
     local ready=""
-    ready=$(cat "$DATADIR/containers/$pod_name/merged/oci/apps/app/probe-ready" 2>/dev/null || echo "")
+    ready=$(cat "$(kube_container_merged "$pod_name")/oci/apps/app/probe-ready" 2>/dev/null || echo "")
     if [[ "$ready" == "ready" ]]; then
         record "${test_prefix}-ready-state" PASS
     else

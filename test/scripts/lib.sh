@@ -53,6 +53,65 @@ if [[ -n "$VERBOSE" ]]; then
     VFLAG="-v"
 fi
 
+# Optional storage backend for kube tests. When set (e.g. KUBE_STORAGE=btrfs),
+# test scripts append `--storage $KUBE_STORAGE` to every `sdme kube create/apply`
+# invocation so the full kube suite can run against a non-default backend.
+KUBE_STORAGE="${KUBE_STORAGE:-}"
+kube_storage_args() {
+    if [[ -n "$KUBE_STORAGE" ]]; then
+        echo "--storage $KUBE_STORAGE"
+    fi
+}
+
+# Whether the kube tests are running against a non-overlay storage backend.
+kube_storage_is_btrfs() {
+    [[ -n "$KUBE_STORAGE" && "$KUBE_STORAGE" != "overlay" ]]
+}
+
+# Root of the btrfs subvolume tree (see src/storage/pool.rs): Mode A native
+# btrfs datadir under {datadir}/btrfs, Mode B loopback pool under {datadir}/pool.
+kube_storage_subroot() {
+    local datadir="${DATADIR:-/var/lib/sdme}"
+    if [[ "$(stat -f -c %T "$datadir")" == "btrfs" ]]; then
+        echo "$datadir/btrfs"
+    else
+        echo "$datadir/pool"
+    fi
+}
+
+# On-disk path of a kube-built rootfs (e.g. kube-my-pod). btrfs rootfs are
+# subvolumes under the pool; overlay rootfs are directories under {datadir}/fs.
+kube_fs_dir() {
+    local name="$1"
+    if kube_storage_is_btrfs; then
+        echo "$(kube_storage_subroot)/fs/$name"
+    else
+        echo "${DATADIR:-/var/lib/sdme}/fs/$name"
+    fi
+}
+
+# Writable root of a kube container for pre-start edits (nginx configs, test
+# scripts). Overlay uses the upper layer; btrfs uses the container subvolume.
+kube_container_root() {
+    local name="$1"
+    if kube_storage_is_btrfs; then
+        echo "$(kube_storage_subroot)/containers/$name"
+    else
+        echo "${DATADIR:-/var/lib/sdme}/containers/$name/upper"
+    fi
+}
+
+# Live root of a running kube container (probe-ready files). Overlay uses the
+# merged view; btrfs uses the container subvolume.
+kube_container_merged() {
+    local name="$1"
+    if kube_storage_is_btrfs; then
+        echo "$(kube_storage_subroot)/containers/$name"
+    else
+        echo "${DATADIR:-/var/lib/sdme}/containers/$name/merged"
+    fi
+}
+
 # Resolve the repo root (two levels up from test/scripts/).
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
@@ -549,6 +608,16 @@ cleanup_prefix() {
     names=$($SDME kube configmap ls 2>/dev/null | awk 'NR>1 {print $1}' | grep "^${prefix}" || true)
     for name in $names; do
         $SDME kube configmap rm "$name" 2>/dev/null || true
+    done
+
+    # Clean stale nspawn unix-export mounts left behind when a container is
+    # SIGKILLed (e.g. after a boot-timeout stop). A leftover mount point makes
+    # the next start of the same name fail with "Mount point exists already".
+    local stale
+    for stale in "/run/systemd/nspawn/unix-export/${prefix}"*; do
+        [[ -e "$stale" ]] || continue
+        umount "$stale" 2>/dev/null || true
+        rm -rf "$stale" 2>/dev/null || true
     done
 }
 

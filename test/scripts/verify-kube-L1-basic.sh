@@ -12,6 +12,8 @@ set -uo pipefail
 
 source "$(dirname "$0")/lib.sh"
 
+KFLAG=$(kube_storage_args)
+
 BASE_FS="${BASE_FS:-ubuntu}"
 DATADIR="/var/lib/sdme"
 REPORT_DIR="."
@@ -95,7 +97,7 @@ spec:
 YAML
 
     echo "--- $test_name: creating pod from YAML ---"
-    if ! "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" -v 2>&1; then
+    if ! "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" $KFLAG -v 2>&1; then
         record "$test_name" FAIL
         rm -f "$yaml_file"
         return
@@ -103,7 +105,7 @@ YAML
     rm -f "$yaml_file"
 
     echo "--- $test_name: starting pod ---"
-    if ! timeout "$TIMEOUT_BOOT" "$SDME" start "$pod_name" -v 2>&1; then
+    if ! timeout "$TIMEOUT_BOOT" "$SDME" start "$pod_name" -t "$TIMEOUT_BOOT" -v 2>&1; then
         record "$test_name" FAIL
         "$SDME" kube delete "$pod_name" --force 2>/dev/null || true
         return
@@ -151,7 +153,7 @@ spec:
 YAML
 
     echo "--- $test_name: creating pod ---"
-    if ! "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" -v 2>&1; then
+    if ! "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" $KFLAG -v 2>&1; then
         record "$test_name" FAIL
         rm -f "$yaml_file"
         return
@@ -159,7 +161,7 @@ YAML
     rm -f "$yaml_file"
 
     echo "--- $test_name: starting pod ---"
-    if ! timeout "$TIMEOUT_BOOT" "$SDME" start "$pod_name" -v 2>&1; then
+    if ! timeout "$TIMEOUT_BOOT" "$SDME" start "$pod_name" -t "$TIMEOUT_BOOT" -v 2>&1; then
         record "$test_name" FAIL
         "$SDME" kube delete "$pod_name" --force 2>/dev/null || true
         return
@@ -200,7 +202,7 @@ spec:
 YAML
 
     echo "--- $test_name: creating pod ---"
-    if ! "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" -v 2>&1; then
+    if ! "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" $KFLAG -v 2>&1; then
         record "$test_name" FAIL
         rm -f "$yaml_file"
         return
@@ -227,7 +229,7 @@ YAML
         record "$test_name" FAIL
         return
     fi
-    if [[ -d "$DATADIR/fs/kube-$pod_name" ]]; then
+    if [[ -d "$(kube_fs_dir "kube-$pod_name")" ]]; then
         echo "rootfs dir still exists after delete"
         record "$test_name" FAIL
         return
@@ -268,7 +270,7 @@ spec:
 YAML
 
     echo "--- $test_name: creating pod ---"
-    if ! "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" -v 2>&1; then
+    if ! "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" $KFLAG -v 2>&1; then
         record "$test_name" FAIL
         rm -f "$yaml_file"
         return
@@ -276,7 +278,7 @@ YAML
     rm -f "$yaml_file"
 
     echo "--- $test_name: starting pod ---"
-    if ! timeout "$TIMEOUT_BOOT" "$SDME" start "$pod_name" -v 2>&1; then
+    if ! timeout "$TIMEOUT_BOOT" "$SDME" start "$pod_name" -t "$TIMEOUT_BOOT" -v 2>&1; then
         record "$test_name" FAIL
         "$SDME" kube delete "$pod_name" --force 2>/dev/null || true
         return
@@ -327,7 +329,7 @@ spec:
 YAML
 
     echo "--- $test_name: creating pod ---"
-    if ! "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" -v 2>&1; then
+    if ! "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" $KFLAG -v 2>&1; then
         record "$test_name" FAIL
         rm -f "$yaml_file"
         return
