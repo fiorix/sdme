@@ -124,6 +124,8 @@ On a datadir that is already btrfs, subvolumes live under `{datadir}/btrfs/` (Mo
 
 Running a container engine (Docker or Podman) inside a btrfs container needs the `bpf` syscall allowed in seccomp so runc can program the cgroup v2 device controller: `--system-call-filter bpf` (plus `keyctl add_key` for images that use the kernel keyring). `--system-call-filter` accepts bare syscall names and `~name` denies, not only `@group` sets; no `CAP_BPF` is needed because the retained `CAP_SYS_ADMIN` covers the operation. Add `--capability CAP_NET_ADMIN --network-veth` for the engine's own bridge and iptables, load `br_netfilter` on the host, and point the engine at its `btrfs` storage driver so image layers become nested subvolumes. `sdme rm` deletes those nested subvolumes recursively. See the docker-in-container tutorial.
 
+For nested user namespaces, `--userns-nested N` (with `--userns`, `--hardened`, or `--strict`) reserves N extra 64K UID/GID ranges, expanding the container's user namespace to `(1+N)*65536` IDs so it can host further namespaced workloads. The default is the `userns_nested_ranges` config key; allocated ranges are recorded in the container state as `USERNS_SHIFT` and `USERNS_RANGE`.
+
 ## Networking Checks
 
 By default, sdme containers use the host network namespace. Port publishing requires a private network plus an interface (`--network-veth`, `--network-bridge`, or `--network-zone`); `--private-network` alone gives only loopback and cannot forward ports.

@@ -91,6 +91,8 @@ With `--userns` (or `--hardened`), sdme passes `--private-users=pick --private-u
 
 sdme probes idmap support at container creation time. When the kernel does not support idmapped mounts on overlayfs, sdme pre-shifts UIDs in parallel during `create` so the first boot is fast. The UID shift is computed using the same SipHash-2-4 algorithm as nspawn's `--private-users=pick`, avoiding conflicts between sdme containers and plain nspawn containers with the same machine name. At boot time, sdme checks for UID range conflicts with running machines and falls back to nspawn's `pick` if a collision is found.
 
+`--userns-nested N` reserves N additional 64K UID/GID ranges, expanding the container's user namespace to `(1+N)*65536` IDs so it can host further namespaced workloads (nested nspawn, Docker, Podman). The ranges are allocated conflict-free at create time and persisted in the container state; the default is controlled by the `userns_nested_ranges` config key. Expanded ranges use idmapped mounts on btrfs and skip nspawn's recursive chown on overlay, which only supports the standard 64K range.
+
 Podman rootless gets user namespace remapping by default; the entire container runtime runs as an unprivileged user.
 
 #### openSUSE file capabilities

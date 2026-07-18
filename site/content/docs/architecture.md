@@ -563,7 +563,10 @@ boot_timeout                      60
 join_as_sudo_user                 true
 host_rootfs_opaque_dirs           /etc/systemd/system,/var/log
 hardened_drop_caps                CAP_SYS_PTRACE,CAP_NET_RAW,...
+userns_nested_ranges              0
 default_base_fs                   (empty)
+default_storage_backend           (empty = overlay)
+btrfs_pool_size                   20G
 default_output_format             (empty)
 default_kube_registry             docker.io
 default_export_fs                 ext4
@@ -596,7 +599,10 @@ update_check.check_interval_hours 24
 - `join_as_sudo_user`: when no `--user` is given, join host-rootfs containers as `$SUDO_USER` instead of root. `--user` on `new`/`join`/`exec` always overrides this.
 - `host_rootfs_opaque_dirs`: default opaque dirs for host-rootfs containers (empty string disables).
 - `hardened_drop_caps`: capabilities dropped by `--hardened`.
+- `userns_nested_ranges`: default number of extra 64K UID/GID ranges to reserve for nested containers when `--userns` is enabled. Overridable per container with `--userns-nested N`.
 - `default_base_fs`: default base rootfs for OCI app images.
+- `default_storage_backend`: default storage backend for new containers (`overlay` or `btrfs`; empty = overlay). A `btrfs` default applies only to imported/OCI rootfs; host-rootfs containers fall back to overlay. Overridable per container with `--storage`.
+- `btrfs_pool_size`: virtual size of the Mode B btrfs pool image (sparse; ignored on a native-btrfs datadir).
 - `default_output_format`: default output format for `ps` and `fs ls` (empty = table, `json`, `json-pretty`).
 - `default_kube_registry`: default registry for unqualified image names in Kubernetes Pod YAML (e.g. `nginx` resolves to `docker.io/library/nginx`).
 - `default_export_fs`: filesystem type for raw disk image export (`ext4` or `btrfs`).
@@ -720,6 +726,12 @@ The deb and rpm packages install and load the profile automatically.
 **`--no-new-privileges`** passes `--no-new-privileges=yes` to nspawn. Off by default because interactive containers typically want `sudo`/`su` to work; `no_new_privs` blocks privilege escalation via setuid binaries and file capabilities. Enabled by `--hardened` and `--strict`.
 
 **`--read-only`** makes the overlayfs merged view read-only. Applications needing writable areas use bind mounts (`-b`).
+
+### Nested user namespace ranges
+
+`--userns-nested N` (together with `--userns`, `--hardened`, or `--strict`) reserves N additional 64K UID/GID ranges for a container, expanding its user namespace to `(1+N)*65536` IDs. This lets the container host further namespaced workloads (nested nspawn, Docker, Podman) without running out of mappable IDs. The default can be changed with `sdme config set userns_nested_ranges N`.
+
+For expanded ranges sdme allocates an explicit UID/GID base and range at create time, recorded in the container state as `USERNS_SHIFT` and `USERNS_RANGE`, and passes them to nspawn as `--private-users=<base>:<range>` instead of `pick`. Allocation scans both running machines and other sdme state files so ranges never overlap. Because nspawn's recursive-chown ownership mode only supports the standard 64K range, expanded ranges use idmapped mounts on btrfs (`--private-users-ownership=map`) and disable ownership changes on overlay (`--private-users-ownership=off`).
 
 ### The `--hardened` flag
 

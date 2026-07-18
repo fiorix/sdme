@@ -224,6 +224,16 @@ Then `--base-fs` can be omitted:
 sudo sdme kube apply -f nginx-pod.yaml --hardened --network-zone=kube
 ```
 
+## Choosing a storage backend
+
+`sdme kube apply` and `sdme kube create` accept the same `--storage` and `--disk` flags as `sdme new` and `sdme create`:
+
+```sh
+sudo sdme kube apply -f nginx-pod.yaml --base-fs ubuntu --storage btrfs --disk 4G --hardened --network-zone=kube
+```
+
+With `--storage btrfs`, the combined pod rootfs is built as a copy-on-write subvolume snapshot of `--base-fs`, so multi-container pods get fast copy-on-write clones, native user-namespace idmapping, and optional per-pod disk quotas. `--disk` requires btrfs simple quotas (btrfs-progs and kernel 6.7 or newer). See [storage backends](@/tutorial/different-rootfs.md#storage-backends) for the backend model and requirements.
+
 ## Networking
 
 All examples in this tutorial use `--network-zone=kube`, which gives each container its own network namespace with automatic DNS between containers in the same zone. Containers are reachable by IP from the host (use `sdme ps` to find the address).
