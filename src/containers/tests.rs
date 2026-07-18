@@ -168,6 +168,29 @@ fn test_create_with_rootfs_exists() {
 }
 
 #[test]
+fn test_create_with_rootfs_path_override() {
+    let _lock = UMASK_LOCK.lock().unwrap();
+    let tmp = tmp();
+    // Create a rootfs outside the normal {datadir}/fs layout.
+    let custom_rootfs = tmp.path().join("custom-rootfs");
+    fs::create_dir_all(&custom_rootfs).unwrap();
+
+    let opts = CreateOptions {
+        name: Some("pathbox".to_string()),
+        rootfs: Some("ignored-name".to_string()),
+        rootfs_path: Some(custom_rootfs.clone()),
+        ..Default::default()
+    };
+    let name = create(tmp.path(), &opts, false).unwrap();
+    assert_eq!(name, "pathbox");
+
+    // The state file records the basename of the resolved rootfs path, not the
+    // name supplied via `rootfs`. The explicit path is what matters for nspawn.
+    let state = State::read_from(&tmp.path().join("state/pathbox")).unwrap();
+    assert_eq!(state.get("ROOTFS"), Some("custom-rootfs"));
+}
+
+#[test]
 fn test_create_cleanup_on_failure() {
     let _lock = UMASK_LOCK.lock().unwrap();
     let tmp = tmp();
