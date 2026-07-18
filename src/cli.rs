@@ -1,6 +1,7 @@
 //! CLI helper functions for argument parsing and validation.
 
 use std::collections::HashSet;
+use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 
@@ -137,6 +138,15 @@ pub(crate) fn for_each_container(
         bail!("some containers could not be {past}");
     }
     Ok(())
+}
+
+/// Print a line to stdout, swallowing BrokenPipe.
+///
+/// Prevents panics when stdout is a pipe whose reader has closed or never
+/// started (e.g. `sdme ps | missing-cmd`). Other I/O errors are also ignored
+/// here because there is no useful recovery once stdout is unusable.
+pub(crate) fn println_stdout(s: &str) {
+    let _ = writeln!(std::io::stdout().lock(), "{s}");
 }
 
 /// Configuration for starting a container and awaiting boot readiness.

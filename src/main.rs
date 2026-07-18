@@ -2847,9 +2847,9 @@ fn run() -> Result<()> {
                 } else {
                     serde_json::to_string(&entries)?
                 };
-                println!("{output}");
+                println_stdout(&output);
             } else if entries.is_empty() {
-                println!("no containers found");
+                println_stdout("no containers found");
             } else {
                 let name_w = entries.iter().map(|e| e.name.len()).max().unwrap().max(4);
                 let status_w = entries.iter().map(|e| e.status.len()).max().unwrap().max(6);
@@ -2901,10 +2901,10 @@ fn run() -> Result<()> {
                     String::new()
                 };
                 // Header.
-                println!(
+                println_stdout(&format!(
                     "{:<name_w$}  {:<status_w$}  {:<health_w$}  {:<6}  {:<7}  {:<6}  {disk_hdr}{:<addr_w$}  OS",
                     "NAME", "STATUS", "HEALTH", "USERNS", "ENABLED", "MOUNTS", "ADDRESSES"
-                );
+                ));
                 // Rows.
                 for (i, e) in entries.iter().enumerate() {
                     let has_mounts = !e.binds.is_empty()
@@ -2915,7 +2915,7 @@ fn run() -> Result<()> {
                     } else {
                         String::new()
                     };
-                    println!(
+                    println_stdout(&format!(
                         "{:<name_w$}  {:<status_w$}  {:<health_w$}  {:<6}  {:<7}  {:<6}  {disk_cell}{:<addr_w$}  {}",
                         e.name,
                         e.status,
@@ -2925,7 +2925,7 @@ fn run() -> Result<()> {
                         if has_mounts { "yes" } else { "no" },
                         addr_display[i],
                         e.os,
-                    );
+                    ));
                 }
             }
         }
@@ -3088,9 +3088,9 @@ fn run() -> Result<()> {
                     } else {
                         serde_json::to_string(&pods)?
                     };
-                    println!("{output}");
+                    println_stdout(&output);
                 } else if pods.is_empty() {
-                    println!("no pods found");
+                    println_stdout("no pods found");
                 } else {
                     let name_w = pods.iter().map(|p| p.name.len()).max().unwrap().max(4);
                     let net_w = pods.iter().map(|p| p.net_mode.len()).max().unwrap().max(3);
@@ -3106,10 +3106,10 @@ fn run() -> Result<()> {
                         })
                         .collect();
                     let addr_w = addr_display.iter().map(|a| a.len()).max().unwrap().max(9);
-                    println!(
+                    println_stdout(&format!(
                         "{:<name_w$}  ACTIVE  {:<net_w$}  {:<zone_w$}  {:<addr_w$}  CREATED",
                         "NAME", "NET", "ZONE", "ADDRESSES"
-                    );
+                    ));
                     for (i, p) in pods.iter().enumerate() {
                         let active = if p.active { "yes" } else { "no" };
                         let net = if p.net_mode.is_empty() {
@@ -3122,10 +3122,10 @@ fn run() -> Result<()> {
                         } else {
                             &p.net_zone
                         };
-                        println!(
+                        println_stdout(&format!(
                             "{:<name_w$}  {:<6}  {:<net_w$}  {:<zone_w$}  {:<addr_w$}  {}",
                             p.name, active, net, zone, addr_display[i], p.created_at
-                        );
+                        ));
                     }
                 }
             }
@@ -3490,25 +3490,27 @@ fn run() -> Result<()> {
                     } else {
                         serde_json::to_string(&entries)?
                     };
-                    println!("{output}");
+                    println_stdout(&output);
                 } else if entries.is_empty() {
-                    println!("no root filesystems found");
+                    println_stdout("no root filesystems found");
                 } else {
                     let name_w = entries.iter().map(|e| e.name.len()).max().unwrap().max(4);
                     let os_w = entries.iter().map(|e| e.os.len()).max().unwrap().max(2);
                     let show_containers = entries.iter().any(|e| !e.containers.is_empty());
-                    print!("{:<name_w$}  {:<os_w$}", "NAME", "OS");
+                    let mut header = format!("{:<name_w$}  {:<os_w$}", "NAME", "OS");
                     if show_containers {
-                        print!("  CONTAINERS");
+                        header.push_str("  CONTAINERS");
                     }
-                    println!("  PATH");
+                    header.push_str("  PATH");
+                    println_stdout(&header);
                     for entry in &entries {
                         let path = cfg.datadir.join("fs").join(&entry.name);
-                        print!("{:<name_w$}  {:<os_w$}", entry.name, entry.os);
+                        let mut line = format!("{:<name_w$}  {:<os_w$}", entry.name, entry.os);
                         if show_containers {
-                            print!("  {:<10}", entry.containers.len());
+                            line.push_str(&format!("  {:<10}", entry.containers.len()));
                         }
-                        println!("  {}", path.display());
+                        line.push_str(&format!("  {}", path.display()));
+                        println_stdout(&line);
                     }
                 }
             }
