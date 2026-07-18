@@ -11,7 +11,7 @@
 %global crate sdme
 
 Name:           sdme
-Version:        0.15.0
+Version:        0.16.0
 Release:        1%{?dist}
 Summary:        The systemd machine editor
 
@@ -100,6 +100,14 @@ install -d %{buildroot}%{_datadir}/fish/vendor_completions.d
 %{_datadir}/fish/vendor_completions.d/%{crate}.fish
 
 %changelog
+* Sat Jul 18 2026 Alexandre Fiori <fiorix@gmail.com> - 0.16.0-1
+- Add btrfs storage backend support to Kubernetes pods: `sdme kube apply/create`
+  now accept `--storage btrfs` and `--disk`, building the combined pod rootfs as
+  a copy-on-write subvolume snapshot of `--base-fs`.
+- Add nested user namespace support: `--userns-nested N` and the
+  `userns_nested_ranges` config reserve extra 64K UID/GID ranges so containers
+  can host further namespaced workloads inside an existing user namespace.
+
 * Fri Jul 17 2026 Alexandre Fiori <fiorix@gmail.com> - 0.15.0-1
 - Require systemd >= 255 explicitly, which is the version sdme has always
   needed, so dnf declines the install where it cannot run instead of letting

@@ -1,3 +1,15 @@
+sdme (0.16.0-1~resolute1) resolute; urgency=medium
+
+  * Add btrfs storage backend support to Kubernetes pods: `sdme kube
+    apply/create` now accept `--storage btrfs` and `--disk`, building the
+    combined pod rootfs as a copy-on-write subvolume snapshot of `--base-fs`.
+  * Add nested user namespace support: `--userns-nested N` and the
+    `userns_nested_ranges` config reserve extra 64K UID/GID ranges so
+    containers can host further namespaced workloads inside an existing user
+    namespace.
+
+ -- Alexandre Fiori <fiorix@gmail.com>  Sat, 18 Jul 2026 21:33:25 +0100
+
 sdme (0.15.0-1~resolute1) resolute; urgency=medium
 
   * Packaging release: publish Arch Linux packages to the AUR. No functional
