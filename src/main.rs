@@ -2444,7 +2444,7 @@ fn run() -> Result<()> {
                 oci_pod,
                 binds,
                 envs,
-                security: sec,
+                security: sec.clone(),
                 oci_volumes,
                 oci_envs,
                 masked_services,
@@ -2460,6 +2460,7 @@ fn run() -> Result<()> {
                 restart_policy: Some(restart_policy.as_str()),
                 restart_sec: cfg.restart_sec,
                 userns_enabled,
+                userns_range: sec.userns_range,
                 verbose: cli.verbose,
             })?;
 
@@ -2790,7 +2791,7 @@ fn run() -> Result<()> {
                 oci_pod,
                 binds,
                 envs,
-                security: sec,
+                security: sec.clone(),
                 oci_volumes,
                 oci_envs,
                 masked_services,
@@ -2807,6 +2808,7 @@ fn run() -> Result<()> {
                 restart_policy: Some(restart_policy.as_str()),
                 restart_sec: cfg.restart_sec,
                 userns_enabled,
+                userns_range: sec.userns_range,
                 verbose: cli.verbose,
             })?;
 
@@ -3274,7 +3276,7 @@ fn run() -> Result<()> {
                         network: kube_network,
                         http: &http,
                         auto_gc: cfg.auto_fs_gc,
-                        security: sec,
+                        security: sec.clone(),
                         hardened,
                         masked_services,
                     },
@@ -3365,7 +3367,7 @@ fn run() -> Result<()> {
                         network: kube_network,
                         http: &http,
                         auto_gc: cfg.auto_fs_gc,
-                        security: sec,
+                        security: sec.clone(),
                         hardened,
                         masked_services,
                     },

@@ -98,6 +98,11 @@ pub struct Config {
     #[serde(default = "default_hardened_drop_caps")]
     pub hardened_drop_caps: String,
 
+    /// Default number of extra 64K UID/GID ranges to reserve for nested
+    /// containers when `--userns` is enabled.
+    #[serde(default = "default_userns_nested_ranges")]
+    pub userns_nested_ranges: u32,
+
     /// Default base rootfs for OCI application images.
     #[serde(default)]
     pub default_base_fs: String,
@@ -242,6 +247,10 @@ fn default_hardened_drop_caps() -> String {
     crate::security::HARDENED_DROP_CAPS.join(",")
 }
 
+fn default_userns_nested_ranges() -> u32 {
+    0
+}
+
 fn default_kube_registry() -> String {
     "docker.io".to_string()
 }
@@ -335,6 +344,7 @@ impl Default for Config {
             join_as_sudo_user: default_join_as_sudo_user(),
             host_rootfs_opaque_dirs: default_host_rootfs_opaque_dirs(),
             hardened_drop_caps: default_hardened_drop_caps(),
+            userns_nested_ranges: default_userns_nested_ranges(),
             default_base_fs: String::new(),
             default_output_format: String::new(),
             default_kube_registry: default_kube_registry(),
@@ -397,6 +407,7 @@ impl Config {
         println!("join_as_sudo_user = {join_as_sudo_user}");
         println!("host_rootfs_opaque_dirs = {}", self.host_rootfs_opaque_dirs);
         println!("hardened_drop_caps = {}", self.hardened_drop_caps);
+        println!("userns_nested_ranges = {}", self.userns_nested_ranges);
         println!("default_base_fs = {}", self.default_base_fs);
         println!("default_output_format = {}", self.default_output_format);
         println!("default_kube_registry = {}", self.default_kube_registry);
