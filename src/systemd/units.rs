@@ -408,7 +408,8 @@ pub fn write_nspawn_dropin(datadir: &Path, name: &str, verbose: bool) -> Result<
     let sd_version =
         crate::system_check::parse_systemd_version(&super::systemd_version()?).unwrap_or(0);
     let security = SecurityConfig::from_state(&state);
-    nspawn_args.extend(security.to_nspawn_args(sd_version));
+    let backend = crate::storage::Backend::from_state(&state);
+    nspawn_args.extend(security.to_nspawn_args(sd_version, backend));
 
     // Pod: entire container runs in the pod's network namespace.
     // The netns is entered via nsenter before nspawn, so nspawn creates its

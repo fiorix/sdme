@@ -186,22 +186,40 @@ impl SecurityConfig {
     ///
     /// Does NOT include AppArmor: that goes into the systemd unit drop-in
     /// as `AppArmorProfile=`, not as an nspawn flag.
-    pub fn to_nspawn_args(&self, _systemd_version: u32) -> Vec<String> {
+    pub fn to_nspawn_args(
+        &self,
+        _systemd_version: u32,
+        backend: crate::storage::Backend,
+    ) -> Vec<String> {
         let mut args = Vec::new();
 
         if self.userns {
+            let range = self.userns_range.unwrap_or(crate::userns::UID_RANGE);
             match self.userns_shift {
                 Some(shift) => {
                     // Inside a nested container the nspawn argument must be an
                     // offset relative to the current user namespace, while the
                     // stored shift is the absolute host base.
                     let local_base = shift.saturating_sub(crate::userns::current_userns_base());
-                    let range = self.userns_range.unwrap_or(crate::userns::UID_RANGE);
                     args.push(format!("--private-users={local_base}:{range}"));
                 }
                 None => args.push("--private-users=pick".to_string()),
             }
-            args.push("--private-users-ownership=auto".to_string());
+            // Recursive chown only supports the standard 64K range. Expanded
+            // ranges are reserved for nested containers; rely on pre-shifted
+            // overlayfs upper layers or btrfs idmapped subvolume mounts.
+            if range == crate::userns::UID_RANGE {
+                args.push("--private-users-ownership=auto".to_string());
+            } else {
+                match backend {
+                    crate::storage::Backend::Btrfs => {
+                        args.push("--private-users-ownership=map".to_string());
+                    }
+                    crate::storage::Backend::Overlay => {
+                        args.push("--private-users-ownership=off".to_string());
+                    }
+                }
+            }
         }
 
         for cap in &self.drop_caps {
@@ -583,7 +601,9 @@ mod tests {
     fn test_default_is_empty() {
         let sec = SecurityConfig::default();
         assert!(sec.is_empty());
-        assert!(sec.to_nspawn_args(255).is_empty());
+        assert!(sec
+            .to_nspawn_args(255, crate::storage::Backend::Overlay)
+            .is_empty());
     }
 
     #[test]
@@ -682,7 +702,7 @@ mod tests {
         // Always uses --private-users-ownership=auto (lets nspawn pick
         // idmapped mounts or recursive chown based on kernel support).
         for ver in [255, 256, 257] {
-            let args = sec.to_nspawn_args(ver);
+            let args = sec.to_nspawn_args(ver, crate::storage::Backend::Overlay);
             assert_eq!(
                 args,
                 vec![
@@ -700,7 +720,7 @@ mod tests {
         }
         // AppArmor should NOT be in nspawn args.
         assert!(!sec
-            .to_nspawn_args(257)
+            .to_nspawn_args(257, crate::storage::Backend::Overlay)
             .iter()
             .any(|a| a.contains("apparmor")));
     }
@@ -713,9 +733,22 @@ mod tests {
             userns_range: Some(131072),
             ..Default::default()
         };
-        let args = sec.to_nspawn_args(255);
+        let args = sec.to_nspawn_args(255, crate::storage::Backend::Btrfs);
         assert_eq!(args[0], "--private-users=1678049280:131072");
-        assert_eq!(args[1], "--private-users-ownership=auto");
+        assert_eq!(args[1], "--private-users-ownership=map");
+    }
+
+    #[test]
+    fn test_to_nspawn_args_with_explicit_shift_overlay() {
+        let sec = SecurityConfig {
+            userns: true,
+            userns_shift: Some(1678049280),
+            userns_range: Some(131072),
+            ..Default::default()
+        };
+        let args = sec.to_nspawn_args(255, crate::storage::Backend::Overlay);
+        assert_eq!(args[0], "--private-users=1678049280:131072");
+        assert_eq!(args[1], "--private-users-ownership=off");
     }
 
     #[test]
@@ -725,8 +758,9 @@ mod tests {
             userns_shift: Some(1678049280),
             ..Default::default()
         };
-        let args = sec.to_nspawn_args(255);
+        let args = sec.to_nspawn_args(255, crate::storage::Backend::Overlay);
         assert_eq!(args[0], "--private-users=1678049280:65536");
+        assert_eq!(args[1], "--private-users-ownership=auto");
     }
 
     #[test]
