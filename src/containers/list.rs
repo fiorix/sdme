@@ -1,11 +1,11 @@
 //! Container listing, health checks, and status reporting.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::{rootfs, systemd, NetworkConfig, ResourceLimits, State};
+use crate::{rootfs, storage, systemd, NetworkConfig, ResourceLimits, State};
 
 /// Kube-specific metadata for a container created via `sdme kube create`.
 #[derive(serde::Serialize)]
@@ -67,13 +67,54 @@ impl ContainerInfo {
     }
 }
 
+/// Return candidate filesystem roots for a container, in precedence order.
+///
+/// For overlay containers the running view is `merged` and the stopped view is
+/// `upper`. For btrfs containers the root is the per-container subvolume under
+/// the btrfs pool root.
+fn root_candidates(
+    container_dir: &Path,
+    name: &str,
+    backend: storage::Backend,
+    pool_root: Option<&Path>,
+) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    match backend {
+        storage::Backend::Overlay => {
+            let merged = container_dir.join("merged");
+            if merged.exists() {
+                candidates.push(merged);
+            }
+            let upper = container_dir.join("upper");
+            if upper.exists() {
+                candidates.push(upper);
+            }
+        }
+        storage::Backend::Btrfs => {
+            if let Some(pool_root) = pool_root {
+                let subvol = storage::btrfs::container_root(pool_root, name);
+                if subvol.exists() {
+                    candidates.push(subvol);
+                }
+            }
+        }
+    }
+    candidates
+}
+
 /// Check readiness probe files for a kube container with probes.
 ///
 /// Looks for `probe-ready` files under `/oci/apps/{name}/` in the container's
-/// overlayfs (merged when running, upper when stopped). Returns "ready" if all
-/// apps with probe-ready files report "ready", "not-ready" if any report
-/// "not-ready", or "ok" if no probe-ready files exist.
-fn probe_readiness_health(container_dir: &Path, state: &State) -> String {
+/// root filesystem (overlay merged/upper, or the btrfs subvolume). Returns
+/// "ready" if all apps with probe-ready files report "ready", "not-ready" if
+/// any report "not-ready", or "ok" if no probe-ready files exist.
+fn probe_readiness_health(
+    container_dir: &Path,
+    name: &str,
+    state: &State,
+    backend: storage::Backend,
+    pool_root: Option<&Path>,
+) -> String {
     // Determine which apps to check from KUBE_CONTAINERS or OCI_APP.
     let app_names: Vec<&str> = if let Some(kc) = state.get("KUBE_CONTAINERS") {
         kc.split(',').collect()
@@ -83,14 +124,13 @@ fn probe_readiness_health(container_dir: &Path, state: &State) -> String {
         return "ok".to_string();
     };
 
-    // Check merged first (running), then upper (stopped).
-    let bases = [container_dir.join("merged"), container_dir.join("upper")];
+    let bases = root_candidates(container_dir, name, backend, pool_root);
 
     let mut found_any = false;
     let mut all_ready = true;
-    for name in &app_names {
+    for app_name in &app_names {
         for base in &bases {
-            let probe_file = base.join("oci/apps").join(name).join("probe-ready");
+            let probe_file = base.join("oci/apps").join(app_name).join("probe-ready");
             if let Ok(content) = fs::read_to_string(&probe_file) {
                 let trimmed = content.trim();
                 found_any = true;
@@ -147,6 +187,13 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
     }
     entries.sort();
 
+    // The btrfs pool root, if one exists. This is used to locate btrfs
+    // container subvolumes for OS/app/probe detection. Like the disk-usage
+    // probe below, this must not mount the pool as a side effect of `ps`:
+    // an unmounted Mode B pool simply yields no subvolume candidates and the
+    // callers fall back to the imported base rootfs.
+    let pool_root = storage::pool::root(datadir).ok();
+
     let mut result = Vec::new();
     for name in &entries {
         let container_dir = datadir.join("containers").join(name);
@@ -194,8 +241,32 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
             }
         };
 
-        if !rootfs_name.is_empty() && !datadir.join("fs").join(&rootfs_name).exists() {
-            problems.push("missing fs");
+        let backend = state
+            .as_ref()
+            .map(|s| storage::Backend::from_state(s))
+            .unwrap_or_default();
+
+        // A btrfs container's rootfs is a subvolume under the pool, not a
+        // directory under {datadir}/fs. Verify against the matching location;
+        // when the pool is not mounted there is nothing to check against, so
+        // do not flag a phantom "missing fs".
+        if !rootfs_name.is_empty() {
+            let fs_ok = match backend {
+                storage::Backend::Overlay => datadir.join("fs").join(&rootfs_name).exists(),
+                // An unmounted Mode B pool (or a datadir whose pool was never
+                // created) has no {pool}/fs tree to check against; only flag a
+                // missing base when the tree is there but the subvolume is not.
+                storage::Backend::Btrfs => pool_root
+                    .as_deref()
+                    .map(|pr| {
+                        !pr.join("fs").is_dir()
+                            || storage::btrfs::base_subvol(pr, &rootfs_name).exists()
+                    })
+                    .unwrap_or(true),
+            };
+            if !fs_ok {
+                problems.push("missing fs");
+            }
         }
 
         // Query systemd ActiveState before health and status.
@@ -211,9 +282,9 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
             "failed".to_string()
         } else if let Ok(ref s) = state {
             // For kube containers with readiness probes, check the probe-ready
-            // file in the container's overlayfs to report ready/not-ready.
+            // file in the container's rootfs to report ready/not-ready.
             if s.is_yes("HAS_PROBES") {
-                probe_readiness_health(&container_dir, s)
+                probe_readiness_health(&container_dir, name, s, backend, pool_root.as_deref())
             } else if active_state.as_deref() == Some("active") {
                 // For running containers without probes, surface the state
                 // of systemd inside the container so a failed unit shows up
@@ -226,12 +297,12 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
             "ok".to_string()
         };
 
-        // OS detection: prefer the container's overlayfs view (merged when
-        // running, upper when stopped), fall back to the imported rootfs.
+        // OS detection: prefer the container's writable root (overlay
+        // merged/upper, or the btrfs subvolume), fall back to the imported
+        // rootfs.
         let os = {
-            let merged = container_dir.join("merged");
-            let upper = container_dir.join("upper");
-            let detected = [&merged, &upper]
+            let candidates = root_candidates(&container_dir, name, backend, pool_root.as_deref());
+            let detected = candidates
                 .iter()
                 .map(|p| rootfs::detect_distro(p))
                 .find(|d| !d.is_empty())
@@ -285,16 +356,15 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
             }
         }
 
-        // Detect OCI apps from the container's rootfs overlay.
-        // Try merged (running), then upper (stopped, modified), then base rootfs.
+        // Detect OCI apps from the container's writable root.
+        // Try the live root (overlay merged/upper, or the btrfs subvolume),
+        // then the base rootfs.
         let oci_apps = {
-            let merged = container_dir.join("merged");
-            let upper = container_dir.join("upper");
-            let candidates: Vec<std::path::PathBuf> = if !rootfs_name.is_empty() {
-                vec![merged, upper, datadir.join("fs").join(&rootfs_name)]
-            } else {
-                vec![merged, upper]
-            };
+            let mut candidates =
+                root_candidates(&container_dir, name, backend, pool_root.as_deref());
+            if !rootfs_name.is_empty() {
+                candidates.push(datadir.join("fs").join(&rootfs_name));
+            }
             candidates
                 .iter()
                 .map(|p| crate::oci::rootfs::read_all_oci_apps(p))
