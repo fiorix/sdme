@@ -90,8 +90,13 @@ pub struct SecurityConfig {
     /// AppArmor profile name (applied as systemd unit directive).
     pub apparmor_profile: Option<String>,
     /// Pre-allocated UID shift for user namespace (bypasses nspawn `pick`).
-    /// When set, uses `--private-users=<shift>:65536` instead of `pick`.
+    /// When set, uses `--private-users=<shift>:<range>` instead of `pick`.
+    /// The value is the absolute host UID base.
     pub userns_shift: Option<u64>,
+    /// Total size of the pre-allocated UID range.
+    /// When unset, defaults to 65536. A larger value means the container
+    /// reserved extra 64K slots for nested containers.
+    pub userns_range: Option<u64>,
 }
 
 impl SecurityConfig {
@@ -105,6 +110,7 @@ impl SecurityConfig {
             && self.system_call_filter.is_empty()
             && self.apparmor_profile.is_none()
             && self.userns_shift.is_none()
+            && self.userns_range.is_none()
     }
 
     /// Read security config from a container's state file.
@@ -119,6 +125,9 @@ impl SecurityConfig {
             apparmor_profile: state.get_nonempty("APPARMOR_PROFILE").map(String::from),
             userns_shift: state
                 .get_nonempty("USERNS_SHIFT")
+                .and_then(|s| s.parse().ok()),
+            userns_range: state
+                .get_nonempty("USERNS_RANGE")
                 .and_then(|s| s.parse().ok()),
         }
     }
@@ -157,6 +166,11 @@ impl SecurityConfig {
             Some(shift) => state.set("USERNS_SHIFT", shift.to_string()),
             None => state.remove("USERNS_SHIFT"),
         }
+
+        match self.userns_range {
+            Some(range) => state.set("USERNS_RANGE", range.to_string()),
+            None => state.remove("USERNS_RANGE"),
+        }
     }
 
     /// Generate systemd-nspawn arguments for security options.
@@ -177,7 +191,14 @@ impl SecurityConfig {
 
         if self.userns {
             match self.userns_shift {
-                Some(shift) => args.push(format!("--private-users={shift}:65536")),
+                Some(shift) => {
+                    // Inside a nested container the nspawn argument must be an
+                    // offset relative to the current user namespace, while the
+                    // stored shift is the absolute host base.
+                    let local_base = shift.saturating_sub(crate::userns::current_userns_base());
+                    let range = self.userns_range.unwrap_or(crate::userns::UID_RANGE);
+                    args.push(format!("--private-users={local_base}:{range}"));
+                }
                 None => args.push("--private-users=pick".to_string()),
             }
             args.push("--private-users-ownership=auto".to_string());
@@ -656,6 +677,7 @@ mod tests {
             system_call_filter: vec!["@system-service".to_string(), "~@mount".to_string()],
             apparmor_profile: Some("sdme-container".to_string()),
             userns_shift: None,
+            userns_range: None,
         };
         // Always uses --private-users-ownership=auto (lets nspawn pick
         // idmapped mounts or recursive chown based on kernel support).
@@ -688,11 +710,23 @@ mod tests {
         let sec = SecurityConfig {
             userns: true,
             userns_shift: Some(1678049280),
+            userns_range: Some(131072),
+            ..Default::default()
+        };
+        let args = sec.to_nspawn_args(255);
+        assert_eq!(args[0], "--private-users=1678049280:131072");
+        assert_eq!(args[1], "--private-users-ownership=auto");
+    }
+
+    #[test]
+    fn test_to_nspawn_args_with_explicit_shift_defaults_range() {
+        let sec = SecurityConfig {
+            userns: true,
+            userns_shift: Some(1678049280),
             ..Default::default()
         };
         let args = sec.to_nspawn_args(255);
         assert_eq!(args[0], "--private-users=1678049280:65536");
-        assert_eq!(args[1], "--private-users-ownership=auto");
     }
 
     #[test]
@@ -706,6 +740,7 @@ mod tests {
             system_call_filter: vec!["~@mount".to_string()],
             apparmor_profile: Some("sdme-default".to_string()),
             userns_shift: Some(1678049280),
+            userns_range: Some(196608),
         };
 
         let mut state = State::new();

@@ -7,6 +7,7 @@
 //! - Deterministic UID shift allocation matching nspawn's `--private-users=pick`
 //! - Conflict detection against other sdme containers and running machines
 //! - Parallel pre-chown at create time so boot is fast
+//! - Nested container support: sub-ranges allocated inside a parent user namespace
 //!
 //! # TODO
 //!
@@ -14,7 +15,6 @@
 //! cross-tool coordination. This eliminates the theoretical conflict window
 //! between stopped sdme containers and nspawn's `pick`.
 
-use std::collections::HashSet;
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -34,7 +34,7 @@ const UID_BASE_MIN: u64 = 0x0008_0000; // 524288
 const UID_BASE_MAX: u64 = 0x6FFF_0000; // 1879048192
 
 /// Number of UIDs per container namespace.
-const UID_RANGE: u64 = 0x1_0000; // 65536
+pub const UID_RANGE: u64 = 0x1_0000; // 65536
 
 /// SipHash-2-4 key used by nspawn's `uid_shift_pick()` to hash the
 /// machine name into a candidate UID shift. Extracted from systemd
@@ -45,6 +45,39 @@ const SIPHASH_KEY: [u8; 16] = [
 
 /// Maximum allocation attempts before giving up.
 const MAX_RETRIES: u32 = 100;
+
+/// Read the parent user namespace mapping for UID 0.
+///
+/// Returns `(outside_start, length)` from the `/proc/self/uid_map` line whose
+/// inside start is `0`. In the initial user namespace this is `(0, 2^32-1)`;
+/// inside an nspawn container it is the host base and length of the range
+/// mapped for the container (e.g. `(524288, 65536)`).
+pub fn current_parent_range() -> Option<(u64, u64)> {
+    let content = fs::read_to_string("/proc/self/uid_map").ok()?;
+    for line in content.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 3 && parts[0] == "0" {
+            let outside = parts[1].parse().ok()?;
+            let length = parts[2].parse().ok()?;
+            return Some((outside, length));
+        }
+    }
+    None
+}
+
+/// Return true if the current process is running in the initial user namespace.
+///
+/// The initial user namespace maps all 32-bit UIDs 1:1, so its uid_map is
+/// exactly `0 0 4294967295`.
+pub fn is_initial_user_namespace() -> bool {
+    matches!(current_parent_range(), Some((0, 0xFFFF_FFFF)))
+}
+
+/// Return the host base of the current user namespace (the outside start of
+/// the UID-0 mapping). In the initial user namespace this is `0`.
+pub fn current_userns_base() -> u64 {
+    current_parent_range().map(|(base, _)| base).unwrap_or(0)
+}
 
 /// Allocate a UID shift for a container, matching nspawn's `pick` algorithm.
 ///
@@ -59,32 +92,82 @@ const MAX_RETRIES: u32 = 100;
 /// Acquires an exclusive lock on the "userns" resource to prevent races
 /// between concurrent `sdme create` calls.
 pub fn allocate_uid_shift(datadir: &Path, name: &str) -> Result<u64> {
+    let (base, _) = allocate_uid_range(datadir, name, 0)?;
+    Ok(base)
+}
+
+/// Allocate a contiguous UID/GID range for a container.
+///
+/// `extra_64k_slots` requests additional 64K ranges beyond the container's own
+/// range. A value of `0` allocates the usual single 64K block; `N` allocates
+/// `(1 + N) * 65536` contiguous IDs. The returned `base` is the absolute host
+/// UID/GID at the start of the block, and `range` is the total length.
+///
+/// When running inside an existing user namespace, the block is constrained to
+/// fit entirely within the parent namespace's mapped range. Inner containers
+/// can then allocate offsets inside this block.
+pub fn allocate_uid_range(datadir: &Path, name: &str, extra_64k_slots: u32) -> Result<(u64, u64)> {
     let _lock = lock::lock_exclusive(datadir, "userns", "shift")
         .context("cannot lock userns allocation")?;
 
-    let used = collect_used_shifts(datadir, name)?;
+    let (parent_base, parent_range) =
+        current_parent_range().context("failed to read current user namespace range")?;
+
+    let slots = 1u64 + u64::from(extra_64k_slots);
+    let total_range = slots
+        .checked_mul(UID_RANGE)
+        .context("requested UID range overflow")?;
+
+    let used = collect_used_ranges(datadir, name)?;
+
+    // Determine the usable absolute host range. It must be inside both the
+    // global [UID_BASE_MIN, UID_BASE_MAX] window and the current parent namespace.
+    let global_min = UID_BASE_MIN;
+    let global_max = UID_BASE_MAX;
+
+    let usable_min = parent_base.max(global_min);
+    let usable_end = parent_base
+        .saturating_add(parent_range)
+        .min(global_max.saturating_add(UID_RANGE));
+
+    if usable_min + total_range > usable_end {
+        bail!(
+            "parent user namespace only provides {} UIDs starting at {}, \
+             but {} UIDs are required",
+            parent_range,
+            parent_base,
+            total_range
+        );
+    }
 
     // First candidate: SipHash of the machine name (matches nspawn's pick).
     let hash = siphash24(name.as_bytes(), &SIPHASH_KEY);
     let mut candidate = hash_to_shift(hash);
 
+    // Clamp the SipHash candidate into the usable window and align it.
+    if candidate < usable_min {
+        candidate = usable_min + ((usable_min - candidate + UID_RANGE - 1) & !0xFFFF);
+    }
+    if candidate + total_range > usable_end {
+        candidate = usable_min;
+    }
+    candidate &= !0xFFFF;
+
     for _ in 0..MAX_RETRIES {
-        if (UID_BASE_MIN..=UID_BASE_MAX).contains(&candidate)
-            && candidate & 0xFFFF == 0
-            && !used.contains(&candidate)
-        {
-            return Ok(candidate);
+        if candidate + total_range <= usable_end && range_is_free(candidate, total_range, &used) {
+            return Ok((candidate, total_range));
         }
 
-        // Linear probe for the next free slot (nspawn uses random_bytes
-        // for retries, but linear is deterministic and avoids a CSPRNG).
-        candidate =
-            UID_BASE_MIN + ((candidate - UID_BASE_MIN + UID_RANGE) % (UID_BASE_MAX - UID_BASE_MIN));
+        // Linear probe for the next free slot.
+        candidate = candidate.saturating_add(UID_RANGE);
+        if candidate + total_range > usable_end {
+            candidate = usable_min;
+        }
         candidate &= !0xFFFF;
     }
 
     bail!(
-        "failed to allocate UID shift after {MAX_RETRIES} attempts \
+        "failed to allocate UID range of size {total_range} after {MAX_RETRIES} attempts \
          (all slots in use)"
     )
 }
@@ -104,10 +187,19 @@ pub fn check_shift_conflict(name: &str, shift: u64) -> Option<String> {
 /// Pre-chown an overlayfs rootfs in parallel to shift UIDs for user namespaces.
 ///
 /// Mounts the overlayfs temporarily, walks the merged tree with rayon, and
-/// shifts all UIDs/GIDs in range 0..65535 by `shift`. This triggers copy-ups
-/// to the upper layer (intended). After unmounting, the upper layer retains
-/// the shifted ownership so nspawn's boot-time chown is a no-op.
-pub fn prechown_overlayfs(datadir: &Path, name: &str, lowerdir: &str, shift: u64) -> Result<()> {
+/// shifts all UIDs/GIDs in range 0..65535 by the local shift. This triggers
+/// copy-ups to the upper layer (intended). After unmounting, the upper layer
+/// retains the shifted ownership so nspawn's boot-time chown is a no-op.
+///
+/// `absolute_shift` is the host-level UID base stored in the container state.
+/// Inside a nested container this is converted to a local offset before calling
+/// `lchown()`, because `lchown()` interprets UIDs in the current namespace.
+pub fn prechown_overlayfs(
+    datadir: &Path,
+    name: &str,
+    lowerdir: &str,
+    absolute_shift: u64,
+) -> Result<()> {
     let container_dir = datadir.join("containers").join(name);
     let upper = container_dir.join("upper");
     let work = container_dir.join("work");
@@ -121,7 +213,11 @@ pub fn prechown_overlayfs(datadir: &Path, name: &str, lowerdir: &str, shift: u64
     crate::system_check::mount_overlay(&merged, &opts)
         .context("failed to mount overlayfs for pre-chown")?;
 
-    let result = do_prechown(&merged, shift);
+    let local_shift = absolute_shift.saturating_sub(current_userns_base());
+    if local_shift > u64::from(u32::MAX) {
+        bail!("local UID shift {local_shift} exceeds u32");
+    }
+    let result = do_prechown(&merged, local_shift);
 
     if let Err(e) = crate::system_check::umount(&merged) {
         if result.is_ok() {
@@ -300,11 +396,18 @@ fn shift_ownership(path: &Path, shift: u32) -> Result<()> {
     Ok(())
 }
 
-/// Collect UID shifts used by other sdme containers and running machines.
-fn collect_used_shifts(datadir: &Path, exclude_name: &str) -> Result<HashSet<u64>> {
-    let mut used = HashSet::new();
+/// A used UID/GID range collected from state files or running machines.
+#[derive(Debug, Clone, Copy)]
+struct UsedRange {
+    start: u64,
+    len: u64,
+}
 
-    // Scan sdme state files for USERNS_SHIFT.
+/// Collect UID ranges used by other sdme containers and running machines.
+fn collect_used_ranges(datadir: &Path, exclude_name: &str) -> Result<Vec<UsedRange>> {
+    let mut used = Vec::new();
+
+    // Scan sdme state files for USERNS_SHIFT and USERNS_RANGE.
     let state_dir = datadir.join("state");
     if let Ok(entries) = fs::read_dir(&state_dir) {
         for entry in entries.flatten() {
@@ -315,8 +418,12 @@ fn collect_used_shifts(datadir: &Path, exclude_name: &str) -> Result<HashSet<u64
             }
             if let Ok(state) = State::read_from(&entry.path()) {
                 if let Some(shift_str) = state.get_nonempty("USERNS_SHIFT") {
-                    if let Ok(shift) = shift_str.parse::<u64>() {
-                        used.insert(shift);
+                    if let Ok(start) = shift_str.parse::<u64>() {
+                        let len = state
+                            .get_nonempty("USERNS_RANGE")
+                            .and_then(|s| s.parse::<u64>().ok())
+                            .unwrap_or(UID_RANGE);
+                        used.push(UsedRange { start, len });
                     }
                 }
             }
@@ -324,11 +431,30 @@ fn collect_used_shifts(datadir: &Path, exclude_name: &str) -> Result<HashSet<u64
     }
 
     // Collect shifts from running machines via /proc/{leader}/uid_map.
+    // We do not know their configured range, so assume the standard 64K.
     for (_, shift) in running_machine_shifts() {
-        used.insert(shift);
+        used.push(UsedRange {
+            start: shift,
+            len: UID_RANGE,
+        });
     }
 
     Ok(used)
+}
+
+/// Check whether `[start, start + len)` overlaps any used range.
+fn range_is_free(start: u64, len: u64, used: &[UsedRange]) -> bool {
+    let end = match start.checked_add(len) {
+        Some(e) => e,
+        None => return false,
+    };
+    for r in used {
+        let r_end = r.start.saturating_add(r.len);
+        if start < r_end && end > r.start {
+            return false;
+        }
+    }
+    true
 }
 
 /// Read UID shifts of all currently running machines from machined.
@@ -490,6 +616,36 @@ mod tests {
             shift, 1678049280,
             "shift for 'iporakepaba' does not match nspawn's output"
         );
+    }
+
+    #[test]
+    fn test_range_is_free() {
+        let used = vec![
+            UsedRange {
+                start: 0x8_0000,
+                len: 0x1_0000,
+            },
+            UsedRange {
+                start: 0xA_0000,
+                len: 0x2_0000,
+            },
+        ];
+        assert!(range_is_free(0x9_0000, 0x1_0000, &used));
+        assert!(!range_is_free(0x8_0000, 0x1_0000, &used));
+        assert!(!range_is_free(0x7_FFFF, 0x2_0000, &used));
+        assert!(!range_is_free(0x9_FFFF, 0x2_0000, &used));
+        assert!(!range_is_free(0xA_0001, 0x1_0000, &used));
+    }
+
+    #[test]
+    fn test_parent_range_parses() {
+        // Every Linux process should have a parseable uid_map.
+        let (base, len) = current_parent_range().expect("uid_map should be readable");
+        assert!(len > 0, "uid_map length must be positive");
+        if is_initial_user_namespace() {
+            assert_eq!(base, 0);
+            assert_eq!(len, 0xFFFF_FFFF);
+        }
     }
 
     #[test]

@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering;
 
 use anyhow::{bail, Context, Result};
 use sdme::{
-    check_interrupted, config, containers, lock, oci, pod, security, systemd, BindConfig,
+    check_interrupted, config, containers, lock, oci, pod, security, systemd, userns, BindConfig,
     EnvConfig, NetworkConfig, ResourceLimits, SecurityConfig, INTERRUPTED,
 };
 
@@ -57,6 +57,11 @@ pub(crate) struct SecurityArgs {
     /// Enable user namespace isolation (container root != host root)
     #[arg(short = 'u', long)]
     pub userns: bool,
+
+    /// Reserve N additional 64K UID/GID ranges for nested containers.
+    /// The container's own user namespace will be expanded to (1+N)*65536 IDs.
+    #[arg(long = "userns-nested")]
+    pub userns_nested: Option<u32>,
 
     /// Drop a capability (e.g. CAP_SYS_PTRACE, repeatable)
     #[arg(long = "drop-capability")]
@@ -303,6 +308,8 @@ pub(crate) struct PostCreateSetup<'a> {
     pub restart_sec: u64,
     /// Whether the container uses a private user namespace.
     pub userns_enabled: bool,
+    /// Pre-allocated user namespace range size, if any.
+    pub userns_range: Option<u64>,
     /// Enable verbose output.
     pub verbose: bool,
 }
@@ -323,6 +330,7 @@ pub(crate) fn post_create_setup(opts: &PostCreateSetup) -> Result<()> {
         restart_policy,
         restart_sec,
         userns_enabled,
+        userns_range,
         verbose,
     } = *opts;
     let state_path = datadir.join("state").join(name);
@@ -351,13 +359,8 @@ pub(crate) fn post_create_setup(opts: &PostCreateSetup) -> Result<()> {
     }
 
     if userns_enabled {
-        // The overlay idmap probe and its recursive-chown fallback are
-        // overlay-specific. A btrfs subvolume root supports native idmapped
-        // mounts, so nspawn's --private-users-ownership=auto shifts ownership at
-        // mount time with no chown pass (and no suid/xattr loss).
-        if sdme::storage::Backend::from_state(&state) == sdme::storage::Backend::Overlay {
-            probe_and_prechown(datadir, name, lowerdir, verbose)?;
-        }
+        let backend = sdme::storage::Backend::from_state(&state);
+        ensure_userns_range(datadir, name, lowerdir, backend, userns_range, verbose)?;
     }
     Ok(())
 }
@@ -401,52 +404,66 @@ pub(crate) fn validate_systemd_log_level(level: &str) -> Result<()> {
     Ok(())
 }
 
-/// Probe overlayfs idmap support and pre-chown if needed.
+/// Ensure a container has an allocatable UID/GID range when it needs one.
 ///
-/// Called after container creation when userns is enabled. If the kernel
-/// does not support idmapped mounts on overlayfs, allocates a UID shift
-/// and pre-chowns the overlayfs in parallel so that nspawn's boot-time
-/// chown is a fast no-op.
+/// Called after container creation when userns is enabled. It allocates a
+/// range if any of the following is true:
 ///
-/// Writes `USERNS_SHIFT` to the container's state file on success.
-pub(crate) fn probe_and_prechown(
+/// - the kernel does not support idmapped mounts on overlayfs (so we must
+///   pre-chown),
+/// - sdme is running inside an existing user namespace (nested container),
+/// - the user requested extra 64K ranges for nested containers.
+///
+/// The allocated `USERNS_SHIFT` and `USERNS_RANGE` are written to the state
+/// file so `SecurityConfig::to_nspawn_args()` can emit an explicit
+/// `--private-users=<base>:<range>`.
+pub(crate) fn ensure_userns_range(
     datadir: &Path,
     name: &str,
     lowerdir: &str,
+    backend: sdme::storage::Backend,
+    userns_range: Option<u64>,
     verbose: bool,
 ) -> Result<()> {
     use sdme::{system_check, userns};
 
-    match system_check::probe_idmap_on_overlayfs(datadir) {
-        Ok(()) => {
-            if verbose {
-                eprintln!("overlayfs idmap: supported");
-            }
-        }
-        Err(e) => {
-            eprintln!("note: overlayfs idmap not available ({e:#})");
-            eprintln!(
-                "pre-shifting UIDs for '{name}' (this runs once and can be \
-                 slow for large filesystems)..."
-            );
-            eprintln!(
-                "hint: upgrading to a kernel with overlayfs idmap support \
-                 eliminates this step"
-            );
+    let idmap_ok = system_check::probe_idmap_on_overlayfs(datadir).is_ok();
+    let nested = !userns::is_initial_user_namespace();
+    let extra_slots = userns_range
+        .map(|r| (r / userns::UID_RANGE).saturating_sub(1) as u32)
+        .unwrap_or(0);
 
-            let shift = userns::allocate_uid_shift(datadir, name)?;
-            if verbose {
-                eprintln!("allocated UID shift: {shift}");
-            }
-            userns::prechown_overlayfs(datadir, name, lowerdir, shift)?;
-
-            // Store the shift in the state file so to_nspawn_args uses it.
-            let state_path = datadir.join("state").join(name);
-            let mut state = sdme::State::read_from(&state_path)?;
-            state.set("USERNS_SHIFT", shift.to_string());
-            state.write_to(&state_path)?;
+    if idmap_ok && !nested && extra_slots == 0 {
+        if verbose {
+            eprintln!("overlayfs idmap: supported");
         }
+        return Ok(());
     }
+
+    if verbose && !idmap_ok {
+        eprintln!("note: overlayfs idmap not available; pre-shifting UIDs");
+    }
+    if verbose && nested {
+        eprintln!("note: allocating user namespace range inside parent userns");
+    }
+
+    let (shift, range) = userns::allocate_uid_range(datadir, name, extra_slots)?;
+    if verbose {
+        eprintln!("allocated UID range: {shift}:{range}");
+    }
+
+    // Pre-chown is only meaningful for overlayfs; btrfs uses idmapped mounts.
+    // Inside a nested container we always pre-chown because idmapped overlayfs
+    // may not translate correctly across multiple user namespaces.
+    if backend == sdme::storage::Backend::Overlay && (!idmap_ok || nested) {
+        userns::prechown_overlayfs(datadir, name, lowerdir, shift)?;
+    }
+
+    let state_path = datadir.join("state").join(name);
+    let mut state = sdme::State::read_from(&state_path)?;
+    state.set("USERNS_SHIFT", shift.to_string());
+    state.set("USERNS_RANGE", range.to_string());
+    state.write_to(&state_path)?;
     Ok(())
 }
 
@@ -532,6 +549,7 @@ pub(crate) fn parse_security(
     let mut no_new_privileges = args.no_new_privileges;
     let mut system_call_filter = args.system_call_filter;
     let mut apparmor_profile = args.apparmor_profile;
+    let userns_nested = args.userns_nested.unwrap_or(cfg.userns_nested_ranges);
 
     // --strict implies --hardened and adds Docker-equivalent restrictions.
     let strict = args.strict;
@@ -582,6 +600,12 @@ pub(crate) fn parse_security(
         }
     }
 
+    let userns_range = if userns && userns_nested > 0 {
+        Some((1 + u64::from(userns_nested)) * userns::UID_RANGE)
+    } else {
+        None
+    };
+
     let sec = SecurityConfig {
         userns,
         drop_caps,
@@ -591,6 +615,7 @@ pub(crate) fn parse_security(
         system_call_filter,
         apparmor_profile,
         userns_shift: None,
+        userns_range,
     };
     sec.validate()?;
     Ok((sec, hardened))
