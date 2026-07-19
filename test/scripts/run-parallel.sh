@@ -53,6 +53,7 @@ KNOWN_PREFIXES=(
     vfy-ks-
     vfy-kf-
     vfy-nested-userns-
+    vfy-nested-
     kube-vfy-
     kube-readonly-
     secret-test-
@@ -591,6 +592,20 @@ main() {
         log "Stage 3: Destructive tests"
         CHILD_PIDS=()
         run_test "$SCRIPT_DIR/verify-tutorial.sh"
+        for pid in "${CHILD_PIDS[@]}"; do
+            wait "$pid" 2>/dev/null || overall_rc=1
+        done
+    fi
+
+    # verify-nested.sh also runs serially: its deletion tests toggle the
+    # user_subvol_rm_allowed mount option on the shared btrfs data root, which
+    # requires a mount restart that no other suite may observe mid-flight.
+    if should_run "verify-nested"; then
+        echo ""
+        cleanup_stale
+        log "Stage 3: Nested (sdme-in-sdme) tests"
+        CHILD_PIDS=()
+        run_test "$SCRIPT_DIR/verify-nested.sh"
         for pid in "${CHILD_PIDS[@]}"; do
             wait "$pid" 2>/dev/null || overall_rc=1
         done

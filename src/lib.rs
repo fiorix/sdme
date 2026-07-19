@@ -27,6 +27,7 @@
 //! | [`lock`] | Advisory file locking for resource protection |
 //! | [`mounts`] | Bind mount and environment variable config |
 //! | [`network`] | Network configuration and state serialization |
+//! | [`nested`] | Nested (user-namespaced) context detection and preflight |
 //! | [`security`] | Capability, seccomp, AppArmor config |
 //! | [`storage`] | Container root storage backends (overlay, btrfs) |
 //! | [`system_check`] | Version and dependency checks |
@@ -51,6 +52,7 @@ pub mod kube;
 pub mod lock;
 pub mod mounts;
 pub(crate) mod names;
+pub mod nested;
 pub mod network;
 pub mod oci;
 pub mod pod;

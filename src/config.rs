@@ -198,12 +198,15 @@ pub struct Config {
     #[serde(default = "default_create_masked_services")]
     pub default_create_masked_services: String,
 
-    /// Default storage backend for new containers. "" or "overlay" selects
-    /// overlayfs (the default); "btrfs" selects btrfs subvolume snapshots.
-    /// Overridable per container with `--storage`. A "btrfs" default applies
-    /// only to imported/OCI rootfs; host-rootfs containers (no `-r`) fall back
-    /// to overlay, since the live host root cannot be snapshotted. An explicit
-    /// `--storage btrfs` on a host rootfs is still an error.
+    /// Default storage backend for new containers. "" or "auto" selects the
+    /// automatic resolution: overlay when sdme runs inside a user-namespaced
+    /// container (btrfs roots cannot boot there), otherwise overlay unless set
+    /// to "btrfs", which selects btrfs subvolume snapshots. Overridable per
+    /// container with `--storage`. A "btrfs" default applies only to
+    /// imported/OCI rootfs; host-rootfs containers (no `-r`) fall back to
+    /// overlay, since the live host root cannot be snapshotted. An explicit
+    /// `--storage btrfs` on a host rootfs is still an error, as is an explicit
+    /// `--storage btrfs` in a nested context.
     #[serde(default)]
     pub default_storage_backend: String,
 

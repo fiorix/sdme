@@ -85,6 +85,7 @@ pub fn ensure_ready(datadir: &Path, pool_size: &str, verbose: bool) -> Result<Pa
     if is_btrfs(datadir)? {
         let dir = datadir.join(BTRFS_SUBDIR);
         fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
+        crate::nested::warn_subvol_rm_allowed(datadir);
         if verbose {
             eprintln!("btrfs storage (mode A, native): {}", dir.display());
         }
@@ -140,6 +141,7 @@ pub fn exists(datadir: &Path) -> Result<bool> {
 /// (rm/cp/export/diff), where the pool must already have been created.
 pub fn ensure_mounted(datadir: &Path, verbose: bool) -> Result<PathBuf> {
     if is_btrfs(datadir)? {
+        crate::nested::warn_subvol_rm_allowed(datadir);
         return Ok(datadir.join(BTRFS_SUBDIR));
     }
     let (image, mount_dir) = mode_b_paths(datadir);

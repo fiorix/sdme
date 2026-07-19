@@ -779,7 +779,7 @@ fn proxy_env_vars() -> Vec<(String, String)> {
 
 /// RAII guard for bind mounts into a chroot environment.
 ///
-/// Manages `/proc`, `/sys`, `/dev`, `/dev/pts` bind mounts and
+/// Manages `/proc` and `/sys` bind mounts, a staged tmpfs `/dev`, and
 /// `/etc/resolv.conf` for DNS resolution during package installation.
 pub(crate) struct ChrootGuard {
     rootfs: PathBuf,
@@ -796,7 +796,7 @@ impl ChrootGuard {
             resolv_backup: None,
         };
 
-        let bind_targets = ["proc", "sys", "dev"];
+        let bind_targets = ["proc", "sys"];
         for target in &bind_targets {
             let mount_point = rootfs.join(target);
             fs::create_dir_all(&mount_point).with_context(|| {
@@ -832,27 +832,72 @@ impl ChrootGuard {
             }
         }
 
-        // Bind mount /dev/pts separately.
-        let devpts = rootfs.join("dev/pts");
-        fs::create_dir_all(&devpts)?;
+        // /dev: stage a fresh tmpfs and populate it instead of binding the
+        // host's /dev. In nested contexts the outer /dev is a host-mounted
+        // (MNT_LOCKED) tmpfs and binding the whole mount fails; binding the
+        // individual device nodes works everywhere (file binds are not
+        // locked). Used unconditionally so host and nested behavior match.
+        let dev_dir = rootfs.join("dev");
+        fs::create_dir_all(&dev_dir)
+            .with_context(|| format!("failed to create mount point {}", dev_dir.display()))?;
         let status = Command::new("mount")
-            .args(["--bind", "/dev/pts"])
-            .arg(&devpts)
+            .args(["-t", "tmpfs", "-o", "mode=0755", "tmpfs"])
+            .arg(&dev_dir)
             .status()
-            .context("failed to bind mount /dev/pts")?;
+            .context("failed to mount tmpfs /dev")?;
         crate::check_interrupted()?;
         if !status.success() {
-            bail!("bind mount failed: /dev/pts -> {}", devpts.display());
+            bail!("tmpfs mount failed: {}", dev_dir.display());
         }
-        guard.mounts.push(devpts.clone());
+        guard.mounts.push(dev_dir.clone());
+        // Make the staged /dev private to this mount namespace before adding
+        // node binds, so they never propagate back to the host /dev tree.
         let status = Command::new("mount")
             .args(["--make-rslave"])
-            .arg(&devpts)
+            .arg(&dev_dir)
             .status()
-            .context("failed to make rslave: /dev/pts")?;
+            .with_context(|| format!("failed to make rslave: {}", dev_dir.display()))?;
         crate::check_interrupted()?;
         if !status.success() {
-            bail!("make-rslave failed: {}", devpts.display());
+            bail!("make-rslave failed: {}", dev_dir.display());
+        }
+
+        for node in ["null", "zero", "full", "random", "urandom", "tty"] {
+            let target = dev_dir.join(node);
+            fs::File::create(&target)
+                .with_context(|| format!("failed to create {}", target.display()))?;
+            let source = PathBuf::from("/dev").join(node);
+            let status = Command::new("mount")
+                .args(["--bind"])
+                .arg(&source)
+                .arg(&target)
+                .status()
+                .with_context(|| format!("failed to bind mount {}", source.display()))?;
+            crate::check_interrupted()?;
+            if !status.success() {
+                bail!(
+                    "bind mount failed: {} -> {}",
+                    source.display(),
+                    target.display()
+                );
+            }
+        }
+        for (link, target) in [
+            ("fd", "/proc/self/fd"),
+            ("stdin", "/proc/self/fd/0"),
+            ("stdout", "/proc/self/fd/1"),
+            ("stderr", "/proc/self/fd/2"),
+            ("core", "/proc/kcore"),
+        ] {
+            std::os::unix::fs::symlink(target, dev_dir.join(link))
+                .with_context(|| format!("failed to create /dev/{link} symlink"))?;
+        }
+        // Package managers do not allocate ptys during chroot installs, so an
+        // empty pts is enough; a host /dev/pts bind would hit the same
+        // MNT_LOCKED problem as /dev in nested contexts.
+        for d in ["pts", "shm", "mqueue"] {
+            fs::create_dir_all(dev_dir.join(d))
+                .with_context(|| format!("failed to create /dev/{d}"))?;
         }
 
         // Copy host resolv.conf for DNS resolution.

@@ -753,7 +753,7 @@ CONFIG KEYS:
     stop_timeout_kill              u64      15        Force-kill stop timeout (seconds)
     auto_fs_gc                     bool     yes       Auto-clean stale transactions
     default_create_masked_services string   systemd-resolved.service
-    default_storage_backend        string   (empty)   Backend for new containers (overlay, btrfs)
+    default_storage_backend        string   auto      Backend for new containers (overlay, btrfs, auto)
     btrfs_pool_size                string   20G       Mode B btrfs pool image size
     docker_user                    string   (empty)   Docker Hub username
     docker_token                   string   (empty)   Docker Hub access token
@@ -960,6 +960,7 @@ CATEGORIES:
     ConfigMaps           Kube configmaps (copied at create time, not runtime-bound)
     Volumes              Orphaned volume directories (no matching container)
     Stale transactions   Leftover staging dirs from interrupted operations
+    btrfs trash          Parked subvolumes a nested context could not destroy
 
 NOTES:
     Secrets and configmaps are included because they are copied into the
@@ -970,7 +971,7 @@ NOTES:
     The --except flag accepts plain names (matches all categories) or
     category:name prefixes to disambiguate when a name appears in
     multiple categories. Prefixes: fs, container, pod, secret, configmap,
-    volume, txn.
+    volume, txn, trash.
 
     The OCI blob cache is not pruned. It has its own size-based eviction
     (oci_cache_max_size) and can be cleaned with 'sdme fs cache clean'.";
@@ -1124,7 +1125,7 @@ enum Command {
         #[arg(long, value_delimiter = ',')]
         masked_services: Option<Vec<String>>,
 
-        /// Storage backend for the container root: overlay (default) or btrfs
+        /// Storage backend for the container root: overlay, btrfs, or auto (default: auto)
         #[arg(long, value_name = "BACKEND")]
         storage: Option<String>,
 
@@ -1303,7 +1304,7 @@ enum Command {
         #[arg(long, value_delimiter = ',')]
         masked_services: Option<Vec<String>>,
 
-        /// Storage backend for the container root: overlay (default) or btrfs
+        /// Storage backend for the container root: overlay, btrfs, or auto (default: auto)
         #[arg(long, value_name = "BACKEND")]
         storage: Option<String>,
 
@@ -1701,7 +1702,7 @@ enum KubeCommand {
         #[arg(long)]
         base_fs: Option<String>,
 
-        /// Storage backend for the pod root: overlay (default) or btrfs
+        /// Storage backend for the pod root: overlay, btrfs, or auto (default: auto)
         #[arg(long)]
         storage: Option<String>,
 
@@ -1745,7 +1746,7 @@ enum KubeCommand {
         #[arg(long)]
         base_fs: Option<String>,
 
-        /// Storage backend for the pod root: overlay (default) or btrfs
+        /// Storage backend for the pod root: overlay, btrfs, or auto (default: auto)
         #[arg(long)]
         storage: Option<String>,
 
@@ -2281,9 +2282,14 @@ fn run() -> Result<()> {
                         };
                     }
                     "default_storage_backend" => {
-                        // Validate the token; empty resolves to overlay.
-                        storage::Backend::parse(&value)
-                            .with_context(|| format!("invalid default_storage_backend: {value}"))?;
+                        // Validate the token; empty and "auto" both select the
+                        // automatic resolution (overlay unless nested or the
+                        // default says btrfs).
+                        if value != "auto" {
+                            storage::Backend::parse(&value).with_context(|| {
+                                format!("invalid default_storage_backend: {value}")
+                            })?;
+                        }
                         toml_key = key.clone();
                         toml_val = Some(V::String(value));
                     }
@@ -2430,6 +2436,7 @@ fn run() -> Result<()> {
                 storage.as_deref(),
                 &cfg.default_storage_backend,
                 fs.is_none(),
+                sdme::nested::is_nested(),
             )?;
             let opts = containers::CreateOptions {
                 name,
@@ -2777,6 +2784,7 @@ fn run() -> Result<()> {
                 storage.as_deref(),
                 &cfg.default_storage_backend,
                 fs.is_none(),
+                sdme::nested::is_nested(),
             )?;
             let opts = containers::CreateOptions {
                 name,
@@ -3248,6 +3256,7 @@ fn run() -> Result<()> {
                     storage.as_deref(),
                     &cfg.default_storage_backend,
                     false,
+                    sdme::nested::is_nested(),
                 )?;
                 let kube_network = parse_network(net_args)?;
                 retain_net_raw_for_dhcp(&mut sec, &kube_network);
@@ -3339,6 +3348,7 @@ fn run() -> Result<()> {
                     storage.as_deref(),
                     &cfg.default_storage_backend,
                     false,
+                    sdme::nested::is_nested(),
                 )?;
                 let kube_network = parse_network(net_args)?;
                 retain_net_raw_for_dhcp(&mut sec, &kube_network);

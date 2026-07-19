@@ -32,6 +32,8 @@ pub enum PruneCategory {
     Volume,
     /// Stale transaction staging directory.
     StaleTransaction,
+    /// Parked btrfs subvolume whose destroy was denied in a nested context.
+    BtrfsTrash,
 }
 
 impl PruneCategory {
@@ -45,6 +47,7 @@ impl PruneCategory {
             Self::ConfigMap => "configmap",
             Self::Volume => "volume",
             Self::StaleTransaction => "txn",
+            Self::BtrfsTrash => "trash",
         }
     }
 
@@ -58,12 +61,13 @@ impl PruneCategory {
             Self::ConfigMap => "ConfigMaps",
             Self::Volume => "Volumes",
             Self::StaleTransaction => "Stale transactions",
+            Self::BtrfsTrash => "btrfs trash",
         }
     }
 }
 
-/// Display ordering of categories: filesystems first, stale transactions last.
-const DISPLAY_ORDER: [PruneCategory; 7] = [
+/// Display ordering of categories: filesystems first, trash last.
+const DISPLAY_ORDER: [PruneCategory; 8] = [
     PruneCategory::Filesystem,
     PruneCategory::Container,
     PruneCategory::Pod,
@@ -71,12 +75,15 @@ const DISPLAY_ORDER: [PruneCategory; 7] = [
     PruneCategory::ConfigMap,
     PruneCategory::Volume,
     PruneCategory::StaleTransaction,
+    PruneCategory::BtrfsTrash,
 ];
 
-/// Removal ordering: stale transactions first (no lock), then follows lock
-/// ordering (fs, containers, pods, secrets, configmaps), volumes last.
-const REMOVAL_ORDER: [PruneCategory; 7] = [
+/// Removal ordering: stale transactions and trash first (no lock), then
+/// follows lock ordering (fs, containers, pods, secrets, configmaps),
+/// volumes last.
+const REMOVAL_ORDER: [PruneCategory; 8] = [
     PruneCategory::StaleTransaction,
+    PruneCategory::BtrfsTrash,
     PruneCategory::Filesystem,
     PruneCategory::Container,
     PruneCategory::Pod,
@@ -254,6 +261,31 @@ pub fn analyze(datadir: &Path, default_base_fs: &str) -> Result<Vec<PrunableItem
         }
     }
 
+    check_interrupted()?;
+
+    // 8. Parked btrfs subvolumes: a nested context could not destroy these
+    // (EPERM without user_subvol_rm_allowed) and parked them in .trash. A
+    // privileged prune on the host destroys them. Read-only: when the pool is
+    // not mounted the trash directories simply do not exist.
+    if let Ok(pool_root) = crate::storage::pool::root(datadir) {
+        for sub in [
+            crate::storage::btrfs::FS_SUBDIR,
+            crate::storage::btrfs::CONTAINERS_SUBDIR,
+        ] {
+            let trash_dir = pool_root.join(sub).join(crate::storage::btrfs::TRASH_SUBDIR);
+            if let Ok(entries) = fs::read_dir(&trash_dir) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    items.push(PrunableItem {
+                        category: PruneCategory::BtrfsTrash,
+                        name: format!("{sub}/{}/{name}", crate::storage::btrfs::TRASH_SUBDIR),
+                        reason: "destroy denied in nested context (EPERM)".to_string(),
+                    });
+                }
+            }
+        }
+    }
+
     Ok(items)
 }
 
@@ -365,6 +397,20 @@ pub fn execute(
                 PruneCategory::StaleTransaction => {
                     let path = datadir.join("fs").join(&item.name);
                     remove_stale_txn(&path, verbose)
+                }
+                PruneCategory::BtrfsTrash => {
+                    // item.name is the pool-relative path (e.g.
+                    // "containers/.trash/web.1721380000"). Destroying needs
+                    // privilege the nested context lacked; on the host this
+                    // succeeds. If it is somehow denied again, delete_subvol
+                    // re-parks the entry instead of failing.
+                    match crate::storage::pool::root(datadir) {
+                        Ok(pool_root) => crate::storage::btrfs::delete_subvol(
+                            &pool_root.join(&item.name),
+                            verbose,
+                        ),
+                        Err(e) => Err(e),
+                    }
                 }
                 PruneCategory::Filesystem => rootfs::remove(datadir, &item.name, auto_gc, verbose),
                 PruneCategory::Container => containers::remove(datadir, &item.name, verbose),
@@ -504,6 +550,7 @@ mod tests {
             PruneCategory::ConfigMap,
             PruneCategory::Volume,
             PruneCategory::StaleTransaction,
+            PruneCategory::BtrfsTrash,
         ];
         let prefixes: Vec<&str> = categories.iter().map(|c| c.prefix()).collect();
         // All prefixes must be unique.

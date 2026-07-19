@@ -120,6 +120,11 @@ pub fn create(datadir: &Path, opts: &CreateOptions, verbose: bool) -> Result<Str
         );
     }
 
+    // In a nested (user-namespaced) context, fail fast on boot blockers that
+    // are outside sdme's control (outer syscall filter blocking mknod) instead
+    // of surfacing as a boot timeout, and warn on known-bad configurations.
+    crate::nested::preflight_create(datadir, opts.security.userns, verbose)?;
+
     // Hold shared lock on rootfs to prevent deletion during container creation.
     let _rootfs_lock = match &opts.rootfs {
         Some(r) => Some(

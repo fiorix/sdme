@@ -25,7 +25,10 @@ declare -A APP_IMAGES=(
 declare -A APP_READY_WAIT=(
     [nginx-unprivileged]=3
     [redis]=3
-    [postgresql]=10
+    # PostgreSQL first boot runs initdb (cluster creation plus a restart);
+    # under load that takes longer than 10s and the single pg_isready verify
+    # then flakes. 20s covers it on loaded hosts.
+    [postgresql]=20
 )
 
 NGINX_MARKER="sdme-distro-oci-test-$$"
@@ -59,8 +62,21 @@ app_verify() {
             fi
             ;;
         postgresql)
-            timeout 10 sdme exec --oci -- "$ct_name" \
-                /bin/sh -c 'pg_isready -h 127.0.0.1 -p 5432' 2>&1
+            # PostgreSQL first boot runs initdb (cluster creation plus a
+            # restart); under load that takes longer than any fixed sleep.
+            # Poll pg_isready instead of a single shot after APP_READY_WAIT.
+            local tries=0 out=""
+            while (( tries < 15 )); do
+                out=$(timeout 10 sdme exec --oci -- "$ct_name" \
+                    /bin/sh -c 'pg_isready -h 127.0.0.1 -p 5432' 2>&1) && {
+                    echo "$out"
+                    return 0
+                }
+                tries=$((tries + 1))
+                sleep 4
+            done
+            echo "$out"
+            return 1
             ;;
         redis)
             local reply

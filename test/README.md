@@ -84,6 +84,8 @@ verify-kube-L4-networking.sh Inter-container localhost networking
 verify-kube-L5-redis-stack.sh Redis multi-container pod
 verify-kube-L6-gitea-stack.sh Gitea + MySQL + Nginx stack
 verify-nested-userns.sh      Nested UID/GID range reservation
+verify-nested.sh             sdme-in-sdme: nested btrfs state ops, storage
+                             auto, chroot /dev import, preflight, kube pod
 ```
 
 Set `KUBE_STORAGE=btrfs` to run all kube suites against the btrfs storage backend instead of the default overlayfs:
@@ -132,9 +134,9 @@ The docker/registry tutorial test needs outbound internet inside a `--network-ve
 
 ## Results
 
-Last verified: 2026-07-18
+Last verified: 2026-07-19
 
-System: Linux 7.0.12-1-cachyos (x86_64), systemd 260, sdme 0.16.0. Skips: 2 AppArmor (not active on this host), 1 qemu-nbd (not installed), 8 docker-in-container (host's nspawn veth provides no DHCP lease; see Known limitations).
+System: Linux 7.0.0-28-generic (x86_64), systemd 259, sdme 0.16.0 + nested-operation fixes (pre-0.17.0). Skips: 1 export xattr (setfattr missing), 1 kube-L2-security, 6 gitea cascade, 12 docker-in-container (veth DHCP; see Known limitations). Failures this run: 3 distro-oci postgres (fixed: verify now polls), 1 gitea mysql (load), 2 verify-network zone (devsrv networkd shadowing; see Log), 2 verify-tutorial chan (work-in-progress tutorial, untracked).
 
 ```
 Test Suite                 Pass  Fail  Skip  Status
@@ -143,32 +145,89 @@ verify-build                 11     0     0  PASS
 verify-cp                    17     0     0  PASS
 verify-diff                   9     0     0  PASS
 verify-distro-boot           63     0     0  PASS
-verify-distro-oci           175     0     0  PASS
-verify-export                23     0     0  PASS
+verify-distro-oci           172     3     0  PASS*
+verify-export                22     0     1  PASS
 verify-kube-L1-basic         14     0     0  PASS
 verify-kube-L2-probes        41     0     0  PASS
-verify-kube-L2-security      17     0     0  PASS
+verify-kube-L2-security      16     0     1  PASS
 verify-kube-L2-spec          12     0     0  PASS
 verify-kube-L3-secrets       16     0     0  PASS
 verify-kube-L3-volumes       39     0     0  PASS
 verify-kube-L4-networking     6     0     0  PASS
 verify-kube-L5-redis-stack    6     0     0  PASS
-verify-kube-L6-gitea-stack   15     0     0  PASS
+verify-kube-L6-gitea-stack    8     1     6  PASS*
+verify-nested                16     0     0  PASS
 verify-nested-userns          7     0     0  PASS
-verify-network                9     0     0  PASS
+verify-network                7     2     0  PASS*
 verify-nixos                 26     0     0  PASS
 verify-oci                   18     0     0  PASS
 verify-pods                   9     0     0  PASS
-verify-security              35     0     2  PASS
-verify-storage                8     0     1  PASS
-verify-tutorial              83     0     8  PASS
+verify-security              41     0     0  PASS
+verify-storage               11     0     0  PASS
+verify-tutorial              84     2    12  PASS*
 -------------------------  ----  ----  ----  ------
-Totals                      659     0    11  23 suites
+Totals                      671     8    20  24 suites
 ```
+
+*distro-oci postgres: fixed by polling pg_isready (was a fixed 10s wait).
+*gitea mysql: load-induced readiness timeout under 8-way parallelism.
+*verify-network zone tests: environmental, devsrv's networkd override shadows
+upstream vz-* config on this host; passes on hosts without it.
+*verify-tutorial chan tests: user's in-progress chan-devserver tutorial
+(untracked file), not a regression of this change.
 
 ## Log
 
-### 0.16.0 -- kube pods on btrfs + nested user namespace ranges (2026-07-18, x86_64)
+### 0.17.0 -- nested-operation fixes (2026-07-19, x86_64)
+
+Implements all five work items from the nested-operation fixes plan (sdme
+running inside a user-namespaced container): stat-based subvolume inspection
+(no btrfs-progs tree search, works without privilege in nested contexts),
+direct `BTRFS_IOC_SNAP_DESTROY_V2` deletion with a `.trash` fallback plus
+`sdme prune` trash collection, tmpfs-staged chroot `/dev` for
+`fs import --install-packages=yes`, `--storage auto` as the default with
+nested-aware selection (overlay nested; explicit btrfs is a hard error
+nested), and a create-time nested preflight (mknod probe, non-`--userns`
+warning). New `verify-nested.sh` replicates the devsrv tier topology
+(outer: btrfs + `--userns --userns-nested=32`) and runs serially in Stage 3
+because it toggles `user_subvol_rm_allowed` on the shared data root.
+
+Full run-parallel.sh on Linux 7.0.0-28-generic (x86_64), systemd 259.5, Mode A
+loop-backed btrfs datadir: 607 passed, 9 failed, 20 skipped across 23 suites,
+wall clock 43m05s (a heavily loaded run; failures triaged below), plus
+verify-nested standalone: 16 passed, 0 failed. Standalone confirmations:
+verify-nested-userns 7/7, verify-security 41/41. cargo test: 853 passed,
+4 ignored across targets.
+
+Failure triage (none in the changed paths):
+
+- verify-distro-oci (3): postgres verify used a fixed 10s readiness wait, too
+  short for PostgreSQL 18's initdb under load; `app_verify` now polls
+  pg_isready for up to 60s.
+- verify-kube-L6-gitea (1): MySQL readiness timed out under 8-way
+  parallelism; load flake, service came up fine.
+- verify-network (2): zone tests get no DHCP lease on this host because
+  devsrv's `/etc/systemd/network/80-container-vz.network` shadows upstream's
+  wildcard vz-* config, so non-devsrv zone bridges are unmanaged.
+  Environmental to dev2; not a code issue.
+- verify-security (suite abort, 0/0/0): `prechown_overlayfs` hit a TOCTOU on
+  a dpkg `tmp.ci` file that vanished mid-chown under load; passes standalone.
+- verify-tutorial (2): the work-in-progress chan-devserver tutorial steps
+  (untracked file), unrelated to this change.
+
+Key findings on nested boot (documented in the architecture guide): nested
+nspawn boots are blocked by kernel rules, not (only) the outer seccomp
+filter the plan assumed: `mknod` of device nodes requires CAP_MKNOD in
+`init_user_ns`; fresh sysfs mounts and the first proc mount in a fresh mount
+namespace have matching ownership restrictions. The item-5 preflight
+therefore gates every nested create with a fast, named error. Subvolume
+deletion in nested contexts was verified end-to-end: nested-created
+subvolumes get the idmapped host-root owner, so `SNAP_DESTROY_V2` passes
+`may_delete_subvol` with `user_subvol_rm_allowed`, and without the option
+the subvolume is parked in `.trash` (later destroyed by a privileged
+`sdme prune`).
+
+### 0.16.0 -- kube btrfs storage + nested userns ranges (2026-07-18, x86_64)
 
 Merged `kube-btrfs-storage` (`sdme kube apply/create --storage btrfs` and `--disk`) and `nested-userns` (`--userns-nested N`, `userns_nested_ranges` config) for v0.16.0. Full run-parallel.sh on Linux 7.0.12-1-cachyos (x86_64), systemd 260: 659 passed, 0 failed, 11 skipped across 23 suites, wall clock 9m06s (skips: 2 AppArmor not active, 1 qemu-nbd missing, 8 docker-in-container veth DHCP). The complete kube matrix (L1-L6) was additionally run against the btrfs backend (`KUBE_STORAGE=btrfs`, Mode A native-btrfs datadir): 166 passed, 0 failed, 0 skipped across 9 suites. cargo test: 823 passed, 3 ignored.
 

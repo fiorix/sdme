@@ -17,6 +17,8 @@
 use std::ffi::OsStr;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::MetadataExt;
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -63,7 +65,7 @@ pub fn provision(
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
-    if dst.exists() {
+    if subvolume_exists(&dst) {
         // A leftover from a crashed create, or an rm whose teardown failed. The
         // state file is claimed atomically (O_CREAT|O_EXCL) before do_create, so
         // no live container can own this path; reclaim it rather than bail and
@@ -118,7 +120,7 @@ pub fn ensure_base(
     sweep_stale_temps(&fs_dir, verbose);
 
     let tmp = fs_dir.join(format!(".{base_name}.tmp-{}", std::process::id()));
-    if tmp.exists() {
+    if subvolume_exists(&tmp) {
         let _ = delete_subvol(&tmp, verbose);
     }
     create_subvol(&tmp, verbose)?;
@@ -174,17 +176,38 @@ pub fn invalidate_base(datadir: &Path, base_name: &str, verbose: bool) -> Result
     Ok(())
 }
 
-/// Returns `true` if `path` is a btrfs subvolume. `btrfs subvolume show` exits
-/// non-zero for a plain directory or a missing path.
+/// Inode number of every btrfs subvolume root (`BTRFS_FIRST_FREE_OBJECTID`).
+/// The filesystem tree root shares it, but sdme only ever probes paths it
+/// created itself under the pool, never the filesystem root.
+const SUBVOL_ROOT_INO: u64 = 256;
+
+/// Returns `true` if `path` is a btrfs subvolume root.
+///
+/// Detection is ioctl-free: a subvolume root is a directory with inode number
+/// 256 on a btrfs filesystem (statfs magic). This works in nested
+/// (user-namespaced) contexts, where `btrfs subvolume show` fails with EPERM:
+/// its tree-search ioctls require CAP_SYS_ADMIN in the initial user namespace.
+/// There the EPERM made sdme conclude a subvolume was missing and recreate it,
+/// corrupting create/commit state (`failed to commit base subvolume`).
 pub fn is_subvolume(path: &Path) -> bool {
-    Command::new("btrfs")
-        .args(["subvolume", "show"])
-        .arg(path)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    let Ok(meta) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    if !meta.is_dir() || meta.ino() != SUBVOL_ROOT_INO {
+        return false;
+    }
+    // Inode 256 only means "subvolume root" on btrfs; on any other filesystem
+    // an ordinary directory could legitimately carry it.
+    pool::is_btrfs(path).unwrap_or(false)
+}
+
+/// Returns `true` if `path` exists, without following symlinks.
+///
+/// sdme only ever addresses subvolumes by known paths it chose itself, so a
+/// plain `lstat` is the complete existence check: unlike tree-search based
+/// enumeration it needs no privilege and works in nested contexts.
+pub fn subvolume_exists(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok()
 }
 
 /// Create an empty subvolume at `path`.
@@ -216,19 +239,38 @@ pub fn snapshot(src: &Path, dst: &Path, readonly: bool, verbose: bool) -> Result
     run(&mut cmd, "btrfs subvolume snapshot")
 }
 
+/// Subdirectory (inside the subvolume's parent) holding subvolumes whose
+/// destroy was denied, parked until a privileged `sdme prune` on the host.
+pub(crate) const TRASH_SUBDIR: &str = ".trash";
+
 /// Delete the subvolume at `path`. No-op if the path does not exist.
+///
+/// When the destroy ioctl is denied (EPERM: nested context on a btrfs mount
+/// without `user_subvol_rm_allowed`), the subvolume is parked in a `.trash`
+/// directory next to it and its contents removed with plain file operations.
+/// Rollback therefore never strands state on a denied destroy; a later
+/// privileged `sdme prune` on the host destroys trash entries.
 pub fn delete_subvol(path: &Path, verbose: bool) -> Result<()> {
-    if !path.exists() {
+    if !subvolume_exists(path) {
         return Ok(());
     }
-    // Fast path: a plain delete succeeds unless the subvolume still contains
+    match destroy_subvol_tree(path, verbose) {
+        Ok(()) => Ok(()),
+        Err(e) if is_destroy_denied(&e) => trash_subvol(path, verbose),
+        Err(e) => Err(e),
+    }
+}
+
+/// Destroy a subvolume, removing any nested child subvolumes deepest-first.
+fn destroy_subvol_tree(path: &Path, verbose: bool) -> Result<()> {
+    // Fast path: a plain destroy succeeds unless the subvolume still contains
     // nested subvolumes, so the common case (no nesting) pays nothing extra.
     if delete_one_subvol(path, verbose).is_ok() {
         return Ok(());
     }
-    // Fallback: a container that ran a nested btrfs-backed engine (Docker or
-    // Podman with the btrfs driver) leaves child subvolumes under the root, and
-    // btrfs refuses to delete a subvolume that still contains them. Remove the
+    // A container that ran a nested btrfs-backed engine (Docker or Podman with
+    // the btrfs driver) leaves child subvolumes under the root, and btrfs
+    // refuses to destroy a subvolume that still contains them. Remove the
     // children deepest-first, then retry the root.
     for child in nested_subvols(path)? {
         delete_one_subvol(&child, verbose)?;
@@ -236,14 +278,128 @@ pub fn delete_subvol(path: &Path, verbose: bool) -> Result<()> {
     delete_one_subvol(path, verbose)
 }
 
-/// Delete a single btrfs subvolume, with no handling of nested children.
+/// Whether `e` reports the destroy ioctl being denied, the signature of a
+/// nested context on a btrfs mount without `user_subvol_rm_allowed` (the
+/// kernel's `may_delete_subvol` check returns EPERM there).
+fn is_destroy_denied(e: &anyhow::Error) -> bool {
+    e.chain()
+        .filter_map(|cause| cause.downcast_ref::<std::io::Error>())
+        .any(|io| {
+            matches!(io.raw_os_error(), Some(code) if code == libc::EPERM || code == libc::EACCES)
+        })
+}
+
+/// Park a subvolume that could not be destroyed in `.trash`, then empty its
+/// contents with plain file operations.
+///
+/// Rename is an ordinary directory operation needing only write access on the
+/// parent directories, so it succeeds where the destroy ioctl EPERMs. The
+/// parked subvolume root itself stays behind (only a privileged destroy on the
+/// host removes it); child subvolume roots from nested btrfs engines likewise
+/// survive the emptying and go away with the host-side destroy.
+fn trash_subvol(path: &Path, verbose: bool) -> Result<()> {
+    let parent = path.parent().context("subvolume path has no parent")?;
+    let name = path
+        .file_name()
+        .context("subvolume path has no basename")?
+        .to_string_lossy();
+    let trash_dir = parent.join(TRASH_SUBDIR);
+    fs::create_dir_all(&trash_dir)
+        .with_context(|| format!("failed to create {}", trash_dir.display()))?;
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut target = trash_dir.join(format!("{name}.{ts}"));
+    if subvolume_exists(&target) {
+        target = trash_dir.join(format!("{name}.{ts}.{}", std::process::id()));
+    }
+    fs::rename(path, &target).with_context(|| {
+        format!(
+            "failed to park {} in trash {}",
+            path.display(),
+            target.display()
+        )
+    })?;
+    eprintln!(
+        "note: permission denied destroying subvolume {}; parked as {}\n\
+         (a privileged `sdme prune` on the host removes parked subvolumes)",
+        path.display(),
+        target.display()
+    );
+    if let Ok(entries) = fs::read_dir(&target) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            let _ = if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                fs::remove_dir_all(&p)
+            } else {
+                fs::remove_file(&p)
+            };
+        }
+    }
+    if verbose {
+        eprintln!("emptied parked subvolume {}", target.display());
+    }
+    Ok(())
+}
+
+/// `BTRFS_IOC_SNAP_DESTROY_V2` request number:
+/// `_IOW(BTRFS_IOCTL_MAGIC = 0x94, 63, btrfs_ioctl_vol_args_v2)`.
+/// Verified against /usr/include/linux/btrfs.h.
+const BTRFS_IOC_SNAP_DESTROY_V2: libc::c_ulong = 0x5000_943f;
+
+/// Maximum length of a subvolume name (`BTRFS_SUBVOL_NAME_MAX`).
+const SUBVOL_NAME_MAX: usize = 4039;
+
+/// `struct btrfs_ioctl_vol_args_v2` from <linux/btrfs.h>, by-name form: `fd`
+/// is an open fd of the parent directory, `name` the NUL-terminated basename.
+#[repr(C)]
+struct SnapDestroyArgs {
+    fd: i64,
+    transid: u64,
+    flags: u64,
+    unused: [u64; 4],
+    name: [u8; SUBVOL_NAME_MAX + 1],
+}
+
+/// Destroy a single btrfs subvolume via `BTRFS_IOC_SNAP_DESTROY_V2`, with no
+/// handling of nested children.
+///
+/// Calling the ioctl directly (by name, through the parent directory fd)
+/// skips btrfs-progs' privileged pre-checks: `btrfs subvolume delete` probes
+/// the default subvolume id first, which requires CAP_SYS_ADMIN in the
+/// initial user namespace and fails with EPERM in nested contexts, hiding the
+/// real result and leaving stale subvolumes behind. Here one syscall yields
+/// one honest errno.
 fn delete_one_subvol(path: &Path, verbose: bool) -> Result<()> {
     if verbose {
-        eprintln!("btrfs subvolume delete {}", path.display());
+        eprintln!("destroying subvolume {}", path.display());
     }
-    let mut cmd = Command::new("btrfs");
-    cmd.args(["subvolume", "delete"]).arg(path);
-    run(&mut cmd, "btrfs subvolume delete")
+    let parent = path.parent().context("subvolume path has no parent")?;
+    let name = path.file_name().context("subvolume path has no basename")?;
+    let name = name.as_bytes();
+    if name.len() > SUBVOL_NAME_MAX {
+        bail!("subvolume name too long: {}", path.display());
+    }
+    let parent_dir = fs::File::open(parent)
+        .with_context(|| format!("failed to open {}", parent.display()))?;
+    let mut args = SnapDestroyArgs {
+        fd: i64::from(parent_dir.as_raw_fd()),
+        transid: 0,
+        flags: 0,
+        unused: [0; 4],
+        name: [0; SUBVOL_NAME_MAX + 1],
+    };
+    args.name[..name.len()].copy_from_slice(name);
+    // SAFETY: `args` is a fully initialized ioctl argument struct and outlives
+    // the call; this request writes nothing back into it.
+    let rc = unsafe { libc::ioctl(parent_dir.as_raw_fd(), BTRFS_IOC_SNAP_DESTROY_V2, &args) };
+    check_interrupted()?;
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("failed to destroy subvolume {}", path.display()));
+    }
+    Ok(())
 }
 
 /// Nested subvolume roots under `path`, deepest-first so children are removed
@@ -330,6 +486,11 @@ pub fn qgroup_usage(pool_root: &Path, subvol: &Path) -> Option<u64> {
 }
 
 /// Read a subvolume's numeric id from `btrfs subvolume show`.
+///
+/// This is the one remaining btrfs-progs shell-out for inspection: it only
+/// feeds qgroup usage reporting, an optional diagnostic that degrades to `None`
+/// (no usage shown) in nested contexts where the tree-search ioctls EPERM.
+/// Existence and deletion decisions never go through it; see [`is_subvolume`].
 fn subvol_id(subvol: &Path) -> Option<u64> {
     let out = Command::new("btrfs")
         .args(["subvolume", "show"])
@@ -420,6 +581,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn snap_destroy_args_layout_matches_kernel() {
+        // Layout verified against /usr/include/linux/btrfs.h:
+        // sizeof(struct btrfs_ioctl_vol_args_v2) == 4096, name at offset 56.
+        assert_eq!(std::mem::size_of::<SnapDestroyArgs>(), 4096);
+        assert_eq!(std::mem::offset_of!(SnapDestroyArgs, name), 56);
+        // _IOW(0x94, 63, args): (1 << 30) | (4096 << 16) | (0x94 << 8) | 63.
+        assert_eq!(
+            BTRFS_IOC_SNAP_DESTROY_V2,
+            (1 << 30) | (4096 << 16) | (0x94 << 8) | 63
+        );
+    }
+
+    #[test]
     fn parse_subvol_id_reads_id() {
         let out = "containers/web\n\
                    \tName: \t\t\tweb\n\
@@ -471,5 +645,84 @@ mod tests {
             container_root(pool, "web"),
             Path::new("/var/lib/sdme/pool/containers/web")
         );
+    }
+
+    #[test]
+    fn is_subvolume_false_for_plain_dirs_and_missing_paths() {
+        let dir = std::env::temp_dir().join(format!("sdme-test-isubvol-{}", std::process::id()));
+        let nested = dir.join("a/b/c");
+        fs::create_dir_all(&nested).unwrap();
+        // Plain directories are never subvolume roots, even on btrfs: only the
+        // root of a subvolume gets inode 256.
+        assert!(!is_subvolume(&dir));
+        assert!(!is_subvolume(&nested));
+        assert!(!is_subvolume(&dir.join("missing")));
+        assert!(subvolume_exists(&dir));
+        assert!(!subvolume_exists(&dir.join("missing")));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The true case needs a real btrfs subvolume: root, btrfs-progs, and a
+    /// writable btrfs mount. Skips when any is missing; e2e suites cover this
+    /// path on real pools.
+    #[test]
+    fn is_subvolume_true_for_real_subvolume() {
+        if unsafe { libc::geteuid() } != 0 {
+            eprintln!("skipping: not root");
+            return;
+        }
+        let Some(mount) = find_writable_btrfs_mount() else {
+            eprintln!("skipping: no writable btrfs mount");
+            return;
+        };
+        let sub = mount.join(format!(".sdme-test-isubvol-{}", std::process::id()));
+        let st = Command::new("btrfs")
+            .args(["subvolume", "create"])
+            .arg(&sub)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("failed to run btrfs subvolume create");
+        if !st.success() {
+            let _ = fs::remove_dir(&sub);
+            eprintln!("skipping: cannot create subvolume on {}", mount.display());
+            return;
+        }
+        assert!(is_subvolume(&sub));
+        // A plain directory inside a subvolume is not itself a subvolume root.
+        let plain = sub.join("plain");
+        fs::create_dir(&plain).unwrap();
+        assert!(!is_subvolume(&plain));
+        let st = Command::new("btrfs")
+            .args(["subvolume", "delete"])
+            .arg(&sub)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("failed to run btrfs subvolume delete");
+        assert!(st.success());
+    }
+
+    /// First btrfs mount point from /proc/self/mounts we can create entries in.
+    fn find_writable_btrfs_mount() -> Option<PathBuf> {
+        let mounts = fs::read_to_string("/proc/self/mounts").ok()?;
+        for line in mounts.lines() {
+            let mut parts = line.split_whitespace();
+            let (Some(_src), Some(target), Some(fstype)) =
+                (parts.next(), parts.next(), parts.next())
+            else {
+                continue;
+            };
+            if fstype != "btrfs" {
+                continue;
+            }
+            let dir = PathBuf::from(target);
+            let probe = dir.join(format!(".sdme-test-probe-{}", std::process::id()));
+            if fs::create_dir(&probe).is_ok() {
+                let _ = fs::remove_dir(&probe);
+                return Some(dir);
+            }
+        }
+        None
     }
 }
