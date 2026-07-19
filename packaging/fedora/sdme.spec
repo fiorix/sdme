@@ -11,7 +11,7 @@
 %global crate sdme
 
 Name:           sdme
-Version:        0.16.0
+Version:        0.17.0
 Release:        1%{?dist}
 Summary:        The systemd machine editor
 
@@ -100,6 +100,22 @@ install -d %{buildroot}%{_datadir}/fish/vendor_completions.d
 %{_datadir}/fish/vendor_completions.d/%{crate}.fish
 
 %changelog
+* Sun Jul 19 2026 Alexandre Fiori <fiorix@gmail.com> - 0.17.0-1
+- Nested-operation fixes for running sdme inside a user-namespaced container:
+- btrfs state operations: subvolume inspection is stat-based (no privileged
+  tree-search ioctls), deletion issues BTRFS_IOC_SNAP_DESTROY_V2 directly.
+- Deletion denied in nested contexts parks the subvolume in .trash instead of
+  failing; sdme prune destroys trash entries, and sdme warns when the
+  data-root mount lacks user_subvol_rm_allowed.
+- fs import --install-packages=yes works nested: the chroot /dev is staged as
+  a tmpfs with node binds instead of binding the outer /dev.
+- New --storage auto (the default): selects overlay when sdme runs inside a
+  user-namespaced container, where btrfs roots cannot boot; explicit
+  --storage btrfs there is a hard error.
+- Create-time nested preflight fails fast with the named cause (mknod
+  blocked by kernel userns rules or an outer SystemCallFilter) instead of a
+  boot timeout.
+
 * Sat Jul 18 2026 Alexandre Fiori <fiorix@gmail.com> - 0.16.0-1
 - Add btrfs storage backend support to Kubernetes pods: `sdme kube apply/create`
   now accept `--storage btrfs` and `--disk`, building the combined pod rootfs as

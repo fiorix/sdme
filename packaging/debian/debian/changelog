@@ -1,3 +1,27 @@
+sdme (0.17.0-1~resolute1) resolute; urgency=medium
+
+  * Nested-operation fixes for running sdme inside a user-namespaced
+    container:
+    - btrfs state operations: subvolume inspection is stat-based instead
+      of shelling out to btrfs-progs tree-search ioctls, which fail in
+      nested contexts and corrupted create/commit state; subvolume
+      deletion issues BTRFS_IOC_SNAP_DESTROY_V2 directly.
+    - Deletion denied in nested contexts now parks the subvolume in
+      .trash instead of failing; `sdme prune` destroys trash entries,
+      and sdme warns when the data-root mount lacks
+      user_subvol_rm_allowed.
+    - `fs import --install-packages=yes` works nested: the chroot /dev
+      is staged as a tmpfs with node binds instead of binding the outer
+      /dev.
+    - New `--storage auto` (the default): selects overlay when sdme runs
+      inside a user-namespaced container, where btrfs roots cannot
+      boot; explicit `--storage btrfs` there is a hard error.
+    - Create-time nested preflight fails fast with the named cause
+      (mknod blocked by kernel userns rules or an outer
+      SystemCallFilter) instead of a boot timeout.
+
+ -- Alexandre Fiori <fiorix@gmail.com>  Sun, 19 Jul 2026 15:26:43 +0000
+
 sdme (0.16.0-1~resolute1) resolute; urgency=medium
 
   * Add btrfs storage backend support to Kubernetes pods: `sdme kube
