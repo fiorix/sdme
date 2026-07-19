@@ -136,7 +136,7 @@ The docker/registry tutorial test needs outbound internet inside a `--network-ve
 
 Last verified: 2026-07-19
 
-System: Linux 7.0.0-28-generic (x86_64), systemd 259, sdme 0.16.0 + nested-operation fixes (pre-0.17.0). Skips: 1 export xattr (setfattr missing), 1 kube-L2-security, 6 gitea cascade, 12 docker-in-container (veth DHCP; see Known limitations). Failures this run: 3 distro-oci postgres (fixed: verify now polls), 1 gitea mysql (load), 2 verify-network zone (devsrv networkd shadowing; see Log), 2 verify-tutorial chan (work-in-progress tutorial, untracked).
+System: Linux 7.0.0-28-generic (x86_64), systemd 259, sdme 0.17.0 release binary. Four parallel jobs, timeout scale 2, wall clock 30m55s. This is the exact post-fix release-candidate run; failures are retained as failures rather than relabeled after triage.
 
 ```
 Test Suite                 Pass  Fail  Skip  Status
@@ -145,7 +145,7 @@ verify-build                 11     0     0  PASS
 verify-cp                    17     0     0  PASS
 verify-diff                   9     0     0  PASS
 verify-distro-boot           63     0     0  PASS
-verify-distro-oci           172     3     0  PASS*
+verify-distro-oci           175     0     0  PASS
 verify-export                22     0     1  PASS
 verify-kube-L1-basic         14     0     0  PASS
 verify-kube-L2-probes        41     0     0  PASS
@@ -155,27 +155,33 @@ verify-kube-L3-secrets       16     0     0  PASS
 verify-kube-L3-volumes       39     0     0  PASS
 verify-kube-L4-networking     6     0     0  PASS
 verify-kube-L5-redis-stack    6     0     0  PASS
-verify-kube-L6-gitea-stack    8     1     6  PASS*
+verify-kube-L6-gitea-stack    9     1     5  FAIL
 verify-nested                16     0     0  PASS
 verify-nested-userns          7     0     0  PASS
-verify-network                7     2     0  PASS*
-verify-nixos                 26     0     0  PASS
+verify-network                7     2     0  FAIL
+verify-nixos                 25     1     0  FAIL
 verify-oci                   18     0     0  PASS
 verify-pods                   9     0     0  PASS
 verify-security              41     0     0  PASS
 verify-storage               11     0     0  PASS
-verify-tutorial              84     2    12  PASS*
+verify-tutorial              84     0     7  PASS
 -------------------------  ----  ----  ----  ------
-Totals                      671     8    20  24 suites
+Totals                      674     4    14  24 suites
 ```
 
-*distro-oci postgres: fixed by polling pg_isready (was a fixed 10s wait).
-*gitea mysql: load-induced readiness timeout under 8-way parallelism.
-*verify-network zone tests: environmental, devsrv's networkd override shadows
-upstream vz-* config on this host; passes on hosts without it.
-*verify-tutorial chan tests: user's in-progress chan-devserver tutorial
-(untracked file), not a regression of this change.
-
+- `verify-nested` passed 16/16, including the changed chroot and nested Btrfs
+  cleanup paths.
+- `verify-network` reproduced the devsrv host's known unmanaged zone bridge:
+  no route to the zone peer and no LLMNR response. Bridge networking passed.
+- `verify-kube-L6-gitea-stack` no longer hits the orphan-rootfs transaction
+  failure. Under four-way load, create, boot, and all three services passed,
+  but Gitea did not listen on port 3000 within 180 seconds. A serial rerun
+  passed 15/15. The runner now schedules Gitea in its serial heavyweight stage.
+- `verify-nixos` passed all 25 functional assertions under four-way load. Its
+  final multi-service delete failed because graceful shutdown exceeded sdme's
+  internal 30-second removal stage. The test now allows heavyweight first-boot
+  latency and stops gracefully before deletion; it passed 26/26 through the
+  normal four-job runner.
 ## Log
 
 ### 0.17.0 -- nested-operation fixes (2026-07-19, x86_64)
@@ -192,28 +198,22 @@ warning). New `verify-nested.sh` replicates the devsrv tier topology
 (outer: btrfs + `--userns --userns-nested=32`) and runs serially in Stage 3
 because it toggles `user_subvol_rm_allowed` on the shared data root.
 
-Full run-parallel.sh on Linux 7.0.0-28-generic (x86_64), systemd 259.5, Mode A
-loop-backed btrfs datadir: 607 passed, 9 failed, 20 skipped across 23 suites,
-wall clock 43m05s (a heavily loaded run; failures triaged below), plus
-verify-nested standalone: 16 passed, 0 failed. Standalone confirmations:
-verify-nested-userns 7/7, verify-security 41/41. cargo test: 853 passed,
-4 ignored across targets.
+Full run-parallel.sh against the 0.17.0 release binary on Linux
+7.0.0-28-generic (x86_64), systemd 259.5, Mode A loop-backed btrfs datadir:
+674 passed, 4 failed, 14 skipped across 24 suites, wall clock 30m55s. Nested
+passed 16/16. Gitea readiness and NixOS graceful deletion failed only under
+four-way load; a targeted serial release-binary run passed Gitea 15/15 and
+NixOS 26/26 in 11m38s. The runner now serializes these heavyweight suites;
+post-change verification passed Gitea 15/15 and NixOS 26/26. Rust verification
+after review fixes: 849 passed, 3 ignored across targets; fmt and clippy with
+warnings denied pass.
 
-Failure triage (none in the changed paths):
-
-- verify-distro-oci (3): postgres verify used a fixed 10s readiness wait, too
-  short for PostgreSQL 18's initdb under load; `app_verify` now polls
-  pg_isready for up to 60s.
-- verify-kube-L6-gitea (1): MySQL readiness timed out under 8-way
-  parallelism; load flake, service came up fine.
-- verify-network (2): zone tests get no DHCP lease on this host because
-  devsrv's `/etc/systemd/network/80-container-vz.network` shadows upstream's
-  wildcard vz-* config, so non-devsrv zone bridges are unmanaged.
-  Environmental to dev2; not a code issue.
-- verify-security (suite abort, 0/0/0): `prechown_overlayfs` hit a TOCTOU on
-  a dpkg `tmp.ci` file that vanished mid-chown under load; passes standalone.
-- verify-tutorial (2): the work-in-progress chan-devserver tutorial steps
-  (untracked file), unrelated to this change.
+Failure triage is recorded with the table above. The exact release-candidate
+summary is `test-reports/summary-20260719-183653.md`; targeted reruns are in
+`test-reports/summary-20260719-164335.md` and
+`test-reports/summary-20260719-175552.md`. Heavyweight-stage verification is in
+`test-reports/summary-20260719-185653.md` and
+`test-reports/summary-20260719-190505.md`.
 
 Key findings on nested boot (documented in the architecture guide): nested
 nspawn boots are blocked by kernel rules, not (only) the outer seccomp

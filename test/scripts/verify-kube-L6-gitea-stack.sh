@@ -38,6 +38,9 @@ POD_RUNNING=0
 cleanup() {
     echo "==> Cleaning up..."
     "$SDME" kube delete "$POD_NAME" --force 2>/dev/null || true
+    # A failed kube create can leave the final rootfs behind before pod state
+    # is committed, so kube delete alone cannot discover it.
+    "$SDME" fs rm -f "kube-$POD_NAME" 2>/dev/null || true
 }
 
 trap cleanup EXIT INT TERM
@@ -445,6 +448,9 @@ main() {
     echo "base-fs: $BASE_FS"
     echo "pod:     $POD_NAME"
     echo ""
+
+    # Make retries independent of artifacts left by an interrupted create.
+    cleanup
 
     # Phase 1: Create
     test_create_pod

@@ -243,7 +243,7 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
 
         let backend = state
             .as_ref()
-            .map(|s| storage::Backend::from_state(s))
+            .map(storage::Backend::from_state)
             .unwrap_or_default();
 
         // A btrfs container's rootfs is a subvolume under the pool, not a

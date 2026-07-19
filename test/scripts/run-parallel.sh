@@ -106,7 +106,7 @@ parse_runner_args() {
             --stagger)  shift; STAGGER="$1" ;;
             --skip)     shift; SKIP_SCRIPTS+=("$1") ;;
             --only)     shift; ONLY_SCRIPTS+=("$1") ;;
-            -v|--verbose) VERBOSE=1; VFLAG="-v" ;;
+            -v|--verbose) VERBOSE=1 ;;
             --help)     usage; exit 0 ;;
             *)          echo "error: unknown option: $1" >&2; usage >&2; exit 1 ;;
         esac
@@ -474,7 +474,6 @@ main() {
         verify-pods.sh
         verify-network.sh
         verify-oci.sh
-        verify-nixos.sh
         verify-distro-boot.sh
         verify-distro-oci.sh
         verify-kube-L1-basic.sh
@@ -519,7 +518,6 @@ main() {
         verify-kube-L2-probes.sh
         verify-kube-L4-networking.sh
         verify-kube-L5-redis-stack.sh
-        verify-kube-L6-gitea-stack.sh
     )
 
     local wave_b_wanted=0
@@ -579,6 +577,27 @@ main() {
     for pid in "${CHILD_PIDS[@]}"; do
         wait "$pid" 2>/dev/null || overall_rc=1
     done
+
+    # NixOS and Gitea each boot several OCI services. Running them while the
+    # distro OCI matrix is pulling and booting images causes readiness and
+    # shutdown false negatives on otherwise healthy containers.
+    local heavyweight_scripts=()
+    if should_run "verify-nixos"; then
+        heavyweight_scripts+=("$SCRIPT_DIR/verify-nixos.sh")
+    fi
+    if should_run "verify-kube-L6-gitea-stack"; then
+        heavyweight_scripts+=("$SCRIPT_DIR/verify-kube-L6-gitea-stack.sh")
+    fi
+    if [[ ${#heavyweight_scripts[@]} -gt 0 ]]; then
+        echo ""
+        cleanup_stale
+        log "Stage 2: Serial heavyweight application tests"
+        CHILD_PIDS=()
+        run_serial_group "heavyweight" "${heavyweight_scripts[@]}"
+        for pid in "${CHILD_PIDS[@]}"; do
+            wait "$pid" 2>/dev/null || overall_rc=1
+        done
+    fi
 
     # ========================================================================
     # Stage 3: Destructive (verify-tutorial.sh)

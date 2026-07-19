@@ -272,7 +272,9 @@ pub fn analyze(datadir: &Path, default_base_fs: &str) -> Result<Vec<PrunableItem
             crate::storage::btrfs::FS_SUBDIR,
             crate::storage::btrfs::CONTAINERS_SUBDIR,
         ] {
-            let trash_dir = pool_root.join(sub).join(crate::storage::btrfs::TRASH_SUBDIR);
+            let trash_dir = pool_root
+                .join(sub)
+                .join(crate::storage::btrfs::TRASH_SUBDIR);
             if let Ok(entries) = fs::read_dir(&trash_dir) {
                 for entry in entries.flatten() {
                     let name = entry.file_name().to_string_lossy().into_owned();

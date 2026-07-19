@@ -42,8 +42,9 @@ NIXOS_BIN="/run/current-system/sw/bin"
 
 # Timeouts (seconds)
 TIMEOUT_IMPORT=$(scale_timeout 900)
-TIMEOUT_BOOT=$(scale_timeout 120)
+TIMEOUT_BOOT=$(scale_timeout 300)
 TIMEOUT_TEST=$(scale_timeout 60)
+TIMEOUT_DELETE=$(scale_timeout 150)
 
 usage() {
     cat <<EOF
@@ -89,21 +90,21 @@ cleanup() {
     log "Cleaning up vfy-nix- artifacts..."
 
     # Delete kube containers first (removes both container and kube rootfs).
-    sdme kube delete "$CT_KUBE_MULTI" 2>/dev/null || true
-    sdme kube delete "$CT_KUBE" 2>/dev/null || true
+    "$SDME" kube delete "$CT_KUBE_MULTI" 2>/dev/null || true
+    "$SDME" kube delete "$CT_KUBE" 2>/dev/null || true
 
     # Stop and remove remaining containers.
     local names
-    names=$(sdme ps 2>/dev/null | awk 'NR>1 {print $1}' | grep '^vfy-nix-' || true)
+    names=$("$SDME" ps 2>/dev/null | awk 'NR>1 {print $1}' | grep '^vfy-nix-' || true)
     for name in $names; do
         stop_container "$name"
-        sdme rm -f "$name" 2>/dev/null || true
+        "$SDME" rm -f "$name" 2>/dev/null || true
     done
 
     # Remove rootfs (including kube- prefixed rootfs for kube containers).
-    names=$(sdme fs ls 2>/dev/null | awk 'NR>1 {print $1}' | grep -E '^(vfy-nix-|kube-vfy-nix-)' || true)
+    names=$("$SDME" fs ls 2>/dev/null | awk 'NR>1 {print $1}' | grep -E '^(vfy-nix-|kube-vfy-nix-)' || true)
     for name in $names; do
-        sdme fs rm "$name" 2>/dev/null || true
+        "$SDME" fs rm "$name" 2>/dev/null || true
     done
 }
 
@@ -145,7 +146,7 @@ phase2_boot_plain() {
 
     # Create
     local output
-    if ! output=$(timeout "$TIMEOUT_BOOT" sdme create -r "$FS_NAME" "$CT_PLAIN" 2>&1); then
+    if ! output=$(timeout "$TIMEOUT_BOOT" "$SDME" create -r "$FS_NAME" "$CT_PLAIN" 2>&1); then
         record "plain/create" FAIL "$output"
         record "plain/boot" SKIP "create failed"
         record "plain/exec" SKIP "create failed"
@@ -154,23 +155,23 @@ phase2_boot_plain() {
     record "plain/create" PASS
 
     # Start
-    if ! output=$(timeout "$TIMEOUT_BOOT" sdme start "$CT_PLAIN" -t 120 2>&1); then
+    if ! output=$(timeout "$((TIMEOUT_BOOT + 15))" "$SDME" start "$CT_PLAIN" -t "$TIMEOUT_BOOT" 2>&1); then
         record "plain/boot" FAIL "start failed: $output"
         record "plain/exec" SKIP "start failed"
-        sdme rm -f "$CT_PLAIN" 2>/dev/null || true
+        "$SDME" rm -f "$CT_PLAIN" 2>/dev/null || true
         return
     fi
     record "plain/boot" PASS
 
     # Exec a basic command
-    if output=$(timeout "$TIMEOUT_TEST" sdme exec "$CT_PLAIN" "$NIXOS_BIN/uname" -a 2>&1); then
+    if output=$(timeout "$TIMEOUT_TEST" "$SDME" exec "$CT_PLAIN" "$NIXOS_BIN/uname" -a 2>&1); then
         record "plain/exec" PASS "$output"
     else
         record "plain/exec" FAIL "$output"
     fi
 
     stop_container "$CT_PLAIN"
-    sdme rm -f "$CT_PLAIN" 2>/dev/null || true
+    "$SDME" rm -f "$CT_PLAIN" 2>/dev/null || true
 }
 
 # -- Phase 3: Import nginx-unprivileged OCI app ---------------------------------
@@ -190,7 +191,7 @@ phase3_import_oci() {
     fi
 
     local output
-    if output=$(timeout "$TIMEOUT_IMPORT" sdme fs import "$APP_FS" "$APP_IMAGE" \
+    if output=$(timeout "$TIMEOUT_IMPORT" "$SDME" fs import "$APP_FS" "$APP_IMAGE" \
             --base-fs="$FS_NAME" --oci-mode=app -v --install-packages=yes -f 2>&1); then
         record "oci/import" PASS
     else
@@ -223,7 +224,7 @@ phase4_test_oci() {
     # --no-oci-ports prevents auto port forwarding to the host; this
     # test uses nsenter to curl from inside the container's net namespace.
     local output
-    if ! output=$(timeout "$TIMEOUT_BOOT" sdme create -r "$APP_FS" --private-network --network-veth --no-oci-ports "$CT_OCI" 2>&1); then
+    if ! output=$(timeout "$TIMEOUT_BOOT" "$SDME" create -r "$APP_FS" --private-network --network-veth --no-oci-ports "$CT_OCI" 2>&1); then
         record "oci/create" FAIL "$output"
         record "oci/volume-dir" SKIP "create failed"
         record "oci/boot" SKIP "create failed"
@@ -247,7 +248,7 @@ phase4_test_oci() {
         record "oci/curl-port" SKIP "volume dir missing"
         record "oci/curl-content" SKIP "volume dir missing"
         stop_container "$CT_OCI"
-        sdme rm -f "$CT_OCI" 2>/dev/null || true
+        "$SDME" rm -f "$CT_OCI" 2>/dev/null || true
         return
     fi
 
@@ -258,13 +259,13 @@ HTMLEOF
     log "  Wrote test content to $vol_dir/index.html"
 
     # Start container
-    if ! output=$(timeout "$TIMEOUT_BOOT" sdme start "$CT_OCI" -t 120 2>&1); then
+    if ! output=$(timeout "$((TIMEOUT_BOOT + 15))" "$SDME" start "$CT_OCI" -t "$TIMEOUT_BOOT" 2>&1); then
         record "oci/boot" FAIL "start failed: $output"
         record "oci/service" SKIP "start failed"
         record "oci/logs" SKIP "start failed"
         record "oci/curl-port" SKIP "start failed"
         record "oci/curl-content" SKIP "start failed"
-        sdme rm -f "$CT_OCI" 2>/dev/null || true
+        "$SDME" rm -f "$CT_OCI" 2>/dev/null || true
         return
     fi
     record "oci/boot" PASS
@@ -273,7 +274,7 @@ HTMLEOF
     sleep 5
 
     # Check sdme-oci-nginx-unprivileged.service
-    if output=$(timeout "$TIMEOUT_TEST" sdme exec "$CT_OCI" \
+    if output=$(timeout "$TIMEOUT_TEST" "$SDME" exec "$CT_OCI" \
             "$NIXOS_BIN/systemctl" is-active sdme-oci-nginx-unprivileged.service 2>&1); then
         record "oci/service" PASS
     else
@@ -281,7 +282,7 @@ HTMLEOF
     fi
 
     # Check OCI app logs via sdme logs --oci
-    if output=$(timeout "$TIMEOUT_TEST" sdme logs --oci -- "$CT_OCI" --no-pager -n 5 2>&1); then
+    if output=$(timeout "$TIMEOUT_TEST" "$SDME" logs --oci -- "$CT_OCI" --no-pager -n 5 2>&1); then
         record "oci/logs" PASS
     else
         record "oci/logs" FAIL "$output"
@@ -294,7 +295,7 @@ HTMLEOF
         record "oci/curl-port" FAIL "could not find container leader PID"
         record "oci/curl-content" SKIP "no leader PID"
         stop_container "$CT_OCI"
-        sdme rm -f "$CT_OCI" 2>/dev/null || true
+        "$SDME" rm -f "$CT_OCI" 2>/dev/null || true
         return
     fi
 
@@ -315,7 +316,7 @@ HTMLEOF
 
     # Cleanup this container
     stop_container "$CT_OCI"
-    sdme rm -f "$CT_OCI" 2>/dev/null || true
+    "$SDME" rm -f "$CT_OCI" 2>/dev/null || true
 }
 
 # -- Phase 5: Kubernetes Pod YAML on NixOS base --------------------------------
@@ -350,26 +351,26 @@ YAMLEOF
 
     # Create the kube container (no start).
     local output
-    if ! output=$(timeout "$TIMEOUT_BOOT" sdme kube create -f "$yaml" --base-fs "$FS_NAME" -v 2>&1); then
+    if ! output=$(timeout "$TIMEOUT_BOOT" "$SDME" kube create -f "$yaml" --base-fs "$FS_NAME" -v 2>&1); then
         record "kube/create" FAIL "$output"
         record "kube/boot" SKIP "create failed"
         record "kube/service" SKIP "create failed"
         record "kube/curl-port" SKIP "create failed"
         record "kube/delete" SKIP "create failed"
         rm -f "$yaml"
-        sdme kube delete "$CT_KUBE" 2>/dev/null || true
+        "$SDME" kube delete "$CT_KUBE" 2>/dev/null || true
         return
     fi
     record "kube/create" PASS
     rm -f "$yaml"
 
     # Start the container.
-    if ! output=$(timeout "$TIMEOUT_BOOT" sdme start "$CT_KUBE" -t 120 2>&1); then
+    if ! output=$(timeout "$((TIMEOUT_BOOT + 15))" "$SDME" start "$CT_KUBE" -t "$TIMEOUT_BOOT" 2>&1); then
         record "kube/boot" FAIL "start failed: $output"
         record "kube/service" SKIP "start failed"
         record "kube/curl-port" SKIP "start failed"
         record "kube/delete" SKIP "start failed"
-        sdme kube delete "$CT_KUBE" 2>/dev/null || true
+        "$SDME" kube delete "$CT_KUBE" 2>/dev/null || true
         return
     fi
     record "kube/boot" PASS
@@ -378,7 +379,7 @@ YAMLEOF
     # service can still be transitioning when `sdme start` returns.
     local service_ok=0 deadline=$((SECONDS + TIMEOUT_TEST))
     while (( SECONDS < deadline )); do
-        if output=$(timeout 5 sdme exec "$CT_KUBE" \
+        if output=$(timeout 5 "$SDME" exec "$CT_KUBE" \
                 "$NIXOS_BIN/systemctl" is-active sdme-oci-nginx-unprivileged.service 2>&1); then
             service_ok=1
             break
@@ -408,8 +409,10 @@ YAMLEOF
         record "kube/curl-port" FAIL "could not find container leader PID"
     fi
 
-    # Delete the kube container.
-    if output=$(timeout "$TIMEOUT_TEST" sdme kube delete "$CT_KUBE" 2>&1); then
+    # Stop gracefully before deletion. kube delete otherwise uses the generic
+    # removal path's fixed 30-second terminate window for a running machine.
+    if output=$(timeout "$TIMEOUT_DELETE" "$SDME" stop "$CT_KUBE" 2>&1) &&
+       output=$(timeout "$TIMEOUT_DELETE" "$SDME" kube delete "$CT_KUBE" 2>&1); then
         record "kube/delete" PASS
     else
         record "kube/delete" FAIL "$output"
@@ -462,7 +465,7 @@ YAMLEOF
 
     # Create
     local output
-    if ! output=$(timeout "$TIMEOUT_BOOT" sdme kube create -f "$yaml" --base-fs "$FS_NAME" -v 2>&1); then
+    if ! output=$(timeout "$TIMEOUT_BOOT" "$SDME" kube create -f "$yaml" --base-fs "$FS_NAME" -v 2>&1); then
         record "kube-multi/create" FAIL "$output"
         record "kube-multi/boot" SKIP "create failed"
         record "kube-multi/service-nginx" SKIP "create failed"
@@ -473,14 +476,14 @@ YAMLEOF
         record "kube-multi/mysql-connect" SKIP "create failed"
         record "kube-multi/delete" SKIP "create failed"
         rm -f "$yaml"
-        sdme kube delete "$CT_KUBE_MULTI" 2>/dev/null || true
+        "$SDME" kube delete "$CT_KUBE_MULTI" 2>/dev/null || true
         return
     fi
     record "kube-multi/create" PASS
     rm -f "$yaml"
 
     # Start
-    if ! output=$(timeout "$TIMEOUT_BOOT" sdme start "$CT_KUBE_MULTI" -t 120 2>&1); then
+    if ! output=$(timeout "$((TIMEOUT_BOOT + 15))" "$SDME" start "$CT_KUBE_MULTI" -t "$TIMEOUT_BOOT" 2>&1); then
         record "kube-multi/boot" FAIL "start failed: $output"
         record "kube-multi/service-nginx" SKIP "start failed"
         record "kube-multi/service-redis" SKIP "start failed"
@@ -489,7 +492,7 @@ YAMLEOF
         record "kube-multi/nginx-http" SKIP "start failed"
         record "kube-multi/mysql-connect" SKIP "start failed"
         record "kube-multi/delete" SKIP "start failed"
-        sdme kube delete "$CT_KUBE_MULTI" 2>/dev/null || true
+        "$SDME" kube delete "$CT_KUBE_MULTI" 2>/dev/null || true
         return
     fi
     record "kube-multi/boot" PASS
@@ -500,7 +503,7 @@ YAMLEOF
     # Check all three OCI app services
     for svc in nginx redis mysql; do
         local test_key="kube-multi/service-$svc"
-        if output=$(timeout "$TIMEOUT_TEST" sdme exec "$CT_KUBE_MULTI" \
+        if output=$(timeout "$TIMEOUT_TEST" "$SDME" exec "$CT_KUBE_MULTI" \
                 "$NIXOS_BIN/systemctl" is-active "sdme-oci-${svc}.service" 2>&1) && \
            [[ "$output" == *"active"* ]]; then
             record "$test_key" PASS
@@ -511,7 +514,7 @@ YAMLEOF
 
     # Redis PING/PONG
     local ping_out
-    ping_out=$(timeout "$TIMEOUT_TEST" sdme exec "$CT_KUBE_MULTI" \
+    ping_out=$(timeout "$TIMEOUT_TEST" "$SDME" exec "$CT_KUBE_MULTI" \
         "$NIXOS_BIN/bash" -c "echo PING | $NIXOS_BIN/nc -w2 127.0.0.1 6379" 2>&1) || true
     if [[ "$ping_out" == *"+PONG"* ]]; then
         record "kube-multi/redis-ping" PASS
@@ -537,7 +540,7 @@ YAMLEOF
 
     # MySQL TCP connect
     local mysql_out
-    mysql_out=$(timeout "$TIMEOUT_TEST" sdme exec "$CT_KUBE_MULTI" \
+    mysql_out=$(timeout "$TIMEOUT_TEST" "$SDME" exec "$CT_KUBE_MULTI" \
         "$NIXOS_BIN/bash" -c "echo '' | $NIXOS_BIN/nc -w2 127.0.0.1 3306 | head -c1 | wc -c" 2>&1) || true
     if [[ "$mysql_out" == *"1"* ]]; then
         record "kube-multi/mysql-connect" PASS "port 3306 responded"
@@ -545,8 +548,10 @@ YAMLEOF
         record "kube-multi/mysql-connect" FAIL "$mysql_out"
     fi
 
-    # Delete
-    if output=$(timeout "$TIMEOUT_TEST" sdme kube delete "$CT_KUBE_MULTI" 2>&1); then
+    # Stop gracefully before deletion. Multi-service NixOS shutdown routinely
+    # needs longer than the removal path's fixed terminate window under load.
+    if output=$(timeout "$TIMEOUT_DELETE" "$SDME" stop "$CT_KUBE_MULTI" 2>&1) &&
+       output=$(timeout "$TIMEOUT_DELETE" "$SDME" kube delete "$CT_KUBE_MULTI" 2>&1); then
         record "kube-multi/delete" PASS
     else
         record "kube-multi/delete" FAIL "$output"

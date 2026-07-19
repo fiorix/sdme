@@ -888,7 +888,7 @@ mod tests {
         assert_eq!(by_path.get("/etc/td/inner"), Some(&ChangeKind::Deleted));
         // Unchanged file must not appear.
         assert!(
-            by_path.get("/etc/keep").is_none(),
+            !by_path.contains_key("/etc/keep"),
             "unchanged file should not appear in the diff"
         );
     }

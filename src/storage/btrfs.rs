@@ -289,6 +289,26 @@ fn is_destroy_denied(e: &anyhow::Error) -> bool {
         })
 }
 
+/// Choose an unused trash path, preserving earlier parked entries even when
+/// multiple deletions of the same name occur in one second.
+fn trash_target(trash_dir: &Path, name: &OsStr, timestamp: u64) -> Result<PathBuf> {
+    let stem = format!("{}.{}", name.to_string_lossy(), timestamp);
+    for suffix in 0u32..=u16::MAX as u32 {
+        let candidate = if suffix == 0 {
+            trash_dir.join(&stem)
+        } else {
+            trash_dir.join(format!("{stem}.{suffix}"))
+        };
+        if !subvolume_exists(&candidate) {
+            return Ok(candidate);
+        }
+    }
+    bail!(
+        "no unused trash name available for {}",
+        name.to_string_lossy()
+    )
+}
+
 /// Park a subvolume that could not be destroyed in `.trash`, then empty its
 /// contents with plain file operations.
 ///
@@ -299,10 +319,7 @@ fn is_destroy_denied(e: &anyhow::Error) -> bool {
 /// survive the emptying and go away with the host-side destroy.
 fn trash_subvol(path: &Path, verbose: bool) -> Result<()> {
     let parent = path.parent().context("subvolume path has no parent")?;
-    let name = path
-        .file_name()
-        .context("subvolume path has no basename")?
-        .to_string_lossy();
+    let name = path.file_name().context("subvolume path has no basename")?;
     let trash_dir = parent.join(TRASH_SUBDIR);
     fs::create_dir_all(&trash_dir)
         .with_context(|| format!("failed to create {}", trash_dir.display()))?;
@@ -310,10 +327,7 @@ fn trash_subvol(path: &Path, verbose: bool) -> Result<()> {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let mut target = trash_dir.join(format!("{name}.{ts}"));
-    if subvolume_exists(&target) {
-        target = trash_dir.join(format!("{name}.{ts}.{}", std::process::id()));
-    }
+    let target = trash_target(&trash_dir, name, ts)?;
     fs::rename(path, &target).with_context(|| {
         format!(
             "failed to park {} in trash {}",
@@ -381,8 +395,8 @@ fn delete_one_subvol(path: &Path, verbose: bool) -> Result<()> {
     if name.len() > SUBVOL_NAME_MAX {
         bail!("subvolume name too long: {}", path.display());
     }
-    let parent_dir = fs::File::open(parent)
-        .with_context(|| format!("failed to open {}", parent.display()))?;
+    let parent_dir =
+        fs::File::open(parent).with_context(|| format!("failed to open {}", parent.display()))?;
     let mut args = SnapDestroyArgs {
         fd: i64::from(parent_dir.as_raw_fd()),
         transid: 0,
@@ -619,6 +633,38 @@ mod tests {
             &PathBuf::from("/pool/containers/c/var/lib/docker/btrfs/subvolumes/a")
         );
         assert_eq!(v.last().unwrap(), &PathBuf::from("/pool/containers/c"));
+    }
+
+    #[test]
+    fn destroy_denied_matches_permission_errors_in_context_chain() {
+        for errno in [libc::EPERM, libc::EACCES] {
+            let err = anyhow::Error::new(std::io::Error::from_raw_os_error(errno))
+                .context("destroy failed");
+            assert!(is_destroy_denied(&err));
+        }
+
+        let err = anyhow::Error::new(std::io::Error::from_raw_os_error(libc::ENOTEMPTY))
+            .context("destroy failed");
+        assert!(!is_destroy_denied(&err));
+        assert!(!is_destroy_denied(&anyhow::anyhow!("permission denied")));
+    }
+
+    #[test]
+    fn trash_target_skips_existing_names() {
+        let dir = std::env::temp_dir().join(format!(
+            "sdme-test-trash-target-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("web.42")).unwrap();
+        fs::create_dir(dir.join("web.42.1")).unwrap();
+
+        assert_eq!(
+            trash_target(&dir, OsStr::new("web"), 42).unwrap(),
+            dir.join("web.42.2")
+        );
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
