@@ -19,7 +19,7 @@ make pkg                    # build .pkg.tar.zst package (Arch Linux)
 sudo make install           # install to /usr/local (does NOT rebuild)
 ```
 
-The probe binary (`sdme-kube-probe`) is built and embedded by `build.rs`. Override with `SDME_KUBE_PROBE_PATH` for cross-compilation. During `cargo test`, the probe build is skipped by default; set `SDME_BUILD_PROBE=1` to force it.
+The probe binary (`sdme-kube-probe`) is built and embedded by `build.rs`. Override with `SDME_KUBE_PROBE_PATH` for cross-compilation. During `cargo test`, the probe build is skipped by default; set `SDME_BUILD_PROBE=1` to force it. A failed probe build fails the whole build; set `SDME_SKIP_PROBE=1` to build without kube probe support.
 
 ### E2E Tests
 

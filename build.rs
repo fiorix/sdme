@@ -10,6 +10,11 @@
 /// During `cargo test`, the probe build is skipped by default since it is
 /// only needed at runtime. Set `SDME_BUILD_PROBE=1` to force building
 /// the probe during tests.
+///
+/// A build that cannot embed the probe FAILS. A probe-less sdme ships kube
+/// pods whose health checks never run, and v0.17.0 showed that a warning is
+/// too easy to miss. Set `SDME_SKIP_PROBE=1` to build without probe support
+/// (exotic targets, offline dev builds); docs.rs builds skip it automatically.
 fn main() {
     // Provenance marker: distro package builds (Copr, Launchpad) set SDME_CHANNEL
     // so the binary defers self-upgrade to the system package manager. Default
@@ -41,12 +46,28 @@ fn main() {
         return;
     }
 
-    // Try explicit env var first (used by CI/cross-compilation).
+    // Opt-outs: SDME_SKIP_PROBE=1 for builds where the probe cannot be built
+    // or is not wanted, and docs.rs, which is sandboxed and ships no binary.
+    // The empty blob is caught at runtime by kube::create if probes are used.
+    if std::env::var("SDME_SKIP_PROBE").unwrap_or_default() == "1"
+        || std::env::var("DOCS_RS").is_ok()
+    {
+        std::fs::write(&probe_dst, b"").unwrap();
+        println!("cargo:rerun-if-env-changed=SDME_SKIP_PROBE");
+        println!("cargo:rerun-if-changed=src/kube/probe/");
+        return;
+    }
+
+    // Explicit override (used by CI/cross-compilation). Set but unusable is a
+    // hard error: falling through to discovery here could embed a host-arch
+    // probe from target/ on a cross build.
     if let Ok(src) = std::env::var("SDME_KUBE_PROBE_PATH") {
-        if std::path::Path::new(&src).is_file() {
-            std::fs::copy(&src, &probe_dst).unwrap();
-            println!("cargo:rerun-if-changed={src}");
-            return;
+        match embed_probe(std::path::Path::new(&src), &probe_dst) {
+            Ok(()) => {
+                println!("cargo:rerun-if-changed={src}");
+                return;
+            }
+            Err(e) => fatal(&format!("SDME_KUBE_PROBE_PATH={src}: {e}")),
         }
     }
 
@@ -61,10 +82,40 @@ fn main() {
         return;
     }
 
-    // Empty placeholder: probes won't work without the real binary.
-    println!("cargo:warning=sdme-kube-probe binary not found, kube probes will not work");
-    std::fs::write(&probe_dst, b"").unwrap();
-    println!("cargo:rerun-if-changed=src/kube/probe/");
+    fatal("sdme-kube-probe could not be built or found (see warnings above)");
+}
+
+/// Print a hard error and abort the build. A build without the embedded probe
+/// would ship a binary whose kube probes never run, so this must stay fatal;
+/// the only way out is the explicit SDME_SKIP_PROBE opt-out above.
+fn fatal(msg: &str) -> ! {
+    eprintln!("error: {msg}");
+    eprintln!("sdme embeds sdme-kube-probe and refuses to ship without it.");
+    eprintln!("Fix the probe build, point SDME_KUBE_PROBE_PATH at a pre-built probe,");
+    eprintln!("or set SDME_SKIP_PROBE=1 to build without kube probe support.");
+    std::process::exit(1);
+}
+
+/// Check the 4-byte ELF magic of `path`.
+fn is_elf(path: &std::path::Path) -> bool {
+    use std::io::Read as _;
+    let mut magic = [0u8; 4];
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    f.read_exact(&mut magic).is_ok() && &magic == b"\x7fELF"
+}
+
+/// Copy `src` to `dst`, requiring `src` to be an ELF binary.
+fn embed_probe(src: &std::path::Path, dst: &str) -> Result<(), String> {
+    if !src.is_file() {
+        return Err("file does not exist".to_string());
+    }
+    if !is_elf(src) {
+        return Err("not an ELF binary".to_string());
+    }
+    std::fs::copy(src, dst).map_err(|e| format!("failed to copy to {dst}: {e}"))?;
+    Ok(())
 }
 
 /// Try to discover a pre-built probe binary in the main target directory.
@@ -81,7 +132,9 @@ fn try_discover(probe_dst: &str) -> bool {
     candidates.push(format!("{manifest_dir}/target/{profile}/sdme-kube-probe"));
 
     for candidate in &candidates {
-        if std::path::Path::new(candidate).is_file() {
+        // Require ELF, not just existence: a stale or empty file here would
+        // otherwise be embedded as-is, silently breaking kube probes.
+        if is_elf(std::path::Path::new(candidate)) {
             std::fs::copy(candidate, probe_dst).unwrap();
             println!("cargo:rerun-if-changed={candidate}");
             return true;
@@ -129,21 +182,17 @@ fn try_build_probe(probe_dst: &str) -> bool {
         }
     };
 
-    // TODO: a probe build failure is only a warning, so a release can ship a
-    // binary whose embedded probe is the empty placeholder and nothing catches
-    // it. v0.17.0 exposed this: the probe failed for the same reason the outer
-    // build did, and was noticed only because the outer build failed too. Make
-    // this fatal (or assert the embedded blob is a valid ELF), and echo the
-    // tail of the stderr rather than the head: the first lines are always
-    // cargo's "Downloading crates ..." chatter, which is what buried the real
-    // error that time.
     if !output.status.success() {
+        // Echo the tail of stderr, not the head: the first lines are always
+        // cargo's "Downloading crates ..." chatter, which buried the real
+        // error in the v0.17.0 musl failure.
         let stderr = String::from_utf8_lossy(&output.stderr);
-        for line in stderr.lines().take(10) {
+        let lines: Vec<&str> = stderr.lines().collect();
+        for line in &lines[lines.len().saturating_sub(20)..] {
             println!("cargo:warning=probe build: {line}");
         }
         println!(
-            "cargo:warning=probe build failed (exit {}), kube probes will not work",
+            "cargo:warning=probe build failed (exit {}); see errors above",
             output.status.code().unwrap_or(-1)
         );
         return false;
@@ -157,7 +206,7 @@ fn try_build_probe(probe_dst: &str) -> bool {
     built_path.push(&profile);
     built_path.push("sdme-kube-probe");
 
-    if built_path.is_file() {
+    if is_elf(&built_path) {
         std::fs::copy(&built_path, probe_dst).unwrap();
         strip_probe_debug(probe_dst);
         // Rebuild when probe source changes.

@@ -62,8 +62,9 @@ check() {
 package() {
     cd "$pkgname-$pkgver"
 
-    # build.rs treats a failed probe build as a warning and embeds an empty
-    # placeholder, so a broken kube probe would otherwise ship silently. The
+    # Backstop: build.rs fails the build outright if the probe cannot be
+    # embedded, but if a probe-less binary ever slipped through (SDME_SKIP_PROBE,
+    # a future regression) its kube probes would ship silently broken. The
     # embedded probe is most of the binary's ~12M.
     local size
     size=$(stat -c%s target/release/sdme)
