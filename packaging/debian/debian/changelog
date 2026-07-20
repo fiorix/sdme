@@ -1,3 +1,14 @@
+sdme (0.17.1-1~resolute1) resolute; urgency=medium
+
+  * Fix the static musl builds, which 0.17.0 could not produce: the btrfs
+    subvolume-destroy ioctl request was typed for glibc, where it is c_ulong,
+    while musl declares it c_int. It is now typed libc::Ioctl, which resolves
+    per target. Only the cross-compiled static binaries were affected; the
+    Debian and Fedora packages build against glibc and were correct in 0.17.0.
+  * Drop a deprecated libc::time_t annotation in the timestamp formatter.
+
+ -- Alexandre Fiori <fiorix@gmail.com>  Mon, 20 Jul 2026 00:34:34 +0000
+
 sdme (0.17.0-1~resolute1) resolute; urgency=medium
 
   * Nested-operation fixes for running sdme inside a user-namespaced

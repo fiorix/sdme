@@ -360,7 +360,12 @@ fn trash_subvol(path: &Path, verbose: bool) -> Result<()> {
 /// `BTRFS_IOC_SNAP_DESTROY_V2` request number:
 /// `_IOW(BTRFS_IOCTL_MAGIC = 0x94, 63, btrfs_ioctl_vol_args_v2)`.
 /// Verified against /usr/include/linux/btrfs.h.
-const BTRFS_IOC_SNAP_DESTROY_V2: libc::c_ulong = 0x5000_943f;
+///
+/// Typed `libc::Ioctl` rather than a fixed-width integer: the request argument
+/// of `ioctl(2)` is `c_ulong` on glibc but `c_int` on musl, so hardcoding
+/// either one breaks the static musl release build. The value fits in 31 bits,
+/// so it is representable in both.
+const BTRFS_IOC_SNAP_DESTROY_V2: libc::Ioctl = 0x5000_943f;
 
 /// Maximum length of a subvolume name (`BTRFS_SUBVOL_NAME_MAX`).
 const SUBVOL_NAME_MAX: usize = 4039;

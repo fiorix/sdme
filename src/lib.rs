@@ -742,7 +742,11 @@ pub fn validate_name(name: &str) -> Result<()> {
 /// Format a unix timestamp (seconds since epoch) as `YYYY-MM-DD HH:MM` in
 /// local time. Returns the raw number as a string if formatting fails.
 pub fn format_timestamp(secs_str: &str) -> String {
-    let secs: libc::time_t = match secs_str.parse() {
+    // Deliberately unannotated: the type falls out of the `*const time_t`
+    // coercion in the localtime_r call below, so this stays correct on every
+    // target without naming `libc::time_t`, whose musl alias is deprecated
+    // pending the 64-bit switch (libc #1848).
+    let secs = match secs_str.parse() {
         Ok(v) => v,
         Err(_) => return secs_str.to_string(),
     };

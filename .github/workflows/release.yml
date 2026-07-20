@@ -169,8 +169,14 @@ jobs:
   # PPA (which then builds amd64 + arm64). Source-package assembly does not
   # compile, so the stock runner is fine; the Launchpad build is offline against
   # the vendored crates. No-ops without the signing secret (e.g. on forks).
+  #
+  # Needs `release`, not `test`: a PPA upload is irrevocable, since Launchpad
+  # refuses a second upload of a version it has already accepted. Gating only on
+  # `test` published 0.17.0 to the PPA while the musl build was still running,
+  # and that build then failed, so the version was burned on a tree that could
+  # not produce binaries and the fix had to go out as 0.17.1.
   launchpad:
-    needs: test
+    needs: release
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -346,8 +352,12 @@ jobs:
   # procedure has pushed main before the tag. Makes the trigger visible in this
   # workflow instead of relying on an external GitHub->Copr webhook. No-op
   # without the webhook secret.
+  #
+  # Needs `release` for the same reason as the PPA: publish only once the whole
+  # release has actually built, so a broken tag cannot reach users' package
+  # managers ahead of the binaries.
   copr:
-    needs: test
+    needs: release
     runs-on: ubuntu-latest
     steps:
       - name: Trigger Copr build

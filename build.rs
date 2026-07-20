@@ -129,6 +129,14 @@ fn try_build_probe(probe_dst: &str) -> bool {
         }
     };
 
+    // TODO: a probe build failure is only a warning, so a release can ship a
+    // binary whose embedded probe is the empty placeholder and nothing catches
+    // it. v0.17.0 exposed this: the probe failed for the same reason the outer
+    // build did, and was noticed only because the outer build failed too. Make
+    // this fatal (or assert the embedded blob is a valid ELF), and echo the
+    // tail of the stderr rather than the head: the first lines are always
+    // cargo's "Downloading crates ..." chatter, which is what buried the real
+    // error that time.
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         for line in stderr.lines().take(10) {

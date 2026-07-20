@@ -11,7 +11,7 @@
 %global crate sdme
 
 Name:           sdme
-Version:        0.17.0
+Version:        0.17.1
 Release:        1%{?dist}
 Summary:        The systemd machine editor
 
@@ -100,6 +100,14 @@ install -d %{buildroot}%{_datadir}/fish/vendor_completions.d
 %{_datadir}/fish/vendor_completions.d/%{crate}.fish
 
 %changelog
+* Mon Jul 20 2026 Alexandre Fiori <fiorix@gmail.com> - 0.17.1-1
+- Fix the static musl builds, which 0.17.0 could not produce: the btrfs
+- subvolume-destroy ioctl request was typed for glibc, where it is c_ulong,
+- while musl declares it c_int. It is now typed libc::Ioctl, which resolves
+- per target. Only the cross-compiled static binaries were affected; this
+- Fedora package builds against glibc and was correct in 0.17.0.
+- Drop a deprecated libc::time_t annotation in the timestamp formatter.
+
 * Sun Jul 19 2026 Alexandre Fiori <fiorix@gmail.com> - 0.17.0-1
 - Nested-operation fixes for running sdme inside a user-namespaced container:
 - btrfs state operations: subvolume inspection is stat-based (no privileged
