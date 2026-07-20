@@ -1,3 +1,13 @@
+sdme (0.17.2-1~resolute1) resolute; urgency=medium
+
+  * Fail builds that cannot embed a valid Kubernetes probe instead of shipping
+    health checks that silently cannot run. Validate the probe's ELF
+    architecture, class, and byte order against the Cargo target.
+  * Make probe-less test builds explicit and track all probe-related environment
+    variables so Cargo reliably invalidates cached build-script output.
+
+ -- Alexandre Fiori <fiorix@gmail.com>  Mon, 20 Jul 2026 09:22:08 +0000
+
 sdme (0.17.1-1~resolute1) resolute; urgency=medium
 
   * Fix the static musl builds, which 0.17.0 could not produce: the btrfs

@@ -11,7 +11,7 @@
 %global crate sdme
 
 Name:           sdme
-Version:        0.17.1
+Version:        0.17.2
 Release:        1%{?dist}
 Summary:        The systemd machine editor
 
@@ -86,7 +86,10 @@ install -d %{buildroot}%{_datadir}/fish/vendor_completions.d
 
 %check
 # Run the unit tests during the build (unprivileged, offline against vendor).
-# build.rs skips the probe under CARGO_CFG_TEST, so no network or probe needed.
+# Unit tests do not use the embedded probe. Keep their target directory separate
+# so the probe-less test build cannot replace the binary staged by %%install.
+export CARGO_TARGET_DIR=target/package-tests
+export SDME_SKIP_PROBE=1
 %cargo_test
 
 %files
@@ -100,6 +103,13 @@ install -d %{buildroot}%{_datadir}/fish/vendor_completions.d
 %{_datadir}/fish/vendor_completions.d/%{crate}.fish
 
 %changelog
+* Mon Jul 20 2026 Alexandre Fiori <fiorix@gmail.com> - 0.17.2-1
+- Fail builds that cannot embed a valid Kubernetes probe instead of shipping
+  health checks that silently cannot run. Validate the probe's ELF
+  architecture, class, and byte order against the Cargo target.
+- Make probe-less test builds explicit and track all probe-related environment
+  variables so Cargo reliably invalidates cached build-script output.
+
 * Mon Jul 20 2026 Alexandre Fiori <fiorix@gmail.com> - 0.17.1-1
 - Fix the static musl builds, which 0.17.0 could not produce: the btrfs
 - subvolume-destroy ioctl request was typed for glibc, where it is c_ulong,

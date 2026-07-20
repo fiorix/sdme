@@ -24,7 +24,7 @@ jobs:
       - name: Check packaging versions
         run: ./packaging/check-versions.sh
       - name: Run tests
-        run: cargo test --locked --verbose
+        run: SDME_SKIP_PROBE=1 cargo test --locked --verbose
 
   build:
     needs: test

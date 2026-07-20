@@ -7,15 +7,18 @@
 /// Override the probe binary path with the `SDME_KUBE_PROBE_PATH` env var
 /// (e.g. for cross-compiled CI builds).
 ///
-/// During `cargo test`, the probe build is skipped by default since it is
-/// only needed at runtime. Set `SDME_BUILD_PROBE=1` to force building
-/// the probe during tests.
-///
 /// A build that cannot embed the probe FAILS. A probe-less sdme ships kube
 /// pods whose health checks never run, and v0.17.0 showed that a warning is
 /// too easy to miss. Set `SDME_SKIP_PROBE=1` to build without probe support
 /// (exotic targets, offline dev builds); docs.rs builds skip it automatically.
 fn main() {
+    // Declare every environment input before any early return. Cargo uses the
+    // directives from the previous run to decide whether to rerun this script.
+    println!("cargo:rerun-if-env-changed=SDME_CHANNEL");
+    println!("cargo:rerun-if-env-changed=SDME_KUBE_PROBE_PATH");
+    println!("cargo:rerun-if-env-changed=SDME_SKIP_PROBE");
+    println!("cargo:rerun-if-env-changed=DOCS_RS");
+
     // Provenance marker: distro package builds (Copr, Launchpad) set SDME_CHANNEL
     // so the binary defers self-upgrade to the system package manager. Default
     // "source" = built from source / install.sh musl binary, where self-upgrade
@@ -23,7 +26,6 @@ fn main() {
     // the crate always resolves it.
     let channel = std::env::var("SDME_CHANNEL").unwrap_or_else(|_| "source".into());
     println!("cargo:rustc-env=SDME_CHANNEL={channel}");
-    println!("cargo:rerun-if-env-changed=SDME_CHANNEL");
 
     let out_dir = std::env::var("OUT_DIR").unwrap();
     let probe_dst = format!("{out_dir}/sdme-kube-probe");
@@ -36,16 +38,6 @@ fn main() {
         return;
     }
 
-    // Skip probe build during cargo test unless SDME_BUILD_PROBE=1 is set.
-    // The probe binary is only needed at runtime, not for unit tests.
-    if std::env::var("CARGO_CFG_TEST").is_ok()
-        && std::env::var("SDME_BUILD_PROBE").unwrap_or_default() != "1"
-    {
-        std::fs::write(&probe_dst, b"").unwrap();
-        println!("cargo:rerun-if-changed=src/kube/probe/");
-        return;
-    }
-
     // Opt-outs: SDME_SKIP_PROBE=1 for builds where the probe cannot be built
     // or is not wanted, and docs.rs, which is sandboxed and ships no binary.
     // The empty blob is caught at runtime by kube::create if probes are used.
@@ -53,7 +45,6 @@ fn main() {
         || std::env::var("DOCS_RS").is_ok()
     {
         std::fs::write(&probe_dst, b"").unwrap();
-        println!("cargo:rerun-if-env-changed=SDME_SKIP_PROBE");
         println!("cargo:rerun-if-changed=src/kube/probe/");
         return;
     }
@@ -99,11 +90,65 @@ fn fatal(msg: &str) -> ! {
 /// Check the 4-byte ELF magic of `path`.
 fn is_elf(path: &std::path::Path) -> bool {
     use std::io::Read as _;
-    let mut magic = [0u8; 4];
+    let mut header = [0u8; 20];
     let Ok(mut f) = std::fs::File::open(path) else {
         return false;
     };
-    f.read_exact(&mut magic).is_ok() && &magic == b"\x7fELF"
+    if f.read_exact(&mut header).is_err() || &header[..4] != b"\x7fELF" {
+        return false;
+    }
+
+    let Ok(target_arch) = std::env::var("CARGO_CFG_TARGET_ARCH") else {
+        return false;
+    };
+    let Ok(target_endian) = std::env::var("CARGO_CFG_TARGET_ENDIAN") else {
+        return false;
+    };
+    let Ok(target_width) = std::env::var("CARGO_CFG_TARGET_POINTER_WIDTH") else {
+        return false;
+    };
+    elf_matches_target(&header, &target_arch, &target_endian, &target_width)
+}
+
+/// Check an ELF header against Cargo's target architecture configuration.
+pub(crate) fn elf_matches_target(header: &[u8], arch: &str, endian: &str, width: &str) -> bool {
+    if header.len() < 20 || &header[..4] != b"\x7fELF" {
+        return false;
+    }
+
+    let expected_class = match width {
+        "32" => 1,
+        "64" => 2,
+        _ => return false,
+    };
+    let expected_endian = match endian {
+        "little" => 1,
+        "big" => 2,
+        _ => return false,
+    };
+    if header[4] != expected_class || header[5] != expected_endian {
+        return false;
+    }
+
+    let machine = match header[5] {
+        1 => u16::from_le_bytes([header[18], header[19]]),
+        2 => u16::from_be_bytes([header[18], header[19]]),
+        _ => return false,
+    };
+    let expected_machine = match arch {
+        "x86" => 3,
+        "mips" | "mips32r6" | "mips64" | "mips64r6" => 8,
+        "powerpc" => 20,
+        "powerpc64" => 21,
+        "s390x" => 22,
+        "arm" => 40,
+        "x86_64" => 62,
+        "aarch64" => 183,
+        "riscv32" | "riscv64" => 243,
+        "loongarch64" => 258,
+        _ => return false,
+    };
+    machine == expected_machine
 }
 
 /// Copy `src` to `dst`, requiring `src` to be an ELF binary.
@@ -112,7 +157,7 @@ fn embed_probe(src: &std::path::Path, dst: &str) -> Result<(), String> {
         return Err("file does not exist".to_string());
     }
     if !is_elf(src) {
-        return Err("not an ELF binary".to_string());
+        return Err("not an ELF binary for the Cargo target".to_string());
     }
     std::fs::copy(src, dst).map_err(|e| format!("failed to copy to {dst}: {e}"))?;
     Ok(())
@@ -124,16 +169,20 @@ fn try_discover(probe_dst: &str) -> bool {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
 
     let mut candidates = Vec::new();
-    if let Ok(target) = std::env::var("TARGET") {
+    let target = std::env::var("TARGET").ok();
+    let host = std::env::var("HOST").ok();
+    if let Some(target) = &target {
         candidates.push(format!(
             "{manifest_dir}/target/{target}/{profile}/sdme-kube-probe"
         ));
     }
-    candidates.push(format!("{manifest_dir}/target/{profile}/sdme-kube-probe"));
+    if target == host {
+        candidates.push(format!("{manifest_dir}/target/{profile}/sdme-kube-probe"));
+    }
 
     for candidate in &candidates {
-        // Require ELF, not just existence: a stale or empty file here would
-        // otherwise be embedded as-is, silently breaking kube probes.
+        // Require an ELF for this target, not just existence: a stale, empty,
+        // or host-architecture file would silently break kube probes.
         if is_elf(std::path::Path::new(candidate)) {
             std::fs::copy(candidate, probe_dst).unwrap();
             println!("cargo:rerun-if-changed={candidate}");

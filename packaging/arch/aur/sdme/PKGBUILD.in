@@ -55,21 +55,21 @@ build() {
 check() {
     cd "$pkgname-$pkgver"
     export RUSTUP_TOOLCHAIN=stable
-    export CARGO_TARGET_DIR=target
-    cargo test --frozen
+    # Keep probe-less test artifacts away from the release binary package().
+    CARGO_TARGET_DIR=target/package-tests SDME_SKIP_PROBE=1 cargo test --frozen
 }
 
 package() {
     cd "$pkgname-$pkgver"
 
-    # Backstop: build.rs fails the build outright if the probe cannot be
-    # embedded, but if a probe-less binary ever slipped through (SDME_SKIP_PROBE,
-    # a future regression) its kube probes would ship silently broken. The
-    # embedded probe is most of the binary's ~12M.
-    local size
-    size=$(stat -c%s target/release/sdme)
-    if (( size < 8000000 )); then
-        echo "error: target/release/sdme is only $size bytes; the probe did not embed" >&2
+    # Backstop: require the validated probe artifact consumed by include_bytes!.
+    # Binary size is not a reliable proxy because the probe-less binary itself
+    # can exceed the old threshold.
+    local probe
+    probe=$(find target/release/build -path '*/out/sdme-kube-probe' \
+        -type f -size +0c -print -quit)
+    if [[ -z "$probe" ]]; then
+        echo "error: no embedded kube probe artifact found" >&2
         return 1
     fi
 

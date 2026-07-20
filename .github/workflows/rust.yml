@@ -28,7 +28,7 @@ jobs:
       - name: Build
         run: cargo build --locked --verbose
       - name: Run tests
-        run: cargo test --locked --verbose
+        run: SDME_SKIP_PROBE=1 cargo test --locked --verbose
 
   doc:
     name: Documentation

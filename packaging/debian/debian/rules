@@ -20,11 +20,12 @@ override_dh_auto_configure:
 override_dh_auto_build:
 	cargo build --release --frozen
 
-# The %check analog. Tests are pure/tempdir-isolated and offline; build.rs skips
-# the probe under CARGO_CFG_TEST. Runs unprivileged (Launchpad buildd), so the
-# SUDO_USER/user-resolution tests pass.
+# The %check analog. Tests are pure/tempdir-isolated and do not use the embedded
+# probe. Runs unprivileged (Launchpad buildd), so the SUDO_USER/user-resolution
+# tests pass.
 override_dh_auto_test:
-	cargo test --release --frozen
+	CARGO_TARGET_DIR=target/package-tests SDME_SKIP_PROBE=1 \
+		cargo test --release --frozen
 
 override_dh_auto_install:
 	install -Dm755 target/release/sdme debian/sdme/usr/bin/sdme

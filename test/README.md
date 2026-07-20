@@ -184,6 +184,17 @@ Totals                      674     4    14  24 suites
   normal four-job runner.
 ## Log
 
+### 0.17.2 -- kube probe build safety (2026-07-20, x86_64)
+
+`verify-kube-L2-probes.sh` against the 0.17.2 native release binary on Linux
+7.0.0-28-generic, systemd 259.5, and an Ubuntu base rootfs: 41 passed, 0 failed,
+0 skipped. Coverage includes the embedded probe binary, exec startup/liveness/
+readiness probes, HTTP and TCP probes, timer activation, readiness health state,
+and combined-probe behavior. Rust verification passed in debug and release
+profiles: 852 tests passed and 3 ignored, plus 6 doctests passed and 1 ignored;
+fmt and clippy with warnings denied passed. The release package verified with
+`cargo package --locked --allow-dirty`.
+
 ### 0.17.0 -- nested-operation fixes (2026-07-19, x86_64)
 
 Implements all five work items from the nested-operation fixes plan (sdme
