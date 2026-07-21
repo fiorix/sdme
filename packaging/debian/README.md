@@ -36,7 +36,7 @@ Requires an Ubuntu 26.04 sdme rootfs (or a host clone on 26.04) and `sudo apt in
 
 ```bash
 mkdir -p dev/deb-out
-sudo sdme new debbuild -r ubuntu \
+sudo sdme new --name debbuild -r ubuntu \
     -b "$PWD:/src:ro" -b "$PWD/dev/deb-out:/out" \
     -- bash /src/packaging/debian/build-in-container.sh
 debsign -k <KEYID> dev/deb-out/sdme_*_source.changes

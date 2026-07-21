@@ -32,7 +32,7 @@ spec:
 The base rootfs can be any [supported distribution](@/tutorial/different-rootfs.md#supported-distributions). Import one if you haven't already (Ubuntu for example):
 
 ```sh
-sudo sdme fs import ubuntu docker.io/ubuntu
+sudo sdme fs import docker.io/ubuntu
 ```
 
 Deploy it:
@@ -65,13 +65,13 @@ Short image names like `redis` or `nginx` are resolved using the `default_kube_r
 All containers on the same network zone can reach each other by hostname. You can use any [supported distribution](@/tutorial/different-rootfs.md#supported-distributions) here (Arch Linux for example):
 
 ```sh
-sudo sdme fs import archlinux docker.io/lopsided/archlinux
+sudo sdme fs import docker.io/lopsided/archlinux
 ```
 
 Create a regular container on the `kube` zone and curl the nginx pod:
 
 ```sh
-sudo sdme new myclient -r archlinux --hardened --network-zone=kube
+sudo sdme new --name myclient -r archlinux --hardened --network-zone=kube
 ```
 
 Inside the client container:
@@ -89,7 +89,7 @@ This example deploys PostgreSQL on a Fedora base and shows how to configure it u
 Import Fedora if you haven't already:
 
 ```sh
-sudo sdme fs import fedora quay.io/fedora/fedora
+sudo sdme fs import quay.io/fedora/fedora
 ```
 
 ### Inline environment variables
@@ -182,8 +182,8 @@ spec:
 Since the database is on the `kube` zone, any other container on the same zone can reach it. Create a Debian client container:
 
 ```sh
-sudo sdme fs import debian docker.io/debian:stable
-sudo sdme new dbclient -r debian --hardened --network-zone=kube
+sudo sdme fs import docker.io/debian:stable
+sudo sdme new --name dbclient -r debian --hardened --network-zone=kube
 ```
 
 Inside the client container, install the PostgreSQL client and connect by hostname:

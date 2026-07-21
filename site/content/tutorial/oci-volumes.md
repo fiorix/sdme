@@ -13,7 +13,7 @@ This tutorial demonstrates OCI auto-volumes using PostgreSQL, which declares `/v
 Make sure you have a base rootfs imported (see the [different rootfs](@/tutorial/different-rootfs.md) tutorial). Then import PostgreSQL as an OCI application:
 
 ```sh
-sudo sdme fs import postgres docker.io/postgres --base-fs ubuntu
+sudo sdme fs import docker.io/postgres --base-fs ubuntu
 ```
 
 Verify that sdme detected the volume declaration:
@@ -29,7 +29,7 @@ You should see `/var/lib/postgresql`.
 PostgreSQL requires a password to be set via the `POSTGRES_PASSWORD` environment variable. Use `--oci-env` to pass it:
 
 ```sh
-sudo sdme create mydb -r postgres --network-zone=services --hardened --oci-env POSTGRES_PASSWORD=secret --started
+sudo sdme create --name mydb -r postgres --network-zone=services --hardened --oci-env POSTGRES_PASSWORD=secret --started
 ```
 
 sdme automatically creates a host directory at `/var/lib/sdme/volumes/mydb/var-lib-postgresql` and bind-mounts it into the container at `/oci/apps/postgres/root/var/lib/postgresql`.
@@ -84,7 +84,7 @@ sudo ls -la /var/lib/sdme/volumes/mydb/
 Create a new container from the same rootfs:
 
 ```sh
-sudo sdme create mydb -r postgres --network-zone=services --hardened --oci-env POSTGRES_PASSWORD=secret --started
+sudo sdme create --name mydb -r postgres --network-zone=services --hardened --oci-env POSTGRES_PASSWORD=secret --started
 ```
 
 Verify the data survived:
@@ -106,7 +106,7 @@ OCI volume data is stored under `/var/lib/sdme/volumes/{container}/`. The volume
 If you don't want sdme to auto-mount the declared volumes, use `--no-oci-volumes`:
 
 ```sh
-sudo sdme create mydb -r postgres --no-oci-volumes
+sudo sdme create --name mydb -r postgres --no-oci-volumes
 ```
 
 You can also use `--bind` to override a specific volume path with your own host directory. User `--bind` flags take priority over auto-volumes for the same container path.

@@ -57,7 +57,7 @@ log "Test: COPY from imported rootfs"
 SECOND_FS="vfy-build-fedora"
 if ! fs_exists "$SECOND_FS"; then
     log "Importing secondary rootfs '$SECOND_FS'..."
-    if ! sdme fs import "$SECOND_FS" "${DISTRO_IMAGES[fedora]}" --install-packages=yes -f $VFLAG 2>&1; then
+    if ! sdme fs import "${DISTRO_IMAGES[fedora]}" --name "$SECOND_FS" --install-packages=yes -f $VFLAG 2>&1; then
         record "copy/fs-prefix" FAIL "failed to import secondary rootfs"
     fi
 fi

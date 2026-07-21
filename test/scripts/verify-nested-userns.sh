@@ -69,7 +69,7 @@ container_uid_map_len() {
 # ---------------------------------------------------------------------------
 echo "=== Test 1: state persistence for nested userns range ==="
 
-if ! output=$(timeout "$BOOT_TIMEOUT" "$SDME" create -r "$BASEFS" --userns --userns-nested 2 "$CTR1" "${VFLAG[@]}" 2>&1); then
+if ! output=$(timeout "$BOOT_TIMEOUT" "$SDME" create --name "$CTR1" -r "$BASEFS" --userns --userns-nested 2 "${VFLAG[@]}" 2>&1); then
     fail "create --userns --userns-nested 2 failed: $output"
     print_summary
     exit 1
@@ -120,7 +120,7 @@ fi
 # ---------------------------------------------------------------------------
 echo "=== Test 3: conflict-free allocation for a second container ==="
 
-if ! output=$(timeout "$BOOT_TIMEOUT" "$SDME" create -r "$BASEFS" --userns --userns-nested 2 "$CTR2" "${VFLAG[@]}" 2>&1); then
+if ! output=$(timeout "$BOOT_TIMEOUT" "$SDME" create --name "$CTR2" -r "$BASEFS" --userns --userns-nested 2 "${VFLAG[@]}" 2>&1); then
     fail "create second nested userns container failed: $output"
     print_summary
     exit 1

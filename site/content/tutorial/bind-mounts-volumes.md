@@ -18,7 +18,7 @@ echo '<h1>Hello from sdme</h1>' > /tmp/mysite/index.html
 Create a container with a bind mount mapping that directory into nginx's document root as a subdirectory:
 
 ```sh
-sudo sdme new mywebserver -r fedora -b /tmp/mysite:/usr/share/nginx/html/example
+sudo sdme new --name mywebserver -r fedora -b /tmp/mysite:/usr/share/nginx/html/example
 ```
 
 Inside the container, install and start nginx:
@@ -54,10 +54,10 @@ Append `:ro` to make a bind mount read-only (e.g. `-b /host/path:/container/path
 
 When using an OCI application, the app runs chrooted under `/oci/apps/{name}/root` inside the container. Bind mount paths need to target that prefix.
 
-Following the [OCI tutorial](@/tutorial/oci-apps.md), after importing nginx with `sudo sdme fs import nginx docker.io/nginx --base-fs ubuntu`, you can bind-mount a host directory to the nginx HTML root:
+Following the [OCI tutorial](@/tutorial/oci-apps.md), after importing nginx with `sudo sdme fs import docker.io/nginx --base-fs ubuntu`, you can bind-mount a host directory to the nginx HTML root:
 
 ```sh
-sudo sdme create mywebserver -r nginx -b /tmp/mysite:/oci/apps/nginx/root/usr/share/nginx/html --started
+sudo sdme create --name mywebserver -r nginx -b /tmp/mysite:/oci/apps/nginx/root/usr/share/nginx/html --started
 sudo sdme ps
 ```
 

@@ -71,7 +71,7 @@ Only the last two are typed by a human, so only they can rot, and they did: **v0
 - **Copr**: click **Rebuild** on the package page (builds the default branch), or `copr-cli build sdme <srpm>`.
 - **Launchpad**: build in a clean Ubuntu 26.04 sdme container, then sign + upload:
   ```sh
-  sudo sdme new debbuild -r ubuntu -b "$PWD:/src:ro" -b "$PWD/dev/deb-out:/out" \
+  sudo sdme new --name debbuild -r ubuntu -b "$PWD:/src:ro" -b "$PWD/dev/deb-out:/out" \
       -- bash /src/packaging/debian/build-in-container.sh
   debsign -k <KEYID> dev/deb-out/sdme_*_source.changes
   dput ppa:fiorix/sdme dev/deb-out/sdme_*_source.changes

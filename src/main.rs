@@ -37,11 +37,11 @@ GETTING STARTED:
     sdme new
 
     # Import Ubuntu from Docker Hub and create a named container
-    sdme fs import ubuntu docker.io/ubuntu -v --install-packages=yes
-    sdme new mybox -r ubuntu
+    sdme fs import docker.io/ubuntu -v --install-packages=yes
+    sdme new --name mybox -r ubuntu
 
     # Run an OCI application image (nginx) on top of ubuntu
-    sdme fs import nginx docker.io/nginx --base-fs=ubuntu -v
+    sdme fs import docker.io/nginx --base-fs=ubuntu -v
     sdme new -r nginx
 
 COMMON COMMANDS:
@@ -101,26 +101,26 @@ EXAMPLES:
     sdme new
 
     # Named container from imported rootfs
-    sdme new mybox -r ubuntu
+    sdme new --name mybox -r ubuntu
 
     # OCI application image with port forwarding (use 'sdme ps' for container IP)
-    sdme new web -r nginx --network-veth -p 8080:80
+    sdme new --name web -r nginx --network-veth -p 8080:80
 
     # Private network with virtual ethernet and resource limits
-    sdme new dev -r ubuntu --network-veth --memory 2G --cpus 2
+    sdme new --name dev -r ubuntu --network-veth --memory 2G --cpus 2
 
     # btrfs storage with a per-container disk cap (also enables nested containers)
-    sdme new build -r ubuntu --storage btrfs --disk 4G
+    sdme new --name build -r ubuntu --storage btrfs --disk 4G
 
     # Network zone for inter-container DNS
-    sdme new node1 -r ubuntu --network-zone myzone
-    sdme new node2 -r ubuntu --network-zone myzone
+    sdme new --name node1 -r ubuntu --network-zone myzone
+    sdme new --name node2 -r ubuntu --network-zone myzone
 
     # Hardened security (userns, private-network, no-new-privileges, cap drops)
-    sdme new sandbox -r ubuntu --hardened
+    sdme new --name sandbox -r ubuntu --hardened
 
     # Strict security (hardened + Docker-equivalent caps, seccomp, AppArmor)
-    sdme new jail -r ubuntu --strict
+    sdme new --name jail -r ubuntu --strict
 
     # Bind mount and environment variable
     sdme new -r ubuntu -b /srv/data:/data:ro -e MYVAR=hello
@@ -171,40 +171,41 @@ DEBUGGING:
 
 const CREATE_HELP: &str = "\
 Create a new container without starting it. Use 'sdme start' to start it later,
-or pass --started to start immediately.
+or pass --started to start immediately. If --name is omitted or empty, a name
+is generated automatically.
 
 EXAMPLES:
     # Create from imported rootfs
-    sdme create mybox -r ubuntu
+    sdme create --name mybox -r ubuntu
 
     # Create with auto-start on boot
-    sdme create mybox -r ubuntu --enable
+    sdme create --name mybox -r ubuntu --enable
 
     # Create a self-healing service container (restart on crash)
-    sdme create mybox -r ubuntu --enable --restart on-failure
+    sdme create --name mybox -r ubuntu --enable --restart on-failure
 
     # Create and start immediately (removes on start failure)
-    sdme create mybox -r ubuntu --started
+    sdme create --name mybox -r ubuntu --started
 
     # Create and start with custom boot timeout
-    sdme create mybox -r ubuntu --started -t 120
+    sdme create --name mybox -r ubuntu --started -t 120
 
     # Join a pod network namespace
     sdme pod new mypod
-    sdme create app1 -r nginx --pod mypod
-    sdme create app2 -r redis --pod mypod
+    sdme create --name app1 -r nginx --pod mypod
+    sdme create --name app2 -r redis --pod mypod
 
     # Override default masked services
-    sdme create mybox -r ubuntu --masked-services systemd-resolved.service,systemd-timesyncd.service
+    sdme create --name mybox -r ubuntu --masked-services systemd-resolved.service,systemd-timesyncd.service
 
     # Create with no services masked
-    sdme create mybox -r ubuntu --masked-services ''
+    sdme create --name mybox -r ubuntu --masked-services ''
 
     # User namespace isolation
-    sdme create mybox -r ubuntu --userns
+    sdme create --name mybox -r ubuntu --userns
 
     # Read-only rootfs with dropped capabilities
-    sdme create mybox -r ubuntu --read-only --drop-capability CAP_NET_RAW
+    sdme create --name mybox -r ubuntu --read-only --drop-capability CAP_NET_RAW
 
 RESTART POLICY:
     --restart controls whether systemd auto-restarts the container unit:
@@ -514,8 +515,8 @@ The default output format for fs ls can be set with:
 See also: sdme ps (list containers and their rootfs).
 
 EXAMPLES:
-    sdme fs import ubuntu docker.io/ubuntu -v --install-packages=yes
-    sdme fs import debian /tmp/debootstrap-output
+    sdme fs import docker.io/ubuntu -v --install-packages=yes
+    sdme fs import /tmp/debootstrap-output --name debian
     sdme fs ls
     sdme fs ls --json
     sdme fs rm ubuntu";
@@ -528,6 +529,15 @@ SUPPORTED SOURCES:
     OCI tarball         Tarball containing an oci-layout file
     OCI registry        docker.io/ubuntu, ghcr.io/org/app:v1, etc.
     QCOW2 disk image    Requires qemu-nbd
+
+NAME INFERENCE:
+    --name overrides the imported rootfs name. When it is omitted or empty,
+    registry images use the final repository component without the tag, and
+    paths and URLs use the final component without a recognized archive or
+    image suffix. For example, docker.io/ubuntu:latest becomes 'ubuntu' and
+    quay.io/fedora/fedora becomes 'fedora'. If the result is not a valid sdme
+    name, provide --name explicitly. Existing names require --force to replace
+    or a different --name to import separately.
 
 OCI REGISTRY IMAGES:
     --oci-mode controls how the image is classified:
@@ -577,22 +587,22 @@ TESTED DISTROS:
 
 EXAMPLES:
     # Import from Docker Hub
-    sdme fs import ubuntu docker.io/ubuntu -v --install-packages=yes
+    sdme fs import docker.io/ubuntu -v --install-packages=yes
 
     # Import an OCI app image with a base filesystem
-    sdme fs import nginx docker.io/nginx --base-fs=ubuntu -v
+    sdme fs import docker.io/nginx --base-fs=ubuntu -v
 
     # Import from a local directory (e.g. debootstrap output)
-    sdme fs import debian /tmp/debian-root
+    sdme fs import /tmp/debian-root --name debian
 
     # Import from URL
-    sdme fs import arch https://example.com/archlinux-rootfs.tar.zst
+    sdme fs import https://example.com/archlinux-rootfs.tar.zst --name arch
 
     # Force re-fetch from registry (skip manifest cache)
-    sdme fs import ubuntu docker.io/ubuntu --no-cache -v
+    sdme fs import docker.io/ubuntu --no-cache -v
 
     # Import through an HTTP proxy
-    sudo -E sdme fs import ubuntu docker.io/ubuntu -v
+    sudo -E sdme fs import docker.io/ubuntu -v
 
     # Override distro import prehook via config
     sdme config set distros.debian.import_prehook '[\"apt-get update\",\"apt-get install -y systemd dbus\"]'";
@@ -633,7 +643,7 @@ RESUMABLE BUILDS:
 EXAMPLE:
     # Import a base rootfs
     sudo debootstrap --include=dbus,systemd noble /tmp/ubuntu
-    sudo sdme fs import ubuntu /tmp/ubuntu
+    sudo sdme fs import /tmp/ubuntu --name ubuntu
 
     # Create a build config
     cat << EOF > examplefs.sdme
@@ -836,8 +846,8 @@ EXTERNAL NETWORKING:
 EXAMPLES:
     # Create a pod and add containers
     sdme pod new mypod
-    sdme new app1 -r nginx --pod mypod
-    sdme new app2 -r redis --pod mypod
+    sdme new --name app1 -r nginx --pod mypod
+    sdme new --name app2 -r redis --pod mypod
 
     # Create pod with immediate external networking
     sdme pod new mypod --attach veth
@@ -845,7 +855,7 @@ EXAMPLES:
 
     # OCI pod with hardened security
     sdme pod new mypod
-    sdme new app -r nginx --oci-pod mypod --hardened
+    sdme new --name app -r nginx --oci-pod mypod --hardened
 
     # Attach external networking (veth)
     sdme pod net attach mypod veth
@@ -871,7 +881,7 @@ pods run as a single nspawn container with one systemd service per app.
 
 WORKFLOW:
     # Import a base filesystem
-    sdme fs import ubuntu docker.io/ubuntu -v --install-packages=yes
+    sdme fs import docker.io/ubuntu -v --install-packages=yes
 
     # Apply a Pod YAML
     sdme kube apply -f pod.yaml --base-fs ubuntu
@@ -1057,7 +1067,8 @@ enum Command {
     /// Create a new container
     #[command(after_long_help = CREATE_HELP)]
     Create {
-        /// Container name (generated if not provided)
+        /// Container name (generated if omitted or empty)
+        #[arg(long, value_name = "NAME")]
         name: Option<String>,
 
         /// Root filesystem to use (host filesystem if not provided)
@@ -1228,7 +1239,8 @@ enum Command {
     /// Create, start, and enter a new container
     #[command(after_long_help = NEW_HELP)]
     New {
-        /// Container name (generated if not provided)
+        /// Container name (generated if omitted or empty)
+        #[arg(long, value_name = "NAME")]
         name: Option<String>,
 
         /// Root filesystem to use (host filesystem if not provided)
@@ -1309,7 +1321,7 @@ enum Command {
         storage: Option<String>,
 
         /// Command to run inside the container (default: login shell)
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        #[arg(last = true, allow_hyphen_values = true)]
         command: Vec<String>,
     },
 
@@ -1487,11 +1499,12 @@ enum RootfsCommand {
     /// Import a root filesystem from a directory, tarball, URL, OCI image, registry image, or QCOW2 disk image
     #[command(after_long_help = FS_IMPORT_HELP)]
     Import {
-        /// Name for the imported rootfs
-        name: String,
         /// Source: directory path, tarball (.tar, .tar.gz, .tar.bz2, .tar.xz, .tar.zst), URL, OCI image (.oci.tar.xz, etc.), registry image (e.g. quay.io/repo:tag), or QCOW2 disk image
         source: String,
-        /// Remove leftover staging directory from a previous failed import
+        /// Name for the imported rootfs (inferred from source if omitted or empty)
+        #[arg(long, value_name = "NAME")]
+        name: Option<String>,
+        /// Replace an existing rootfs and remove stale staging data
         #[arg(short, long)]
         force: bool,
         /// Whether to install systemd packages if missing (auto: prompt if interactive)
@@ -2439,7 +2452,7 @@ fn run() -> Result<()> {
                 sdme::nested::is_nested(),
             )?;
             let opts = containers::CreateOptions {
-                name,
+                name: name.filter(|name| !name.is_empty()),
                 rootfs: fs,
                 rootfs_path: None,
                 limits,
@@ -2787,7 +2800,7 @@ fn run() -> Result<()> {
                 sdme::nested::is_nested(),
             )?;
             let opts = containers::CreateOptions {
-                name,
+                name: name.filter(|name| !name.is_empty()),
                 rootfs: fs,
                 rootfs_path: None,
                 limits,
@@ -3518,11 +3531,11 @@ fn run() -> Result<()> {
                 if no_cache {
                     http.manifest_cache_ttl = 0;
                 }
-                rootfs::import(
+                let name = rootfs::import(
                     &cfg.datadir,
                     &ImportOptions {
                         source: &source,
-                        name: &name,
+                        name: name.as_deref(),
                         verbose: cli.verbose,
                         force,
                         interactive,
@@ -3952,6 +3965,64 @@ mod tests {
     fn test_top_level_help_mentions_dump_skill() {
         let help = Cli::command().render_long_help().to_string();
         assert!(help.contains("dump-skill"));
+    }
+
+    #[test]
+    fn test_new_and_create_name_flags() {
+        let cli = Cli::try_parse_from(["sdme", "create", "--name", "box"]).unwrap();
+        assert!(
+            matches!(cli.command, Command::Create { name: Some(ref name), .. } if name == "box")
+        );
+
+        let cli = Cli::try_parse_from(["sdme", "new", "--name="]).unwrap();
+        assert!(
+            matches!(cli.command, Command::New { name: Some(ref name), .. } if name.is_empty())
+        );
+
+        let cli = Cli::try_parse_from(["sdme", "create", "--name="]).unwrap();
+        assert!(
+            matches!(cli.command, Command::Create { name: Some(ref name), .. } if name.is_empty())
+        );
+    }
+
+    #[test]
+    fn test_old_container_name_positionals_are_rejected() {
+        assert!(Cli::try_parse_from(["sdme", "create", "box"]).is_err());
+        assert!(Cli::try_parse_from(["sdme", "new", "box"]).is_err());
+    }
+
+    #[test]
+    fn test_new_command_requires_double_dash() {
+        let cli = Cli::try_parse_from(["sdme", "new", "--", "echo", "ok"]).unwrap();
+        assert!(matches!(cli.command, Command::New { command, .. } if command == ["echo", "ok"]));
+        assert!(Cli::try_parse_from(["sdme", "new", "echo", "ok"]).is_err());
+    }
+
+    #[test]
+    fn test_fs_import_source_first_and_optional_name() {
+        let cli = Cli::try_parse_from([
+            "sdme",
+            "fs",
+            "import",
+            "docker.io/ubuntu:latest",
+            "--name=base",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Fs(RootfsCommand::Import { source, name: Some(name), .. })
+                if source == "docker.io/ubuntu:latest" && name == "base"
+        ));
+        let cli =
+            Cli::try_parse_from(["sdme", "fs", "import", "docker.io/ubuntu:latest", "--name="])
+                .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Fs(RootfsCommand::Import { name: Some(name), .. }) if name.is_empty()
+        ));
+        assert!(
+            Cli::try_parse_from(["sdme", "fs", "import", "ubuntu", "docker.io/ubuntu",]).is_err()
+        );
     }
 
     #[test]

@@ -227,10 +227,11 @@ pub fn list(datadir: &Path) -> Result<Vec<RootfsEntry>> {
     Ok(entries)
 }
 
-/// Import a root filesystem from a directory, tarball, URL, or OCI image.
+/// Import a root filesystem from a directory, tarball, URL, or OCI image,
+/// returning its explicit or inferred name.
 ///
 /// Delegates to [`crate::import::run`]. CLI command: `sdme fs import`.
-pub fn import(datadir: &Path, opts: &crate::import::ImportOptions) -> Result<()> {
+pub fn import(datadir: &Path, opts: &crate::import::ImportOptions) -> Result<String> {
     crate::import::run(datadir, opts)
 }
 
@@ -348,7 +349,7 @@ mod tests {
             datadir,
             &ImportOptions {
                 source,
-                name,
+                name: Some(name),
                 verbose: false,
                 force: true,
                 interactive: false,
@@ -367,6 +368,7 @@ mod tests {
                 distros: &std::collections::HashMap::new(),
             },
         )
+        .map(|_| ())
     }
 
     fn tmp() -> TempDataDir {

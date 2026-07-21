@@ -17,7 +17,7 @@ This is the simplest mode but means port conflicts are possible. Use `--network-
 ## Private network
 
 ```sh
-sudo sdme new mybox -r ubuntu --private-network
+sudo sdme new --name mybox -r ubuntu --private-network
 ```
 
 The container gets its own network namespace with only a loopback interface. No external connectivity, no internet. Useful for fully isolated workloads that don't need networking.
@@ -25,7 +25,7 @@ The container gets its own network namespace with only a loopback interface. No 
 ## Virtual ethernet (veth)
 
 ```sh
-sudo sdme new mybox -r ubuntu --network-veth
+sudo sdme new --name mybox -r ubuntu --network-veth
 ```
 
 Creates a virtual ethernet link between the host and the container. The container gets an interface named `host0` with an IP assigned via DHCP. The container can reach the host and the internet.
@@ -39,7 +39,7 @@ sdme automatically enables `systemd-networkd` inside the container so the `host0
 Port forwarding maps a host port to a container port. It requires a network interface, so you must use `--network-veth`, `--network-bridge`, or `--network-zone` alongside `--port`.
 
 ```sh
-sudo sdme new myweb -r nginx --network-veth --port 8080:80
+sudo sdme new --name myweb -r nginx --network-veth --port 8080:80
 ```
 
 This forwards host port 8080 to container port 80. Format:
@@ -57,11 +57,11 @@ Port forwarding creates nftables DNAT rules for incoming traffic. It works for c
 Zones are the easiest way to set up multi-container networking. Zone names are arbitrary strings. Containers on the same zone share a bridge and can communicate with each other by IP or hostname.
 
 ```sh
-sudo sdme new http-server -r nginx --network-zone=myzone
+sudo sdme new --name http-server -r nginx --network-zone=myzone
 ```
 
 ```sh
-sudo sdme new http-client -r ubuntu --network-zone=myzone
+sudo sdme new --name http-client -r ubuntu --network-zone=myzone
 ```
 
 Both containers get DHCP addresses on the zone bridge. sdme automatically:
@@ -79,7 +79,7 @@ curl http://http-server
 Port forwarding works with zones. Use `sdme ps` to find the container's IP:
 
 ```sh
-sudo sdme new myweb -r nginx --network-zone=myzone --port 8080:80
+sudo sdme new --name myweb -r nginx --network-zone=myzone --port 8080:80
 sudo sdme ps
 ```
 
@@ -100,7 +100,7 @@ sudo ip link set sdmebr0 up
 Create containers on the bridge:
 
 ```sh
-sudo sdme create server -r nginx --network-bridge=sdmebr0
+sudo sdme create --name server -r nginx --network-bridge=sdmebr0
 ```
 
 Containers on a bridge need static IP configuration. Write a networkd config to the container's overlayfs upper layer before starting:
@@ -139,13 +139,13 @@ You can override the masking behavior with `--masked-services`:
 Mask resolved explicitly (even with a zone):
 
 ```sh
-sudo sdme new mybox -r ubuntu --network-zone=myzone --masked-services systemd-resolved.service
+sudo sdme new --name mybox -r ubuntu --network-zone=myzone --masked-services systemd-resolved.service
 ```
 
 Disable all masking:
 
 ```sh
-sudo sdme new mybox -r ubuntu --masked-services=''
+sudo sdme new --name mybox -r ubuntu --masked-services=''
 ```
 
 The default masked services are controlled by the `default_create_masked_services` config key.

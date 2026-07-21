@@ -31,7 +31,7 @@ create_containers() {
     local count="$1"
     for i in $(seq 1 "$count"); do
         local name="${PREFIX}c${i}"
-        if ! $SDME create -r "$BASE_FS" "$name" >/dev/null 2>&1; then
+        if ! $SDME create --name "$name" -r "$BASE_FS" >/dev/null 2>&1; then
             echo "error: failed to create $name" >&2
             return 1
         fi
@@ -188,7 +188,7 @@ test_fs_rm_interrupt() {
     local count=10
     for i in $(seq 1 "$count"); do
         local name="${PREFIX}fs${i}"
-        if ! $SDME fs import "$name" /var/lib/sdme/fs/"$BASE_FS" -f >/dev/null 2>&1; then
+        if ! $SDME fs import /var/lib/sdme/fs/"$BASE_FS" --name "$name" -f >/dev/null 2>&1; then
             record "fs-rm/interrupt" FAIL "failed to import $name"
             return
         fi

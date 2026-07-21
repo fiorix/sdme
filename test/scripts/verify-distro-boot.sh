@@ -93,7 +93,7 @@ phase1_import() {
         fi
         log "  Importing $fs_name from $image"
         local output
-        if output=$(timeout "$TIMEOUT_IMPORT" sdme fs import "$fs_name" "$image" -v --install-packages=yes -f 2>&1); then
+        if output=$(timeout "$TIMEOUT_IMPORT" sdme fs import "$image" --name "$fs_name" -v --install-packages=yes -f 2>&1); then
             record "import/$distro" PASS
         else
             record "import/$distro" FAIL "$output"
@@ -123,7 +123,7 @@ phase2_boot() {
 
         # Create
         local output
-        if ! output=$(timeout "$TIMEOUT_BOOT" sdme create -r "$fs_name" "$ct_name" 2>&1); then
+        if ! output=$(timeout "$TIMEOUT_BOOT" sdme create --name "$ct_name" -r "$fs_name" 2>&1); then
             record "boot/$distro/create" FAIL "$output"
             record "boot/$distro/systemd" SKIP "create failed"
             record "boot/$distro/journalctl" SKIP "create failed"
@@ -209,7 +209,7 @@ phase3_hardened_boot() {
 
         # Create with --hardened
         local output
-        if ! output=$(timeout "$TIMEOUT_BOOT" sdme create -r "$fs_name" --hardened "$ct_name" 2>&1); then
+        if ! output=$(timeout "$TIMEOUT_BOOT" sdme create --name "$ct_name" -r "$fs_name" --hardened 2>&1); then
             record "hardened-boot/$distro/create" FAIL "$output"
             record "hardened-boot/$distro/systemd" SKIP "create failed"
             continue

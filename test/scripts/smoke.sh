@@ -48,7 +48,7 @@ ok "base rootfs import"
 # -- Create --------------------------------------------------------------------
 
 log "Creating container"
-if output=$(timeout "$TIMEOUT_BOOT" "$SDME" create -r "$BASE_FS" "$CT_NAME" 2>&1); then
+if output=$(timeout "$TIMEOUT_BOOT" "$SDME" create --name "$CT_NAME" -r "$BASE_FS" 2>&1); then
     ok "create"
 else
     fail "create: $output"
@@ -174,7 +174,7 @@ fi
 # This catches bugs where machinectl_shell swallows stdout.
 log "Testing new with command (join path)"
 NEW_CT="smoke-new-cmd"
-if output=$(timeout "$TIMEOUT_BOOT" "$SDME" new -r "$BASE_FS" "$NEW_CT" -- /usr/bin/echo join-ok 2>&1); then
+if output=$(timeout "$TIMEOUT_BOOT" "$SDME" new --name "$NEW_CT" -r "$BASE_FS" -- /usr/bin/echo join-ok 2>&1); then
     if [[ "$output" == *"join-ok"* ]]; then
         ok "new with command"
     else

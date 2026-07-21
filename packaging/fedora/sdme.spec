@@ -11,7 +11,7 @@
 %global crate sdme
 
 Name:           sdme
-Version:        0.17.2
+Version:        0.18.0
 Release:        1%{?dist}
 Summary:        The systemd machine editor
 
@@ -103,6 +103,14 @@ export SDME_SKIP_PROBE=1
 %{_datadir}/fish/vendor_completions.d/%{crate}.fish
 
 %changelog
+* Tue Jul 21 2026 Alexandre Fiori <fiorix@gmail.com> - 0.18.0-1
+- Make rootfs imports source-first and infer names from OCI repositories,
+  paths, and URLs; add --name for explicit aliases and actionable collision
+  errors.
+- Replace positional container names on sdme create and sdme new with --name,
+  while preserving automatic generation for omitted or empty names.
+- Enforce the documented 64-character limit on sdme object names.
+
 * Mon Jul 20 2026 Alexandre Fiori <fiorix@gmail.com> - 0.17.2-1
 - Fail builds that cannot embed a valid Kubernetes probe instead of shipping
   health checks that silently cannot run. Validate the probe's ELF

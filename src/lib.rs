@@ -736,6 +736,9 @@ pub fn validate_name(name: &str) -> Result<()> {
             bail!("container name may only contain lowercase letters, digits, and hyphens");
         }
     }
+    if name.len() > 64 {
+        bail!("container name must be at most 64 characters");
+    }
     Ok(())
 }
 

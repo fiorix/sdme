@@ -11,8 +11,10 @@ By default, `sdme new` creates an overlayfs clone of your host root filesystem. 
 For example, to import Ubuntu:
 
 ```sh
-sudo sdme fs import ubuntu docker.io/ubuntu
+sudo sdme fs import docker.io/ubuntu
 ```
+
+sdme infers `ubuntu` from the final repository component, ignoring an OCI tag such as `:latest`. For files, directories, and URLs it uses the final path component and removes recognized archive or image suffixes. Use `--name NAME` when you want an alias or the inferred value is not a valid lowercase sdme name.
 
 sdme pulls the OCI image, extracts it, and installs the minimum packages needed for `systemd-nspawn` to boot it (systemd, dbus, etc). See [import prehooks](#import-prehooks) below for details on how this works.
 
@@ -25,7 +27,7 @@ sudo sdme new -r ubuntu
 Or give it a name:
 
 ```sh
-sudo sdme new mybox -r ubuntu
+sudo sdme new --name mybox -r ubuntu
 ```
 
 This creates a container using the imported Ubuntu rootfs instead of cloning the host. The imported rootfs is reusable: you can create multiple containers from the same base.
@@ -35,7 +37,7 @@ This creates a container using the imported Ubuntu rootfs instead of cloning the
 Containers created from an imported rootfs use an overlayfs upper layer by default. On a host with btrfs available, you can back a container with a copy-on-write btrfs subvolume instead:
 
 ```sh
-sudo sdme new mybox -r ubuntu --storage btrfs
+sudo sdme new --name mybox -r ubuntu --storage btrfs
 ```
 
 The btrfs backend gives the container a real filesystem rather than an overlay mount. That lets you run nested containers inside it (Docker, podman, or another sdme), preserves setuid bits and file capabilities under `--userns`, and enables a per-container disk cap. Host clones (`sdme new` with no `-r`) always use overlay; only imported rootfs can use btrfs.
@@ -43,7 +45,7 @@ The btrfs backend gives the container a real filesystem rather than an overlay m
 Cap a btrfs container's disk usage with `--disk`:
 
 ```sh
-sudo sdme new build -r ubuntu --storage btrfs --disk 4G
+sudo sdme new --name build -r ubuntu --storage btrfs --disk 4G
 ```
 
 `sdme ps` then shows a `DISK` column with used and limit for capped containers, and a write past the cap fails with "No space left on device". You can change the cap later with `sudo sdme set build --disk 8G`.
@@ -71,37 +73,37 @@ Any OCI image with a systemd-based distro can be imported. Here are the official
 ### Debian
 
 ```sh
-sudo sdme fs import debian docker.io/debian:stable
+sudo sdme fs import docker.io/debian:stable
 ```
 
 ### Ubuntu
 
 ```sh
-sudo sdme fs import ubuntu docker.io/ubuntu
+sudo sdme fs import docker.io/ubuntu
 ```
 
 ### Fedora
 
 ```sh
-sudo sdme fs import fedora quay.io/fedora/fedora
+sudo sdme fs import quay.io/fedora/fedora
 ```
 
 ### CentOS Stream
 
 ```sh
-sudo sdme fs import centos quay.io/centos/centos:stream10
+sudo sdme fs import quay.io/centos/centos:stream10
 ```
 
 ### AlmaLinux
 
 ```sh
-sudo sdme fs import almalinux quay.io/almalinuxorg/almalinux:9
+sudo sdme fs import quay.io/almalinuxorg/almalinux:9
 ```
 
 ### Arch Linux / CachyOS
 
 ```sh
-sudo sdme fs import archlinux docker.io/lopsided/archlinux
+sudo sdme fs import docker.io/lopsided/archlinux
 ```
 
 CachyOS is Arch-based and uses the same base image. If you're running CachyOS as your host, cloning with `sudo sdme new` (no `-r`) gives you a CachyOS container directly.
@@ -109,7 +111,7 @@ CachyOS is Arch-based and uses the same base image. If you're running CachyOS as
 ### openSUSE Tumbleweed
 
 ```sh
-sudo sdme fs import opensuse registry.opensuse.org/opensuse/tumbleweed
+sudo sdme fs import registry.opensuse.org/opensuse/tumbleweed --name opensuse
 ```
 
 ### NixOS
@@ -121,19 +123,19 @@ NixOS requires a separate build process. See the [build script](https://github.c
 `sdme fs import` also supports tarballs, directories, and QCOW2 disk images. Cloud images from Ubuntu, Fedora, and others can be imported directly from a URL. On x86_64:
 
 ```sh
-sudo sdme fs import ubuntu-cloud https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64-root.tar.xz
+sudo sdme fs import https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64-root.tar.xz --name ubuntu-cloud
 ```
 
 On aarch64:
 
 ```sh
-sudo sdme fs import ubuntu-cloud https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-arm64-root.tar.xz
+sudo sdme fs import https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-arm64-root.tar.xz --name ubuntu-cloud
 ```
 
 Cloud images typically ship with their own SSH server, may expect cloud-init for initial configuration, and often have a default or locked root password. They are well suited to run with `--private-network` so their services don't conflict with the host:
 
 ```sh
-sudo sdme new mycloud -r ubuntu-cloud --private-network
+sudo sdme new --name mycloud -r ubuntu-cloud --private-network
 ```
 
 ### Other sources
@@ -153,7 +155,7 @@ sudo debootstrap --include=systemd,dbus,systemd-resolved,login noble /tmp/noble 
 Then import it:
 
 ```sh
-sudo sdme fs import ubuntu-debootstrap /tmp/noble
+sudo sdme fs import /tmp/noble --name ubuntu-debootstrap
 ```
 
 See `sdme fs import --help` for the full list of supported sources.

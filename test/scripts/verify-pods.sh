@@ -47,8 +47,8 @@ cleanup_container pod-c2
 cleanup_pod testpod
 
 $SDME pod new testpod $VFLAG
-$SDME create --pod=testpod -r ubuntu pod-c1 $VFLAG
-$SDME create --pod=testpod -r ubuntu pod-c2 $VFLAG
+$SDME create --name pod-c1 --pod=testpod -r ubuntu $VFLAG
+$SDME create --name pod-c2 --pod=testpod -r ubuntu $VFLAG
 $SDME start pod-c1 $VFLAG
 $SDME start pod-c2 $VFLAG
 
@@ -88,8 +88,8 @@ cleanup_container pod-pn2
 cleanup_pod pnpod
 
 $SDME pod new pnpod $VFLAG
-$SDME create --pod=pnpod --private-network -r ubuntu pod-pn1 $VFLAG
-$SDME create --pod=pnpod --private-network -r ubuntu pod-pn2 $VFLAG
+$SDME create --name pod-pn1 --pod=pnpod --private-network -r ubuntu $VFLAG
+$SDME create --name pod-pn2 --pod=pnpod --private-network -r ubuntu $VFLAG
 
 timeout "$TIMEOUT_BOOT" "$SDME" start pod-pn1 -t "$TIMEOUT_BOOT" $VFLAG 2>&1
 timeout "$TIMEOUT_BOOT" "$SDME" start pod-pn2 -t "$TIMEOUT_BOOT" $VFLAG 2>&1
@@ -134,7 +134,7 @@ echo "=== Test 3: Validation ==="
 # 3a: --pod + --hardened → should succeed (nsenter enters the netns before
 # nspawn creates the userns, avoiding the cross-userns setns restriction)
 $SDME pod new valpod $VFLAG
-if $SDME create --pod=valpod --hardened -r ubuntu val-h1 $VFLAG; then
+if $SDME create --name val-h1 --pod=valpod --hardened -r ubuntu $VFLAG; then
     dropin="/etc/systemd/system/sdme@val-h1.service.d/nspawn.conf"
     timeout "$TIMEOUT_BOOT" "$SDME" start val-h1 -t "$TIMEOUT_BOOT" $VFLAG 2>&1
     if [[ -f "$dropin" ]] && grep -q "nsenter --net=" "$dropin" \
@@ -149,7 +149,7 @@ else
 fi
 
 # 3b: --pod + --userns → should succeed (same nsenter mechanism)
-if $SDME create --pod=valpod --userns -r ubuntu val-u1 $VFLAG; then
+if $SDME create --name val-u1 --pod=valpod --userns -r ubuntu $VFLAG; then
     dropin="/etc/systemd/system/sdme@val-u1.service.d/nspawn.conf"
     timeout "$TIMEOUT_BOOT" "$SDME" start val-u1 -t "$TIMEOUT_BOOT" $VFLAG 2>&1
     if [[ -f "$dropin" ]] && grep -q "nsenter --net=" "$dropin" \
@@ -166,7 +166,7 @@ fi
 # 3c: --oci-pod without --private-network → should error (nspawn strips
 # CAP_NET_ADMIN on host-network containers, breaking NetworkNamespacePath=)
 $SDME pod new valpod 2>/dev/null || true
-if err=$($SDME create --oci-pod=valpod -r ubuntu val-err1 2>&1); then
+if err=$($SDME create --name val-err1 --oci-pod=valpod -r ubuntu 2>&1); then
     fail "--oci-pod without --private-network should error"
     cleanup_container val-err1
 else
@@ -179,7 +179,7 @@ fi
 
 # 3d: --oci-pod without OCI app rootfs → should error (needs --hardened to
 # pass the --private-network check first)
-if err=$($SDME create --oci-pod=valpod --hardened val-err1b 2>&1); then
+if err=$($SDME create --name val-err1b --oci-pod=valpod --hardened 2>&1); then
     fail "--oci-pod without OCI rootfs should error"
     cleanup_container val-err1b
 else
@@ -191,7 +191,7 @@ else
 fi
 
 # 3e: --pod=nonexistent → should error
-if $SDME create --pod=nonexistent val-err2 2>/dev/null; then
+if $SDME create --name val-err2 --pod=nonexistent 2>/dev/null; then
     fail "--pod=nonexistent should error"
     cleanup_container val-err2
 else
@@ -203,7 +203,7 @@ fi
 # enters pod netns via inner systemd drop-in NetworkNamespacePath=).
 # Without an OCI app rootfs the error should be about the rootfs, not
 # about network/userns conflicts.
-err_msg=$($SDME create --oci-pod=valpod --hardened val-err3 2>&1 || true)
+err_msg=$($SDME create --name val-err3 --oci-pod=valpod --hardened 2>&1 || true)
 if echo "$err_msg" | grep -q "requires an OCI app rootfs"; then
     ok "--oci-pod + --hardened not rejected for network conflict"
 else

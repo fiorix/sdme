@@ -85,8 +85,8 @@ pub enum OciMode {
 pub struct ImportOptions<'a> {
     /// Import source (path, URL, or OCI registry reference).
     pub source: &'a str,
-    /// Name for the imported rootfs.
-    pub name: &'a str,
+    /// Name for the imported rootfs; inferred from the source when omitted or empty.
+    pub name: Option<&'a str>,
     /// Enable verbose output.
     pub verbose: bool,
     /// Overwrite an existing rootfs with the same name.
@@ -109,6 +109,83 @@ pub struct ImportOptions<'a> {
     pub auto_gc: bool,
     /// Per-distro chroot command overrides from config.
     pub distros: &'a HashMap<String, DistroCommands>,
+}
+
+const IMPORT_SUFFIXES: &[&str] = &[
+    ".oci.tar.bz2",
+    ".oci.tar.zst",
+    ".oci.tar.gz",
+    ".oci.tar.xz",
+    ".tar.bz2",
+    ".tar.zst",
+    ".raw.bz2",
+    ".raw.zst",
+    ".img.bz2",
+    ".img.zst",
+    ".oci.tar",
+    ".tar.gz",
+    ".tar.xz",
+    ".raw.gz",
+    ".raw.xz",
+    ".img.gz",
+    ".img.xz",
+    ".qcow2",
+    ".tar",
+    ".tgz",
+    ".tbz2",
+    ".txz",
+    ".tzst",
+    ".raw",
+    ".img",
+    ".gz",
+    ".bz2",
+    ".xz",
+    ".zst",
+];
+
+/// Resolve an import name from an explicit override or the source basename.
+///
+/// Registry tags are deliberately excluded. Other sources use their final path
+/// component with the longest recognized import suffix removed.
+pub fn resolve_name(source: &str, explicit: Option<&str>) -> Result<String> {
+    let inferred;
+    let name = match explicit.filter(|name| !name.is_empty()) {
+        Some(name) => name,
+        None => {
+            inferred = if let Some(image) = crate::oci::registry::ImageReference::parse(source) {
+                image
+                    .repository
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(&image.repository)
+                    .to_string()
+            } else {
+                let path = source
+                    .split(['?', '#'])
+                    .next()
+                    .unwrap_or(source)
+                    .trim_end_matches('/');
+                let filename = path.rsplit('/').next().unwrap_or(path);
+                let lower = filename.to_ascii_lowercase();
+                let suffix = IMPORT_SUFFIXES
+                    .iter()
+                    .find(|suffix| lower.ends_with(**suffix))
+                    .copied()
+                    .unwrap_or("");
+                filename[..filename.len().saturating_sub(suffix.len())].to_string()
+            };
+            &inferred
+        }
+    };
+
+    validate_name(name).with_context(|| {
+        if explicit.is_some_and(|name| !name.is_empty()) {
+            format!("invalid rootfs name '{name}'")
+        } else {
+            format!("cannot infer a valid rootfs name from '{source}'; use --name <name>")
+        }
+    })?;
+    Ok(name.to_string())
 }
 
 // --- Source detection ---
@@ -1208,8 +1285,9 @@ fn prompt_install_systemd(
 /// the root filesystem, and its contents are copied to the staging directory.
 ///
 /// The import is transactional: files are copied/extracted into a staging
-/// directory and atomically renamed into place on success.
-pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
+/// directory and atomically renamed into place on success. Returns the final
+/// rootfs name, whether explicit or inferred from the source.
+pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<String> {
     let ImportOptions {
         source,
         name,
@@ -1226,7 +1304,7 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
         distros,
     } = *opts;
 
-    validate_name(name)?;
+    let name = resolve_name(source, name)?;
 
     // Lock ordering: SHARED on base_fs first, then EXCLUSIVE on target name.
     let _base_lock = match base_fs {
@@ -1236,16 +1314,18 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
         ),
         None => None,
     };
-    let _name_lock = crate::lock::lock_exclusive(datadir, "fs", name)
+    let _name_lock = crate::lock::lock_exclusive(datadir, "fs", &name)
         .with_context(|| format!("cannot lock rootfs '{name}' for import"))?;
 
     let kind = detect_source_kind(source)?;
 
     let rootfs_dir = datadir.join("fs");
-    let final_dir = rootfs_dir.join(name);
+    let final_dir = rootfs_dir.join(&name);
     if final_dir.exists() {
         if !force {
-            bail!("fs already exists: {name}; re-run with -f to replace it");
+            bail!(
+                "fs already exists: {name}; use --force to replace it or --name <name> to import separately"
+            );
         }
         if verbose {
             eprintln!("removing existing fs '{name}' (forced)");
@@ -1258,7 +1338,7 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
         // Drop the cached btrfs base subvolume for the old content so the
         // replacement is re-materialized on the next container create
         // (best-effort; overlay-only hosts have no pool).
-        let _ = crate::storage::btrfs::invalidate_base(datadir, name, verbose);
+        let _ = crate::storage::btrfs::invalidate_base(datadir, &name, verbose);
     }
 
     fs::create_dir_all(&rootfs_dir)
@@ -1266,7 +1346,7 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
 
     let mut txn = crate::txn::Txn::new(
         &rootfs_dir,
-        name,
+        &name,
         crate::txn::TxnKind::Import,
         auto_gc,
         verbose,
@@ -1288,7 +1368,7 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
                 interactive,
                 http,
             };
-            import_url(&ctx, url, &staging_dir, &rootfs_dir, name)
+            import_url(&ctx, url, &staging_dir, &rootfs_dir, &name)
         }
         SourceKind::RegistryImage(ref img) => {
             match crate::oci::registry::import_registry_image(
@@ -1337,13 +1417,13 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
         } else {
             match base_fs {
                 Some(base_name) => {
-                    let app_name = crate::oci::derive_app_name(source, name);
+                    let app_name = crate::oci::derive_app_name(source, &name);
                     let setup_result = crate::oci::app::setup_app_image(
                         datadir,
                         &staging_dir,
                         &crate::oci::app::AppImageOptions {
                             rootfs_dir: &rootfs_dir,
-                            name,
+                            name: &name,
                             base_name,
                             app_name: &app_name,
                             config: cc,
@@ -1584,7 +1664,7 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<()> {
     if verbose {
         eprintln!("imported fs '{name}' from {source}");
     }
-    Ok(())
+    Ok(name)
 }
 
 // --- Tests ---
@@ -1608,7 +1688,7 @@ pub(crate) mod tests {
         name: &str,
         verbose: bool,
         force: bool,
-    ) -> Result<()> {
+    ) -> Result<String> {
         // Acquire the interrupt lock to prevent concurrent InterruptGuard
         // tests from poisoning check_interrupted() calls inside run().
         let _lock = INTERRUPT_LOCK.lock().unwrap();
@@ -1621,7 +1701,7 @@ pub(crate) mod tests {
             datadir,
             &ImportOptions {
                 source,
-                name,
+                name: Some(name),
                 verbose,
                 force,
                 interactive: false,
@@ -1714,6 +1794,68 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn test_resolve_name_registry() {
+        assert_eq!(resolve_name("docker.io/ubuntu", None).unwrap(), "ubuntu");
+        assert_eq!(
+            resolve_name("docker.io/ubuntu:latest", None).unwrap(),
+            "ubuntu"
+        );
+        assert_eq!(
+            resolve_name("quay.io/fedora/fedora:41", None).unwrap(),
+            "fedora"
+        );
+    }
+
+    #[test]
+    fn test_resolve_name_paths_and_urls() {
+        assert_eq!(resolve_name("/tmp/noble", None).unwrap(), "noble");
+        assert_eq!(
+            resolve_name("/tmp/ubuntu-cloud.oci.tar.xz", None).unwrap(),
+            "ubuntu-cloud"
+        );
+        assert_eq!(
+            resolve_name(
+                "https://example.com/images/debian-rootfs.tar.zst?download=1#mirror",
+                None
+            )
+            .unwrap(),
+            "debian-rootfs"
+        );
+        assert_eq!(resolve_name("/tmp/disk.raw.gz", None).unwrap(), "disk");
+    }
+
+    #[test]
+    fn test_resolve_name_explicit_and_empty() {
+        assert_eq!(
+            resolve_name("docker.io/ubuntu", Some("custom")).unwrap(),
+            "custom"
+        );
+        assert_eq!(
+            resolve_name("docker.io/ubuntu:latest", Some("")).unwrap(),
+            "ubuntu"
+        );
+    }
+
+    #[test]
+    fn test_resolve_name_requires_override_for_invalid_inference() {
+        for source in [
+            "/tmp/INVALID.tar.xz",
+            "/tmp/redis_exporter.tar",
+            "/tmp/1rootfs.img",
+            "https://example.com/",
+        ] {
+            let err = resolve_name(source, None).unwrap_err();
+            assert!(
+                err.to_string().contains("use --name"),
+                "unexpected error: {err}"
+            );
+        }
+        let overlong = format!("/tmp/{}.tar", "a".repeat(65));
+        let err = resolve_name(&overlong, None).unwrap_err();
+        assert!(err.to_string().contains("use --name"));
+    }
+
+    #[test]
     fn test_derive_app_name_non_registry() {
         assert_eq!(crate::oci::derive_app_name("/path/to/dir", "myfs"), "myfs");
         assert_eq!(
@@ -1752,6 +1894,43 @@ pub(crate) mod tests {
             fs::read_to_string(rootfs.join("subdir/nested.txt")).unwrap(),
             "nested\n"
         );
+    }
+
+    #[test]
+    fn test_import_inferred_directory_name() {
+        let tmp = tmp();
+        let src = TempSourceDir::new("infer");
+        let source = src.path().join("inferred");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("hello.txt"), "hello\n").unwrap();
+
+        let cfg = crate::config::Config {
+            oci_cache_max_size: "0".to_string(),
+            ..crate::config::Config::default()
+        };
+        let cache = crate::oci::cache::BlobCache::from_config(&cfg).unwrap();
+        let name = run(
+            tmp.path(),
+            &ImportOptions {
+                source: source.to_str().unwrap(),
+                name: None,
+                verbose: false,
+                force: true,
+                interactive: false,
+                install_packages: InstallPackages::No,
+                oci_mode: OciMode::Auto,
+                base_fs: None,
+                docker_credentials: None,
+                cache: &cache,
+                http: cfg.http_config().unwrap(),
+                auto_gc: true,
+                distros: &HashMap::new(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(name, "inferred");
+        assert!(tmp.path().join("fs/inferred/hello.txt").is_file());
     }
 
     #[test]
@@ -1847,8 +2026,8 @@ pub(crate) mod tests {
         )
         .unwrap_err();
         assert!(
-            err.to_string().contains("lowercase"),
-            "unexpected error: {err}"
+            format!("{err:#}").contains("lowercase"),
+            "unexpected error: {err:#}"
         );
     }
 
@@ -2548,7 +2727,7 @@ pub(crate) mod tests {
             tmp.path(),
             &ImportOptions {
                 source: tarball.to_str().unwrap(),
-                name: "ocicfg",
+                name: Some("ocicfg"),
                 verbose: false,
                 force: true,
                 interactive: false,

@@ -227,9 +227,9 @@ echo "=== Test 1: outer container topology ==="
 
 setup_network
 
-if ! output=$(timeout "$BOOT_TIMEOUT" "$SDME" create -r "$BASEFS" \
+if ! output=$(timeout "$BOOT_TIMEOUT" "$SDME" create --name "$OUTER" -r "$BASEFS" \
     --storage btrfs --userns --userns-nested 32 --network-bridge "$BRIDGE" \
-    --started -t "$BOOT_TIMEOUT" "$OUTER" "${VFLAG[@]}" 2>&1); then
+    --started -t "$BOOT_TIMEOUT" "${VFLAG[@]}" 2>&1); then
     fail "outer create failed: $output"
     print_summary
     exit 1
@@ -271,7 +271,7 @@ fi
 echo "=== Test 2: nested fs import with package installation ==="
 
 import_ok=0
-if output=$(nsdme fs import "$NESTED_FS" "${DISTRO_IMAGES[ubuntu]}" --install-packages=yes -f "${VFLAG[@]}" 2>&1); then
+if output=$(nsdme fs import "${DISTRO_IMAGES[ubuntu]}" --name "$NESTED_FS" --install-packages=yes -f "${VFLAG[@]}" 2>&1); then
     import_ok=1
 fi
 if [[ $import_ok -eq 1 ]]; then
@@ -296,7 +296,7 @@ echo "=== Test 3: nested create fails fast with named cause ==="
 
 start_s=$SECONDS
 rc=0
-output=$(nsdme create -r "$NESTED_FS" --storage auto --userns --started -t "$BOOT_TIMEOUT" "$INNER1" 2>&1) || rc=$?
+output=$(nsdme create --name "$INNER1" -r "$NESTED_FS" --storage auto --userns --started -t "$BOOT_TIMEOUT" 2>&1) || rc=$?
 elapsed=$((SECONDS - start_s))
 if [[ $rc -ne 0 ]] && echo "$output" | grep -q "mknod" && echo "$output" | grep -q "initial user namespace"; then
     ok "nested create fails fast naming the mknod/userns restriction (${elapsed}s)"
@@ -310,7 +310,7 @@ else
 fi
 
 rc=0
-output=$(nsdme create -r "$NESTED_FS" --storage auto "$INNER2" 2>&1) || rc=$?
+output=$(nsdme create --name "$INNER2" -r "$NESTED_FS" --storage auto 2>&1) || rc=$?
 if [[ $rc -ne 0 ]] && echo "$output" | grep -q "mknod"; then
     ok "nested create without --userns also fails fast with mknod preflight"
 else
@@ -324,7 +324,7 @@ echo "=== Test 4: explicit nested --storage btrfs fails fast ==="
 
 start_s=$SECONDS
 rc=0
-output=$(nsdme create -r "$NESTED_FS" --storage btrfs "$BADCTR" 2>&1) || rc=$?
+output=$(nsdme create --name "$BADCTR" -r "$NESTED_FS" --storage btrfs 2>&1) || rc=$?
 elapsed=$((SECONDS - start_s))
 if [[ $rc -ne 0 ]] && echo "$output" | grep -q "cannot boot inside a user-namespaced"; then
     ok "explicit --storage btrfs fails with the documented error"

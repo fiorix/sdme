@@ -53,7 +53,7 @@ sudo sdme restart --all
 Containers can have CPU and memory limits. Set them at creation time:
 
 ```sh
-sudo sdme new dev -r ubuntu --memory 2G --cpus 2
+sudo sdme new --name dev -r ubuntu --memory 2G --cpus 2
 ```
 
 Or on an existing container with `sdme set`:
@@ -206,7 +206,7 @@ This may fail to boot because the hardened flags enable user namespace isolation
 When `sdme new` fails, break it into individual steps to isolate the problem. First create the container without starting it:
 
 ```sh
-sudo sdme create mycontainer --hardened
+sudo sdme create --name mycontainer --hardened
 ```
 
 Then start it separately:

@@ -34,8 +34,15 @@ fn test_validate_name_invalid() {
     assert!(validate_name("").is_err());
     assert!(validate_name("MyContainer").is_err());
     assert!(validate_name("has space").is_err());
+    assert!(validate_name("ubuntu:latest").is_err());
     assert!(validate_name("1startsdigit").is_err());
     assert!(validate_name("-startshyphen").is_err());
+    assert!(validate_name(&format!("a{}", "b".repeat(64))).is_err());
+}
+
+#[test]
+fn test_validate_name_max_length() {
+    assert!(validate_name(&format!("a{}", "b".repeat(63))).is_ok());
 }
 
 #[test]

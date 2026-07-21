@@ -13,7 +13,7 @@ Builds are resumable: if a `RUN` step fails, re-running the same command picks u
 You need a base rootfs to build from. If you don't have one:
 
 ```sh
-sudo sdme fs import ubuntu docker.io/ubuntu
+sudo sdme fs import docker.io/ubuntu
 ```
 
 ## FROM

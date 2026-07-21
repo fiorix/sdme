@@ -46,9 +46,9 @@ for ctr in "$CTR1" "$CTR2" "$CTR_EMPTY"; do
     $SDME rm -f "$ctr" 2>/dev/null || true
     rm -rf "${DATADIR}/containers/${ctr}"
 done
-$SDME create "$CTR1" $VFLAG
-$SDME create "$CTR2" $VFLAG
-$SDME create "$CTR_EMPTY" $VFLAG
+$SDME create --name "$CTR1" $VFLAG
+$SDME create --name "$CTR2" $VFLAG
+$SDME create --name "$CTR_EMPTY" $VFLAG
 
 # Mutate CTR1 upper layer directly (container is stopped, upper is writable).
 UPPER="${DATADIR}/containers/${CTR1}/upper"

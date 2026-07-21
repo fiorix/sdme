@@ -44,9 +44,9 @@ No version bump is needed here for a release. Both packages take the version fro
 ## Manual build + push (fallback)
 
 ```bash
-sudo sdme fs import archlinux docker.io/archlinux/archlinux:base
+sudo sdme fs import docker.io/archlinux/archlinux:base
 mkdir -p dev/aur-out
-sudo sdme new aurbuild -r archlinux \
+sudo sdme new --name aurbuild -r archlinux \
     -b "$PWD:/src:ro" -b "$PWD/dev/aur-out:/out" \
     -- bash /src/packaging/arch/build-in-container.sh
 ```

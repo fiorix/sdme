@@ -430,7 +430,7 @@ echo "=== Test 18: smart error hint (rootfs not found, container exists) ==="
 
 # Create and stop a container for this test.
 ctr_name="export-hint-test"
-if $SDME create -r ubuntu "$ctr_name" $VFLAG 2>/dev/null; then
+if $SDME create --name "$ctr_name" -r ubuntu $VFLAG 2>/dev/null; then
     err_output=$($SDME fs export "fs:$ctr_name" "$TMPDIR/hint-test2" 2>&1 || true)
     if echo "$err_output" | grep -q "without the fs: prefix"; then
         ok "smart error: hint suggests dropping fs: prefix"
@@ -448,7 +448,7 @@ fi
 echo "=== Test 19: container export (stopped) ==="
 
 ctr_name="export-ctr-test"
-if $SDME create -r ubuntu "$ctr_name" $VFLAG 2>/dev/null; then
+if $SDME create --name "$ctr_name" -r ubuntu $VFLAG 2>/dev/null; then
     outdir="$TMPDIR/ctr-export"
     if $SDME fs export "$ctr_name" "$outdir" $VFLAG; then
         if [[ -d "$outdir" ]] && [[ -f "$outdir/etc/os-release" ]]; then

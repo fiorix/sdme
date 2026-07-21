@@ -47,11 +47,11 @@ which the Fedora Rust Packaging Guidelines allow for applications.
 
 ### Build the RPM locally
 
-Requires the sdme Fedora rootfs (`sudo sdme fs import fedora quay.io/fedora/fedora`).
+Requires the sdme Fedora rootfs (`sudo sdme fs import quay.io/fedora/fedora`).
 
 ```bash
 sudo mkdir -p dev/fedora-out
-sudo sdme new fedbuild -r fedora \
+sudo sdme new --name fedbuild -r fedora \
     -b "$PWD:/src:ro" -b "$PWD/dev/fedora-out:/out" \
     -- bash /src/packaging/fedora/build-in-container.sh
 ```

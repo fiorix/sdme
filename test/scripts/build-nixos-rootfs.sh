@@ -92,7 +92,7 @@ trap cleanup EXIT INT TERM
 
 # Step 1: Import docker.io/nixos/nix as a temporary rootfs.
 log "Importing docker.io/nixos/nix as temporary rootfs '$TMP_FS'"
-sdme fs import "$TMP_FS" docker.io/nixos/nix $VERBOSE --install-packages=no -f
+sdme fs import docker.io/nixos/nix --name "$TMP_FS" $VERBOSE --install-packages=no -f
 
 ROOTFS="$DATADIR/fs/$TMP_FS"
 
@@ -191,7 +191,7 @@ OSEOF
 
 # Step 7: Import the clean rootfs via sdme.
 log "Importing clean NixOS rootfs as '$FS_NAME'"
-sdme fs import "$FS_NAME" "$CLEAN_DIR" $VERBOSE -f
+sdme fs import "$CLEAN_DIR" --name "$FS_NAME" $VERBOSE -f
 
 # Clean up the temporary build directory.
 rm -rf "$CLEAN_DIR"

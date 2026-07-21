@@ -215,6 +215,8 @@ The `fs` subsystem manages the catalogue of root filesystems that containers are
 
 `sdme fs import` auto-detects the source type by probing in order:
 
+Before importing, sdme resolves the rootfs name from `--name` or infers it from the source. OCI references use the final repository component and discard the tag; paths and URLs use their final component with a recognized import suffix removed. Inferred names are not sanitized: an invalid result must be overridden with `--name`. A collision requires either `--force` to replace the existing rootfs or another `--name`.
+
 - **URL**: `http://` or `https://` prefix. Downloads the file, then extracts as a tarball.
 - **OCI registry**: looks like a domain with a path (e.g. `docker.io/ubuntu`, `quay.io/fedora/fedora`). Pulled via the OCI Distribution Spec.
 - **Directory**: path is a directory. Copied with `copy_tree()` preserving ownership, permissions, xattrs, hard links, and special files.
@@ -243,7 +245,7 @@ fd 37 7a 58 5a 00     xz
 28 b5 2f fd           zstd
 ```
 
-This means `sdme fs import ubuntu rootfs.tar.zst` works even if the file is named `rootfs.tar`, because the content, not the name, determines the decompressor.
+This means `sdme fs import rootfs.tar.zst --name ubuntu` works even if the file is named `rootfs.tar`, because the content, not the name, determines the decompressor.
 
 **Systemd detection** runs after import. If the rootfs doesn't contain systemd and dbus (both required for nspawn containers), sdme can install them automatically: it detects the distro family from `/etc/os-release` and runs the appropriate package manager (`apt`, `dnf`) in a chroot. The `--install-packages` flag controls this: `auto` prompts interactively, `yes` always installs, `no` refuses if systemd is absent.
 
@@ -275,7 +277,7 @@ B     ext4, xfs, other    {datadir}/btrfs-pool.img, a loopback
 
 **Offline access.** `sdme cp`, `sdme fs export`, and `sdme diff` operate on the container without booting it. For overlay this means a temporary read-only overlay mount of `merged`; for btrfs the container root already is a full filesystem, so those commands read (and, for `cp`, write) the subvolume directly. A `cp` into a stopped btrfs container writes into the subvolume itself, so it takes an exclusive lock, re-checks that the container is stopped, and runs through a symlink-safe copy that shadows any pre-existing base-image symlink at each destination before writing, preventing an escape out of the subvolume.
 
-**Base invalidation.** The `{pool}/fs/{name}` base subvolume is a cache of the imported rootfs at materialization time. Removing (`fs rm`) or replacing (`fs import -f`, and `fs build -f` via the same removal path) a rootfs deletes its base subvolume so the next container re-materializes from the current content instead of seeding from stale content. This is safe while container snapshots exist: btrfs snapshots are independent of their source after creation.
+**Base invalidation.** The `{pool}/fs/{name}` base subvolume is a cache of the imported rootfs at materialization time. Removing (`fs rm`) or replacing (`fs import --force`, and `fs build -f` via the same removal path) a rootfs deletes its base subvolume so the next container re-materializes from the current content instead of seeding from stale content. This is safe while container snapshots exist: btrfs snapshots are independent of their source after creation.
 
 **Disk quotas.** `--disk N` caps a btrfs container's root via a btrfs qgroup limit (see [Resource Limits](#12-resource-limits)). It has no cgroup equivalent and is ignored (with a warning) on overlay.
 
@@ -285,7 +287,7 @@ An outer container created with `--userns --storage btrfs` can run sdme manageme
 
 Inner nspawn boot is unsupported inside a user-namespaced outer container. sdme detects this context from a non-identity `/proc/self/uid_map`: `--storage auto` selects overlay because a btrfs root cannot complete nspawn's mount choreography there (btrfs is not `FS_USERNS_MOUNT`), and explicit inner `--storage btrfs` is a hard error. Overlay avoids the btrfs-specific failure but does not make boot work: device-node creation and related proc/sysfs mount operations still require privilege the nested user namespace does not have. A create-time `mknod` probe therefore fails fast before state is claimed, instead of surfacing as a boot timeout. Rootfs import remains supported: `fs import --install-packages=yes` stages `/dev` as a fresh tmpfs populated with individual device-node binds instead of binding the outer `/dev`, which is a host-owned `MNT_LOCKED` mount.
 
-**Caveats, surfaced honestly.** A Mode B pool is a single shared image: ENOSPC or corruption affects all btrfs containers at once, and there are two fsck layers (ext4 under, btrfs over the loop); steer production to Mode A, keep the pool in the datadir for backups, and run `btrfs scrub`. Enabling quotas is a whole-filesystem switch, so on a Mode A datadir it turns on quotas for the entire host btrfs filesystem, not just sdme's subtree; quotas stay off unless a `--disk` cap is requested. Simple quotas (`quota enable --simple`) require btrfs-progs and a kernel from the 6.7 series or newer, so `--disk` fails clearly on older hosts. sdme only guarantees `--disk` enforcement when it owns the quota lifecycle: if quotas are already enabled on the datadir filesystem by something else (a Mode A datadir on a host root btrfs that ships with snapper or btrfs-assistant is the common case), sdme's per-subvolume writes may not be accounted and a `qgroup limit` would never trigger, so `--disk` is refused with a clear error rather than silently accepted as an unenforced cap. Point the datadir at a dedicated btrfs (or use the Mode B loopback pool) whose quotas sdme manages. Editing a shared rootfs in place with `cp fs:NAME:...` does not currently invalidate the btrfs base subvolume, so prefer `fs import -f` or `fs build` to change a rootfs that btrfs containers snapshot from.
+**Caveats, surfaced honestly.** A Mode B pool is a single shared image: ENOSPC or corruption affects all btrfs containers at once, and there are two fsck layers (ext4 under, btrfs over the loop); steer production to Mode A, keep the pool in the datadir for backups, and run `btrfs scrub`. Enabling quotas is a whole-filesystem switch, so on a Mode A datadir it turns on quotas for the entire host btrfs filesystem, not just sdme's subtree; quotas stay off unless a `--disk` cap is requested. Simple quotas (`quota enable --simple`) require btrfs-progs and a kernel from the 6.7 series or newer, so `--disk` fails clearly on older hosts. sdme only guarantees `--disk` enforcement when it owns the quota lifecycle: if quotas are already enabled on the datadir filesystem by something else (a Mode A datadir on a host root btrfs that ships with snapper or btrfs-assistant is the common case), sdme's per-subvolume writes may not be accounted and a `qgroup limit` would never trigger, so `--disk` is refused with a clear error rather than silently accepted as an unenforced cap. Point the datadir at a dedicated btrfs (or use the Mode B loopback pool) whose quotas sdme manages. Editing a shared rootfs in place with `cp fs:NAME:...` does not currently invalidate the btrfs base subvolume, so prefer `fs import --force` or `fs build` to change a rootfs that btrfs containers snapshot from.
 
 ## 7. fs build: Building Root Filesystems
 
@@ -691,14 +693,14 @@ Capability-gated: `@clock` requires `CAP_SYS_TIME`, `@module` requires `CAP_SYS_
 - `~name`: deny an individual syscall
 
 ```
-sdme create mybox --system-call-filter ~@raw-io
-sdme create mybox --system-call-filter ~@cpu-emulation
+sdme create --name mybox --system-call-filter ~@raw-io
+sdme create --name mybox --system-call-filter ~@cpu-emulation
 ```
 
 Bare syscall names let you open just the syscalls a nested container engine needs, instead of a whole `@group` or an extra capability. Running Docker or Podman inside a container needs `bpf` (runc programs the cgroup v2 device controller as an eBPF program), plus `keyctl` and `add_key` for images that use the kernel keyring. `CAP_SYS_ADMIN` (in nspawn's default set) already covers the operation, so no extra capability is required:
 
 ```
-sdme create dbox -r ubuntu --storage btrfs \
+sdme create --name dbox -r ubuntu --storage btrfs \
   --system-call-filter bpf \
   --system-call-filter keyctl \
   --system-call-filter add_key
@@ -713,7 +715,7 @@ sdme ships a default AppArmor profile (`sdme-default`) designed for systemd-nspa
 The profile is automatically applied by `--strict`. It can also be used standalone:
 
 ```
-sdme create mybox --apparmor-profile sdme-default
+sdme create --name mybox --apparmor-profile sdme-default
 ```
 
 To install the profile:
@@ -749,8 +751,8 @@ For expanded ranges sdme allocates an explicit UID/GID base and range at create 
 - **Drops capabilities**: `CAP_SYS_PTRACE`, `CAP_NET_RAW`, `CAP_SYS_RAWIO`, `CAP_SYS_BOOT`, dropping 4 capabilities (3 from the active set; `CAP_SYS_RAWIO` is preventive since nspawn does not grant it by default), leaving 23 retained capabilities.
 
 ```
-sdme create mybox --hardened
-sdme new mybox --hardened
+sdme create --name mybox --hardened
+sdme new --name mybox --hardened
 ```
 
 **When cloning the host rootfs** (no `-r` flag), `--hardened` has several visible effects because the container inherits the host's installed binaries and enabled services:
@@ -765,16 +767,16 @@ sdme new mybox --hardened
 For a host-rootfs container where these side effects matter, apply individual flags instead:
 
 ```
-sdme create mybox --userns --drop-capability CAP_SYS_RAWIO
+sdme create --name mybox --userns --drop-capability CAP_SYS_RAWIO
 ```
 
 **Composable with fine-grained flags.** `--hardened` sets a baseline that individual flags can override or extend:
 
 ```
-sdme create mybox --hardened --capability CAP_NET_RAW       # re-enable a dropped cap
-sdme create mybox --hardened --system-call-filter ~@raw-io  # add seccomp filter
-sdme create mybox --hardened --apparmor-profile myprofile   # add MAC confinement
-sdme create mybox --hardened --read-only                    # read-only rootfs
+sdme create --name mybox --hardened --capability CAP_NET_RAW       # re-enable a dropped cap
+sdme create --name mybox --hardened --system-call-filter ~@raw-io  # add seccomp filter
+sdme create --name mybox --hardened --apparmor-profile myprofile   # add MAC confinement
+sdme create --name mybox --hardened --read-only                    # read-only rootfs
 ```
 
 **Configurable.** The capabilities dropped by `--hardened` are controlled by the `hardened_drop_caps` config key:
@@ -792,8 +794,8 @@ sdme config set hardened_drop_caps CAP_SYS_PTRACE,CAP_NET_RAW
 - **AppArmor profile**: applies the `sdme-default` profile, which confines `/proc`/`/sys` writes and raw device access at the MAC level.
 
 ```
-sdme create mybox --strict
-sdme new mybox --strict
+sdme create --name mybox --strict
+sdme new --name mybox --strict
 ```
 
 **When cloning the host rootfs**, `--strict` compounds the effects of `--hardened` with additional restrictions:
@@ -807,7 +809,7 @@ sdme new mybox --strict
 For host-rootfs use, `--hardened` with selective additions is often more practical than `--strict`:
 
 ```
-sdme create mybox --hardened --system-call-filter ~@raw-io
+sdme create --name mybox --hardened --system-call-filter ~@raw-io
 ```
 
 `--strict` is best suited for imported rootfs images where the service set is known and controlled.
@@ -817,9 +819,9 @@ sdme create mybox --hardened --system-call-filter ~@raw-io
 **Composable with fine-grained flags.** Like `--hardened`, `--strict` sets a baseline that individual flags can override:
 
 ```
-sdme create mybox --strict --capability CAP_NET_RAW   # re-enable a dropped cap
-sdme create mybox --strict --read-only                # add read-only rootfs
-sdme create mybox --strict --apparmor-profile custom  # use a custom profile
+sdme create --name mybox --strict --capability CAP_NET_RAW   # re-enable a dropped cap
+sdme create --name mybox --strict --read-only                # add read-only rootfs
+sdme create --name mybox --strict --apparmor-profile custom  # use a custom profile
 ```
 
 ### Input sanitization
@@ -963,8 +965,8 @@ Application image  Has entrypoint, non-shell cmd, or ports
 Application images require a base rootfs specified with `--base-fs`:
 
 ```bash
-sudo sdme fs import ubuntu docker.io/ubuntu -v --install-packages=yes
-sudo sdme fs import nginx docker.io/nginx --base-fs=ubuntu -v
+sudo sdme fs import docker.io/ubuntu -v --install-packages=yes
+sudo sdme fs import docker.io/nginx --base-fs=ubuntu -v
 ```
 
 Set a default to avoid repeating `--base-fs`:

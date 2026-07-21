@@ -11,7 +11,7 @@ Since sdme containers boot a full systemd, you can install and run services the 
 Import a rootfs to use as a container template. This example uses Fedora, but any [supported distribution](@/tutorial/different-rootfs.md#supported-distributions) works:
 
 ```sh
-sudo sdme fs import fedora quay.io/fedora/fedora
+sudo sdme fs import quay.io/fedora/fedora
 ```
 
 ## Create a container
@@ -22,7 +22,7 @@ We recommend using `--network-zone` and `--hardened` for service containers:
 - `--hardened` enables user namespace isolation so root inside the container is not root on the host. See the [security architecture](@/docs/security.md#10-hardening-tiers) for details on what this enables.
 
 ```sh
-sudo sdme new mywebserver -r fedora --network-zone=services --hardened
+sudo sdme new --name mywebserver -r fedora --network-zone=services --hardened
 ```
 
 ## Install a service
@@ -57,7 +57,7 @@ curl http://<container-ip>
 Other containers on the same zone can reach the nginx container by hostname:
 
 ```sh
-sudo sdme new myclient -r fedora --network-zone=services --hardened
+sudo sdme new --name myclient -r fedora --network-zone=services --hardened
 ```
 
 Inside the client:

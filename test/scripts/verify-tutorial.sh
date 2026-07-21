@@ -114,7 +114,7 @@ test_first_container() {
     local output
 
     # sdme create (host clone, no -r)
-    if ! output=$(timeout "$TIMEOUT_BOOT" $SDME create "$ct" 2>&1); then
+    if ! output=$(timeout "$TIMEOUT_BOOT" $SDME create --name "$ct" 2>&1); then
         record "first/create" FAIL "$output"
         record "first/start" SKIP "create failed"
         record "first/exec" SKIP "create failed"
@@ -157,7 +157,7 @@ test_different_rootfs() {
 
     local output
 
-    # sdme fs import ubuntu docker.io/ubuntu
+    # sdme fs import docker.io/ubuntu
     if ensure_base_fs "$BASE_FS" "$BASE_IMAGE" && ensure_python3_in_rootfs "$BASE_FS"; then
         record "rootfs/import" PASS
     else
@@ -174,7 +174,7 @@ test_different_rootfs() {
 
     # sdme new -r ubuntu (create + start)
     local ct="vfy-tut-distro"
-    if ! output=$(timeout "$TIMEOUT_BOOT" $SDME create -r "$BASE_FS" "$ct" 2>&1); then
+    if ! output=$(timeout "$TIMEOUT_BOOT" $SDME create --name "$ct" -r "$BASE_FS" 2>&1); then
         record "rootfs/create" FAIL "$output"
         record "rootfs/boot" SKIP "create failed"
     else
@@ -194,7 +194,7 @@ test_different_rootfs() {
     if fs_exists "$tmp_fs"; then
         $SDME fs rm "$tmp_fs" 2>/dev/null || true
     fi
-    if output=$(timeout "$TIMEOUT_IMPORT" $SDME fs import "$tmp_fs" "$BASE_IMAGE" \
+    if output=$(timeout "$TIMEOUT_IMPORT" $SDME fs import "$BASE_IMAGE" --name "$tmp_fs" \
             -v --install-packages=yes -f 2>&1); then
         if output=$($SDME fs rm "$tmp_fs" 2>&1); then
             if ! fs_exists "$tmp_fs"; then
@@ -252,10 +252,10 @@ test_storage() {
         return
     fi
 
-    # sdme new mybox -r ubuntu --storage btrfs (create only, for a non-interactive test)
+    # sdme new --name mybox -r ubuntu --storage btrfs (create only, for a non-interactive test)
     local ct="vfy-tut-btrfs"
     $SDME rm -f "$ct" 2>/dev/null || true
-    if output=$(timeout "$TIMEOUT_BOOT" $SDME create -r "$BASE_FS" --storage btrfs "$ct" 2>&1); then
+    if output=$(timeout "$TIMEOUT_BOOT" $SDME create --name "$ct" -r "$BASE_FS" --storage btrfs 2>&1); then
         # The container root is a btrfs subvolume (Mode B pool or Mode A datadir).
         if btrfs subvolume show "$datadir/pool/containers/$ct" >/dev/null 2>&1 || \
            btrfs subvolume show "$datadir/btrfs/containers/$ct" >/dev/null 2>&1; then
@@ -285,10 +285,10 @@ test_storage() {
     rm -f "$marker"
     $SDME rm -f "$ct" 2>/dev/null || true
 
-    # sdme new build -r ubuntu --storage btrfs --disk N (a per-container disk cap)
+    # sdme new --name build -r ubuntu --storage btrfs --disk N (a per-container disk cap)
     local capped="vfy-tut-btrfs-disk"
     $SDME rm -f "$capped" 2>/dev/null || true
-    if output=$($SDME create -r "$BASE_FS" --storage btrfs --disk 250M "$capped" 2>&1); then
+    if output=$($SDME create --name "$capped" -r "$BASE_FS" --storage btrfs --disk 250M 2>&1); then
         if grep -q '^DISK=250M' "$datadir/state/$capped" 2>/dev/null && \
            $SDME ps 2>/dev/null | awk -v n="$capped" '$1==n' | grep -qE '/250M'; then
             record "storage/disk-cap" PASS
@@ -338,7 +338,7 @@ test_management() {
 
     # Create and start a container for management tests
     local ct="vfy-tut-mgmt"
-    if ! output=$(timeout "$TIMEOUT_BOOT" $SDME create -r "$BASE_FS" "$ct" 2>&1) || \
+    if ! output=$(timeout "$TIMEOUT_BOOT" $SDME create --name "$ct" -r "$BASE_FS" 2>&1) || \
        ! output=$(timeout "$TIMEOUT_BOOT" $SDME start "$ct" -t 120 2>&1); then
         for k in mgmt/ps mgmt/ps-json mgmt/logs \
                  mgmt/cp-host-to-ct mgmt/cp-ct-to-host \
@@ -474,12 +474,12 @@ test_services() {
 
     local ct="vfy-tut-svc"
 
-    # sdme new mywebserver -r fedora --network-zone=services --hardened
+    # sdme new --name mywebserver -r fedora --network-zone=services --hardened
     # (the tutorial uses interactive dnf install inside; we skip that and
     # test OCI nginx in test_oci_apps instead. Here we verify that
     # --network-zone + --hardened creation and boot work.)
-    if ! output=$(timeout "$TIMEOUT_BOOT" $SDME create -r "$FEDORA_FS" \
-            --network-zone=vfytut --hardened "$ct" 2>&1); then
+    if ! output=$(timeout "$TIMEOUT_BOOT" $SDME create --name "$ct" -r "$FEDORA_FS" \
+            --network-zone=vfytut --hardened 2>&1); then
         record "svc/create" FAIL "$output"
         for k in svc/boot svc/ps-addresses svc/enable svc/disable; do
             record "$k" SKIP "create failed"
@@ -550,10 +550,10 @@ test_oci_apps() {
 
     local output
 
-    # sdme fs import nginx docker.io/nginx --base-fs ubuntu
+    # sdme fs import docker.io/nginx --base-fs ubuntu
     if fs_exists "$NGINX_FS"; then
         record "oci/nginx-import" PASS "exists"
-    elif output=$(timeout "$TIMEOUT_IMPORT" $SDME fs import "$NGINX_FS" "$NGINX_IMAGE" \
+    elif output=$(timeout "$TIMEOUT_IMPORT" $SDME fs import "$NGINX_IMAGE" --name "$NGINX_FS" \
             --base-fs="$BASE_FS" -v 2>&1); then
         record "oci/nginx-import" PASS
     else
@@ -567,9 +567,9 @@ test_oci_apps() {
 
     local ct="vfy-tut-web"
 
-    # sdme create mycontainer -r nginx --network-zone=services --hardened
-    if ! output=$(timeout "$TIMEOUT_BOOT" $SDME create -r "$NGINX_FS" \
-            --network-zone=vfytut --hardened "$ct" 2>&1); then
+    # sdme create --name mycontainer -r nginx --network-zone=services --hardened
+    if ! output=$(timeout "$TIMEOUT_BOOT" $SDME create --name "$ct" -r "$NGINX_FS" \
+            --network-zone=vfytut --hardened 2>&1); then
         record "oci/nginx-create" FAIL "$output"
         for k in oci/nginx-boot oci/nginx-ps oci/nginx-service oci/nginx-logs; do
             record "$k" SKIP "create failed"
@@ -641,8 +641,8 @@ test_bind_mounts() {
     local ct="vfy-tut-bind"
 
     # sdme create -r ubuntu -b /tmp/mysite:/data:ro
-    if ! output=$(timeout "$TIMEOUT_BOOT" $SDME create -r "$BASE_FS" \
-            -b "$bind_dir:/data:ro" "$ct" 2>&1); then
+    if ! output=$(timeout "$TIMEOUT_BOOT" $SDME create --name "$ct" -r "$BASE_FS" \
+            -b "$bind_dir:/data:ro" 2>&1); then
         record "bind/create" FAIL "$output"
         record "bind/boot" SKIP "create failed"
         record "bind/verify" SKIP "create failed"
@@ -693,10 +693,10 @@ test_oci_volumes() {
 
     local output
 
-    # sdme fs import postgres docker.io/postgres --base-fs ubuntu
+    # sdme fs import docker.io/postgres --base-fs ubuntu
     if fs_exists "$POSTGRES_FS"; then
         record "vol/pg-import" PASS "exists"
-    elif output=$(timeout "$TIMEOUT_IMPORT" $SDME fs import "$POSTGRES_FS" "$POSTGRES_IMAGE" \
+    elif output=$(timeout "$TIMEOUT_IMPORT" $SDME fs import "$POSTGRES_IMAGE" --name "$POSTGRES_FS" \
             --base-fs="$BASE_FS" -v 2>&1); then
         record "vol/pg-import" PASS
     else
@@ -713,8 +713,8 @@ test_oci_volumes() {
     local create_flags=(-r "$POSTGRES_FS" --network-zone=vfytut --hardened
                         --oci-env "POSTGRES_PASSWORD=secret")
 
-    # sdme create mydb -r postgres --oci-env POSTGRES_PASSWORD=secret
-    if ! output=$(timeout "$TIMEOUT_BOOT" $SDME create "${create_flags[@]}" "$ct" 2>&1); then
+    # sdme create --name mydb -r postgres --oci-env POSTGRES_PASSWORD=secret
+    if ! output=$(timeout "$TIMEOUT_BOOT" $SDME create --name "$ct" "${create_flags[@]}" 2>&1); then
         record "vol/pg-create" FAIL "$output"
         for k in vol/pg-boot vol/pg-volume-dir vol/pg-logs vol/pg-exec \
                  vol/pg-insert vol/pg-stop-rm vol/pg-persist-dir \
@@ -801,7 +801,7 @@ test_oci_volumes() {
     fi
 
     # Recreate container from same rootfs
-    if ! output=$(timeout "$TIMEOUT_BOOT" $SDME create "${create_flags[@]}" "$ct" 2>&1) || \
+    if ! output=$(timeout "$TIMEOUT_BOOT" $SDME create --name "$ct" "${create_flags[@]}" 2>&1) || \
        ! output=$(timeout "$TIMEOUT_BOOT" $SDME start "$ct" -t 120 2>&1); then
         record "vol/pg-recreate" FAIL "$output"
         record "vol/pg-persist-data" SKIP "recreate failed"
@@ -849,7 +849,7 @@ test_networking() {
 
     # --private-network (loopback only)
     ct="vfy-tut-net-priv"
-    if output=$(timeout "$TIMEOUT_BOOT" $SDME create -r "$BASE_FS" --private-network "$ct" 2>&1) && \
+    if output=$(timeout "$TIMEOUT_BOOT" $SDME create --name "$ct" -r "$BASE_FS" --private-network 2>&1) && \
        output=$(timeout "$TIMEOUT_BOOT" $SDME start "$ct" -t 120 2>&1); then
         record "net/private" PASS
         stop_container "$ct"
@@ -860,8 +860,8 @@ test_networking() {
 
     # --network-veth --port 8080:80
     ct="vfy-tut-net-veth"
-    if output=$(timeout "$TIMEOUT_BOOT" $SDME create -r "$BASE_FS" \
-            --network-veth --port 8080:80 "$ct" 2>&1) && \
+    if output=$(timeout "$TIMEOUT_BOOT" $SDME create --name "$ct" -r "$BASE_FS" \
+            --network-veth --port 8080:80 2>&1) && \
        output=$(timeout "$TIMEOUT_BOOT" $SDME start "$ct" -t 120 2>&1); then
         record "net/veth-port" PASS
         stop_container "$ct"
@@ -873,10 +873,10 @@ test_networking() {
     # --network-zone (two containers)
     local ct_web="vfy-tut-zone-web"
     local ct_client="vfy-tut-zone-cli"
-    if output=$(timeout "$TIMEOUT_BOOT" $SDME create -r "$BASE_FS" \
-            --private-network --network-zone=vfyzone "$ct_web" 2>&1) && \
-       output=$(timeout "$TIMEOUT_BOOT" $SDME create -r "$BASE_FS" \
-            --private-network --network-zone=vfyzone "$ct_client" 2>&1) && \
+    if output=$(timeout "$TIMEOUT_BOOT" $SDME create --name "$ct_web" -r "$BASE_FS" \
+            --private-network --network-zone=vfyzone 2>&1) && \
+       output=$(timeout "$TIMEOUT_BOOT" $SDME create --name "$ct_client" -r "$BASE_FS" \
+            --private-network --network-zone=vfyzone 2>&1) && \
        output=$(timeout "$TIMEOUT_BOOT" $SDME start "$ct_web" -t 120 2>&1) && \
        output=$(timeout "$TIMEOUT_BOOT" $SDME start "$ct_client" -t 120 2>&1); then
         record "net/zone" PASS
@@ -937,8 +937,8 @@ test_pod_networking() {
             srv_rootfs="$NGINX_FS"
         fi
 
-        if output=$(timeout "$TIMEOUT_BOOT" $SDME create -r "$srv_rootfs" \
-                --pod "$pod" "$ct_srv" 2>&1); then
+        if output=$(timeout "$TIMEOUT_BOOT" $SDME create --name "$ct_srv" -r "$srv_rootfs" \
+                --pod "$pod" 2>&1); then
             record "pod/create-server" PASS
         else
             record "pod/create-server" FAIL "$output"
@@ -953,7 +953,7 @@ test_pod_networking() {
         fi
 
         # Create host-clone client in same pod
-        if output=$(timeout "$TIMEOUT_BOOT" $SDME create --pod "$pod" "$ct_cli" 2>&1); then
+        if output=$(timeout "$TIMEOUT_BOOT" $SDME create --name "$ct_cli" --pod "$pod" 2>&1); then
             record "pod/create-client" PASS
         else
             record "pod/create-client" FAIL "$output"
@@ -1010,10 +1010,10 @@ test_pod_networking() {
 _test_oci_pod() {
     local output
 
-    # sdme fs import redis --base-fs ubuntu
+    # sdme fs import docker.io/redis --base-fs ubuntu
     if fs_exists "$REDIS_FS"; then
         record "pod/oci-import-redis" PASS "exists"
-    elif output=$(timeout "$TIMEOUT_IMPORT" $SDME fs import "$REDIS_FS" "$REDIS_IMAGE" \
+    elif output=$(timeout "$TIMEOUT_IMPORT" $SDME fs import "$REDIS_IMAGE" --name "$REDIS_FS" \
             --base-fs="$BASE_FS" -v 2>&1); then
         record "pod/oci-import-redis" PASS
     else
@@ -1039,9 +1039,9 @@ _test_oci_pod() {
     fi
     record "pod/oci-new-pod" PASS
 
-    # sdme create redis-server -r redis --oci-pod dbpod --hardened
-    if ! output=$(timeout "$TIMEOUT_BOOT" $SDME create -r "$REDIS_FS" \
-            --oci-pod "$pod" --hardened "$ct" 2>&1); then
+    # sdme create --name redis-server -r redis --oci-pod dbpod --hardened
+    if ! output=$(timeout "$TIMEOUT_BOOT" $SDME create --name "$ct" -r "$REDIS_FS" \
+            --oci-pod "$pod" --hardened 2>&1); then
         record "pod/oci-create-server" FAIL "$output"
         for k in pod/oci-boot-server pod/oci-redis-ping pod/oci-rm; do
             record "$k" SKIP "create failed"
@@ -1254,10 +1254,10 @@ test_docker_in_container() {
     #   --system-call-filter bpf --system-call-filter keyctl --system-call-filter add_key
     # No CAP_BPF: allowing the bpf syscall in seccomp is enough; CAP_SYS_ADMIN
     # (in nspawn's default set) covers the operation.
-    if ! output=$(timeout "$TIMEOUT_BOOT" $SDME create -r "$BASE_FS" --storage btrfs \
+    if ! output=$(timeout "$TIMEOUT_BOOT" $SDME create --name "$ct" -r "$BASE_FS" --storage btrfs \
             --network-veth --capability CAP_NET_ADMIN \
             --system-call-filter bpf --system-call-filter keyctl --system-call-filter add_key \
-            "$ct" 2>&1); then
+            2>&1); then
         record "docker/create" FAIL "$output"
         for k in "${keys[@]:1}"; do record "$k" SKIP "create failed"; done
         _docker_teardown
@@ -1374,8 +1374,8 @@ test_batch_ops() {
     # Create two containers
     local ct1="vfy-tut-all1"
     local ct2="vfy-tut-all2"
-    timeout "$TIMEOUT_BOOT" $SDME create -r "$BASE_FS" "$ct1" 2>/dev/null || true
-    timeout "$TIMEOUT_BOOT" $SDME create -r "$BASE_FS" "$ct2" 2>/dev/null || true
+    timeout "$TIMEOUT_BOOT" $SDME create --name "$ct1" -r "$BASE_FS" 2>/dev/null || true
+    timeout "$TIMEOUT_BOOT" $SDME create --name "$ct2" -r "$BASE_FS" 2>/dev/null || true
     timeout "$TIMEOUT_BOOT" $SDME start "$ct1" -t 120 2>/dev/null || true
     timeout "$TIMEOUT_BOOT" $SDME start "$ct2" -t 120 2>/dev/null || true
 

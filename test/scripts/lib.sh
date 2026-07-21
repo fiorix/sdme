@@ -370,7 +370,13 @@ ensure_base_fs() {
         return 0
     fi
     echo "==> Importing base rootfs '$name' from $image"
-    if ! sdme fs import "$name" "$image" -v --install-packages=yes -f 2>&1; then
+    local inferred="${image##*/}"
+    inferred="${inferred%%:*}"
+    local name_args=()
+    if [[ "$name" != "$inferred" ]]; then
+        name_args=(--name "$name")
+    fi
+    if ! sdme fs import "$image" "${name_args[@]}" -v --install-packages=yes -f 2>&1; then
         echo "error: failed to import $name" >&2
         return 1
     fi

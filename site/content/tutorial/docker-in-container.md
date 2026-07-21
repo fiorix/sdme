@@ -31,7 +31,7 @@ sudo modprobe br_netfilter
 Create and enter a container from an imported Ubuntu rootfs (see [using a different root filesystem](@/tutorial/different-rootfs.md) to import one):
 
 ```sh
-sudo sdme new dockerbox -r ubuntu --storage btrfs \
+sudo sdme new --name dockerbox -r ubuntu --storage btrfs \
   --network-veth \
   --capability CAP_NET_ADMIN \
   --system-call-filter bpf \

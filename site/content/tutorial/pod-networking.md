@@ -41,13 +41,13 @@ sudo sdme pod new webpod
 Start an nginx server in the pod:
 
 ```sh
-sudo sdme create http-server -r nginx --pod webpod --started
+sudo sdme create --name http-server -r nginx --pod webpod --started
 ```
 
 Start a client in the same pod and drop into a shell. The client uses a host clone which already has curl:
 
 ```sh
-sudo sdme new http-client --pod webpod
+sudo sdme new --name http-client --pod webpod
 ```
 
 Inside the client, curl the server via localhost:
@@ -95,13 +95,13 @@ sudo sdme pod new dbpod
 ```
 
 ```sh
-sudo sdme fs import redis docker.io/redis --base-fs ubuntu
+sudo sdme fs import docker.io/redis --base-fs ubuntu
 ```
 
 Start redis in the pod with hardened security:
 
 ```sh
-sudo sdme create redis-server -r redis --oci-pod dbpod --hardened --started
+sudo sdme create --name redis-server -r redis --oci-pod dbpod --hardened --started
 ```
 
 Verify redis is running:
@@ -113,7 +113,7 @@ sudo sdme logs redis-server --oci
 Start a client container in the same pod using the same redis rootfs, so `redis-cli` is available. Both containers use `--oci-pod` with `--hardened`:
 
 ```sh
-sudo sdme create redis-client -r redis --oci-pod dbpod --hardened --started
+sudo sdme create --name redis-client -r redis --oci-pod dbpod --hardened --started
 ```
 
 Test the connection from the client:
@@ -146,7 +146,7 @@ Creates a point-to-point veth between the pod and the host:
 
 ```sh
 sudo sdme pod new mypod
-sudo sdme new mybox --pod mypod
+sudo sdme new --name mybox --pod mypod
 sudo sdme start mybox
 sudo sdme pod net attach mypod veth
 ```
@@ -203,9 +203,9 @@ Pods using zone mode share the same bridge as regular containers using `--networ
 ```sh
 sudo sdme pod new mypod
 sudo sdme pod net attach mypod zone myzone
-sudo sdme new mybox --pod mypod
+sudo sdme new --name mybox --pod mypod
 
-sudo sdme new standalone -r ubuntu --network-zone=myzone
+sudo sdme new --name standalone -r ubuntu --network-zone=myzone
 ```
 
 Both `mybox` (in the pod) and `standalone` (regular container) are on the `vz-myzone` bridge and can communicate.

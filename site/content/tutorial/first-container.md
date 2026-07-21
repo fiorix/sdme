@@ -60,7 +60,7 @@ Random names work for quick experiments, but named containers are easier to scri
 
 ```sh
 sudo sdme rm araciubaia
-sudo sdme new foobar
+sudo sdme new --name foobar
 ```
 
 The rest of this tutorial uses `foobar` so every command is copy-paste ready.

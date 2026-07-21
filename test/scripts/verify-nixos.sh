@@ -146,7 +146,7 @@ phase2_boot_plain() {
 
     # Create
     local output
-    if ! output=$(timeout "$TIMEOUT_BOOT" "$SDME" create -r "$FS_NAME" "$CT_PLAIN" 2>&1); then
+    if ! output=$(timeout "$TIMEOUT_BOOT" "$SDME" create --name "$CT_PLAIN" -r "$FS_NAME" 2>&1); then
         record "plain/create" FAIL "$output"
         record "plain/boot" SKIP "create failed"
         record "plain/exec" SKIP "create failed"
@@ -191,7 +191,7 @@ phase3_import_oci() {
     fi
 
     local output
-    if output=$(timeout "$TIMEOUT_IMPORT" "$SDME" fs import "$APP_FS" "$APP_IMAGE" \
+    if output=$(timeout "$TIMEOUT_IMPORT" "$SDME" fs import "$APP_IMAGE" --name "$APP_FS" \
             --base-fs="$FS_NAME" --oci-mode=app -v --install-packages=yes -f 2>&1); then
         record "oci/import" PASS
     else
@@ -224,7 +224,7 @@ phase4_test_oci() {
     # --no-oci-ports prevents auto port forwarding to the host; this
     # test uses nsenter to curl from inside the container's net namespace.
     local output
-    if ! output=$(timeout "$TIMEOUT_BOOT" "$SDME" create -r "$APP_FS" --private-network --network-veth --no-oci-ports "$CT_OCI" 2>&1); then
+    if ! output=$(timeout "$TIMEOUT_BOOT" "$SDME" create --name "$CT_OCI" -r "$APP_FS" --private-network --network-veth --no-oci-ports 2>&1); then
         record "oci/create" FAIL "$output"
         record "oci/volume-dir" SKIP "create failed"
         record "oci/boot" SKIP "create failed"

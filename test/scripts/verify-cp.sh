@@ -80,7 +80,7 @@ fi
 # ---------------------------------------------------------------------------
 echo "=== Test 3: host → stopped container ==="
 
-$SDME create -r ubuntu "$CTR_STOPPED" $VFLAG 2>/dev/null
+$SDME create --name "$CTR_STOPPED" -r ubuntu $VFLAG 2>/dev/null
 echo "stopped-marker" > "$TMPDIR/marker"
 if $SDME cp "$TMPDIR/marker" "$CTR_STOPPED:/etc/marker" $VFLAG; then
     # Start and verify content.
@@ -120,7 +120,7 @@ fi
 # ---------------------------------------------------------------------------
 echo "=== Test 5: host → running container ==="
 
-$SDME create -r ubuntu "$CTR_RUNNING" $VFLAG 2>/dev/null
+$SDME create --name "$CTR_RUNNING" -r ubuntu $VFLAG 2>/dev/null
 $SDME start "$CTR_RUNNING" --timeout "$BOOT_TIMEOUT" $VFLAG
 echo "running-marker" > "$TMPDIR/running-file"
 cp_output=$($SDME cp "$TMPDIR/running-file" "$CTR_RUNNING:/etc/running-marker" $VFLAG 2>&1) || {

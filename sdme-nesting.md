@@ -50,7 +50,7 @@ flowchart LR
 Example outer container for Docker:
 
 ```sh
-sudo sdme new dockerbox -r ubuntu --storage btrfs \
+sudo sdme new --name dockerbox -r ubuntu --storage btrfs \
   --network-veth \
   --capability CAP_NET_ADMIN \
   --system-call-filter bpf \
@@ -102,7 +102,7 @@ sequenceDiagram
 Example outer topology used by the nested verification:
 
 ```sh
-sudo sdme create outer -r ubuntu --storage btrfs \
+sudo sdme create --name outer -r ubuntu --storage btrfs \
   --userns --userns-nested 32 --started
 ```
 

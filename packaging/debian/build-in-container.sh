@@ -4,7 +4,7 @@
 # e.g. an sdme Ubuntu container, for a Launchpad PPA:
 #
 #   sudo mkdir -p dev/deb-out
-#   sudo sdme new debbuild -r ubuntu \
+#   sudo sdme new --name debbuild -r ubuntu \
 #       -b "$PWD:/src:ro" -b "$PWD/dev/deb-out:/out" \
 #       -- bash /src/packaging/debian/build-in-container.sh
 #

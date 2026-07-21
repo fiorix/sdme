@@ -134,9 +134,12 @@ The docker/registry tutorial test needs outbound internet inside a `--network-ve
 
 ## Results
 
-Last verified: 2026-07-19
+Last verified: 2026-07-21
 
-System: Linux 7.0.0-28-generic (x86_64), systemd 259, sdme 0.17.0 release binary. Four parallel jobs, timeout scale 2, wall clock 30m55s. This is the exact post-fix release-candidate run; failures are retained as failures rather than relabeled after triage.
+System: Linux 7.0.0-28-generic (x86_64), systemd 259.5, sdme 0.18.0
+release binary. Eight parallel jobs, timeout scale 1, wall clock 38m01s.
+This is the exact release-candidate run; failures are retained as failures
+rather than relabeled after triage.
 
 ```
 Test Suite                 Pass  Fail  Skip  Status
@@ -155,34 +158,52 @@ verify-kube-L3-secrets       16     0     0  PASS
 verify-kube-L3-volumes       39     0     0  PASS
 verify-kube-L4-networking     6     0     0  PASS
 verify-kube-L5-redis-stack    6     0     0  PASS
-verify-kube-L6-gitea-stack    9     1     5  FAIL
-verify-nested                16     0     0  PASS
+verify-kube-L6-gitea-stack    8     1     6  FAIL
+verify-nested                 4     1     0  FAIL
 verify-nested-userns          7     0     0  PASS
 verify-network                7     2     0  FAIL
-verify-nixos                 25     1     0  FAIL
+verify-nixos                 26     0     0  PASS
 verify-oci                   18     0     0  PASS
 verify-pods                   9     0     0  PASS
 verify-security              41     0     0  PASS
 verify-storage               11     0     0  PASS
-verify-tutorial              84     0     7  PASS
+verify-tutorial              83     1     7  FAIL
 -------------------------  ----  ----  ----  ------
-Totals                      674     4    14  24 suites
+Totals                      661     5    15  24 suites
 ```
 
-- `verify-nested` passed 16/16, including the changed chroot and nested Btrfs
-  cleanup paths.
 - `verify-network` reproduced the devsrv host's known unmanaged zone bridge:
   no route to the zone peer and no LLMNR response. Bridge networking passed.
-- `verify-kube-L6-gitea-stack` no longer hits the orphan-rootfs transaction
-  failure. Under four-way load, create, boot, and all three services passed,
-  but Gitea did not listen on port 3000 within 180 seconds. A serial rerun
-  passed 15/15. The runner now schedules Gitea in its serial heavyweight stage.
-- `verify-nixos` passed all 25 functional assertions under four-way load. Its
-  final multi-service delete failed because graceful shutdown exceeded sdme's
-  internal 30-second removal stage. The test now allows heavyweight first-boot
-  latency and stops gracefully before deletion; it passed 26/26 through the
-  normal four-job runner.
+  A clean serial rerun reproduced the same 7/2 result.
+- `verify-nested` failed when Docker Hub DNS resolution temporarily failed
+  inside the outer container. A clean serial rerun passed 16/16, including
+  import, btrfs cleanup, preflight, and kube coverage.
+- `verify-tutorial` failed because `start --all` included the stopped
+  `gitea-pod` left by the preceding failed suite. A clean serial rerun passed
+  84/84 with seven expected Docker/veth DHCP skips.
+- `verify-kube-L6-gitea-stack` remains unresolved. The canonical serial stage
+  timed out waiting for MySQL port 3306. A clean serial rerun cleared MySQL but
+  timed out waiting for Gitea port 3000, producing 9 passed, 1 failed, and
+  5 skipped. This is retained as a release-review failure.
+
 ## Log
+
+### 0.18.0 -- source-first import and --name migration (2026-07-21, x86_64)
+
+Full `run-parallel.sh --jobs 8` against the installed 0.18.0 release binary on
+Linux 7.0.0-28-generic and systemd 259.5: 661 passed, 5 failed, and 15 skipped
+across 24 suites in 38m01s. The exact aggregate is
+`test-reports/summary-20260721-070727.md`.
+
+All changed CLI paths passed throughout the import, distro, OCI, build,
+storage, security, tutorial, and nested suites. Triage retained the canonical
+failures and added clean serial reruns: nested passed 16/16 after transient
+Docker Hub DNS; tutorial passed 84/84 after removing failed-Gitea state;
+network reproduced the host's known zone route and LLMNR failures at 7/2;
+Gitea remained unresolved, moving from a MySQL readiness timeout in the full
+run to a Gitea readiness timeout in the rerun. The missing `qemu-nbd` and
+`kubeconform` tools account for two optional skips; seven tutorial Docker
+checks skipped because the host veth received no default route.
 
 ### 0.17.2 -- kube probe build safety (2026-07-20, x86_64)
 

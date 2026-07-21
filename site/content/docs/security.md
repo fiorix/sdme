@@ -160,10 +160,10 @@ This is the simplest mode and sufficient for most development use cases. The tra
 `--private-network` gives the container its own network namespace with only a loopback interface (no external connectivity). This is the foundation for all other network options.
 
 ```
-sdme create mybox --private-network
-sdme create mybox --private-network --network-veth
-sdme create mybox --private-network --network-zone=myzone
-sdme create mybox --private-network --port=8080:80
+sdme create --name mybox --private-network
+sdme create --name mybox --private-network --network-veth
+sdme create --name mybox --private-network --network-zone=myzone
+sdme create --name mybox --private-network --port=8080:80
 ```
 
 When `--private-network` is active:

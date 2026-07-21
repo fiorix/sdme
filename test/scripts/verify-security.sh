@@ -61,7 +61,7 @@ ensure_base_fs ubuntu docker.io/ubuntu
 echo "=== Test 1: CLI validation ==="
 
 # 1a: unknown capability → error
-if err=$("$SDME" create --drop-capability=CAP_BOGUS -r ubuntu sec-val1 2>&1); then
+if err=$("$SDME" create --name sec-val1 --drop-capability=CAP_BOGUS -r ubuntu 2>&1); then
     fail "unknown capability should error"
     cleanup_container sec-val1
 else
@@ -75,7 +75,7 @@ fi
 # 1b: invalid syscall filter (bad chars in a bare name) → error.
 # Bare syscall names are accepted (see Test 7b), but must be [a-z0-9_]; an
 # uppercase token is rejected so it cannot break the nspawn ExecStart line.
-if err=$("$SDME" create --system-call-filter=Bad -r ubuntu sec-val2 2>&1); then
+if err=$("$SDME" create --name sec-val2 --system-call-filter=Bad -r ubuntu 2>&1); then
     fail "invalid syscall filter should error"
     cleanup_container sec-val2
 else
@@ -87,7 +87,7 @@ else
 fi
 
 # 1c: contradictory caps (same cap in both add and drop) → error
-if err=$("$SDME" create --drop-capability=CAP_NET_RAW --capability=CAP_NET_RAW -r ubuntu sec-val3 2>&1); then
+if err=$("$SDME" create --name sec-val3 --drop-capability=CAP_NET_RAW --capability=CAP_NET_RAW -r ubuntu 2>&1); then
     fail "contradictory caps should error"
     cleanup_container sec-val3
 else
@@ -99,7 +99,7 @@ else
 fi
 
 # 1d: invalid AppArmor profile name → error
-if err=$("$SDME" create --apparmor-profile="foo/bar" -r ubuntu sec-val4 2>&1); then
+if err=$("$SDME" create --name sec-val4 --apparmor-profile="foo/bar" -r ubuntu 2>&1); then
     fail "invalid AppArmor profile should error"
     cleanup_container sec-val4
 else
@@ -111,7 +111,7 @@ else
 fi
 
 # 1e: empty syscall filter group → error
-if err=$("$SDME" create --system-call-filter=@ -r ubuntu sec-val5 2>&1); then
+if err=$("$SDME" create --name sec-val5 --system-call-filter=@ -r ubuntu 2>&1); then
     fail "empty syscall filter group should error"
     cleanup_container sec-val5
 else
@@ -129,7 +129,7 @@ echo "=== Test 2: State persistence ==="
 
 cleanup_container sec-state
 
-"$SDME" create -r ubuntu \
+"$SDME" create --name sec-state -r ubuntu \
     --drop-capability=CAP_SYS_PTRACE \
     --drop-capability=CAP_NET_RAW \
     --capability=CAP_NET_ADMIN \
@@ -138,7 +138,7 @@ cleanup_container sec-state
     --system-call-filter=~@mount \
     --system-call-filter=~@raw-io \
     --apparmor-profile=sdme-test \
-    sec-state "${VFLAG[@]}" 2>&1
+    "${VFLAG[@]}" 2>&1
 
 state_file="$DATADIR/state/sec-state"
 if [[ ! -f "$state_file" ]]; then
@@ -186,7 +186,7 @@ echo "=== Test 3: --drop-capability ==="
 
 cleanup_container sec-dropcap
 
-"$SDME" create -r ubuntu --drop-capability=CAP_NET_RAW sec-dropcap "${VFLAG[@]}" 2>&1
+"$SDME" create --name sec-dropcap -r ubuntu --drop-capability=CAP_NET_RAW "${VFLAG[@]}" 2>&1
 timeout "$TIMEOUT_BOOT" "$SDME" start sec-dropcap -t "$TIMEOUT_BOOT" "${VFLAG[@]}" 2>&1
 
 # Read the container's bounding set from /proc/1/status.
@@ -220,7 +220,7 @@ echo "=== Test 4: --capability ==="
 cleanup_container sec-addcap
 
 # CAP_NET_ADMIN (bit 12) is not in the default nspawn set.
-"$SDME" create -r ubuntu --capability=CAP_NET_ADMIN sec-addcap "${VFLAG[@]}" 2>&1
+"$SDME" create --name sec-addcap -r ubuntu --capability=CAP_NET_ADMIN "${VFLAG[@]}" 2>&1
 timeout "$TIMEOUT_BOOT" "$SDME" start sec-addcap -t "$TIMEOUT_BOOT" "${VFLAG[@]}" 2>&1
 
 raw=$(timeout "$TIMEOUT_TEST" "$SDME" exec sec-addcap \
@@ -248,7 +248,7 @@ echo "=== Test 5: --no-new-privileges ==="
 
 cleanup_container sec-nnp
 
-"$SDME" create -r ubuntu --no-new-privileges sec-nnp "${VFLAG[@]}" 2>&1
+"$SDME" create --name sec-nnp -r ubuntu --no-new-privileges "${VFLAG[@]}" 2>&1
 timeout "$TIMEOUT_BOOT" "$SDME" start sec-nnp -t "$TIMEOUT_BOOT" "${VFLAG[@]}" 2>&1
 
 # Check that NoNewPrivs is 1 for a newly spawned process.
@@ -270,7 +270,7 @@ echo "=== Test 6: --read-only ==="
 
 cleanup_container sec-ro
 
-"$SDME" create -r ubuntu --read-only sec-ro "${VFLAG[@]}" 2>&1
+"$SDME" create --name sec-ro -r ubuntu --read-only "${VFLAG[@]}" 2>&1
 timeout "$TIMEOUT_BOOT" "$SDME" start sec-ro -t "$TIMEOUT_BOOT" "${VFLAG[@]}" 2>&1
 
 # Attempt to write to /usr should fail (read-only filesystem).
@@ -295,7 +295,7 @@ cleanup_container sec-seccomp
 # Use ~@raw-io to deny raw I/O syscalls (iopl, ioperm, etc.): this
 # doesn't interfere with systemd boot. Verify state persistence and that
 # the nspawn drop-in contains the filter flag.
-"$SDME" create -r ubuntu --system-call-filter=~@raw-io sec-seccomp "${VFLAG[@]}" 2>&1
+"$SDME" create --name sec-seccomp -r ubuntu --system-call-filter=~@raw-io "${VFLAG[@]}" 2>&1
 
 # Verify state file.
 state_file="$DATADIR/state/sec-seccomp"
@@ -328,11 +328,11 @@ cleanup_container sec-seccomp-bare
 # container (bpf gates the cgroup v2 device controller). Verify the bare names
 # are accepted, persist comma-joined in state, land in the drop-in, and survive
 # a stop/start regeneration (the regression a manual drop-in edit fails).
-"$SDME" create -r ubuntu \
+"$SDME" create --name sec-seccomp-bare -r ubuntu \
     --system-call-filter=bpf \
     --system-call-filter=keyctl \
     --system-call-filter=add_key \
-    sec-seccomp-bare "${VFLAG[@]}" 2>&1
+    "${VFLAG[@]}" 2>&1
 
 state_file="$DATADIR/state/sec-seccomp-bare"
 if grep -q "^SYSCALL_FILTER=bpf,keyctl,add_key$" "$state_file"; then
@@ -376,7 +376,7 @@ echo "=== Test 8: --hardened ==="
 
 cleanup_container sec-hardened
 
-"$SDME" create -r ubuntu --hardened sec-hardened "${VFLAG[@]}" 2>&1
+"$SDME" create --name sec-hardened -r ubuntu --hardened "${VFLAG[@]}" 2>&1
 
 state_file="$DATADIR/state/sec-hardened"
 if [[ ! -f "$state_file" ]]; then
@@ -426,7 +426,7 @@ echo "=== Test 9: --hardened with capability override ==="
 cleanup_container sec-hard-ovr
 
 # Explicitly re-add CAP_NET_RAW: it should NOT appear in DROP_CAPS.
-"$SDME" create -r ubuntu --hardened --capability=CAP_NET_RAW sec-hard-ovr "${VFLAG[@]}" 2>&1
+"$SDME" create --name sec-hard-ovr -r ubuntu --hardened --capability=CAP_NET_RAW "${VFLAG[@]}" 2>&1
 
 state_file="$DATADIR/state/sec-hard-ovr"
 if [[ ! -f "$state_file" ]]; then
@@ -494,7 +494,7 @@ else
     if $apparmor_installed; then
         cleanup_container sec-apparmor
 
-        "$SDME" create -r ubuntu --apparmor-profile=sdme-default sec-apparmor "${VFLAG[@]}" 2>&1
+        "$SDME" create --name sec-apparmor -r ubuntu --apparmor-profile=sdme-default "${VFLAG[@]}" 2>&1
 
         state_file="$DATADIR/state/sec-apparmor"
         if [[ ! -f "$state_file" ]]; then
@@ -530,8 +530,8 @@ else
     if $apparmor_installed; then
         cleanup_container sec-aa-enforce
 
-        if ! output=$(timeout "$TIMEOUT_BOOT" "$SDME" create -r ubuntu \
-                --apparmor-profile=sdme-default sec-aa-enforce "${VFLAG[@]}" 2>&1); then
+        if ! output=$(timeout "$TIMEOUT_BOOT" "$SDME" create --name sec-aa-enforce -r ubuntu \
+                --apparmor-profile=sdme-default "${VFLAG[@]}" 2>&1); then
             fail "apparmor enforcement: create failed: $output"
         else
             if ! output=$(timeout "$TIMEOUT_BOOT" "$SDME" start sec-aa-enforce \
@@ -586,7 +586,7 @@ echo "=== Test 12: --hardened boot test ==="
 
 cleanup_container sec-hardboot
 
-if ! output=$(timeout "$TIMEOUT_BOOT" "$SDME" create -r ubuntu --hardened sec-hardboot "${VFLAG[@]}" 2>&1); then
+if ! output=$(timeout "$TIMEOUT_BOOT" "$SDME" create --name sec-hardboot -r ubuntu --hardened "${VFLAG[@]}" 2>&1); then
     fail "hardened-boot: create failed: $output"
 else
     if ! output=$(timeout "$TIMEOUT_BOOT" "$SDME" start sec-hardboot -t "$TIMEOUT_BOOT" "${VFLAG[@]}" 2>&1); then
@@ -646,7 +646,7 @@ echo "=== Test 13: sdme ps with security flags ==="
 
 cleanup_container sec-pschk
 
-"$SDME" create -r ubuntu --no-new-privileges --read-only sec-pschk "${VFLAG[@]}" 2>&1
+"$SDME" create --name sec-pschk -r ubuntu --no-new-privileges --read-only "${VFLAG[@]}" 2>&1
 
 # Check that ps output shows the container (existence check).
 ps_output=$("$SDME" ps 2>&1 || true)
@@ -678,7 +678,7 @@ for distro in "${USERNS_DISTROS[@]}"; do
     userns_any=true
     cleanup_container "$ct_name"
 
-    if ! output=$(timeout "$TIMEOUT_BOOT" "$SDME" create -r "$fs_name" --userns "$ct_name" "${VFLAG[@]}" 2>&1); then
+    if ! output=$(timeout "$TIMEOUT_BOOT" "$SDME" create --name "$ct_name" -r "$fs_name" --userns "${VFLAG[@]}" 2>&1); then
         fail "$distro userns: create failed: $output"
         continue
     fi
@@ -758,7 +758,7 @@ else
     if "$SDME" fs ls 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "$fs_name"; then
         log "  $fs_name already exists, skipping import"
         import_ok=1
-    elif output=$(timeout 600 "$SDME" fs import "$fs_name" quay.io/nginx/nginx-unprivileged \
+    elif output=$(timeout 600 "$SDME" fs import quay.io/nginx/nginx-unprivileged --name "$fs_name" \
             --base-fs=vfy-ubuntu --oci-mode=app -v --install-packages=yes -f 2>&1); then
         import_ok=1
     else
@@ -766,7 +766,7 @@ else
     fi
 
     if [[ $import_ok -eq 1 ]]; then
-        if ! output=$(timeout "$TIMEOUT_BOOT" "$SDME" create -r "$fs_name" --userns "$ct_name" "${VFLAG[@]}" 2>&1); then
+        if ! output=$(timeout "$TIMEOUT_BOOT" "$SDME" create --name "$ct_name" -r "$fs_name" --userns "${VFLAG[@]}" 2>&1); then
             fail "nginx userns OCI: create failed: $output"
         else
             if ! output=$(timeout "$TIMEOUT_BOOT" "$SDME" start "$ct_name" -t 180 "${VFLAG[@]}" 2>&1); then

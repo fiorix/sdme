@@ -3,9 +3,9 @@
 # Render and test-build both AUR packages in a clean Arch environment, e.g. an
 # sdme Arch container, since makepkg does not exist on a non-Arch host:
 #
-#   sudo sdme fs import archlinux docker.io/archlinux/archlinux:base
+#   sudo sdme fs import docker.io/archlinux/archlinux:base
 #   mkdir -p dev/aur-out
-#   sudo sdme new aurbuild -r archlinux \
+#   sudo sdme new --name aurbuild -r archlinux \
 #       -b "$PWD:/src:ro" -b "$PWD/dev/aur-out:/out" \
 #       -- bash /src/packaging/arch/build-in-container.sh
 #

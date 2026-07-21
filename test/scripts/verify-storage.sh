@@ -58,7 +58,7 @@ fi
 # Import a small base rootfs to snapshot from (idempotent; OCI cache is fast).
 echo "=== Setup: importing base rootfs '$BASEFS' ==="
 if ! fs_exists "$BASEFS"; then
-    $SDME fs import "$BASEFS" "${DISTRO_IMAGES[debian]}" $VFLAG --install-packages=yes -f
+    $SDME fs import "${DISTRO_IMAGES[debian]}" --name "$BASEFS" $VFLAG --install-packages=yes -f
 fi
 
 subvol_exists() { btrfs subvolume show "$1" >/dev/null 2>&1; }
@@ -67,7 +67,7 @@ subvol_exists() { btrfs subvolume show "$1" >/dev/null 2>&1; }
 # Test 1: lifecycle
 # ---------------------------------------------------------------------------
 echo "=== Test 1: btrfs container lifecycle ==="
-$SDME create "$CTR" -r "$BASEFS" --storage btrfs $VFLAG
+$SDME create --name "$CTR" -r "$BASEFS" --storage btrfs $VFLAG
 POOLSUB="${SUBROOT}/containers/${CTR}"
 if subvol_exists "$POOLSUB"; then ok "create provisions a subvolume"; else fail "no container subvolume after create"; fi
 
@@ -135,7 +135,7 @@ fi
 # ---------------------------------------------------------------------------
 echo "=== Test 6: disk cap ==="
 CAP="${PREFIX}-cap"
-if $SDME create "$CAP" -r "$BASEFS" --storage btrfs --disk 250M $VFLAG 2>"$TMPD/caperr"; then
+if $SDME create --name "$CAP" -r "$BASEFS" --storage btrfs --disk 250M $VFLAG 2>"$TMPD/caperr"; then
     if grep -q '^DISK=250M' "${DATADIR}/state/${CAP}"; then ok "state records DISK cap"; else fail "state missing DISK cap"; fi
     if timeout "$BOOT_TIMEOUT" $SDME start "$CAP" $VFLAG; then
         sleep 2

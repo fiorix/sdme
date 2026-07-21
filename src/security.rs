@@ -501,8 +501,8 @@ pub const STRICT_APPARMOR_PROFILE: &str = "sdme-default";
 pub const APPARMOR_PROFILE: &str = r#"# AppArmor profile for sdme systemd-nspawn containers.
 #
 # This profile confines containers started with:
-#   sdme create mybox --apparmor-profile sdme-default
-#   sdme create mybox --strict
+#   sdme create --name mybox --apparmor-profile sdme-default
+#   sdme create --name mybox --strict
 #
 # Install:
 #   sdme config apparmor-profile > /etc/apparmor.d/sdme-default

@@ -1,3 +1,14 @@
+sdme (0.18.0-1~resolute1) resolute; urgency=medium
+
+  * Make rootfs imports source-first and infer names from OCI repositories,
+    paths, and URLs; add --name for explicit aliases and actionable collision
+    errors.
+  * Replace positional container names on `sdme create` and `sdme new` with
+    --name, while preserving automatic generation for omitted or empty names.
+  * Enforce the documented 64-character limit on sdme object names.
+
+ -- Alexandre Fiori <fiorix@gmail.com>  Tue, 21 Jul 2026 01:10:57 +0000
+
 sdme (0.17.2-1~resolute1) resolute; urgency=medium
 
   * Fail builds that cannot embed a valid Kubernetes probe instead of shipping

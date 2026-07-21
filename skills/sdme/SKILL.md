@@ -44,8 +44,8 @@ If a command times out or hangs, capture the exact command, stderr, timeout, con
 Use these commands for normal operation:
 
 ```sh
-sudo sdme new NAME -r FS
-sudo sdme create NAME -r FS
+sudo sdme new --name NAME -r FS
+sudo sdme create --name NAME -r FS
 sudo sdme start NAME
 sudo sdme join NAME
 sudo sdme exec NAME -- COMMAND...
@@ -106,7 +106,7 @@ Use `sdme logs` for container journals. The default `sdme logs NAME` reads the h
 
 ## Rootfs And OCI Workflows
 
-Use `sdme fs import` for root filesystems from OCI registries, tarballs, directories, and disk images. Use `--install-packages=yes` when an imported distro rootfs needs packages such as systemd or dbus installed for boot.
+Use `sdme fs import SOURCE` for root filesystems from OCI registries, tarballs, directories, and disk images. The name is inferred from the final repository or path component; pass `--name NAME` for an alias or when inference is invalid. Use `--install-packages=yes` when an imported distro rootfs needs packages such as systemd or dbus installed for boot.
 
 Use `sdme fs build` for repeatable rootfs customization from `FROM`, `RUN`, and `COPY` directives.
 

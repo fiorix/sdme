@@ -180,7 +180,7 @@ phase1_import() {
         fi
         log "  Importing $fs_name from $image"
         local output
-        if output=$(timeout "$TIMEOUT_IMPORT" sdme fs import "$fs_name" "$image" -v --install-packages=yes -f 2>&1); then
+        if output=$(timeout "$TIMEOUT_IMPORT" sdme fs import "$image" --name "$fs_name" -v --install-packages=yes -f 2>&1); then
             record "import/$distro" PASS
         else
             record "import/$distro" FAIL "$output"
@@ -218,7 +218,7 @@ phase2_apps() {
             if fs_exists "$fs_name"; then
                 log "    $fs_name already exists, skipping import"
                 record "app/$app-on-$distro/import" PASS "exists"
-            elif output=$(timeout "$TIMEOUT_IMPORT" sdme fs import "$fs_name" "$image" \
+            elif output=$(timeout "$TIMEOUT_IMPORT" sdme fs import "$image" --name "$fs_name" \
                     --base-fs="$base_fs" --oci-mode=app -v --install-packages=yes -f 2>&1); then
                 record "app/$app-on-$distro/import" PASS
             else
@@ -239,7 +239,7 @@ phase2_apps() {
             esac
 
             # Create
-            if ! output=$(timeout "$TIMEOUT_BOOT" sdme create "${create_args[@]}" "$ct_name" 2>&1); then
+            if ! output=$(timeout "$TIMEOUT_BOOT" sdme create --name "$ct_name" "${create_args[@]}" 2>&1); then
                 record "app/$app-on-$distro/boot" FAIL "create failed: $output"
                 record "app/$app-on-$distro/service" SKIP "create failed"
                 record "app/$app-on-$distro/logs" SKIP "create failed"
@@ -358,7 +358,7 @@ phase3_hardened_apps() {
 
             # Create with --hardened
             local output
-            if ! output=$(timeout "$TIMEOUT_BOOT" sdme create "${create_args[@]}" "$ct_name" 2>&1); then
+            if ! output=$(timeout "$TIMEOUT_BOOT" sdme create --name "$ct_name" "${create_args[@]}" 2>&1); then
                 record "hardened-app/$app-on-$distro/boot" FAIL "create failed: $output"
                 record "hardened-app/$app-on-$distro/service" SKIP "create failed"
                 continue

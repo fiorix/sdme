@@ -47,13 +47,13 @@ The application runs as a regular systemd service. You get logs via `journalctl`
 First, make sure you have a base rootfs imported. If not:
 
 ```sh
-sudo sdme fs import ubuntu docker.io/ubuntu
+sudo sdme fs import docker.io/ubuntu
 ```
 
 Then import nginx on top of it:
 
 ```sh
-sudo sdme fs import nginx docker.io/nginx --base-fs ubuntu
+sudo sdme fs import docker.io/nginx --base-fs ubuntu
 ```
 
 To avoid repeating `--base-fs` on every import, set a default:
@@ -67,7 +67,7 @@ sudo sdme config set default_base_fs ubuntu
 We recommend using `--network-zone` and `--hardened` as described in the [services tutorial](@/tutorial/services.md):
 
 ```sh
-sudo sdme create mycontainer -r nginx --network-zone=services --hardened --started
+sudo sdme create --name mycontainer -r nginx --network-zone=services --hardened --started
 ```
 
 Unlike `sdme new` which drops you into a shell, `create --started` starts the container in the background. OCI application containers run headless services, so there is no need for an interactive shell.

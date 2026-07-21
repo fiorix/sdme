@@ -4,7 +4,7 @@
 # Fedora container:
 #
 #   sudo mkdir -p dev/fedora-out
-#   sudo sdme new fedbuild -r fedora \
+#   sudo sdme new --name fedbuild -r fedora \
 #       -b "$PWD:/src:ro" -b "$PWD/dev/fedora-out:/out" \
 #       -- bash /src/packaging/fedora/build-in-container.sh
 #

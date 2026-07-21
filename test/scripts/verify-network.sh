@@ -89,7 +89,7 @@ phase1_import() {
         log "  $app_fs already exists, skipping import"
     else
         log "  Importing $app_fs from $APP_IMAGE"
-        if ! timeout "$TIMEOUT_IMPORT" sdme fs import "$app_fs" "$APP_IMAGE" \
+        if ! timeout "$TIMEOUT_IMPORT" sdme fs import "$APP_IMAGE" --name "$app_fs" \
                 --base-fs=net-ubuntu --oci-mode=app -v --install-packages=yes -f 2>&1; then
             echo "error: failed to import $app_fs" >&2
             exit 1
@@ -104,7 +104,7 @@ phase2_masking() {
 
     # Test 1: zone auto-unmask (config default masks resolved, zone removes it)
     local ct="net-mask1"
-    if sdme create --network-zone="$ZONE_NAME" -r net-ubuntu "$ct" $VFLAG 2>&1; then
+    if sdme create --name "$ct" --network-zone="$ZONE_NAME" -r net-ubuntu $VFLAG 2>&1; then
         local state_file="$DATADIR/state/$ct"
         if grep -q '^MASKED_SERVICES=' "$state_file" 2>/dev/null; then
             record "mask/zone-auto-unmask" FAIL "MASKED_SERVICES should be absent, got: $(grep '^MASKED_SERVICES=' "$state_file")"
@@ -118,7 +118,7 @@ phase2_masking() {
 
     # Test 2: non-zone masks resolved (--private-network keeps default mask)
     ct="net-mask2"
-    if sdme create --private-network -r net-ubuntu "$ct" $VFLAG 2>&1; then
+    if sdme create --name "$ct" --private-network -r net-ubuntu $VFLAG 2>&1; then
         local state_file="$DATADIR/state/$ct"
         local masked
         masked=$(grep '^MASKED_SERVICES=' "$state_file" 2>/dev/null | cut -d= -f2- || true)
@@ -134,7 +134,7 @@ phase2_masking() {
 
     # Test 3: explicit override (--masked-services kept even with zone)
     ct="net-mask3"
-    if sdme create --network-zone="$ZONE_NAME" --masked-services=systemd-resolved.service -r net-ubuntu "$ct" $VFLAG 2>&1; then
+    if sdme create --name "$ct" --network-zone="$ZONE_NAME" --masked-services=systemd-resolved.service -r net-ubuntu $VFLAG 2>&1; then
         local state_file="$DATADIR/state/$ct"
         local masked
         masked=$(grep '^MASKED_SERVICES=' "$state_file" 2>/dev/null | cut -d= -f2- || true)
@@ -150,7 +150,7 @@ phase2_masking() {
 
     # Test 4: empty masks nothing (--masked-services= clears all masks)
     ct="net-mask4"
-    if sdme create --masked-services= -r net-ubuntu "$ct" $VFLAG 2>&1; then
+    if sdme create --name "$ct" --masked-services= -r net-ubuntu $VFLAG 2>&1; then
         local state_file="$DATADIR/state/$ct"
         if grep -q '^MASKED_SERVICES=' "$state_file" 2>/dev/null; then
             record "mask/empty-clears-all" FAIL "MASKED_SERVICES should be absent, got: $(grep '^MASKED_SERVICES=' "$state_file")"
@@ -173,13 +173,13 @@ phase3_zone() {
 
     # Create containers in the same zone.
     local output
-    if ! output=$(sdme create --network-zone="$ZONE_NAME" -r net-nginx "$engine" $VFLAG 2>&1); then
+    if ! output=$(sdme create --name "$engine" --network-zone="$ZONE_NAME" -r net-nginx $VFLAG 2>&1); then
         record "zone/http-via-ip" FAIL "create engine failed: $output"
         record "zone/resolved-running" FAIL "create engine failed"
         record "zone/llmnr-resolution" FAIL "create engine failed"
         return
     fi
-    if ! output=$(sdme create --network-zone="$ZONE_NAME" -r net-ubuntu "$car" $VFLAG 2>&1); then
+    if ! output=$(sdme create --name "$car" --network-zone="$ZONE_NAME" -r net-ubuntu $VFLAG 2>&1); then
         record "zone/http-via-ip" FAIL "create car failed: $output"
         record "zone/resolved-running" FAIL "create car failed"
         record "zone/llmnr-resolution" FAIL "create car failed"
@@ -284,12 +284,12 @@ phase4_bridge() {
 
     # Create containers on the bridge.
     local output
-    if ! output=$(sdme create --network-bridge="$BRIDGE_NAME" -r net-nginx "$server" $VFLAG 2>&1); then
+    if ! output=$(sdme create --name "$server" --network-bridge="$BRIDGE_NAME" -r net-nginx $VFLAG 2>&1); then
         record "bridge/http-via-ip" FAIL "create server failed: $output"
         record "bridge/networkd-enabled" FAIL "create server failed"
         return
     fi
-    if ! output=$(sdme create --network-bridge="$BRIDGE_NAME" -r net-ubuntu "$client" $VFLAG 2>&1); then
+    if ! output=$(sdme create --name "$client" --network-bridge="$BRIDGE_NAME" -r net-ubuntu $VFLAG 2>&1); then
         record "bridge/http-via-ip" FAIL "create client failed: $output"
         record "bridge/networkd-enabled" FAIL "create client failed"
         sdme rm -f "$server" 2>/dev/null || true

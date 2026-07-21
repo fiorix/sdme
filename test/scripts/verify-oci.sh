@@ -105,7 +105,7 @@ phase1_import_base() {
         fi
         log "  Importing $fs_name from $image"
         local output
-        if output=$(timeout "$TIMEOUT_IMPORT" sdme fs import "$fs_name" "$image" -v --install-packages=yes -f 2>&1); then
+        if output=$(timeout "$TIMEOUT_IMPORT" sdme fs import "$image" --name "$fs_name" -v --install-packages=yes -f 2>&1); then
             record "$distro/import-base" PASS
         else
             record "$distro/import-base" FAIL "$output"
@@ -141,7 +141,7 @@ phase2_test_oci() {
         if fs_exists "$app_fs"; then
             log "    $app_fs already exists, skipping import"
             record "$distro/import-app" PASS "exists"
-        elif output=$(timeout "$TIMEOUT_IMPORT" sdme fs import "$app_fs" "$APP_IMAGE" \
+        elif output=$(timeout "$TIMEOUT_IMPORT" sdme fs import "$APP_IMAGE" --name "$app_fs" \
                 --base-fs="$base_fs" --oci-mode=app -v --install-packages=yes -f 2>&1); then
             record "$distro/import-app" PASS
         else
@@ -166,7 +166,7 @@ phase2_test_oci() {
         # -- Create container with private network + veth --
         # --no-oci-ports prevents auto port forwarding to the host; this
         # test curls the container's veth IP directly so host ports stay free.
-        if ! output=$(timeout "$TIMEOUT_BOOT" sdme create -r "$app_fs" --private-network --network-veth --no-oci-ports "$ct_name" 2>&1); then
+        if ! output=$(timeout "$TIMEOUT_BOOT" sdme create --name "$ct_name" -r "$app_fs" --private-network --network-veth --no-oci-ports 2>&1); then
             record "$distro/state-volumes" SKIP "create failed: $output"
             record "$distro/volume-dir" SKIP "create failed"
             record "$distro/boot" SKIP "create failed"
