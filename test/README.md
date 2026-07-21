@@ -172,7 +172,8 @@ verify-tutorial              83     1     7  FAIL
 Totals                      661     5    15  24 suites
 ```
 
-- `verify-network` reproduced the devsrv host's known unmanaged zone bridge:
+- On Ubuntu 26.04 with Linux 7.0.0-28-generic and systemd 259.5,
+  `verify-network` reproduced the environment's known unmanaged zone bridge:
   no route to the zone peer and no LLMNR response. Bridge networking passed.
   A clean serial rerun reproduced the same 7/2 result.
 - `verify-nested` failed when Docker Hub DNS resolution temporarily failed
@@ -181,10 +182,12 @@ Totals                      661     5    15  24 suites
 - `verify-tutorial` failed because `start --all` included the stopped
   `gitea-pod` left by the preceding failed suite. A clean serial rerun passed
   84/84 with seven expected Docker/veth DHCP skips.
-- `verify-kube-L6-gitea-stack` remains unresolved. The canonical serial stage
-  timed out waiting for MySQL port 3306. A clean serial rerun cleared MySQL but
-  timed out waiting for Gitea port 3000, producing 9 passed, 1 failed, and
-  5 skipped. This is retained as a release-review failure.
+- On the same Ubuntu 26.04 environment, `verify-kube-L6-gitea-stack` remains
+  unresolved. The canonical serial stage timed out waiting for MySQL port
+  3306. A clean serial rerun cleared MySQL but timed out waiting for Gitea port
+  3000, producing 9 passed, 1 failed, and 5 skipped. This records an observed
+  environment result, not a confirmed product regression; it remains retained
+  as a review failure.
 
 ## Log
 
@@ -199,11 +202,13 @@ All changed CLI paths passed throughout the import, distro, OCI, build,
 storage, security, tutorial, and nested suites. Triage retained the canonical
 failures and added clean serial reruns: nested passed 16/16 after transient
 Docker Hub DNS; tutorial passed 84/84 after removing failed-Gitea state;
-network reproduced the host's known zone route and LLMNR failures at 7/2;
-Gitea remained unresolved, moving from a MySQL readiness timeout in the full
-run to a Gitea readiness timeout in the rerun. The missing `qemu-nbd` and
-`kubeconform` tools account for two optional skips; seven tutorial Docker
-checks skipped because the host veth received no default route.
+network reproduced this host's known zone route and LLMNR failures at 7/2;
+Gitea remained unresolved on this host, moving from a MySQL readiness timeout
+in the full run to a Gitea readiness timeout in the rerun. The latter is an
+observed host result, not a confirmed product regression. The missing
+`qemu-nbd` and `kubeconform` tools account for two optional skips; seven
+tutorial Docker checks skipped because the host veth received no default
+route.
 
 ### 0.17.2 -- kube probe build safety (2026-07-20, x86_64)
 

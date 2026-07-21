@@ -492,6 +492,13 @@ parse_standard_args() {
 # failure details. Reads from RESULTS, _pass, _fail, _skip.
 #   generate_standard_report <report-prefix> <title>
 
+host_distro() {
+    (
+        source /etc/os-release 2>/dev/null || true
+        printf '%s\n' "${PRETTY_NAME:-unknown}"
+    )
+}
+
 generate_standard_report() {
     local report_prefix="$1" title="$2"
     local ts
@@ -508,7 +515,7 @@ generate_standard_report() {
         echo "| Field | Value |"
         echo "|-------|-------|"
         echo "| Date | $(date -Iseconds) |"
-        echo "| Hostname | $(hostname) |"
+        echo "| Distro | $(host_distro) |"
         echo "| Kernel | $(uname -r) |"
         echo "| systemd | $(systemctl --version | head -1) |"
         local sdme_ver

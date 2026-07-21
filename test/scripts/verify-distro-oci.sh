@@ -419,7 +419,7 @@ generate_report() {
         echo "| Field | Value |"
         echo "|-------|-------|"
         echo "| Date | $(date -Iseconds) |"
-        echo "| Hostname | $(hostname) |"
+        echo "| Distro | $(host_distro) |"
         echo "| Kernel | $(uname -r) |"
         echo "| systemd | $(systemctl --version | head -1) |"
         local sdme_ver
