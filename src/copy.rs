@@ -110,6 +110,17 @@ fn copy_entry_inner(
             if stat.st_nlink > 1 {
                 let key = (stat.st_dev, stat.st_ino);
                 if let Some(existing) = hardlinks.get(&key) {
+                    // link(2) refuses to replace an existing destination, so
+                    // remove a non-directory destination first: re-copying
+                    // over a populated tree must behave like the fs::copy
+                    // branch, which truncates an existing destination file. A
+                    // directory is left alone and fails the link below.
+                    if let Ok(m) = fs::symlink_metadata(dst) {
+                        if !m.is_dir() {
+                            fs::remove_file(dst)
+                                .with_context(|| format!("failed to replace {}", dst.display()))?;
+                        }
+                    }
                     fs::hard_link(existing, dst).with_context(|| {
                         format!(
                             "failed to hard link {} -> {}",
@@ -705,6 +716,57 @@ mod tests {
         assert!(
             !escape_dir.join("f").exists(),
             "descent followed a symlinked directory and escaped"
+        );
+    }
+
+    #[test]
+    fn test_copy_tree_hardlink_overwrites_existing_destination() {
+        // Re-copying a hardlinked pair over a destination that already has
+        // real files at those names must replace them (the fs::copy branch
+        // truncates; the hardlink branch must not fail with EEXIST).
+        let src = crate::testutil::TempDataDir::new("copy-hl-over-src");
+        let dst = crate::testutil::TempDataDir::new("copy-hl-over-dst");
+        let out = dst.path().join("out");
+        fs::create_dir(&out).unwrap();
+
+        fs::write(src.path().join("a"), "new-content").unwrap();
+        fs::hard_link(src.path().join("a"), src.path().join("b")).unwrap();
+        fs::write(out.join("a"), "old-content").unwrap();
+        fs::write(out.join("b"), "old-content").unwrap();
+
+        copy_tree(src.path(), &out, false).unwrap();
+
+        assert_eq!(fs::read_to_string(out.join("a")).unwrap(), "new-content");
+        let ino_a = fs::metadata(out.join("a")).unwrap().ino();
+        let ino_b = fs::metadata(out.join("b")).unwrap().ino();
+        assert_eq!(ino_a, ino_b, "replaced files should share the same inode");
+        assert_eq!(fs::metadata(out.join("a")).unwrap().nlink(), 2);
+    }
+
+    #[test]
+    fn test_copy_tree_hardlink_destination_directory_errors() {
+        // A directory at the link name is not removed; the link fails instead
+        // of silently replacing the directory.
+        let src = crate::testutil::TempDataDir::new("copy-hl-dir-src");
+        let dst = crate::testutil::TempDataDir::new("copy-hl-dir-dst");
+        let out = dst.path().join("out");
+        fs::create_dir(&out).unwrap();
+
+        fs::write(src.path().join("a"), "content").unwrap();
+        fs::hard_link(src.path().join("a"), src.path().join("b")).unwrap();
+        fs::create_dir(out.join("b")).unwrap();
+
+        let err = copy_tree(src.path(), &out, false).unwrap_err();
+        // Depending on read_dir order this fails in the fs::copy branch
+        // (EISDIR) or the hard link branch; either way it must error.
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("hard link") || msg.contains("Is a directory"),
+            "unexpected error: {msg}"
+        );
+        assert!(
+            out.join("b").symlink_metadata().unwrap().is_dir(),
+            "destination directory must not be removed"
         );
     }
 
