@@ -132,6 +132,19 @@ fn copy_entry_inner(
                 }
                 hardlinks.insert(key, dst.to_path_buf());
             }
+            // In shadow mode, an existing destination with other hard links
+            // must be unlinked first: fs::copy truncates in place, which
+            // would write the new content through every other link to the
+            // same inode, including a link planted outside the tree.
+            if shadow {
+                if let Ok(dst_stat) = lstat_entry(dst) {
+                    if dst_stat.st_nlink > 1 && (dst_stat.st_mode & libc::S_IFMT) == libc::S_IFREG {
+                        fs::remove_file(dst).with_context(|| {
+                            format!("failed to unlink hardlinked destination {}", dst.display())
+                        })?;
+                    }
+                }
+            }
             fs::copy(src, dst).with_context(|| format!("failed to copy file {}", src.display()))?;
             copy_metadata_from_stat(dst, &stat)?;
             copy_xattrs(src, dst)?;
@@ -767,6 +780,35 @@ mod tests {
         assert!(
             out.join("b").symlink_metadata().unwrap().is_dir(),
             "destination directory must not be removed"
+        );
+    }
+
+    #[test]
+    fn test_copy_entry_shadowed_unlinks_hardlinked_destination() {
+        // A destination file hardlinked to an outside file shares its inode:
+        // truncating it in place would write the new content through the
+        // other link. Shadowed copies must unlink such a destination first.
+        let tmp = crate::testutil::TempDataDir::new("shadow-hl-dest");
+        let src = tmp.path().join("source");
+        let outside = tmp.path().join("outside");
+        let root = tmp.path().join("root");
+        fs::create_dir(&root).unwrap();
+        fs::write(&src, b"replacement").unwrap();
+        fs::write(&outside, b"outside original").unwrap();
+        fs::hard_link(&outside, root.join("target")).unwrap();
+
+        copy_entry_shadowed(&src, &root.join("target"), false).unwrap();
+
+        assert_eq!(fs::read(root.join("target")).unwrap(), b"replacement");
+        assert_eq!(
+            fs::read(&outside).unwrap(),
+            b"outside original",
+            "write went through a destination hard link and escaped"
+        );
+        assert_eq!(
+            fs::metadata(&outside).unwrap().nlink(),
+            1,
+            "destination should be a fresh inode, unlinked from the outside file"
         );
     }
 
