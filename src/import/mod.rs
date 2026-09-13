@@ -1326,10 +1326,10 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<String> {
     let kind = detect_source_kind(source)?;
 
     let rootfs_dir = datadir.join("fs");
-    // Reconcile any interrupted earlier replacement before inspecting
-    // state, so a crashed predecessor cannot leave the only copy of the old
-    // tree (or mismatched sidecars) unaddressed.
-    crate::rootfs::recover_interrupted_replacement(&rootfs_dir, &name, verbose)?;
+    // Refuse if an earlier replacement was interrupted mid-flight; the
+    // recovery backups are the only copy of one of the two states, and the
+    // error tells the operator exactly how to reconcile them.
+    crate::rootfs::ensure_no_interrupted_replacement(&rootfs_dir, &name)?;
 
     let final_dir = rootfs_dir.join(&name);
     let replacing = final_dir.exists();
@@ -1690,12 +1690,13 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<String> {
         }
     }
 
-    // Move the replacement into place. Recovery artifacts (the parked old
-    // tree and sidecars, and a completion marker) use names outside the
-    // stale-transaction pattern, so neither the auto-gc sweep nor
-    // `sdme fs gc` can delete the only copy of the old state while the
-    // replacement is in flight; the next locked fs operation reconciles
-    // them via rootfs::recover_interrupted_replacement.
+    // Move the replacement into place. Recovery backups (the parked old
+    // tree and sidecars) use names outside the stale-transaction pattern,
+    // so neither the auto-gc sweep nor `sdme fs gc` can delete the only
+    // copy of the old state while the replacement is in flight. They are
+    // only removed here, in-process, after a successful publication; a
+    // crash leaves them behind and the next locked fs operation fails
+    // closed with exact recovery guidance (ensure_no_interrupted_replacement).
     let rec = crate::rootfs::ReplaceRecover::new(&rootfs_dir, &name);
     if replacing {
         fs::rename(&final_dir, &rec.tree).with_context(|| {
@@ -1795,31 +1796,17 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<String> {
     }
 
     if replacing {
-        // The new state is fully published. Mark completion before
-        // discarding recovery data, so an interruption from here on keeps
-        // the new state instead of restoring the old one. If the marker
-        // cannot be written, report the failure: the next locked fs
-        // operation will roll back to the (consistent) old state.
-        fs::write(&rec.done, b"")
-            .with_context(|| format!("failed to write {}", rec.done.display()))?;
-        // Discard recovery data. Failures leave artifacts that the next
-        // locked fs operation discards via the completion marker, so they
-        // are reported but not fatal.
+        // Publication succeeded; discard the recovery backups. A removal
+        // failure leaves backups that fail the next fs operation closed
+        // (with exact recovery guidance), so it is reported, not fatal.
         if let Err(e) = crate::copy::safe_remove_dir(&rec.tree) {
             eprintln!(
-                "warning: failed to remove replaced rootfs at {}: {e}; \
-                 left for the next fs operation to discard",
+                "warning: failed to remove replaced rootfs at {}: {e}",
                 rec.tree.display()
             );
         }
         let _ = fs::remove_file(&rec.meta);
         let _ = fs::remove_file(&rec.env);
-        if let Err(e) = fs::remove_file(&rec.done) {
-            eprintln!(
-                "warning: failed to clear replacement marker {}: {e}",
-                rec.done.display()
-            );
-        }
     }
 
     if verbose {
@@ -2413,11 +2400,11 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_force_import_recovers_crash_after_tree_park() {
+    fn test_force_import_fails_closed_after_interrupted_replacement() {
         // Simulate a crash between parking the old tree and committing the
-        // new one: the old tree sits at its recovery path and no rootfs is
-        // visible. The next import must first move it back (recovery data is
-        // never GC-eligible), then proceed with the replacement.
+        // new one: the next import must refuse (the backup is the only copy
+        // of the old tree), preserve everything, and emit exact recovery
+        // guidance. Following the guidance unblocks the import.
         let tmp = tmp();
         let src1 = TempSourceDir::new("crash-old");
         fs::write(src1.path().join("marker"), "v1").unwrap();
@@ -2440,6 +2427,35 @@ pub(crate) mod tests {
 
         let src2 = TempSourceDir::new("crash-new");
         fs::write(src2.path().join("marker"), "v2").unwrap();
+        let err = test_run(
+            tmp.path(),
+            src2.path().to_str().unwrap(),
+            "base",
+            false,
+            true,
+        )
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("interrupted"), "got: {msg}");
+        assert!(
+            msg.contains(".base.replace-recover"),
+            "guidance must name the backup: {msg}"
+        );
+
+        // Nothing was moved or deleted.
+        assert_eq!(
+            fs::read_to_string(tmp.path().join("fs/.base.replace-recover/marker")).unwrap(),
+            "v1"
+        );
+        assert!(!tmp.path().join("fs/base").exists());
+
+        // The documented rollback procedure (move the backup back) works,
+        // and the retried replacement completes.
+        fs::rename(
+            tmp.path().join("fs/.base.replace-recover"),
+            tmp.path().join("fs/base"),
+        )
+        .unwrap();
         test_run(
             tmp.path(),
             src2.path().to_str().unwrap(),
@@ -2448,17 +2464,11 @@ pub(crate) mod tests {
             true,
         )
         .unwrap();
-
-        // The replacement proceeded from the recovered old state.
         assert_eq!(
             fs::read_to_string(tmp.path().join("fs/base/marker")).unwrap(),
             "v2"
         );
-        assert!(
-            !tmp.path().join("fs/.base.replace-recover").exists(),
-            "recovery data must be gone after a completed replacement"
-        );
-        assert!(!tmp.path().join("fs/.base.replace-done").exists());
+        assert!(!tmp.path().join("fs/.base.replace-recover").exists());
     }
 
     #[test]
