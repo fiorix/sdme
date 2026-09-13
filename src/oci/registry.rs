@@ -683,14 +683,41 @@ fn resolve_manifest(
 
 // --- Layer download + extraction ---
 
+/// Create a fresh private subdirectory of `parent`, never reusing or
+/// following an existing path.
+///
+/// `mkdir` is atomic: an existing entry (directory, symlink, or file) at a
+/// candidate name fails with EEXIST and the next suffix is tried, so a
+/// preplanted name is always skipped rather than adopted. The directory is
+/// created mode 0o700.
+fn create_fresh_dir(parent: &Path, base: &str) -> Result<PathBuf> {
+    use std::os::unix::fs::DirBuilderExt;
+    for n in 0..1000u32 {
+        let candidate = parent.join(format!("{base}-{n}"));
+        match fs::DirBuilder::new().mode(0o700).create(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                return Err(e).with_context(|| format!("failed to create {}", candidate.display()));
+            }
+        }
+    }
+    bail!(
+        "could not allocate a fresh scratch directory under {}",
+        parent.display()
+    );
+}
+
 /// Scratch directory for layer downloads, created as a sibling of the
 /// staging tree rather than inside it.
 ///
 /// Download temp files must stay outside the tree being extracted: an
 /// earlier layer can plant a symlink at the next download's pathname, and
 /// both the cache copy and the network write would follow it onto the
-/// host. The directory is removed on drop, covering success, failure, and
-/// interruption exits from `download_layers`.
+/// host. The directory is freshly allocated (never a preexisting path) next
+/// to the canonical location of the staging tree, and is removed on drop,
+/// covering success, failure, and interruption exits from
+/// `download_layers`.
 struct LayerScratch {
     dir: PathBuf,
 }
@@ -698,16 +725,25 @@ struct LayerScratch {
 impl LayerScratch {
     fn new(staging_dir: &Path) -> Result<Self> {
         let parent = staging_dir.parent().unwrap_or_else(|| Path::new("."));
+        // The scratch must sit next to the real staging tree. If the given
+        // staging path reaches its directory through a final symlink, its
+        // lexical parent is not the directory that actually holds the tree;
+        // refuse rather than allocate scratch next to a detached path.
+        let staging_canon = fs::canonicalize(staging_dir)
+            .with_context(|| format!("failed to resolve staging dir {}", staging_dir.display()))?;
+        let parent_canon = fs::canonicalize(parent)
+            .with_context(|| format!("failed to resolve {}", parent.display()))?;
+        if staging_canon.parent() != Some(parent_canon.as_path()) {
+            bail!(
+                "staging dir {} resolves to a different subtree; refusing to allocate layer scratch",
+                staging_dir.display()
+            );
+        }
         let name = staging_dir
             .file_name()
             .unwrap_or_else(|| std::ffi::OsStr::new("staging"));
-        let dir = parent.join(format!(
-            ".{}.layers-{}",
-            name.to_string_lossy(),
-            std::process::id()
-        ));
-        fs::create_dir_all(&dir)
-            .with_context(|| format!("failed to create layer scratch dir {}", dir.display()))?;
+        let base = format!(".{}.layers-{}", name.to_string_lossy(), std::process::id());
+        let dir = create_fresh_dir(&parent_canon, &base)?;
         Ok(Self { dir })
     }
 
@@ -1589,14 +1625,22 @@ mod tests {
         }
     }
 
-    /// The scratch directory must be a sibling of the staging tree, never
-    /// inside it. Kept in sync with the naming in `download_layers`.
-    fn scratch_dir_for(staging: &Path) -> PathBuf {
-        staging.parent().unwrap().join(format!(
-            ".{}.layers-{}",
-            staging.file_name().unwrap().to_string_lossy(),
-            std::process::id()
-        ))
+    /// Any leftover scratch dir next to the staging tree, by name prefix.
+    fn leftover_scratch(staging: &Path) -> Vec<PathBuf> {
+        let prefix = format!(
+            ".{}.layers-",
+            staging.file_name().unwrap().to_string_lossy()
+        );
+        fs::read_dir(staging.parent().unwrap())
+            .unwrap()
+            .filter_map(|e| {
+                let e = e.ok()?;
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with(&prefix)
+                    .then(|| e.path())
+            })
+            .collect()
     }
 
     #[test]
@@ -1635,7 +1679,7 @@ mod tests {
             .file_type()
             .is_symlink());
         // No download scratch is left behind, inside or outside the tree.
-        assert!(!scratch_dir_for(&fx.staging).exists());
+        assert!(leftover_scratch(&fx.staging).is_empty());
         assert!(!fx.staging.join(".layer-0.tmp").exists());
         assert!(!fx.staging.join("layer-0.tmp").exists());
     }
@@ -1659,10 +1703,13 @@ mod tests {
             max_download_size: 0,
         };
 
-        let scratch = scratch_dir_for(&fx.staging);
+        let scratch = leftover_scratch(&fx.staging);
         download_layers(&ctx, &fx.image, &fx.manifest, &fx.staging).unwrap_err();
 
-        assert!(!scratch.exists(), "scratch dir left behind after failure");
+        assert!(
+            leftover_scratch(&fx.staging).is_empty(),
+            "scratch dir left behind after failure: {scratch:?}"
+        );
         assert_eq!(fs::read(&fx.sentinel).unwrap(), b"host data");
     }
 
@@ -1680,11 +1727,145 @@ mod tests {
             max_download_size: 0,
         };
 
-        let scratch = scratch_dir_for(&fx.staging);
+        let scratch = leftover_scratch(&fx.staging);
         download_layers(&ctx, &fx.image, &fx.manifest, &fx.staging).unwrap_err();
 
-        assert!(!scratch.exists(), "scratch dir left behind after failure");
+        assert!(
+            leftover_scratch(&fx.staging).is_empty(),
+            "scratch dir left behind after failure: {scratch:?}"
+        );
         assert_eq!(fs::read(&fx.sentinel).unwrap(), b"host data");
+    }
+
+    #[test]
+    fn test_create_fresh_dir_retries_past_existing_entries() {
+        let tmp = crate::testutil::TempDataDir::new("fresh-dir-retry");
+        let parent = tmp.path().join("parent");
+        fs::create_dir_all(&parent).unwrap();
+        let outside = tmp.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+
+        // base-0 is a symlink to an outside directory; base-1 is a real
+        // directory holding a hostile preplanted layer file.
+        std::os::unix::fs::symlink(&outside, parent.join("base-0")).unwrap();
+        fs::create_dir_all(parent.join("base-1")).unwrap();
+        std::os::unix::fs::symlink(&outside, parent.join("base-1/layer-0.tmp")).unwrap();
+
+        let dir = create_fresh_dir(&parent, "base").unwrap();
+        assert_eq!(dir, parent.join("base-2"));
+        let md = dir.symlink_metadata().unwrap();
+        assert!(md.is_dir() && !md.file_type().is_symlink());
+        assert_eq!(mode_of_dir(&dir), 0o700);
+
+        // Preplanted entries and the outside directory are untouched.
+        assert!(fs::read_dir(&outside).unwrap().next().is_none());
+        assert!(parent.join("base-1/layer-0.tmp").symlink_metadata().is_ok());
+
+        // A second allocation gets the next free suffix.
+        let dir2 = create_fresh_dir(&parent, "base").unwrap();
+        assert_eq!(dir2, parent.join("base-3"));
+    }
+
+    fn mode_of_dir(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(path).unwrap().permissions().mode() & 0o7777
+    }
+
+    #[test]
+    fn test_layer_scratch_never_reuses_preplanted_path() {
+        let tmp = crate::testutil::TempDataDir::new("scratch-preplant");
+        let staging = tmp.path().join("staging");
+        fs::create_dir_all(&staging).unwrap();
+        let outside = tmp.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+
+        // Preplant the legacy predictable scratch name as a symlink to an
+        // outside directory. Allocation must not reuse or follow it.
+        let preplanted = tmp
+            .path()
+            .join(format!(".staging.layers-{}", std::process::id()));
+        std::os::unix::fs::symlink(&outside, &preplanted).unwrap();
+
+        let scratch = LayerScratch::new(&staging).unwrap();
+        let scratch_dir = scratch.dir.clone();
+        assert_ne!(scratch_dir, preplanted);
+        let md = scratch_dir.symlink_metadata().unwrap();
+        assert!(md.is_dir() && !md.file_type().is_symlink());
+        assert!(
+            fs::read_dir(&outside).unwrap().next().is_none(),
+            "scratch allocation reached through the preplanted symlink"
+        );
+        // The preplanted symlink is left in place.
+        assert!(preplanted
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink());
+
+        drop(scratch);
+        assert!(!scratch_dir.exists(), "scratch dir not removed on drop");
+    }
+
+    #[test]
+    fn test_layer_scratch_rejects_detached_staging() {
+        let tmp = crate::testutil::TempDataDir::new("scratch-detached");
+        // The real staging tree lives in a different subtree; the path we
+        // are handed reaches it through a symlink.
+        let elsewhere = tmp.path().join("elsewhere");
+        fs::create_dir_all(elsewhere.join("staging")).unwrap();
+        let link = tmp.path().join("staging-link");
+        std::os::unix::fs::symlink(elsewhere.join("staging"), &link).unwrap();
+
+        assert!(
+            LayerScratch::new(&link).is_err(),
+            "scratch allocated for a staging path that is itself a symlink"
+        );
+        // Nothing was created in either location.
+        assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 1);
+        assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn test_layer_scratch_repeated_and_concurrent_allocations_are_distinct() {
+        let tmp = crate::testutil::TempDataDir::new("scratch-concurrent");
+        let staging = tmp.path().join("staging");
+        fs::create_dir_all(&staging).unwrap();
+
+        // Repeated allocations while previous ones are still alive.
+        let a = LayerScratch::new(&staging).unwrap();
+        let b = LayerScratch::new(&staging).unwrap();
+        assert_ne!(a.dir, b.dir);
+        assert!(a.dir.is_dir() && b.dir.is_dir());
+
+        // Concurrent allocations from multiple threads. The scratches are
+        // kept alive until after the join so the allocations overlap.
+        let scratches: Vec<LayerScratch> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..4)
+                .map(|_| {
+                    s.spawn(|| {
+                        (0..4)
+                            .map(|_| LayerScratch::new(&staging).unwrap())
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|h| h.join().unwrap())
+                .collect()
+        });
+        let dirs: Vec<&PathBuf> = scratches.iter().map(|s| &s.dir).collect();
+        let unique: std::collections::HashSet<_> = dirs.iter().collect();
+        assert_eq!(unique.len(), 16, "concurrent scratch dirs collide");
+        assert!(!unique.contains(&&a.dir) && !unique.contains(&&b.dir));
+        for d in &dirs {
+            assert!(d.is_dir(), "scratch dir missing: {}", d.display());
+        }
+
+        drop(scratches);
+        drop(a);
+        drop(b);
+        assert!(leftover_scratch(&staging).is_empty());
     }
 
     #[test]
