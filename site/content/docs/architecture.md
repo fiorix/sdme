@@ -192,7 +192,7 @@ The balance struck is: use D-Bus where it gives us programmatic control (start, 
 
 **restart** stops and then starts a container. It combines flags from stop (`--term`, `--kill`) and start (`--timeout`). Supports `--all` to restart every running container.
 
-**rm** stops the container if running, removes the state file, and deletes the container's directories via `safe_remove_dir()`. This function guards against stale bind mounts that can survive a host crash or unclean shutdown:
+**rm** first queries the container unit's state. Only a typed `NoSuchUnit` response confirms absence; D-Bus connection, permission, decoding, and property errors abort removal before unit mutation or filesystem teardown. A container that needs stopping must also pass the shutdown wait before its storage and state are removed; a failed state query during that wait is not successful shutdown. Once stopped or confirmed absent, removal deletes the container's directories via `safe_remove_dir()` and removes its state file. This function guards against stale bind mounts that can survive a host crash or unclean shutdown:
 
 1. `make_removable()` recursively fixes directory permissions to ensure owner read/write/execute (`0o700`), since containers can create files owned by arbitrary UIDs with restrictive modes.
 2. `find_mounts_under()` reads `/proc/self/mountinfo` to discover any filesystems still mounted under the directory. Mount paths in mountinfo use kernel octal escapes (`\040` for space, etc.); `decode_mountinfo_path()` decodes them before comparison.
