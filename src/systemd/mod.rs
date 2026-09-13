@@ -50,9 +50,12 @@ pub fn is_unit_active(unit: &str) -> bool {
 
 /// Return the ActiveState of a container's systemd unit.
 ///
-/// Returns `None` if the unit does not exist. Possible values include
-/// `"active"`, `"activating"`, `"deactivating"`, `"inactive"`, `"failed"`.
-pub fn unit_active_state(name: &str) -> Option<String> {
+/// Returns `Ok(None)` only when systemd confirms the unit does not
+/// exist, and `Err` when the state could not be determined (bus or
+/// query failure). Destructive callers must treat `Err` as fatal.
+/// Possible state values include `"active"`, `"activating"`,
+/// `"deactivating"`, `"inactive"`, `"failed"`.
+pub fn unit_active_state(name: &str) -> Result<Option<String>> {
     dbus::pub_get_unit_active_state(&service_name(name))
 }
 
