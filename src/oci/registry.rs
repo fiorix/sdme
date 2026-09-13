@@ -700,6 +700,11 @@ fn download_blob(opts: &DownloadBlobOptions<'_>) -> Result<()> {
     let dest = opts.dest;
     let verbose = ctx.verbose;
     let registry = opts.registry;
+    // Layer descriptors come from the registry and are untrusted: reject
+    // malformed digests before they reach a URL or a filesystem path.
+    if super::cache::parse_sha256_hex(digest).is_none() {
+        bail!("malformed or unsupported layer digest: {digest}");
+    }
     // Check cache first.
     if let Some(cached_path) = ctx.cache.get(digest, verbose) {
         fs::copy(&cached_path, dest)
@@ -1381,6 +1386,61 @@ mod tests {
 
         assert!(msg.contains("failed to fetch required image config sha256:abc"));
         assert!(msg.contains("timeout: resolve"));
+    }
+
+    #[test]
+    fn test_download_blob_rejects_malformed_digest() {
+        let tmp = std::env::temp_dir().join(format!(
+            "sdme-test-blob-digest-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        let cfg = crate::config::Config {
+            oci_cache_max_size: "0".to_string(),
+            ..crate::config::Config::default()
+        };
+        let cache = crate::oci::cache::BlobCache::from_config(&cfg).unwrap();
+        let agent = build_http_agent(false, 5, 5).unwrap();
+        let ctx = PullContext {
+            agent: &agent,
+            token: None,
+            cache: &cache,
+            verbose: false,
+            max_download_size: 0,
+        };
+        let dest = tmp.join("dest.blob");
+
+        let sentinel = tmp.join("sentinel");
+        fs::write(&sentinel, b"untouched").unwrap();
+        let abs_digest = format!("sha256:{}", sentinel.display());
+
+        for bad in [
+            abs_digest.as_str(),
+            "sha256:../escape",
+            "sha256:abcd",
+            "sha512:aaaaaaaa",
+        ] {
+            let err = download_blob(&DownloadBlobOptions {
+                ctx: &ctx,
+                registry: "127.0.0.1:1",
+                repository: "test/img",
+                digest: bad,
+                dest: &dest,
+            })
+            .unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("malformed or unsupported layer digest"),
+                "unexpected error for {bad}: {err}"
+            );
+            assert!(!dest.exists(), "dest created for digest {bad}");
+        }
+        assert_eq!(fs::read(&sentinel).unwrap(), b"untouched");
+
+        let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]
