@@ -1326,6 +1326,11 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<String> {
     let kind = detect_source_kind(source)?;
 
     let rootfs_dir = datadir.join("fs");
+    // Reconcile any interrupted earlier replacement before inspecting
+    // state, so a crashed predecessor cannot leave the only copy of the old
+    // tree (or mismatched sidecars) unaddressed.
+    crate::rootfs::recover_interrupted_replacement(&rootfs_dir, &name, verbose)?;
+
     let final_dir = rootfs_dir.join(&name);
     let replacing = final_dir.exists();
     if replacing {
@@ -1685,81 +1690,134 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<String> {
         }
     }
 
-    // Move the replacement into place. When replacing, the old tree is first
-    // parked under a remove-txn name (hidden from `fs list`, reclaimed by gc
-    // if the import dies in this window) so the commit rename can proceed
-    // and a later failure can still be rolled back.
-    let remove_txn = if replacing {
-        Some(crate::txn::Txn::new(
-            &rootfs_dir,
-            &name,
-            crate::txn::TxnKind::Remove,
-            auto_gc,
-            verbose,
-        ))
-    } else {
-        None
-    };
-    if let Some(ref rtxn) = remove_txn {
-        fs::rename(&final_dir, rtxn.path()).with_context(|| {
+    // Move the replacement into place. Recovery artifacts (the parked old
+    // tree and sidecars, and a completion marker) use names outside the
+    // stale-transaction pattern, so neither the auto-gc sweep nor
+    // `sdme fs gc` can delete the only copy of the old state while the
+    // replacement is in flight; the next locked fs operation reconciles
+    // them via rootfs::recover_interrupted_replacement.
+    let rec = crate::rootfs::ReplaceRecover::new(&rootfs_dir, &name);
+    if replacing {
+        fs::rename(&final_dir, &rec.tree).with_context(|| {
             format!(
                 "failed to park {} at {}",
                 final_dir.display(),
-                rtxn.path().display()
+                rec.tree.display()
             )
         })?;
-        if let Err(e) = txn.commit(&final_dir) {
-            let _ = fs::rename(rtxn.path(), &final_dir);
-            return Err(e);
+    }
+    if let Err(e) = txn.commit(&final_dir) {
+        if replacing {
+            // The commit never happened; move the old tree back. A rollback
+            // failure is reported, not swallowed.
+            return Err(match fs::rename(&rec.tree, &final_dir) {
+                Ok(()) => e,
+                Err(re) => e.context(format!(
+                    "rollback also failed: the old rootfs remains parked at {}: {re:#}",
+                    rec.tree.display()
+                )),
+            });
         }
-    } else {
-        txn.commit(&final_dir)?;
+        return Err(e);
     }
 
     // Publish the sidecars: install the new ones, and drop a stale
-    // environment file when the replacement carries none. The old
-    // environment file is parked (not deleted) first so a failure can be
-    // rolled back to the exact pre-import sidecar state; the parked file is
-    // removed once publication succeeds.
-    let env_parked = rootfs_dir.join(format!(".{name}.env.remove-txn-{pid}"));
-    let had_env = env_path.symlink_metadata().is_ok();
+    // environment file when the replacement carries none. When replacing,
+    // the old sidecars are parked (not deleted) so a failure can be rolled
+    // back to the exact pre-import state. Every completed step is tracked,
+    // and the rollback below only undoes steps that actually happened;
+    // rollback errors are reported, not swallowed.
+    let had_meta = replacing && meta_path.symlink_metadata().is_ok();
+    let had_env = replacing && env_path.symlink_metadata().is_ok();
+    let mut meta_parked = false;
+    let mut env_parked = false;
+    let mut env_published = false;
     let publish = (|| -> Result<()> {
+        if had_meta {
+            fs::rename(&meta_path, &rec.meta)
+                .with_context(|| format!("failed to park {}", meta_path.display()))?;
+            meta_parked = true;
+        }
         if had_env {
-            fs::rename(&env_path, &env_parked)
+            fs::rename(&env_path, &rec.env)
                 .with_context(|| format!("failed to park {}", env_path.display()))?;
+            env_parked = true;
         }
         if new_env.is_some() {
             fs::rename(&env_tmp, &env_path)
                 .with_context(|| format!("failed to publish {}", env_path.display()))?;
+            env_published = true;
+        } else if !replacing {
+            // A stale environment file from an earlier import of the same
+            // name must not survive a fresh, environment-less import.
+            let _ = fs::remove_file(&env_path);
         }
         fs::rename(&meta_tmp, &meta_path)
             .with_context(|| format!("failed to publish {}", meta_path.display()))?;
         Ok(())
     })();
     if let Err(e) = publish {
-        // Roll the tree and sidecars back to the pre-import state.
-        let _ = crate::copy::safe_remove_dir(&final_dir);
-        if let Some(ref rtxn) = remove_txn {
-            let _ = fs::rename(rtxn.path(), &final_dir);
+        let mut errs: Vec<String> = Vec::new();
+        if env_published {
+            if let Err(re) = fs::remove_file(&env_path) {
+                errs.push(format!("remove new env {}: {re}", env_path.display()));
+            }
         }
-        let _ = fs::remove_file(&env_path);
-        if had_env {
-            let _ = fs::rename(&env_parked, &env_path);
+        if env_parked {
+            if let Err(re) = fs::rename(&rec.env, &env_path) {
+                errs.push(format!("restore env {}: {re}", env_path.display()));
+            }
+        }
+        if meta_parked {
+            if let Err(re) = fs::rename(&rec.meta, &meta_path) {
+                errs.push(format!("restore metadata {}: {re}", meta_path.display()));
+            }
+        }
+        if let Err(re) = crate::copy::safe_remove_dir(&final_dir) {
+            errs.push(format!("remove new tree {}: {re}", final_dir.display()));
+        }
+        if replacing {
+            if let Err(re) = fs::rename(&rec.tree, &final_dir) {
+                errs.push(format!("restore old tree {}: {re}", final_dir.display()));
+            }
         }
         let _ = fs::remove_file(&meta_tmp);
         let _ = fs::remove_file(&env_tmp);
-        return Err(e);
+        return Err(if errs.is_empty() {
+            e
+        } else {
+            e.context(format!(
+                "publication rollback incomplete; recovery artifacts remain under {}: {}",
+                rootfs_dir.display(),
+                errs.join("; ")
+            ))
+        });
     }
-    let _ = fs::remove_file(&env_parked);
 
-    // Replacement complete: drop the parked old tree. A removal failure
-    // leaves a hidden transaction directory that a later stale-transaction
-    // sweep reclaims, so it does not fail the import.
-    if let Some(ref rtxn) = remove_txn {
-        if let Err(e) = crate::copy::safe_remove_dir(rtxn.path()) {
+    if replacing {
+        // The new state is fully published. Mark completion before
+        // discarding recovery data, so an interruption from here on keeps
+        // the new state instead of restoring the old one. If the marker
+        // cannot be written, report the failure: the next locked fs
+        // operation will roll back to the (consistent) old state.
+        fs::write(&rec.done, b"")
+            .with_context(|| format!("failed to write {}", rec.done.display()))?;
+        // Discard recovery data. Failures leave artifacts that the next
+        // locked fs operation discards via the completion marker, so they
+        // are reported but not fatal.
+        if let Err(e) = crate::copy::safe_remove_dir(&rec.tree) {
             eprintln!(
-                "warning: failed to remove replaced rootfs at {}: {e}; left for fs gc",
-                rtxn.path().display()
+                "warning: failed to remove replaced rootfs at {}: {e}; \
+                 left for the next fs operation to discard",
+                rec.tree.display()
+            );
+        }
+        let _ = fs::remove_file(&rec.meta);
+        let _ = fs::remove_file(&rec.env);
+        if let Err(e) = fs::remove_file(&rec.done) {
+            eprintln!(
+                "warning: failed to clear replacement marker {}: {e}",
+                rec.done.display()
             );
         }
     }
@@ -2252,12 +2310,13 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_force_import_sidecar_publish_failure_rolls_back() {
-        // If publishing the new metadata fails after the new tree is in
-        // place, the old tree and the old sidecars are rolled back: the
-        // filesystem and its sidecars move as one replacement state.
+    fn test_force_import_env_park_failure_preserves_original_state() {
+        // A foreign non-empty directory at the env recovery path makes the
+        // env park step fail. The rollback must only undo steps that
+        // completed, so the original environment sidecar, never parked, is
+        // preserved exactly, along with the old tree and metadata.
         let tmp = tmp();
-        let src1 = TempSourceDir::new("pub-old");
+        let src1 = TempSourceDir::new("park-old");
         fs::write(src1.path().join("marker"), "v1").unwrap();
         test_run(
             tmp.path(),
@@ -2268,14 +2327,12 @@ pub(crate) mod tests {
         )
         .unwrap();
         fs::write(tmp.path().join("fs/.base.env"), "A=1\n").unwrap();
+        let meta_before = fs::read_to_string(tmp.path().join("fs/.base.meta")).unwrap();
 
-        // Replace the metadata sidecar with a non-empty directory so the
-        // publish rename fails deterministically.
-        let meta_path = tmp.path().join("fs/.base.meta");
-        fs::remove_file(&meta_path).unwrap();
-        fs::create_dir_all(meta_path.join("child")).unwrap();
+        let junk = tmp.path().join("fs/.base.env.replace-recover");
+        fs::create_dir_all(junk.join("child")).unwrap();
 
-        let src2 = TempSourceDir::new("pub-new");
+        let src2 = TempSourceDir::new("park-new");
         fs::write(src2.path().join("marker"), "v2").unwrap();
         test_run(
             tmp.path(),
@@ -2289,14 +2346,119 @@ pub(crate) mod tests {
         assert_eq!(
             fs::read_to_string(tmp.path().join("fs/base/marker")).unwrap(),
             "v1",
-            "sidecar publish failure must roll the rootfs back to the old tree"
+            "failed replacement must keep the old tree"
         );
         assert_eq!(
             fs::read_to_string(tmp.path().join("fs/.base.env")).unwrap(),
             "A=1\n",
-            "sidecar publish failure must restore the old environment sidecar"
+            "the original env was never parked and must not be deleted"
         );
-        assert!(meta_path.is_dir(), "injected obstacle should be untouched");
+        assert_eq!(
+            fs::read_to_string(tmp.path().join("fs/.base.meta")).unwrap(),
+            meta_before,
+            "metadata must be preserved exactly"
+        );
+        assert!(
+            junk.join("child").is_dir(),
+            "foreign data at the recovery path must be left untouched"
+        );
+    }
+
+    #[test]
+    fn test_force_import_meta_park_failure_preserves_original_state() {
+        // Same boundary at the metadata park step: a foreign non-empty
+        // directory at the meta recovery path fails the replacement, and the
+        // old tree and both sidecars are preserved exactly.
+        let tmp = tmp();
+        let src1 = TempSourceDir::new("mpark-old");
+        fs::write(src1.path().join("marker"), "v1").unwrap();
+        test_run(
+            tmp.path(),
+            src1.path().to_str().unwrap(),
+            "base",
+            false,
+            true,
+        )
+        .unwrap();
+        fs::write(tmp.path().join("fs/.base.env"), "A=1\n").unwrap();
+        let meta_before = fs::read_to_string(tmp.path().join("fs/.base.meta")).unwrap();
+
+        let junk = tmp.path().join("fs/.base.meta.replace-recover");
+        fs::create_dir_all(junk.join("child")).unwrap();
+
+        let src2 = TempSourceDir::new("mpark-new");
+        fs::write(src2.path().join("marker"), "v2").unwrap();
+        test_run(
+            tmp.path(),
+            src2.path().to_str().unwrap(),
+            "base",
+            false,
+            true,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            fs::read_to_string(tmp.path().join("fs/base/marker")).unwrap(),
+            "v1"
+        );
+        assert_eq!(
+            fs::read_to_string(tmp.path().join("fs/.base.env")).unwrap(),
+            "A=1\n"
+        );
+        assert_eq!(
+            fs::read_to_string(tmp.path().join("fs/.base.meta")).unwrap(),
+            meta_before
+        );
+        assert!(junk.join("child").is_dir());
+    }
+
+    #[test]
+    fn test_force_import_recovers_crash_after_tree_park() {
+        // Simulate a crash between parking the old tree and committing the
+        // new one: the old tree sits at its recovery path and no rootfs is
+        // visible. The next import must first move it back (recovery data is
+        // never GC-eligible), then proceed with the replacement.
+        let tmp = tmp();
+        let src1 = TempSourceDir::new("crash-old");
+        fs::write(src1.path().join("marker"), "v1").unwrap();
+        test_run(
+            tmp.path(),
+            src1.path().to_str().unwrap(),
+            "base",
+            false,
+            true,
+        )
+        .unwrap();
+
+        // Crash simulation: old tree parked, nothing committed.
+        fs::rename(
+            tmp.path().join("fs/base"),
+            tmp.path().join("fs/.base.replace-recover"),
+        )
+        .unwrap();
+        assert!(!tmp.path().join("fs/base").exists());
+
+        let src2 = TempSourceDir::new("crash-new");
+        fs::write(src2.path().join("marker"), "v2").unwrap();
+        test_run(
+            tmp.path(),
+            src2.path().to_str().unwrap(),
+            "base",
+            false,
+            true,
+        )
+        .unwrap();
+
+        // The replacement proceeded from the recovered old state.
+        assert_eq!(
+            fs::read_to_string(tmp.path().join("fs/base/marker")).unwrap(),
+            "v2"
+        );
+        assert!(
+            !tmp.path().join("fs/.base.replace-recover").exists(),
+            "recovery data must be gone after a completed replacement"
+        );
+        assert!(!tmp.path().join("fs/.base.replace-done").exists());
     }
 
     #[test]

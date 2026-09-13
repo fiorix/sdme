@@ -15,6 +15,110 @@ use anyhow::{bail, Context, Result};
 
 use crate::{validate_name, State};
 
+/// Recovery artifact paths for a rootfs replacement (forced import).
+///
+/// The names deliberately lack the `-txn-` marker, so neither the
+/// stale-transaction sweep nor `sdme fs gc` ever deletes them: while a
+/// replacement is in flight they hold the only copy of the pre-replacement
+/// state, and [`recover_interrupted_replacement`] reconciles them
+/// deterministically on the next locked fs operation.
+pub(crate) struct ReplaceRecover {
+    /// Parked old rootfs tree.
+    pub tree: std::path::PathBuf,
+    /// Parked old metadata sidecar.
+    pub meta: std::path::PathBuf,
+    /// Parked old environment sidecar.
+    pub env: std::path::PathBuf,
+    /// Completion marker, written only after the new state is fully published.
+    pub done: std::path::PathBuf,
+}
+
+impl ReplaceRecover {
+    pub(crate) fn new(rootfs_dir: &Path, name: &str) -> Self {
+        Self {
+            tree: rootfs_dir.join(format!(".{name}.replace-recover")),
+            meta: rootfs_dir.join(format!(".{name}.meta.replace-recover")),
+            env: rootfs_dir.join(format!(".{name}.env.replace-recover")),
+            done: rootfs_dir.join(format!(".{name}.replace-done")),
+        }
+    }
+}
+
+fn path_present(p: &Path) -> bool {
+    p.symlink_metadata().is_ok()
+}
+
+/// Reconcile a forced-import replacement of `name` that was interrupted.
+///
+/// Must run under the exclusive fs lock for `name`, before the operation
+/// inspects the tree. The completion marker decides the outcome:
+///
+/// - Marker present: the new state was fully published before the
+///   interruption and is authoritative; leftover recovery artifacts are
+///   discarded.
+/// - Marker absent and the parked old tree is present: the replacement did
+///   not complete. The pre-replacement state is restored: a committed new
+///   tree is removed, parked old sidecars are moved back, and the parked
+///   old tree is moved back.
+/// - No parked old tree: nothing to do. Lone sidecar recovery files cannot
+///   arise from the replacement flow (the tree is parked first and
+///   discarded last), so they are foreign data and left untouched.
+///
+/// All errors propagate: guessing is worse than failing when the only copy
+/// of either state is at stake.
+pub(crate) fn recover_interrupted_replacement(
+    rootfs_dir: &Path,
+    name: &str,
+    verbose: bool,
+) -> Result<()> {
+    let rec = ReplaceRecover::new(rootfs_dir, name);
+    let final_dir = rootfs_dir.join(name);
+    let meta_path = rootfs_dir.join(format!(".{name}.meta"));
+    let env_path = rootfs_dir.join(format!(".{name}.env"));
+
+    if path_present(&rec.done) {
+        // Fully published before the interruption: discard recovery data.
+        if path_present(&rec.tree) {
+            crate::copy::safe_remove_dir(&rec.tree)?;
+        }
+        for p in [&rec.meta, &rec.env] {
+            if path_present(p) {
+                fs::remove_file(p)?;
+            }
+        }
+        fs::remove_file(&rec.done)?;
+        if verbose {
+            eprintln!("discarded recovery data from completed replacement of '{name}'");
+        }
+        return Ok(());
+    }
+
+    if !path_present(&rec.tree) {
+        return Ok(());
+    }
+    if verbose {
+        eprintln!("recovering interrupted replacement of fs '{name}'");
+    }
+
+    if path_present(&rec.meta) {
+        // Publication had started: restore the old sidecars. A parked env
+        // means a visible env file (if any) belongs to the aborted
+        // replacement and is removed before the old one is moved back.
+        if path_present(&rec.env) {
+            if path_present(&env_path) {
+                fs::remove_file(&env_path)?;
+            }
+            fs::rename(&rec.env, &env_path)?;
+        }
+        fs::rename(&rec.meta, &meta_path)?;
+    }
+    if path_present(&final_dir) {
+        crate::copy::safe_remove_dir(&final_dir)?;
+    }
+    fs::rename(&rec.tree, &final_dir)?;
+    Ok(())
+}
+
 /// An entry returned by [`list`].
 #[derive(serde::Serialize)]
 pub struct RootfsEntry {
@@ -248,14 +352,20 @@ pub fn import(datadir: &Path, opts: &crate::import::ImportOptions) -> Result<Str
 pub fn remove(datadir: &Path, name: &str, auto_gc: bool, verbose: bool) -> Result<()> {
     validate_name(name)?;
 
-    let rootfs_path = datadir.join("fs").join(name);
-    if !rootfs_path.exists() {
-        bail!("fs not found: {name}");
-    }
-
     // Acquire exclusive lock to prevent removal while a build is using this rootfs.
     let _lock = crate::lock::lock_exclusive(datadir, "fs", name)
         .with_context(|| format!("cannot remove rootfs '{name}': in use"))?;
+
+    // Reconcile any interrupted forced-import replacement before inspecting
+    // the tree, so removal never mistakes recovery artifacts for the rootfs
+    // or deletes the only copy of a recoverable state.
+    let rootfs_dir = datadir.join("fs");
+    recover_interrupted_replacement(&rootfs_dir, name, verbose)?;
+
+    let rootfs_path = rootfs_dir.join(name);
+    if !rootfs_path.exists() {
+        bail!("fs not found: {name}");
+    }
 
     // Check that no container is using this rootfs (first pass).
     check_rootfs_in_use(datadir, name)?;
@@ -263,7 +373,6 @@ pub fn remove(datadir: &Path, name: &str, auto_gc: bool, verbose: bool) -> Resul
     // Atomically rename the fs entry to a staging name so that any concurrent
     // `sdme create --fs <name>` will fail with "fs not found" instead
     // of creating a container with a dangling reference.
-    let rootfs_dir = datadir.join("fs");
     let mut txn = crate::txn::Txn::new(
         &rootfs_dir,
         name,
@@ -311,6 +420,19 @@ pub fn remove(datadir: &Path, name: &str, auto_gc: bool, verbose: bool) -> Resul
     let _ = fs::remove_file(meta_path);
     let env_path = datadir.join("fs").join(format!(".{name}.env"));
     let _ = fs::remove_file(env_path);
+
+    // The rootfs is gone for good, so any replacement-recovery artifacts
+    // left under its name have nothing to protect; remove them too.
+    let rec = ReplaceRecover::new(&rootfs_dir, name);
+    for p in [&rec.tree, &rec.meta, &rec.env, &rec.done] {
+        if let Ok(m) = p.symlink_metadata() {
+            if m.is_dir() {
+                crate::copy::safe_remove_dir(p)?;
+            } else {
+                fs::remove_file(p)?;
+            }
+        }
+    }
 
     if verbose {
         eprintln!("removed fs '{name}'");
@@ -573,6 +695,180 @@ mod tests {
         assert!(list(tmp.path()).unwrap().is_empty());
         assert!(!tmp.path().join("fs/alpha").exists());
         assert!(!tmp.path().join("fs/beta").exists());
+    }
+
+    // --- Interrupted replacement recovery ---
+
+    /// Helper: a datadir with fs/base (marker v1) and its sidecars.
+    fn make_base(name: &str) -> TempDataDir {
+        let tmp = tmp();
+        let fs_dir = tmp.path().join("fs");
+        fs::create_dir_all(fs_dir.join("base")).unwrap();
+        fs::write(fs_dir.join("base/marker"), "v1").unwrap();
+        fs::write(fs_dir.join(".base.meta"), "DISTRO=old\n").unwrap();
+        fs::write(fs_dir.join(".base.env"), "A=1\n").unwrap();
+        let _ = name;
+        tmp
+    }
+
+    #[test]
+    fn test_recover_crash_after_park_before_commit() {
+        // Old tree parked, nothing committed: restore it in place.
+        let tmp = make_base("park");
+        let fs_dir = tmp.path().join("fs");
+        fs::rename(fs_dir.join("base"), fs_dir.join(".base.replace-recover")).unwrap();
+
+        recover_interrupted_replacement(&fs_dir, "base", false).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(fs_dir.join("base/marker")).unwrap(),
+            "v1"
+        );
+        assert!(!fs_dir.join(".base.replace-recover").exists());
+        assert_eq!(
+            fs::read_to_string(fs_dir.join(".base.meta")).unwrap(),
+            "DISTRO=old\n"
+        );
+        assert_eq!(
+            fs::read_to_string(fs_dir.join(".base.env")).unwrap(),
+            "A=1\n"
+        );
+    }
+
+    #[test]
+    fn test_recover_crash_after_commit_before_publish() {
+        // New tree committed, old tree parked, old sidecars still in place:
+        // roll back to the old tree.
+        let tmp = make_base("commit");
+        let fs_dir = tmp.path().join("fs");
+        fs::rename(fs_dir.join("base"), fs_dir.join(".base.replace-recover")).unwrap();
+        fs::create_dir_all(fs_dir.join("base")).unwrap();
+        fs::write(fs_dir.join("base/marker"), "v2").unwrap();
+
+        recover_interrupted_replacement(&fs_dir, "base", false).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(fs_dir.join("base/marker")).unwrap(),
+            "v1"
+        );
+        assert!(!fs_dir.join(".base.replace-recover").exists());
+        assert_eq!(
+            fs::read_to_string(fs_dir.join(".base.meta")).unwrap(),
+            "DISTRO=old\n"
+        );
+    }
+
+    #[test]
+    fn test_recover_crash_mid_publish_restores_sidecars() {
+        // New tree and new env visible, old tree/meta/env parked: the whole
+        // pre-replacement state is restored.
+        let tmp = make_base("midpub");
+        let fs_dir = tmp.path().join("fs");
+        fs::rename(fs_dir.join("base"), fs_dir.join(".base.replace-recover")).unwrap();
+        fs::create_dir_all(fs_dir.join("base")).unwrap();
+        fs::write(fs_dir.join("base/marker"), "v2").unwrap();
+        fs::rename(
+            fs_dir.join(".base.meta"),
+            fs_dir.join(".base.meta.replace-recover"),
+        )
+        .unwrap();
+        fs::rename(
+            fs_dir.join(".base.env"),
+            fs_dir.join(".base.env.replace-recover"),
+        )
+        .unwrap();
+        fs::write(fs_dir.join(".base.env"), "B=2\n").unwrap();
+
+        recover_interrupted_replacement(&fs_dir, "base", false).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(fs_dir.join("base/marker")).unwrap(),
+            "v1"
+        );
+        assert_eq!(
+            fs::read_to_string(fs_dir.join(".base.meta")).unwrap(),
+            "DISTRO=old\n"
+        );
+        assert_eq!(
+            fs::read_to_string(fs_dir.join(".base.env")).unwrap(),
+            "A=1\n"
+        );
+        assert!(!fs_dir.join(".base.meta.replace-recover").exists());
+        assert!(!fs_dir.join(".base.env.replace-recover").exists());
+    }
+
+    #[test]
+    fn test_recover_completed_marker_discards_recovery_data() {
+        // Completion marker present: the new state is authoritative and
+        // leftover recovery artifacts are discarded.
+        let tmp = make_base("done");
+        let fs_dir = tmp.path().join("fs");
+        fs::rename(fs_dir.join("base"), fs_dir.join(".base.replace-recover")).unwrap();
+        fs::create_dir_all(fs_dir.join("base")).unwrap();
+        fs::write(fs_dir.join("base/marker"), "v2").unwrap();
+        fs::rename(
+            fs_dir.join(".base.meta"),
+            fs_dir.join(".base.meta.replace-recover"),
+        )
+        .unwrap();
+        fs::write(fs_dir.join(".base.meta"), "DISTRO=new\n").unwrap();
+        fs::write(fs_dir.join(".base.replace-done"), b"").unwrap();
+
+        recover_interrupted_replacement(&fs_dir, "base", false).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(fs_dir.join("base/marker")).unwrap(),
+            "v2"
+        );
+        assert_eq!(
+            fs::read_to_string(fs_dir.join(".base.meta")).unwrap(),
+            "DISTRO=new\n"
+        );
+        assert!(!fs_dir.join(".base.replace-recover").exists());
+        assert!(!fs_dir.join(".base.meta.replace-recover").exists());
+        assert!(!fs_dir.join(".base.replace-done").exists());
+    }
+
+    #[test]
+    fn test_recover_ignores_lone_sidecar_recovery_files() {
+        // A lone sidecar recovery file cannot arise from the replacement
+        // flow; it is foreign data and must be left untouched.
+        let tmp = make_base("lone");
+        let fs_dir = tmp.path().join("fs");
+        fs::create_dir_all(fs_dir.join(".base.env.replace-recover/child")).unwrap();
+
+        recover_interrupted_replacement(&fs_dir, "base", false).unwrap();
+
+        assert!(fs_dir.join(".base.env.replace-recover/child").is_dir());
+        assert_eq!(
+            fs::read_to_string(fs_dir.join("base/marker")).unwrap(),
+            "v1"
+        );
+        assert_eq!(
+            fs::read_to_string(fs_dir.join(".base.env")).unwrap(),
+            "A=1\n"
+        );
+    }
+
+    #[test]
+    fn test_recovery_artifacts_survive_txn_gc() {
+        // Recovery artifacts use names outside the -txn- pattern: neither
+        // the stale-transaction sweep nor `sdme fs gc` may delete the only
+        // copy of a recoverable state.
+        let tmp = make_base("gc");
+        let fs_dir = tmp.path().join("fs");
+        fs::rename(fs_dir.join("base"), fs_dir.join(".base.replace-recover")).unwrap();
+        fs::rename(
+            fs_dir.join(".base.meta"),
+            fs_dir.join(".base.meta.replace-recover"),
+        )
+        .unwrap();
+
+        crate::txn::cleanup_stale_txns(&fs_dir, "base", false).unwrap();
+        crate::txn::gc(&fs_dir, false).unwrap();
+
+        assert!(fs_dir.join(".base.replace-recover/marker").is_file());
+        assert!(fs_dir.join(".base.meta.replace-recover").is_file());
     }
 
     #[test]
