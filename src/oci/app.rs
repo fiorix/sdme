@@ -501,6 +501,17 @@ pub(crate) fn setup_oci_app(opts: &OciAppSetup) -> Result<()> {
             opts.staging_dir.display()
         );
     }
+    // The app dir (env/ports/volumes) comes from the same image-adjacent
+    // ancestry; it must likewise resolve inside the staging tree.
+    let app_dir_canon = fs::canonicalize(opts.app_dir)
+        .with_context(|| format!("failed to resolve {}", opts.app_dir.display()))?;
+    if !app_dir_canon.starts_with(&staging_canon) {
+        bail!(
+            "app dir {} escapes the staging tree {}",
+            opts.app_dir.display(),
+            opts.staging_dir.display()
+        );
+    }
 
     // 1. Ensure essential runtime directories.
     for (dir, mode) in [
@@ -590,7 +601,7 @@ pub(crate) fn setup_oci_app(opts: &OciAppSetup) -> Result<()> {
 
     // 4. Write env file (0o600: may contain secrets).
     if !opts.env_lines.is_empty() {
-        let env_path = opts.app_dir.join("env");
+        let env_path = prepare_app_file(opts.app_dir, &app_dir_canon, Path::new("env"))?;
         let content = opts.env_lines.join("\n") + "\n";
         fs::write(&env_path, &content)
             .with_context(|| format!("failed to write {}", env_path.display()))?;
@@ -602,7 +613,7 @@ pub(crate) fn setup_oci_app(opts: &OciAppSetup) -> Result<()> {
     // 5. Write ports file.
     if let Some(ref ports) = opts.config.exposed_ports {
         if !ports.is_empty() {
-            let ports_path = opts.app_dir.join("ports");
+            let ports_path = prepare_app_file(opts.app_dir, &app_dir_canon, Path::new("ports"))?;
             let content = super::sorted_keys_joined(ports, "\n") + "\n";
             fs::write(&ports_path, &content).context("failed to write ports file")?;
             use std::os::unix::fs::PermissionsExt as _;
@@ -614,7 +625,8 @@ pub(crate) fn setup_oci_app(opts: &OciAppSetup) -> Result<()> {
     // 6. Write volumes file.
     if let Some(ref vols) = opts.config.volumes {
         if !vols.is_empty() {
-            let volumes_path = opts.app_dir.join("volumes");
+            let volumes_path =
+                prepare_app_file(opts.app_dir, &app_dir_canon, Path::new("volumes"))?;
             let content = super::sorted_keys_joined(vols, "\n") + "\n";
             fs::write(&volumes_path, &content).context("failed to write volumes file")?;
             use std::os::unix::fs::PermissionsExt as _;
@@ -756,17 +768,21 @@ WantedBy=multi-user.target
     );
 
     let unit_rel = systemd_unit_dir(opts.staging_dir);
-    let unit_dir = opts.staging_dir.join(unit_rel);
-    fs::create_dir_all(&unit_dir)
-        .with_context(|| format!("failed to create {}", unit_dir.display()))?;
-    let unit_path = unit_dir.join(&service_name);
+    let unit_path = prepare_app_file(
+        opts.staging_dir,
+        &staging_canon,
+        &Path::new(unit_rel).join(&service_name),
+    )?;
     fs::write(&unit_path, &unit_content)
         .with_context(|| format!("failed to write {}", unit_path.display()))?;
 
-    // 8. Enable via symlink.
-    let wants_dir = unit_dir.join("multi-user.target.wants");
-    fs::create_dir_all(&wants_dir)
-        .with_context(|| format!("failed to create {}", wants_dir.display()))?;
+    // 8. Enable via symlink. symlink(2) creation never follows an existing
+    // entry: a name collision fails the setup instead of redirecting a write.
+    let wants_dir = resolve_app_dirs(
+        opts.staging_dir,
+        &staging_canon,
+        &Path::new(unit_rel).join("multi-user.target.wants"),
+    )?;
     let symlink_path = wants_dir.join(&service_name);
     std::os::unix::fs::symlink(format!("../{service_name}"), &symlink_path)
         .with_context(|| format!("failed to create symlink {}", symlink_path.display()))?;
@@ -778,32 +794,51 @@ WantedBy=multi-user.target
     // Generate probe timer + service unit pairs (no scripts).
     if let Some(ref probes) = opts.probes {
         for (rel_path, content) in generate_probe_units(opts.name, unit_rel, probes) {
-            let full_path = opts.staging_dir.join(&rel_path);
-            if let Some(parent) = full_path.parent() {
-                fs::create_dir_all(parent)
-                    .with_context(|| format!("failed to create {}", parent.display()))?;
-            }
-            fs::write(&full_path, &content)
-                .with_context(|| format!("failed to write {}", full_path.display()))?;
-            // Enable timer units via symlink.
-            if rel_path.ends_with(".timer") {
-                let timer_filename = full_path
-                    .file_name()
-                    .expect("probe unit path has a filename")
-                    .to_str()
-                    .expect("probe unit filename is valid UTF-8");
-                let symlink_path = wants_dir.join(timer_filename);
-                std::os::unix::fs::symlink(format!("../{timer_filename}"), &symlink_path)
-                    .with_context(|| {
-                        format!("failed to create symlink {}", symlink_path.display())
-                    })?;
-            }
-            if opts.verbose {
-                eprintln!("wrote probe unit: {}", full_path.display());
-            }
+            install_generated_unit(
+                opts.staging_dir,
+                &staging_canon,
+                &wants_dir,
+                &rel_path,
+                &content,
+                opts.verbose,
+            )?;
         }
     }
 
+    Ok(())
+}
+
+/// Write a generated unit file inside the staging tree, enabling timers via
+/// a `multi-user.target.wants` symlink.
+///
+/// `rel_path` is relative to the staging dir; ancestors must resolve inside
+/// `staging_canon` and an existing non-directory destination is replaced
+/// (see [`prepare_app_file`]).
+fn install_generated_unit(
+    staging_dir: &Path,
+    staging_canon: &Path,
+    wants_dir: &Path,
+    rel_path: &str,
+    content: &str,
+    verbose: bool,
+) -> Result<()> {
+    let full_path = prepare_app_file(staging_dir, staging_canon, Path::new(rel_path))?;
+    fs::write(&full_path, content)
+        .with_context(|| format!("failed to write {}", full_path.display()))?;
+    // Enable timer units via symlink.
+    if rel_path.ends_with(".timer") {
+        let timer_filename = full_path
+            .file_name()
+            .expect("probe unit path has a filename")
+            .to_str()
+            .expect("probe unit filename is valid UTF-8");
+        let symlink_path = wants_dir.join(timer_filename);
+        std::os::unix::fs::symlink(format!("../{timer_filename}"), &symlink_path)
+            .with_context(|| format!("failed to create symlink {}", symlink_path.display()))?;
+    }
+    if verbose {
+        eprintln!("wrote probe unit: {}", full_path.display());
+    }
     Ok(())
 }
 
@@ -1827,5 +1862,300 @@ mod tests {
 
         assert!(!outside_root.join("usr/lib/sdme-devfd-shim.so").exists());
         assert!(!outside_root.join("tmp").exists());
+    }
+
+    #[test]
+    fn test_setup_oci_app_oci_ancestor_symlink_rejected() {
+        let tmp = crate::testutil::TempDataDir::new("setup-oci-link");
+        let staging = tmp.path().join("staging");
+        fs::create_dir_all(&staging).unwrap();
+        let outside = tmp.path().join("outside-oci");
+        fs::create_dir_all(&outside).unwrap();
+        // The base rootfs ships `oci` as a symlink out of the staging tree.
+        std::os::unix::fs::symlink(&outside, staging.join("oci")).unwrap();
+        let app_dir = staging.join("oci/apps/demo");
+        fs::create_dir_all(app_dir.join("root")).unwrap();
+
+        let fx = AppFixture {
+            _tmp: tmp,
+            app_root: app_dir.join("root"),
+            staging,
+            app_dir,
+        };
+        let config = OciContainerConfig::default();
+        setup_oci_app(&setup_opts(&fx, "/app/run", &config)).unwrap_err();
+
+        assert!(!outside
+            .join("apps/demo/root/usr/lib/sdme-devfd-shim.so")
+            .exists());
+        assert!(!outside.join("apps/demo/env").exists());
+    }
+
+    #[test]
+    fn test_setup_oci_app_env_leaf_symlink_replaced() {
+        let fx = app_fixture("setup-env-link");
+        let outside = fx.staging.parent().unwrap().join("outside-env");
+        fs::create_dir_all(&outside).unwrap();
+        let sentinel = outside.join("env-target");
+        fs::write(&sentinel, b"host env").unwrap();
+
+        // The base rootfs ships app_dir/env as a symlink to a host file.
+        std::os::unix::fs::symlink(&sentinel, fx.app_dir.join("env")).unwrap();
+
+        let config = OciContainerConfig::default();
+        setup_oci_app(&setup_opts(&fx, "/app/run", &config)).unwrap();
+
+        assert_eq!(fs::read(&sentinel).unwrap(), b"host env");
+        let env = fx.app_dir.join("env");
+        let md = env.symlink_metadata().unwrap();
+        assert!(md.is_file() && !md.file_type().is_symlink());
+        assert_eq!(fs::read_to_string(&env).unwrap(), "A=B\n");
+        assert_eq!(mode_of(&env), 0o600);
+        let _ = fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    fn test_setup_oci_app_env_hardlink_replaced() {
+        use std::os::unix::fs::MetadataExt;
+
+        let fx = app_fixture("setup-env-hardlink");
+        let outside = fx.staging.parent().unwrap().join("outside-envhl");
+        fs::create_dir_all(&outside).unwrap();
+        let sentinel = outside.join("env-shared");
+        fs::write(&sentinel, b"host env").unwrap();
+
+        fs::hard_link(&sentinel, fx.app_dir.join("env")).unwrap();
+
+        let config = OciContainerConfig::default();
+        setup_oci_app(&setup_opts(&fx, "/app/run", &config)).unwrap();
+
+        assert_eq!(fs::read(&sentinel).unwrap(), b"host env");
+        let env = fx.app_dir.join("env");
+        assert_eq!(fs::read_to_string(&env).unwrap(), "A=B\n");
+        assert_ne!(
+            fs::metadata(&env).unwrap().ino(),
+            fs::metadata(&sentinel).unwrap().ino()
+        );
+        let _ = fs::remove_dir_all(&outside);
+    }
+
+    fn ports_volumes_config() -> OciContainerConfig {
+        let mut ports = std::collections::HashMap::new();
+        ports.insert(
+            "80/tcp".to_string(),
+            serde_json::Value::Object(Default::default()),
+        );
+        let mut volumes = std::collections::HashMap::new();
+        volumes.insert(
+            "/data".to_string(),
+            serde_json::Value::Object(Default::default()),
+        );
+        OciContainerConfig {
+            exposed_ports: Some(ports),
+            volumes: Some(volumes),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_setup_oci_app_ports_volumes_leaf_symlinks_replaced() {
+        let fx = app_fixture("setup-pv-link");
+        let outside = fx.staging.parent().unwrap().join("outside-pv");
+        fs::create_dir_all(&outside).unwrap();
+        let ports_sentinel = outside.join("ports-target");
+        let volumes_sentinel = outside.join("volumes-target");
+        fs::write(&ports_sentinel, b"host ports").unwrap();
+        fs::write(&volumes_sentinel, b"host volumes").unwrap();
+
+        std::os::unix::fs::symlink(&ports_sentinel, fx.app_dir.join("ports")).unwrap();
+        std::os::unix::fs::symlink(&volumes_sentinel, fx.app_dir.join("volumes")).unwrap();
+
+        let config = ports_volumes_config();
+        setup_oci_app(&setup_opts(&fx, "/app/run", &config)).unwrap();
+
+        assert_eq!(fs::read(&ports_sentinel).unwrap(), b"host ports");
+        assert_eq!(fs::read(&volumes_sentinel).unwrap(), b"host volumes");
+        let ports = fx.app_dir.join("ports");
+        let volumes = fx.app_dir.join("volumes");
+        assert_eq!(fs::read_to_string(&ports).unwrap(), "80/tcp\n");
+        assert_eq!(fs::read_to_string(&volumes).unwrap(), "/data\n");
+        assert!(!ports.symlink_metadata().unwrap().file_type().is_symlink());
+        assert!(!volumes.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(mode_of(&ports), 0o644);
+        assert_eq!(mode_of(&volumes), 0o644);
+        let _ = fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    fn test_setup_oci_app_unit_leaf_symlink_replaced() {
+        let fx = app_fixture("setup-unit-link");
+        let outside = fx.staging.parent().unwrap().join("outside-unit");
+        fs::create_dir_all(&outside).unwrap();
+        let sentinel = outside.join("unit-target");
+        fs::write(&sentinel, b"host unit").unwrap();
+
+        let unit_dir = fx.staging.join("etc/systemd/system");
+        fs::create_dir_all(&unit_dir).unwrap();
+        std::os::unix::fs::symlink(&sentinel, unit_dir.join("sdme-oci-demo.service")).unwrap();
+
+        let config = OciContainerConfig::default();
+        setup_oci_app(&setup_opts(&fx, "/app/run", &config)).unwrap();
+
+        assert_eq!(fs::read(&sentinel).unwrap(), b"host unit");
+        let unit = unit_dir.join("sdme-oci-demo.service");
+        let md = unit.symlink_metadata().unwrap();
+        assert!(md.is_file() && !md.file_type().is_symlink());
+        assert!(fs::read_to_string(&unit)
+            .unwrap()
+            .contains("ExecStart=/usr/sbin/sdme-isolate"));
+        let _ = fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    fn test_setup_oci_app_unit_leaf_hardlink_replaced() {
+        use std::os::unix::fs::MetadataExt;
+
+        let fx = app_fixture("setup-unit-hardlink");
+        let outside = fx.staging.parent().unwrap().join("outside-unithl");
+        fs::create_dir_all(&outside).unwrap();
+        let sentinel = outside.join("unit-shared");
+        fs::write(&sentinel, b"host unit").unwrap();
+
+        let unit_dir = fx.staging.join("etc/systemd/system");
+        fs::create_dir_all(&unit_dir).unwrap();
+        fs::hard_link(&sentinel, unit_dir.join("sdme-oci-demo.service")).unwrap();
+
+        let config = OciContainerConfig::default();
+        setup_oci_app(&setup_opts(&fx, "/app/run", &config)).unwrap();
+
+        assert_eq!(fs::read(&sentinel).unwrap(), b"host unit");
+        let unit = unit_dir.join("sdme-oci-demo.service");
+        assert_ne!(
+            fs::metadata(&unit).unwrap().ino(),
+            fs::metadata(&sentinel).unwrap().ino()
+        );
+        let _ = fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    fn test_setup_oci_app_unit_dir_ancestor_symlink_rejected() {
+        let fx = app_fixture("setup-unit-ancestor");
+        let outside = fx.staging.parent().unwrap().join("outside-etc");
+        fs::create_dir_all(&outside).unwrap();
+
+        // The base rootfs ships `etc` as a symlink out of the staging tree.
+        std::os::unix::fs::symlink(&outside, fx.staging.join("etc")).unwrap();
+
+        let config = OciContainerConfig::default();
+        let err = setup_oci_app(&setup_opts(&fx, "/app/run", &config)).unwrap_err();
+        assert!(err.to_string().contains("symlink"), "unexpected: {err:#}");
+
+        assert!(!outside
+            .join("systemd/system/sdme-oci-demo.service")
+            .exists());
+        assert_eq!(
+            fs::read_dir(&outside).unwrap().count(),
+            0,
+            "unit installation wrote outside the staging tree"
+        );
+        let _ = fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    fn test_setup_oci_app_wants_dir_symlink_rejected() {
+        let fx = app_fixture("setup-wants-link");
+        let outside = fx.staging.parent().unwrap().join("outside-wants");
+        fs::create_dir_all(&outside).unwrap();
+
+        // The base rootfs ships the wants directory as a symlink outside.
+        let unit_dir = fx.staging.join("etc/systemd/system");
+        fs::create_dir_all(&unit_dir).unwrap();
+        std::os::unix::fs::symlink(&outside, unit_dir.join("multi-user.target.wants")).unwrap();
+
+        let config = OciContainerConfig::default();
+        setup_oci_app(&setup_opts(&fx, "/app/run", &config)).unwrap_err();
+
+        assert_eq!(
+            fs::read_dir(&outside).unwrap().count(),
+            0,
+            "enablement symlink created outside the staging tree"
+        );
+        let _ = fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    fn test_install_generated_unit_replaces_hostile_leaf() {
+        let fx = app_fixture("gen-unit-leaf");
+        let outside = fx.staging.parent().unwrap().join("outside-genunit");
+        fs::create_dir_all(&outside).unwrap();
+        let sentinel = outside.join("probe-target");
+        fs::write(&sentinel, b"host unit").unwrap();
+
+        // Preplant the probe service path as a symlink to a host file.
+        let unit_dir = fx.staging.join("etc/systemd/system");
+        fs::create_dir_all(&unit_dir).unwrap();
+        std::os::unix::fs::symlink(&sentinel, unit_dir.join("sdme-probe-liveness-demo.service"))
+            .unwrap();
+        let wants_dir = unit_dir.join("multi-user.target.wants");
+        fs::create_dir_all(&wants_dir).unwrap();
+
+        let staging_canon = fs::canonicalize(&fx.staging).unwrap();
+        install_generated_unit(
+            &fx.staging,
+            &staging_canon,
+            &wants_dir,
+            "etc/systemd/system/sdme-probe-liveness-demo.service",
+            "[Service]\nType=oneshot\n",
+            false,
+        )
+        .unwrap();
+        install_generated_unit(
+            &fx.staging,
+            &staging_canon,
+            &wants_dir,
+            "etc/systemd/system/sdme-probe-liveness-demo.timer",
+            "[Timer]\nOnActiveSec=1s\n",
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(fs::read(&sentinel).unwrap(), b"host unit");
+        let svc = unit_dir.join("sdme-probe-liveness-demo.service");
+        let md = svc.symlink_metadata().unwrap();
+        assert!(md.is_file() && !md.file_type().is_symlink());
+        assert!(fs::read_to_string(&svc).unwrap().contains("Type=oneshot"));
+        // The timer was enabled via a wants symlink.
+        assert!(wants_dir
+            .join("sdme-probe-liveness-demo.timer")
+            .symlink_metadata()
+            .is_ok());
+        let _ = fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    fn test_install_generated_unit_rejects_escaping_ancestor() {
+        let fx = app_fixture("gen-unit-ancestor");
+        let outside = fx.staging.parent().unwrap().join("outside-genetc");
+        fs::create_dir_all(&outside).unwrap();
+
+        // The unit dir ancestry is a symlink out of the staging tree.
+        std::os::unix::fs::symlink(&outside, fx.staging.join("etc")).unwrap();
+        let wants_dir = fx
+            .staging
+            .join("etc/systemd/system/multi-user.target.wants");
+
+        let staging_canon = fs::canonicalize(&fx.staging).unwrap();
+        install_generated_unit(
+            &fx.staging,
+            &staging_canon,
+            &wants_dir,
+            "etc/systemd/system/sdme-probe-startup-demo.service",
+            "[Service]\nType=oneshot\n",
+            false,
+        )
+        .unwrap_err();
+
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
+        let _ = fs::remove_dir_all(&outside);
     }
 }
