@@ -125,7 +125,7 @@
       html += '<p class="checksum-link"><a href="' + checksumUrl + '">SHA256SUMS</a></p>';
     }
 
-    var section = document.getElementById('downloads');
+    var section = document.getElementById('release-downloads');
     section.innerHTML = html;
     section.style.display = 'block';
 
@@ -136,7 +136,7 @@
   }
 
   function showFallback() {
-    var fb = document.getElementById('fallback-content');
+    var fb = document.getElementById('fallback');
     if (fb) fb.style.display = 'block';
   }
 

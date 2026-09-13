@@ -1,26 +1,22 @@
-{% extends "base.html" %}
+{% extends "page.html" %}
 
-{% block title %}{{ page.title }} — sdme{% endblock %}
+{% block title %}{{ page.title }} | sdme{% endblock %}
 
-{% block content %}
-  <p class="breadcrumb"><a href="{{ get_url(path='/') }}">sdme</a> / <a href="{{ get_url(path='/') }}#documentation">docs</a> /</p>
-  <h1>{{ page.title }}</h1>
-  {% if page.description %}
-  <p class="subtitle">{{ page.description }}</p>
-  {% endif %}
+{% block breadcrumb %}
+<nav class="breadcrumb" aria-label="Breadcrumb"><a href="{{ get_url(path='/') }}">Home</a><span aria-hidden="true">/</span><a href="{{ get_url(path='/') }}#documentation">Documentation</a></nav>
+{% endblock %}
 
-  {{ page.content | safe }}
-
-  <div class="nav-links">
+{% block page_navigation %}
+  <nav class="nav-links" aria-label="Documentation navigation">
     {% if page.lower %}
-      <a href="{{ page.lower.permalink }}">&larr; {{ page.lower.title }}</a>
+      <a href="{{ page.lower.permalink }}"><span>Previous</span>{{ page.lower.title }}</a>
     {% else %}
-      <a href="{{ get_url(path='/') }}#documentation">All docs</a>
+      <a href="{{ get_url(path='/') }}#documentation"><span>Explore</span>All documentation</a>
     {% endif %}
     {% if page.higher %}
-      <a class="next" href="{{ page.higher.permalink }}">{{ page.higher.title }} &rarr;</a>
+      <a class="next" href="{{ page.higher.permalink }}"><span>Next</span>{{ page.higher.title }}</a>
     {% else %}
-      <a class="next" href="{{ get_url(path='@/docs/_index.md') }}">All docs</a>
+      <a class="next" href="{{ get_url(path='/') }}#documentation"><span>Explore</span>All documentation</a>
     {% endif %}
-  </div>
+  </nav>
 {% endblock %}

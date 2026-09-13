@@ -1,30 +1,48 @@
 {% extends "base.html" %}
+{% import "macros/outline.html" as outline %}
 
-{% block title %}{{ page.title }} — sdme tutorial{% endblock %}
+{% block title %}{{ page.title }} | sdme tutorial{% endblock %}
 
 {% block content %}
-  <p class="breadcrumb"><a href="{{ get_url(path='/') }}">sdme</a> / <a href="{{ get_url(path='/') }}#tutorials">tutorials</a> /</p>
-  <h1>{{ page.title }}</h1>
-  {% if page.description %}
-  <p class="subtitle">{{ page.description }}</p>
+{% set show_outline = page.extra.show_outline | default(value=config.extra.show_outline) %}
+<div class="document-layout{% if show_outline and page.toc %} has-outline{% endif %}">
+  {% if show_outline and page.toc %}
+  {% include "partials/outline.html" %}
   {% endif %}
+  <main class="document" id="main-content">
+    <header class="document-header">
+      {% block breadcrumb %}
+      <nav class="breadcrumb" aria-label="Breadcrumb"><a href="{{ get_url(path='/') }}">Home</a><span aria-hidden="true">/</span><a href="{{ get_url(path='/') }}#tutorials">Tutorials</a></nav>
+      {% endblock %}
+      <h1>{{ page.title }}</h1>
+      {% if page.description %}
+      <p class="subtitle">{{ page.description }}</p>
+      {% endif %}
+    </header>
 
-  {{ page.content | safe }}
+    <article class="document-content" aria-label="{{ page.title }}">
+      {{ page.content | safe }}
+    </article>
 
-  <div class="nav-links">
+  {% block page_navigation %}
+  <nav class="nav-links" aria-label="Tutorial navigation">
     {% if page.lower %}
-      <a href="{{ page.lower.permalink }}">&larr; Previous: {{ page.lower.title }}</a>
+      <a href="{{ page.lower.permalink }}"><span>Previous</span>{{ page.lower.title }}</a>
     {% else %}
-      <a href="{{ get_url(path='/') }}#tutorials">All tutorials</a>
+      <a href="{{ get_url(path='/') }}#tutorials"><span>Explore</span>All tutorials</a>
     {% endif %}
     {% if page.higher %}
-      <a class="next" href="{{ page.higher.permalink }}">Next: {{ page.higher.title }} &rarr;</a>
+      <a class="next" href="{{ page.higher.permalink }}"><span>Next</span>{{ page.higher.title }}</a>
     {% else %}
-      <a class="next" href="{{ get_url(path='@/tutorial/_index.md') }}">All tutorials</a>
+      <a class="next" href="{{ get_url(path='/') }}#tutorials"><span>Explore</span>All tutorials</a>
     {% endif %}
-  </div>
+  </nav>
+  {% endblock %}
+  </main>
+</div>
 {% endblock %}
 
 {% block extra_scripts %}
 <script src="{{ get_url(path='js/copy.js') }}"></script>
+<script src="{{ get_url(path='js/outline.js') }}"></script>
 {% endblock %}

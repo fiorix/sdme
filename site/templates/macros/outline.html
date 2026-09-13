@@ -1,0 +1,12 @@
+{% macro headings(items) %}
+<ul>
+  {% for heading in items %}
+  <li>
+    <a href="#{{ heading.id }}">{{ heading.title }}</a>
+    {% if heading.children %}
+    {{ self::headings(items=heading.children) }}
+    {% endif %}
+  </li>
+  {% endfor %}
+</ul>
+{% endmacro headings %}

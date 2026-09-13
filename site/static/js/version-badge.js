@@ -48,4 +48,5 @@
 
   // Expose cache + in-flight promise so other scripts reuse the same request
   window._sdmeRelease = { getCached: getCached, fetched: fetched };
+  fetched.catch(function() {});
 })();

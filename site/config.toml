@@ -9,3 +9,4 @@ minify_html = false
 insert_anchor_links = "heading"
 
 [extra]
+show_outline = true
