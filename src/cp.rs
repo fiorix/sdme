@@ -3,6 +3,8 @@
 //! Implements `sdme cp` for copying files and directories between the host
 //! filesystem and containers or imported root filesystems. One side must
 //! always be a host path; container-to-container copy is not supported.
+//! Writes into running containers are refused: the live tree can change
+//! between path checks and writes, which cannot be guarded against.
 //!
 //! Uses the same copy engine (`copy::copy_tree`, `copy::copy_entry`) and
 //! path validation (`copy::sanitize_dest_path`) as `fs build` COPY.
@@ -117,8 +119,9 @@ struct ResolvedSource {
 /// Holds resolved paths and RAII guards for a destination.
 struct ResolvedDest {
     /// Directory to write into (overlay upper/ or btrfs subvolume for stopped
-    /// containers, merged//proc-root for running, rootfs dir or host path
-    /// directly).
+    /// containers, rootfs dir or host path directly). Running containers are
+    /// refused as destinations, so this tree is always quiescent under the
+    /// held locks.
     write_dir: PathBuf,
     /// Directory to check for existing files (rootfs for stopped overlay
     /// containers, same as write_dir otherwise).
@@ -129,8 +132,6 @@ struct ResolvedDest {
     /// tree, and an overlay upper populated by a container run or an earlier
     /// copy can all hold symlinks that resolve onto the host.
     protect_symlinks: bool,
-    /// True when the destination is a running container.
-    is_running: bool,
     _rootfs_lock: Option<lock::ResourceLock>,
     _lock: Option<lock::ResourceLock>,
 }
@@ -161,7 +162,7 @@ pub fn cp(datadir: &Path, src: &CpEndpoint, dst: &CpEndpoint, opts: &CpOptions) 
     }
 
     // Safety checks when copying TO a container/rootfs.
-    if !matches!(dst, CpEndpoint::Host(_)) && !resolved_dst.is_running {
+    if !matches!(dst, CpEndpoint::Host(_)) {
         check_container_dest_safety(&resolved_dst.write_dir, dst)?;
     }
 
@@ -351,7 +352,6 @@ fn resolve_destination(
             write_dir: path.clone(),
             check_dir: path.clone(),
             protect_symlinks: false,
-            is_running: false,
             _rootfs_lock: None,
             _lock: None,
         }),
@@ -369,7 +369,6 @@ fn resolve_destination(
                 // symlinks (e.g. etc -> /outside) that would redirect parent
                 // creation or writes onto the host, so guard the write.
                 protect_symlinks: true,
-                is_running: false,
                 _rootfs_lock: None,
                 _lock: Some(lock),
             })
@@ -377,82 +376,28 @@ fn resolve_destination(
         CpEndpoint::Container { name, path } => {
             let name = containers::resolve_name(datadir, name)?;
             containers::ensure_exists(datadir, &name)?;
-            let container_dir = datadir.join("containers").join(&name);
             let state = State::read_from(&datadir.join("state").join(&name))?;
             let backend = storage::Backend::from_state(&state);
             let running = systemd::is_active(&name)?;
 
             if running {
-                let lock = lock::lock_shared(datadir, "containers", &name)
-                    .with_context(|| format!("cannot lock container '{name}' for writing"))?;
-                eprintln!(
-                    "warning: container '{name}' is running; filesystem is live and \
-                     consistency is not guaranteed, and a container process can swap path \
-                     components between the destination checks and the writes"
+                // Refuse writes into a running container. The destination
+                // tree is live: a container process can swap any checked path
+                // component for a symlink between the guard checks and the
+                // writes, and sdme runs as root without chroot, so a followed
+                // symlink (e.g. an absolute one in the host-visible merged/
+                // view) can write onto the host. No pathname-based guard
+                // closes that race, so fail safe: only a stopped container
+                // (whose tree cannot change under the lock) is a writable
+                // destination.
+                bail!(
+                    "cannot write to {} in running container '{name}': the live \
+                     filesystem can change between path checks and writes, which \
+                     cannot be guarded against; stop the container first, or use \
+                     'sdme exec {name} -- tee {}'",
+                    path.display(),
+                    path.display(),
                 );
-
-                let leader = systemd::get_machine_leader(&name)?
-                    .with_context(|| format!("container '{name}' disappeared (race)"))?;
-                let uses_userns = systemd::has_foreign_userns(leader);
-
-                let base = if uses_userns {
-                    // A running btrfs container's root is a subvolume mounted only
-                    // inside its own namespace, with no host-side merged/ view.
-                    if backend == storage::Backend::Btrfs {
-                        bail!(
-                            "cannot write to {} in running btrfs container '{name}' under \
-                             --userns; stop the container first, or use \
-                             'sdme exec {name} -- tee {}'",
-                            path.display(),
-                            path.display(),
-                        );
-                    }
-                    if is_under_shadowed_dir(path) {
-                        bail!(
-                            "cannot write to {} in running container '{name}': the kernel blocks \
-                             /proc/<pid>/root/ access for user namespace containers (--userns, \
-                             --hardened, --strict), and writing to merged/ would go under the \
-                             overlayfs layer instead of the live tmpfs at {}; use \
-                             'sdme exec {name} -- tee {}' as a workaround",
-                            path.display(),
-                            SHADOWED_DIRS
-                                .iter()
-                                .find(|d| {
-                                    let s = path.to_string_lossy();
-                                    s == **d || s.starts_with(&format!("{d}/"))
-                                })
-                                .unwrap(),
-                            path.display(),
-                        );
-                    }
-                    if verbose {
-                        eprintln!(
-                            "userns container: using merged/ (kernel blocks /proc/{leader}/root/)"
-                        );
-                    }
-                    container_dir.join("merged")
-                } else {
-                    if verbose {
-                        eprintln!("writing to /proc/{leader}/root/");
-                    }
-                    PathBuf::from(format!("/proc/{leader}/root"))
-                };
-
-                Ok(ResolvedDest {
-                    write_dir: base.clone(),
-                    check_dir: base,
-                    // Guard the live tree against symlinks that resolve onto
-                    // the host (merged/ resolves absolute symlinks in the
-                    // host mount namespace). This is best-effort: a running
-                    // container can still swap a checked component for a
-                    // symlink before the write lands, so it narrows but does
-                    // not eliminate the race. Stop the container for a fully
-                    // guarded copy.
-                    protect_symlinks: true,
-                    is_running: true,
-                    _rootfs_lock: None,
-                    _lock: Some(lock),
-                })
             } else {
                 // Stopped: overlay writes into upper/ (checked against the lower
                 // rootfs); btrfs writes into its own subvolume, which already
@@ -478,29 +423,21 @@ fn resolve_destination(
                 } else {
                     None
                 };
-                // A btrfs container write lands directly in its live subvolume,
-                // so take an EXCLUSIVE lock (which excludes a concurrent
+                // Take an EXCLUSIVE lock (which excludes a concurrent
                 // `sdme start`, itself a shared lock) and re-verify the
                 // container is still stopped under it. This closes a TOCTOU
                 // where a start between the is_active() check above and the
-                // write would make the subvolume the running container's root
-                // mid-copy, reopening a symlink-follow escape. The overlay
-                // backend writes into a separate upper/ layer and keeps the
-                // shared lock (unchanged behavior).
-                let lock = if backend == storage::Backend::Btrfs {
-                    let l = lock::lock_exclusive(datadir, "containers", &name)
-                        .with_context(|| format!("cannot lock container '{name}' for writing"))?;
-                    if systemd::is_active(&name)? {
-                        bail!(
-                            "container '{name}' is running; stop it before copying into a \
-                             btrfs container"
-                        );
-                    }
-                    l
-                } else {
-                    lock::lock_shared(datadir, "containers", &name)
-                        .with_context(|| format!("cannot lock container '{name}' for writing"))?
-                };
+                // write would make the destination tree live mid-copy,
+                // reopening a symlink-follow race that the guard below
+                // cannot close against a running container.
+                let lock = lock::lock_exclusive(datadir, "containers", &name)
+                    .with_context(|| format!("cannot lock container '{name}' for writing"))?;
+                if systemd::is_active(&name)? {
+                    bail!(
+                        "container '{name}' started while the copy was being set up; \
+                         stop it before copying into it"
+                    );
+                }
 
                 let dest =
                     containers::open_write_dest(datadir, &name, backend, &rootfs_dir, verbose)?;
@@ -518,7 +455,6 @@ fn resolve_destination(
                     // overlay upper too, since it can hold symlinks once
                     // populated (see above).
                     protect_symlinks: dest.protect_symlinks || backend == storage::Backend::Overlay,
-                    is_running: false,
                     _rootfs_lock: rootfs_lock,
                     _lock: Some(lock),
                 })
@@ -688,13 +624,13 @@ fn warn_rootfs_in_use(datadir: &Path, rootfs_name: &str) {
 ///
 /// `protect_symlinks` guards writes that land in a tree the destination
 /// controls (an imported rootfs, a container's btrfs subvolume or populated
-/// overlay upper, a running container's live root): before creating any
-/// parent directory or writing the target, it refuses to traverse a symlink
-/// ancestor already present in the tree and shadows a leaf symlink. The
-/// checks and the writes are separate path operations, so against a tree
-/// that can be mutated concurrently (a running container's root) this is a
-/// best-effort narrowing of the race, not a guarantee; only host
-/// destinations skip it.
+/// overlay upper): before creating any parent directory or writing the
+/// target, it refuses to traverse a symlink ancestor already present in the
+/// tree and shadows a leaf symlink. The checks and the writes are separate
+/// path operations, so the guard is only sound against a tree that cannot
+/// change concurrently; callers establish that by refusing running-container
+/// destinations and by holding an exclusive container lock for stopped ones.
+/// Only host destinations skip it.
 fn execute_copy(
     src_path: &Path,
     write_dir: &Path,
