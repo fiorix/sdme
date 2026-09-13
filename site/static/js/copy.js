@@ -12,8 +12,10 @@
       wrapper.appendChild(pre);
       var btn = document.createElement('button');
       btn.className = 'copy-btn';
+      btn.type = 'button';
       btn.innerHTML = ICON_COPY;
       btn.title = 'Copy';
+      btn.setAttribute('aria-label', 'Copy code');
       btn.addEventListener('click', function() {
         var text = pre.querySelector('code')
           ? pre.querySelector('code').textContent

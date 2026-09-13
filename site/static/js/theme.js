@@ -11,16 +11,24 @@
 
   function applyTheme(theme) {
     document.documentElement.setAttribute('data-theme', theme);
-    document.getElementById('icon-sun').style.display = theme === 'dark' ? 'none' : 'inline';
-    document.getElementById('icon-moon').style.display = theme === 'dark' ? 'inline' : 'none';
-    try { localStorage.setItem(THEME_KEY, theme); } catch(e) {}
+    var button = document.getElementById('theme-toggle');
+    if (button) {
+      var label = 'Switch to ' + (theme === 'dark' ? 'light' : 'dark') + ' theme';
+      button.setAttribute('aria-label', label);
+      button.title = label;
+    }
   }
 
   applyTheme(getPreferredTheme());
 
-  document.getElementById('theme-toggle').addEventListener('click', function() {
-    var current = document.documentElement.getAttribute('data-theme') || 'dark';
-    applyTheme(current === 'dark' ? 'light' : 'dark');
+  document.addEventListener('DOMContentLoaded', function() {
+    applyTheme(getPreferredTheme());
+    document.getElementById('theme-toggle').addEventListener('click', function() {
+      var current = document.documentElement.getAttribute('data-theme') || 'dark';
+      var next = current === 'dark' ? 'light' : 'dark';
+      try { localStorage.setItem(THEME_KEY, next); } catch(e) {}
+      applyTheme(next);
+    });
   });
 
   if (window.matchMedia) {
