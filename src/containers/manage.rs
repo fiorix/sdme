@@ -10,7 +10,22 @@ use crate::{systemd, ResourceLimits, State};
 use super::{ensure_exists, volumes_dir};
 
 /// Stop a container if running, then delete its state file and overlayfs directories.
+///
+/// Refuses to remove anything when the unit state cannot be determined:
+/// an undetermined state is not proof that the container is stopped, so
+/// the filesystem teardown, state file, and drop-in are all left in
+/// place and the command stays retryable.
 pub fn remove(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
+    remove_with_state_query(datadir, name, verbose, systemd::unit_active_state)
+}
+
+/// Container removal with the unit-state query injected for testing.
+fn remove_with_state_query(
+    datadir: &Path,
+    name: &str,
+    verbose: bool,
+    unit_state: impl Fn(&str) -> Result<Option<String>>,
+) -> Result<()> {
     ensure_exists(datadir, name)?;
 
     // Acquire exclusive lock to prevent removal while a build is reading from this container.
@@ -47,7 +62,12 @@ pub fn remove(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
     // the directories we are about to delete. For the normal "active" case use
     // the existing graceful Terminate stop; for the abnormal states issue a real
     // StopUnit job (cancels the pending restart) and clear the failed latch.
-    match systemd::unit_active_state(name).as_deref() {
+    // A failed query is not proof of absence: abort before touching any files
+    // when the state cannot be determined.
+    let active_state = unit_state(name).with_context(|| {
+        format!("cannot determine whether container '{name}' is stopped; refusing to remove it")
+    })?;
+    match active_state.as_deref() {
         None | Some("inactive") => {}
         Some("active") => {
             if verbose {
@@ -263,5 +283,66 @@ pub fn stop(name: &str, mode: StopMode, timeout_secs: u64, verbose: bool) -> Res
             let _ = systemd::reset_failed(name);
             result
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testutil::TempDataDir;
+    use std::path::PathBuf;
+
+    /// Minimal container fixture: a state file plus a container directory
+    /// with a sentinel file, satisfying remove's preconditions without
+    /// touching systemd or the host.
+    fn fixture(tmp: &TempDataDir, name: &str) -> (PathBuf, PathBuf) {
+        let state_dir = tmp.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+        let state_file = state_dir.join(name);
+        fs::write(&state_file, "NAME=fixture\nROOTFS=\n").unwrap();
+        let container_dir = tmp.path().join("containers").join(name);
+        fs::create_dir_all(container_dir.join("upper")).unwrap();
+        fs::write(container_dir.join("upper").join("keep.txt"), "user data").unwrap();
+        (state_file, container_dir)
+    }
+
+    #[test]
+    fn test_remove_aborts_when_unit_state_uncertain() {
+        let tmp = TempDataDir::new("remove-uncertain");
+        let (state_file, container_dir) = fixture(&tmp, "uncertainbox");
+        let err = remove_with_state_query(tmp.path(), "uncertainbox", false, |_| {
+            Err(anyhow::anyhow!("failed to connect to system dbus"))
+        })
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("refusing to remove"),
+            "unexpected error: {msg}"
+        );
+        // Nothing destructive ran: the container storage and state file
+        // survive, so the command stays retryable.
+        assert!(state_file.exists());
+        assert!(container_dir.join("upper").join("keep.txt").exists());
+    }
+
+    #[test]
+    fn test_remove_proceeds_when_unit_confirmed_absent() {
+        let tmp = TempDataDir::new("remove-absent");
+        let (state_file, container_dir) = fixture(&tmp, "gonebox");
+        remove_with_state_query(tmp.path(), "gonebox", false, |_| Ok(None)).unwrap();
+        assert!(!state_file.exists());
+        assert!(!container_dir.exists());
+    }
+
+    #[test]
+    fn test_remove_proceeds_when_unit_inactive() {
+        let tmp = TempDataDir::new("remove-inactive");
+        let (state_file, container_dir) = fixture(&tmp, "idlebox");
+        remove_with_state_query(tmp.path(), "idlebox", false, |_| {
+            Ok(Some("inactive".to_string()))
+        })
+        .unwrap();
+        assert!(!state_file.exists());
+        assert!(!container_dir.exists());
     }
 }

@@ -51,6 +51,22 @@ fn is_machine_not_found(e: &zbus::Error) -> bool {
         || msg.contains("no such object")
 }
 
+/// systemd's typed D-Bus error name for a unit that is not loaded.
+const NO_SUCH_UNIT_ERROR: &str = "org.freedesktop.systemd1.NoSuchUnit";
+
+/// Standard D-Bus error for a call on an object path that does not exist.
+/// A unit object path disappears when systemd collects an inactive unit.
+const UNKNOWN_OBJECT_ERROR: &str = "org.freedesktop.DBus.Error.UnknownObject";
+
+/// Whether a D-Bus error reply carries the given typed error name.
+///
+/// Only the error name is matched, never the free-form message text: a
+/// message that merely mentions an absent unit (for example a permission
+/// error quoting the unit name) is not evidence that the unit is gone.
+fn error_name_is(e: &zbus::Error, name: &str) -> bool {
+    matches!(e, zbus::Error::MethodError(n, _, _) if n.as_str() == name)
+}
+
 pub(crate) fn daemon_reload() -> Result<()> {
     let conn = connect()?;
     let proxy = systemd_manager(&conn)?;
@@ -136,9 +152,11 @@ pub(super) fn is_unit_active(unit: &str) -> Result<bool> {
 /// Return the ActiveState string for a systemd unit via a new connection.
 ///
 /// Public wrapper around the private `get_unit_active_state` used
-/// internally by `wait_for_shutdown`.
-pub(super) fn pub_get_unit_active_state(unit: &str) -> Option<String> {
-    let conn = connect().ok()?;
+/// internally by `wait_for_shutdown`. `Ok(None)` means systemd confirmed
+/// the unit does not exist; `Err` means the state could not be
+/// determined.
+pub(super) fn pub_get_unit_active_state(unit: &str) -> Result<Option<String>> {
+    let conn = connect()?;
     get_unit_active_state(&conn, unit)
 }
 
@@ -641,21 +659,52 @@ pub(super) fn get_machine_addresses(name: &str) -> Vec<String> {
 
 /// Read the ActiveState property of a systemd unit.
 ///
-/// Returns the state string (e.g. "active", "inactive", "failed",
-/// "activating", "deactivating"). Returns `None` if the unit is
-/// not loaded or not found.
-fn get_unit_active_state(conn: &Connection, unit: &str) -> Option<String> {
-    let manager = systemd_manager(conn).ok()?;
-    let reply = manager.call_method("GetUnit", &(unit,)).ok()?;
-    let unit_path: zbus::zvariant::OwnedObjectPath = reply.body().deserialize().ok()?;
+/// Returns `Ok(Some(state))` with the state string (e.g. "active",
+/// "inactive", "failed", "activating", "deactivating") when the unit is
+/// loaded. Returns `Ok(None)` only when systemd confirms the unit does
+/// not exist (a typed `NoSuchUnit` error). Every other failure
+/// (connection, method, reply-decoding, proxy, or property error) is an
+/// `Err`, so destructive callers can distinguish "confirmed absent" from
+/// "could not determine".
+fn get_unit_active_state(conn: &Connection, unit: &str) -> Result<Option<String>> {
+    let manager = systemd_manager(conn)?;
+    let reply = match manager.call_method("GetUnit", &(unit,)) {
+        Ok(r) => r,
+        Err(e) => {
+            if error_name_is(&e, NO_SUCH_UNIT_ERROR) {
+                return Ok(None);
+            }
+            return Err(e).with_context(|| format!("failed to query unit {unit}"));
+        }
+    };
+    let unit_path: zbus::zvariant::OwnedObjectPath = reply
+        .body()
+        .deserialize()
+        .with_context(|| format!("failed to decode GetUnit reply for {unit}"))?;
     let unit_proxy = Proxy::new(
         conn,
         "org.freedesktop.systemd1",
         unit_path,
         "org.freedesktop.systemd1.Unit",
     )
-    .ok()?;
-    unit_proxy.get_property::<String>("ActiveState").ok()
+    .with_context(|| format!("failed to create unit proxy for {unit}"))?;
+    match unit_proxy.get_property::<String>("ActiveState") {
+        Ok(state) => Ok(Some(state)),
+        Err(e) => {
+            // The unit may have been collected between GetUnit and the
+            // property read, which removes its object path. Treat that as
+            // confirmed absence only when a fresh GetUnit agrees; any
+            // other property error leaves the state unknown.
+            if error_name_is(&e, NO_SUCH_UNIT_ERROR) || error_name_is(&e, UNKNOWN_OBJECT_ERROR) {
+                if let Err(confirm) = manager.call_method("GetUnit", &(unit,)) {
+                    if error_name_is(&confirm, NO_SUCH_UNIT_ERROR) {
+                        return Ok(None);
+                    }
+                }
+            }
+            Err(e).with_context(|| format!("failed to read ActiveState of unit {unit}"))
+        }
+    }
 }
 
 /// Wait for a machine to fully shut down.
@@ -670,6 +719,9 @@ fn get_unit_active_state(conn: &Connection, unit: &str) -> Option<String> {
 ///    unit's `ActiveState` until it reaches `inactive` or `failed`.
 ///    This ensures `ExecStopPost` has run (overlayfs unmounted), making
 ///    it safe to delete container files on disk.
+///
+/// Fails if the machine or unit state cannot be determined (bus or query
+/// error); uncertainty is never treated as a completed shutdown.
 pub(super) fn wait_for_shutdown(
     name: &str,
     timeout: std::time::Duration,
@@ -771,13 +823,29 @@ fn wait_for_unit_inactive(
     timeout: std::time::Duration,
     verbose: bool,
 ) -> Result<()> {
+    wait_until_unit_inactive(unit, timeout, verbose, || get_unit_active_state(conn, unit))
+}
+
+/// Poll `query` until the unit is confirmed inactive, failed, or absent.
+///
+/// A failed query is an error, never success: callers use this result to
+/// decide whether filesystem teardown may begin, and an undetermined
+/// state is not proof that nspawn and ExecStopPost have finished. In
+/// particular, a failed query after an earlier successful one aborts the
+/// wait rather than completing it.
+fn wait_until_unit_inactive(
+    unit: &str,
+    timeout: std::time::Duration,
+    verbose: bool,
+    mut query: impl FnMut() -> Result<Option<String>>,
+) -> Result<()> {
     let deadline = std::time::Instant::now() + timeout;
     let poll_interval = std::time::Duration::from_millis(200);
 
     loop {
         crate::check_interrupted()?;
 
-        match get_unit_active_state(conn, unit) {
+        match query().with_context(|| format!("failed to determine the state of unit {unit}"))? {
             Some(state) => {
                 if verbose {
                     eprintln!("unit state: {state}");
@@ -786,10 +854,8 @@ fn wait_for_unit_inactive(
                     return Ok(());
                 }
             }
-            None => {
-                // Unit not found; treat as inactive.
-                return Ok(());
-            }
+            // systemd confirmed the unit is gone.
+            None => return Ok(()),
         }
 
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
@@ -798,5 +864,471 @@ fn wait_for_unit_inactive(
         }
 
         std::thread::sleep(poll_interval.min(remaining));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    // ---- typed error-name classification ----
+
+    /// Build the zbus error a client would receive for an error reply with
+    /// the given typed name and free-form detail text.
+    fn dbus_error_reply(error_name: &str, detail: &str) -> zbus::Error {
+        let call = zbus::Message::method_call("/org/freedesktop/systemd1", "GetUnit")
+            .unwrap()
+            .build(&("sdme@test.service",))
+            .unwrap();
+        let reply = zbus::Message::error(&call.header(), error_name)
+            .unwrap()
+            .build(&detail.to_string())
+            .unwrap();
+        zbus::Error::from(reply)
+    }
+
+    #[test]
+    fn test_error_name_matches_no_such_unit() {
+        let e = dbus_error_reply(NO_SUCH_UNIT_ERROR, "Unit sdme@test.service not loaded.");
+        assert!(error_name_is(&e, NO_SUCH_UNIT_ERROR));
+        assert!(!error_name_is(&e, UNKNOWN_OBJECT_ERROR));
+    }
+
+    #[test]
+    fn test_error_name_matches_unknown_object() {
+        let e = dbus_error_reply(UNKNOWN_OBJECT_ERROR, "Unknown object '/org/x'.");
+        assert!(error_name_is(&e, UNKNOWN_OBJECT_ERROR));
+        assert!(!error_name_is(&e, NO_SUCH_UNIT_ERROR));
+    }
+
+    #[test]
+    fn test_absent_phrase_in_message_text_is_not_absence() {
+        // A permission error whose detail text mentions an absent unit
+        // must not be treated as confirmation that the unit is gone.
+        let e = dbus_error_reply(
+            "org.freedesktop.DBus.Error.AccessDenied",
+            "Permission denied reading NoSuchUnit sdme@test.service",
+        );
+        assert!(!error_name_is(&e, NO_SUCH_UNIT_ERROR));
+        assert!(!error_name_is(&e, UNKNOWN_OBJECT_ERROR));
+        // Non-reply errors (transport, handshake, ...) never match either.
+        let io = zbus::Error::InputOutput(std::sync::Arc::new(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "NoSuchUnit",
+        )));
+        assert!(!error_name_is(&io, NO_SUCH_UNIT_ERROR));
+    }
+
+    // ---- injected shutdown waits ----
+
+    /// Script a sequence of query responses; a `None` entry is a query
+    /// failure. The last entry repeats once the script is exhausted.
+    fn scripted(
+        responses: Vec<Option<Option<&'static str>>>,
+    ) -> impl FnMut() -> Result<Option<String>> {
+        let mut queue: std::collections::VecDeque<_> = responses.into();
+        move || {
+            let item = if queue.len() > 1 {
+                queue.pop_front().unwrap()
+            } else {
+                *queue.front().unwrap()
+            };
+            match item {
+                Some(state) => Ok(state.map(String::from)),
+                None => Err(anyhow::anyhow!("bus query failed")),
+            }
+        }
+    }
+
+    #[test]
+    fn test_wait_query_error_is_not_success() {
+        let err =
+            wait_until_unit_inactive("u", Duration::from_secs(30), false, scripted(vec![None]))
+                .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("failed to determine the state of unit u"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn test_wait_query_error_after_success_is_not_success() {
+        // A failed query after an initial successful one must not become a
+        // completed shutdown.
+        let err = wait_until_unit_inactive(
+            "u",
+            Duration::from_secs(30),
+            false,
+            scripted(vec![Some(Some("deactivating")), None]),
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("failed to determine"));
+    }
+
+    #[test]
+    fn test_wait_deactivating_then_inactive() {
+        wait_until_unit_inactive(
+            "u",
+            Duration::from_secs(30),
+            false,
+            scripted(vec![Some(Some("deactivating")), Some(Some("inactive"))]),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_wait_failed_unit_completes() {
+        wait_until_unit_inactive(
+            "u",
+            Duration::from_secs(30),
+            false,
+            scripted(vec![Some(Some("failed"))]),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_wait_absent_unit_completes() {
+        wait_until_unit_inactive(
+            "u",
+            Duration::from_secs(30),
+            false,
+            scripted(vec![Some(None)]),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_wait_active_unit_times_out() {
+        let err = wait_until_unit_inactive(
+            "u",
+            Duration::ZERO,
+            false,
+            scripted(vec![Some(Some("active"))]),
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("timed out"));
+    }
+
+    // ---- isolated session bus with a fake systemd1 service ----
+
+    const MANAGER_PATH: &str = "/org/freedesktop/systemd1";
+    const UNIT_PATH: &str = "/org/freedesktop/systemd1/unit/test";
+
+    /// Error identity for the fake Manager. The AccessDenied variant's
+    /// detail text deliberately claims the unit is missing: only the
+    /// typed error name may ever grant absence.
+    #[derive(Debug)]
+    enum UnitError {
+        NoSuchUnit,
+        AccessDenied,
+    }
+
+    impl zbus::DBusError for UnitError {
+        fn create_reply(&self, call: &zbus::message::Header<'_>) -> zbus::Result<zbus::Message> {
+            let name = match self {
+                UnitError::NoSuchUnit => NO_SUCH_UNIT_ERROR,
+                UnitError::AccessDenied => "org.freedesktop.DBus.Error.AccessDenied",
+            };
+            zbus::Message::error(call, name)?
+                .build(&self.description().unwrap_or_default().to_string())
+        }
+
+        fn name(&self) -> zbus::names::ErrorName<'_> {
+            match self {
+                UnitError::NoSuchUnit => NO_SUCH_UNIT_ERROR.try_into().unwrap(),
+                UnitError::AccessDenied => "org.freedesktop.DBus.Error.AccessDenied"
+                    .try_into()
+                    .unwrap(),
+            }
+        }
+
+        fn description(&self) -> Option<&str> {
+            match self {
+                UnitError::NoSuchUnit => Some("Unit sdme@test.service not loaded."),
+                UnitError::AccessDenied => Some("Access denied; unit sdme@test.service not loaded"),
+            }
+        }
+    }
+
+    /// The zbus `interface` macro must see the literal `Result<T, E>`
+    /// return type, so no type alias is used for the GetUnit result.
+    fn unit_path() -> zbus::zvariant::OwnedObjectPath {
+        UNIT_PATH.try_into().unwrap()
+    }
+
+    /// GetUnit always resolves the unit object path.
+    struct LoadedManager;
+
+    #[zbus::interface(name = "org.freedesktop.systemd1.Manager")]
+    impl LoadedManager {
+        fn get_unit(&self, _name: String) -> Result<zbus::zvariant::OwnedObjectPath, UnitError> {
+            Ok(unit_path())
+        }
+    }
+
+    /// GetUnit replies with the typed NoSuchUnit error.
+    struct NoSuchUnitManager;
+
+    #[zbus::interface(name = "org.freedesktop.systemd1.Manager")]
+    impl NoSuchUnitManager {
+        fn get_unit(&self, _name: String) -> Result<zbus::zvariant::OwnedObjectPath, UnitError> {
+            Err(UnitError::NoSuchUnit)
+        }
+    }
+
+    /// GetUnit replies AccessDenied.
+    struct DeniedManager;
+
+    #[zbus::interface(name = "org.freedesktop.systemd1.Manager")]
+    impl DeniedManager {
+        fn get_unit(&self, _name: String) -> Result<zbus::zvariant::OwnedObjectPath, UnitError> {
+            Err(UnitError::AccessDenied)
+        }
+    }
+
+    /// GetUnit replies with a body of the wrong type ("s" instead of "o").
+    struct MalformedManager;
+
+    #[zbus::interface(name = "org.freedesktop.systemd1.Manager")]
+    impl MalformedManager {
+        fn get_unit(&self, _name: String) -> String {
+            "not an object path".to_string()
+        }
+    }
+
+    /// First GetUnit succeeds; subsequent ones report NoSuchUnit. Models a
+    /// unit collected by systemd between GetUnit and the property read.
+    struct CollectingManager(AtomicUsize);
+
+    #[zbus::interface(name = "org.freedesktop.systemd1.Manager")]
+    impl CollectingManager {
+        fn get_unit(&self, _name: String) -> Result<zbus::zvariant::OwnedObjectPath, UnitError> {
+            if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                Ok(unit_path())
+            } else {
+                Err(UnitError::NoSuchUnit)
+            }
+        }
+    }
+
+    /// Unit object with a fixed ActiveState.
+    struct FakeUnit(&'static str);
+
+    #[zbus::interface(name = "org.freedesktop.systemd1.Unit")]
+    impl FakeUnit {
+        #[zbus(property)]
+        fn active_state(&self) -> String {
+            self.0.to_string()
+        }
+    }
+
+    /// Unit object whose ActiveState property read is denied.
+    struct DeniedUnit;
+
+    #[zbus::interface(name = "org.freedesktop.systemd1.Unit")]
+    impl DeniedUnit {
+        #[zbus(property)]
+        fn active_state(&self) -> zbus::fdo::Result<String> {
+            Err(zbus::fdo::Error::AccessDenied(
+                "property read denied".to_string(),
+            ))
+        }
+    }
+
+    /// Unit object that reports "deactivating" once, then "inactive".
+    struct StoppingUnit(AtomicUsize);
+
+    #[zbus::interface(name = "org.freedesktop.systemd1.Unit")]
+    impl StoppingUnit {
+        #[zbus(property)]
+        fn active_state(&self) -> String {
+            if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                "deactivating".to_string()
+            } else {
+                "inactive".to_string()
+            }
+        }
+    }
+
+    /// A private dbus-daemon session bus. The daemon is killed on drop.
+    struct TestBus {
+        address: String,
+        daemon: std::process::Child,
+    }
+
+    impl TestBus {
+        /// Returns None when dbus-daemon is not installed; tests skip.
+        fn spawn() -> Option<TestBus> {
+            use std::io::BufRead;
+            let mut daemon = std::process::Command::new("dbus-daemon")
+                .args(["--session", "--nofork", "--print-address=1"])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .ok()?;
+            let stdout = daemon.stdout.take().unwrap();
+            let mut line = String::new();
+            if std::io::BufReader::new(stdout)
+                .read_line(&mut line)
+                .is_err()
+                || line.trim().is_empty()
+            {
+                let _ = daemon.kill();
+                let _ = daemon.wait();
+                return None;
+            }
+            Some(TestBus {
+                address: line.trim().to_string(),
+                daemon,
+            })
+        }
+
+        fn client(&self) -> Connection {
+            zbus::blocking::connection::Builder::address(self.address.as_str())
+                .unwrap()
+                .build()
+                .unwrap()
+        }
+
+        /// Serve a fake systemd1 Manager, and optionally a unit object at
+        /// UNIT_PATH, under the well-known systemd1 name.
+        fn serve<M, U>(&self, manager: M, unit: Option<U>) -> zbus::blocking::Connection
+        where
+            M: zbus::object_server::Interface,
+            U: zbus::object_server::Interface,
+        {
+            let builder = zbus::blocking::connection::Builder::address(self.address.as_str())
+                .unwrap()
+                .name("org.freedesktop.systemd1")
+                .unwrap()
+                .serve_at(MANAGER_PATH, manager)
+                .unwrap();
+            match unit {
+                Some(u) => builder.serve_at(UNIT_PATH, u).unwrap().build().unwrap(),
+                None => builder.build().unwrap(),
+            }
+        }
+    }
+
+    impl Drop for TestBus {
+        fn drop(&mut self) {
+            let _ = self.daemon.kill();
+            let _ = self.daemon.wait();
+        }
+    }
+
+    /// Skip silently (with a note) when no dbus-daemon is available.
+    macro_rules! require_bus {
+        () => {
+            match TestBus::spawn() {
+                Some(bus) => bus,
+                None => {
+                    eprintln!("dbus-daemon unavailable; skipping isolated-bus test");
+                    return;
+                }
+            }
+        };
+    }
+
+    #[test]
+    fn test_absent_unit_is_confirmed_none() {
+        let bus = require_bus!();
+        let _server = bus.serve(NoSuchUnitManager, None::<FakeUnit>);
+        let conn = bus.client();
+        assert_eq!(
+            get_unit_active_state(&conn, "sdme@test.service").unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn test_access_denied_is_error_not_absence() {
+        let bus = require_bus!();
+        let _server = bus.serve(DeniedManager, None::<FakeUnit>);
+        let conn = bus.client();
+        let err = get_unit_active_state(&conn, "sdme@test.service").unwrap_err();
+        assert!(format!("{err:#}").contains("failed to query unit"));
+    }
+
+    #[test]
+    fn test_loaded_unit_returns_state() {
+        let bus = require_bus!();
+        let _server = bus.serve(LoadedManager, Some(FakeUnit("active")));
+        let conn = bus.client();
+        assert_eq!(
+            get_unit_active_state(&conn, "sdme@test.service")
+                .unwrap()
+                .as_deref(),
+            Some("active")
+        );
+    }
+
+    #[test]
+    fn test_malformed_reply_is_error() {
+        let bus = require_bus!();
+        let _server = bus.serve(MalformedManager, None::<FakeUnit>);
+        let conn = bus.client();
+        assert!(get_unit_active_state(&conn, "sdme@test.service").is_err());
+    }
+
+    #[test]
+    fn test_property_error_is_error_not_absence() {
+        let bus = require_bus!();
+        let _server = bus.serve(LoadedManager, Some(DeniedUnit));
+        let conn = bus.client();
+        assert!(get_unit_active_state(&conn, "sdme@test.service").is_err());
+    }
+
+    #[test]
+    fn test_collected_unit_is_absent_only_after_confirmation() {
+        // GetUnit resolves, the unit object is gone by the property read
+        // (nothing served at its path), and a fresh GetUnit confirms the
+        // unit no longer exists.
+        let bus = require_bus!();
+        let _server = bus.serve(CollectingManager(AtomicUsize::new(0)), None::<FakeUnit>);
+        let conn = bus.client();
+        assert_eq!(
+            get_unit_active_state(&conn, "sdme@test.service").unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn test_vanished_object_without_no_such_unit_is_error() {
+        // The unit object path vanished but GetUnit still resolves it, so
+        // the state is unknown and must stay an error.
+        let bus = require_bus!();
+        let _server = bus.serve(LoadedManager, None::<FakeUnit>);
+        let conn = bus.client();
+        assert!(get_unit_active_state(&conn, "sdme@test.service").is_err());
+    }
+
+    #[test]
+    fn test_wait_over_bus_until_inactive() {
+        let bus = require_bus!();
+        let _server = bus.serve(LoadedManager, Some(StoppingUnit(AtomicUsize::new(0))));
+        let conn = bus.client();
+        wait_for_unit_inactive(&conn, "sdme@test.service", Duration::from_secs(10), false).unwrap();
+    }
+
+    #[test]
+    fn test_wait_fails_when_bus_disconnects() {
+        let bus = require_bus!();
+        let server = bus.serve(LoadedManager, Some(FakeUnit("active")));
+        let conn = bus.client();
+        // Drop the server mid-wait; the next poll must fail the wait
+        // rather than complete it.
+        let dropper = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(400));
+            drop(server);
+        });
+        let err =
+            wait_for_unit_inactive(&conn, "sdme@test.service", Duration::from_secs(15), false)
+                .unwrap_err();
+        dropper.join().unwrap();
+        assert!(format!("{err:#}").contains("failed to determine"));
     }
 }

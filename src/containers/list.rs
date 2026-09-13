@@ -269,9 +269,12 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
             }
         }
 
-        // Query systemd ActiveState before health and status.
+        // Query systemd ActiveState before health and status. Listing is
+        // best-effort: an undetermined state degrades to "stopped"/unknown
+        // display rather than failing the listing. Removal treats the same
+        // error as fatal instead; see manage::remove.
         let active_state = if container_dir.exists() {
-            systemd::unit_active_state(name)
+            systemd::unit_active_state(name).ok().flatten()
         } else {
             None
         };
