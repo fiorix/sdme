@@ -683,6 +683,45 @@ fn resolve_manifest(
 
 // --- Layer download + extraction ---
 
+/// Scratch directory for layer downloads, created as a sibling of the
+/// staging tree rather than inside it.
+///
+/// Download temp files must stay outside the tree being extracted: an
+/// earlier layer can plant a symlink at the next download's pathname, and
+/// both the cache copy and the network write would follow it onto the
+/// host. The directory is removed on drop, covering success, failure, and
+/// interruption exits from `download_layers`.
+struct LayerScratch {
+    dir: PathBuf,
+}
+
+impl LayerScratch {
+    fn new(staging_dir: &Path) -> Result<Self> {
+        let parent = staging_dir.parent().unwrap_or_else(|| Path::new("."));
+        let name = staging_dir
+            .file_name()
+            .unwrap_or_else(|| std::ffi::OsStr::new("staging"));
+        let dir = parent.join(format!(
+            ".{}.layers-{}",
+            name.to_string_lossy(),
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir)
+            .with_context(|| format!("failed to create layer scratch dir {}", dir.display()))?;
+        Ok(Self { dir })
+    }
+
+    fn layer_path(&self, index: usize) -> PathBuf {
+        self.dir.join(format!("layer-{index}.tmp"))
+    }
+}
+
+impl Drop for LayerScratch {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.dir);
+    }
+}
+
 /// Options for downloading a blob from an OCI registry.
 struct DownloadBlobOptions<'a> {
     ctx: &'a PullContext<'a>,
@@ -1040,13 +1079,17 @@ fn download_layers(
     fs::create_dir_all(staging_dir)
         .with_context(|| format!("failed to create staging dir {}", staging_dir.display()))?;
 
+    // Downloads land in a scratch dir outside the extracted tree; see
+    // LayerScratch.
+    let scratch = LayerScratch::new(staging_dir)?;
+
     // Share a decompression size limit across all layers.
     let limit = DecompressLimit::new(ctx.max_download_size);
 
     for (i, layer) in manifest.layers.iter().enumerate() {
         check_interrupted()?;
 
-        let temp_path = staging_dir.join(format!(".layer-{i}.tmp"));
+        let temp_path = scratch.layer_path(i);
 
         let result = (|| -> Result<()> {
             eprintln!(
@@ -1441,6 +1484,207 @@ mod tests {
         assert_eq!(fs::read(&sentinel).unwrap(), b"untouched");
 
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// Build a gzipped tar layer with regular files and symlinks.
+    fn build_layer_gz(files: &[(&str, &[u8])], symlinks: &[(&str, &str)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        {
+            let encoder = flate2::write::GzEncoder::new(&mut out, flate2::Compression::default());
+            let mut builder = tar::Builder::new(encoder);
+            for (path, content) in files {
+                let mut header = tar::Header::new_ustar();
+                header.set_path(path).unwrap();
+                header.set_size(content.len() as u64);
+                header.set_mode(0o644);
+                header.set_uid(unsafe { libc::getuid() } as u64);
+                header.set_gid(unsafe { libc::getgid() } as u64);
+                header.set_cksum();
+                builder.append(&header, *content).unwrap();
+            }
+            for (path, target) in symlinks {
+                let mut header = tar::Header::new_ustar();
+                header.set_path(path).unwrap();
+                header.set_entry_type(tar::EntryType::Symlink);
+                header.set_link_name(target).unwrap();
+                header.set_size(0);
+                header.set_mode(0o777);
+                header.set_uid(unsafe { libc::getuid() } as u64);
+                header.set_gid(unsafe { libc::getgid() } as u64);
+                header.set_cksum();
+                builder.append(&header, &b""[..]).unwrap();
+            }
+            let encoder = builder.into_inner().unwrap();
+            encoder.finish().unwrap();
+        }
+        out
+    }
+
+    fn sha256_hex(data: &[u8]) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(data);
+        format!("{:x}", hasher.finalize())
+    }
+
+    struct LayerFixture {
+        _tmp: crate::testutil::TempDataDir,
+        staging: PathBuf,
+        sentinel: PathBuf,
+        cache: crate::oci::cache::BlobCache,
+        image: ImageReference,
+        manifest: ImageManifest,
+    }
+
+    /// Two valid SHA-256-addressed layers where the first plants a symlink at
+    /// the second download's legacy pathname (`staging/.layer-1.tmp`).
+    fn layer_symlink_fixture(test: &str, layer2: Vec<u8>, cache_layer2: bool) -> LayerFixture {
+        let tmp = crate::testutil::TempDataDir::new(test);
+        let staging = tmp.path().join("staging");
+        let sentinel = tmp.path().join("host-sentinel");
+        fs::write(&sentinel, b"host data").unwrap();
+
+        let layer1 = build_layer_gz(
+            &[("base.txt", b"base\n")],
+            &[(".layer-1.tmp", sentinel.to_str().unwrap())],
+        );
+        let d1 = format!("sha256:{}", sha256_hex(&layer1));
+        let d2 = format!("sha256:{}", sha256_hex(&layer2));
+
+        let cache_dir = tmp.path().join("cache");
+        let cfg = crate::config::Config {
+            oci_cache_dir: cache_dir.to_string_lossy().into_owned(),
+            oci_cache_max_size: "1G".to_string(),
+            ..crate::config::Config::default()
+        };
+        let cache = crate::oci::cache::BlobCache::from_config(&cfg).unwrap();
+        let blob1 = tmp.path().join("blob1");
+        fs::write(&blob1, &layer1).unwrap();
+        cache.put(&d1, &blob1, false).unwrap();
+        if cache_layer2 {
+            let blob2 = tmp.path().join("blob2");
+            fs::write(&blob2, &layer2).unwrap();
+            cache.put(&d2, &blob2, false).unwrap();
+        }
+
+        let image = ImageReference {
+            registry: "127.0.0.1:1".to_string(),
+            repository: "test/img".to_string(),
+            reference: "latest".to_string(),
+        };
+        let manifest: ImageManifest = serde_json::from_value(serde_json::json!({
+            "layers": [
+                {"digest": d1, "size": layer1.len()},
+                {"digest": d2, "size": layer2.len()},
+            ]
+        }))
+        .unwrap();
+
+        LayerFixture {
+            _tmp: tmp,
+            staging,
+            sentinel,
+            cache,
+            image,
+            manifest,
+        }
+    }
+
+    /// The scratch directory must be a sibling of the staging tree, never
+    /// inside it. Kept in sync with the naming in `download_layers`.
+    fn scratch_dir_for(staging: &Path) -> PathBuf {
+        staging.parent().unwrap().join(format!(
+            ".{}.layers-{}",
+            staging.file_name().unwrap().to_string_lossy(),
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn test_download_layers_cached_symlink_cannot_redirect_download() {
+        let _lock = crate::import::tests::INTERRUPT_LOCK.lock().unwrap();
+        let fx = layer_symlink_fixture(
+            "layers-cached",
+            build_layer_gz(&[("app.txt", b"layer two\n")], &[]),
+            true,
+        );
+        let agent = build_http_agent(false, 5, 5).unwrap();
+        let ctx = PullContext {
+            agent: &agent,
+            token: None,
+            cache: &fx.cache,
+            verbose: false,
+            max_download_size: 0,
+        };
+
+        download_layers(&ctx, &fx.image, &fx.manifest, &fx.staging).unwrap();
+
+        // The outside file the planted symlink points at is untouched.
+        assert_eq!(fs::read(&fx.sentinel).unwrap(), b"host data");
+        // Both layers extracted the expected content.
+        assert_eq!(fs::read(fx.staging.join("base.txt")).unwrap(), b"base\n");
+        assert_eq!(
+            fs::read(fx.staging.join("app.txt")).unwrap(),
+            b"layer two\n"
+        );
+        // The planted symlink remains inert image content.
+        assert!(fx
+            .staging
+            .join(".layer-1.tmp")
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        // No download scratch is left behind, inside or outside the tree.
+        assert!(!scratch_dir_for(&fx.staging).exists());
+        assert!(!fx.staging.join(".layer-0.tmp").exists());
+        assert!(!fx.staging.join("layer-0.tmp").exists());
+    }
+
+    #[test]
+    fn test_download_layers_network_failure_removes_scratch() {
+        let _lock = crate::import::tests::INTERRUPT_LOCK.lock().unwrap();
+        // Layer 2 is valid-format but absent from the cache, and the
+        // registry address is a closed loopback port: the download fails.
+        let fx = layer_symlink_fixture(
+            "layers-netfail",
+            build_layer_gz(&[("app.txt", b"layer two\n")], &[]),
+            false,
+        );
+        let agent = build_http_agent(false, 5, 5).unwrap();
+        let ctx = PullContext {
+            agent: &agent,
+            token: None,
+            cache: &fx.cache,
+            verbose: false,
+            max_download_size: 0,
+        };
+
+        let scratch = scratch_dir_for(&fx.staging);
+        download_layers(&ctx, &fx.image, &fx.manifest, &fx.staging).unwrap_err();
+
+        assert!(!scratch.exists(), "scratch dir left behind after failure");
+        assert_eq!(fs::read(&fx.sentinel).unwrap(), b"host data");
+    }
+
+    #[test]
+    fn test_download_layers_extract_failure_removes_scratch() {
+        let _lock = crate::import::tests::INTERRUPT_LOCK.lock().unwrap();
+        // Layer 2 is cached but is not a readable tar stream.
+        let fx = layer_symlink_fixture("layers-badtar", b"not a tar archive".to_vec(), true);
+        let agent = build_http_agent(false, 5, 5).unwrap();
+        let ctx = PullContext {
+            agent: &agent,
+            token: None,
+            cache: &fx.cache,
+            verbose: false,
+            max_download_size: 0,
+        };
+
+        let scratch = scratch_dir_for(&fx.staging);
+        download_layers(&ctx, &fx.image, &fx.manifest, &fx.staging).unwrap_err();
+
+        assert!(!scratch.exists(), "scratch dir left behind after failure");
+        assert_eq!(fs::read(&fx.sentinel).unwrap(), b"host data");
     }
 
     #[test]
