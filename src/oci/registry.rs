@@ -724,7 +724,12 @@ struct LayerScratch {
 
 impl LayerScratch {
     fn new(staging_dir: &Path) -> Result<Self> {
-        let parent = staging_dir.parent().unwrap_or_else(|| Path::new("."));
+        // A single-component relative staging path has parent Some("");
+        // treat it as the current directory.
+        let parent = staging_dir
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
         // The scratch must sit next to the real staging tree. If the given
         // staging path reaches its directory through a final symlink, its
         // lexical parent is not the directory that actually holds the tree;
@@ -1823,6 +1828,32 @@ mod tests {
         // Nothing was created in either location.
         assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 1);
         assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn test_layer_scratch_single_component_relative_staging() {
+        // A bare relative staging name has parent Some(""), which must be
+        // treated as "." rather than failing to canonicalize. Uses a unique
+        // directory in the process cwd instead of chdir (process-global).
+        let name = format!(
+            "sdme-test-rel-staging-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        );
+        let cwd = std::env::current_dir().unwrap();
+        let staging_abs = cwd.join(&name);
+        let _ = fs::remove_dir_all(&staging_abs);
+        fs::create_dir_all(&staging_abs).unwrap();
+
+        let scratch = LayerScratch::new(Path::new(&name)).unwrap();
+        let scratch_dir = scratch.dir.clone();
+        assert!(scratch_dir.is_absolute());
+        assert_eq!(scratch_dir.parent(), Some(cwd.as_path()));
+        assert!(scratch_dir.is_dir());
+
+        drop(scratch);
+        assert!(!scratch_dir.exists());
+        fs::remove_dir_all(&staging_abs).unwrap();
     }
 
     #[test]
