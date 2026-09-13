@@ -421,6 +421,15 @@ fn do_copy(ctx: &CopyContext, src: &Path, dst: &Path) -> Result<()> {
         }
     }
 
+    // COPY steps accumulate in a single upper layer, so a symlink already
+    // present there (from an earlier step or a reused build container) must
+    // not redirect this write outside the layer; same guard as `sdme cp`.
+    let rel_target = target.strip_prefix(ctx.upper_dir).unwrap_or(&rel_dst);
+    if let Some(parent_rel) = rel_target.parent() {
+        copy::reject_symlinked_path(ctx.upper_dir, &parent_rel.to_string_lossy())?;
+    }
+    copy::shadow_symlink(&target)?;
+
     if ctx.verbose {
         eprintln!("copy: {} -> {}", src.display(), target.display());
     }
@@ -434,10 +443,10 @@ fn do_copy(ctx: &CopyContext, src: &Path, dst: &Path) -> Result<()> {
     if meta.is_dir() {
         fs::create_dir_all(&target)
             .with_context(|| format!("failed to create {}", target.display()))?;
-        copy::copy_tree(src, &target, ctx.verbose)
+        copy::copy_tree_shadowed(src, &target, ctx.verbose)
             .with_context(|| format!("failed to copy directory {}", src.display()))?;
     } else {
-        copy::copy_entry(src, &target, ctx.verbose)
+        copy::copy_entry_shadowed(src, &target, ctx.verbose)
             .with_context(|| format!("failed to copy {}", src.display()))?;
     }
 
@@ -1400,6 +1409,71 @@ mod tests {
         // Valid paths should still work.
         do_copy(&ctx, &src_file, Path::new("/opt/safe")).unwrap();
         assert!(upper.join("opt/safe").is_file());
+    }
+
+    #[test]
+    fn test_do_copy_rejects_symlink_ancestor_in_upper() {
+        // COPY steps accumulate in one upper layer, so a symlink already
+        // present there (from an earlier step or a reused build container)
+        // must not redirect a later COPY outside the layer; same guard as
+        // `sdme cp`.
+        let (_tmp, upper, lower) = make_layers("symlink-guard");
+        let outside = _tmp.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("victim"), "original").unwrap();
+        std::os::unix::fs::symlink(&outside, upper.join("data")).unwrap();
+
+        let src_dir = _tmp.path().join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+        let src_file = src_dir.join("payload");
+        fs::write(&src_file, "attacker").unwrap();
+
+        let ctx = CopyContext {
+            upper_dir: &upper,
+            check_dir: &lower,
+            shadowed: SHADOWED_DIRS,
+            opaque_dirs: &[],
+            verbose: false,
+        };
+        let err = do_copy(&ctx, &src_file, Path::new("/data/victim")).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("symlink"),
+            "should reject a symlink ancestor in the upper layer, got: {err:#}"
+        );
+        assert_eq!(
+            fs::read_to_string(outside.join("victim")).unwrap(),
+            "original"
+        );
+    }
+
+    #[test]
+    fn test_do_copy_shadows_leaf_symlink_in_upper() {
+        // A leaf symlink in the upper is replaced by the copied file, not
+        // followed onto the host.
+        let (_tmp, upper, lower) = make_layers("leaf-guard");
+        fs::create_dir_all(upper.join("etc")).unwrap();
+        let outside = _tmp.path().join("outside-target");
+        fs::write(&outside, "keep").unwrap();
+        std::os::unix::fs::symlink(&outside, upper.join("etc/conf")).unwrap();
+
+        let src_dir = _tmp.path().join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+        let src_file = src_dir.join("newconf");
+        fs::write(&src_file, "new").unwrap();
+
+        let ctx = CopyContext {
+            upper_dir: &upper,
+            check_dir: &lower,
+            shadowed: SHADOWED_DIRS,
+            opaque_dirs: &[],
+            verbose: false,
+        };
+        do_copy(&ctx, &src_file, Path::new("/etc/conf")).unwrap();
+
+        let written = upper.join("etc/conf");
+        assert!(written.symlink_metadata().unwrap().file_type().is_file());
+        assert_eq!(fs::read_to_string(&written).unwrap(), "new");
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "keep");
     }
 
     #[test]

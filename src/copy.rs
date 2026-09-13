@@ -25,13 +25,13 @@ pub(crate) fn copy_tree(src_dir: &Path, dst_dir: &Path, verbose: bool) -> Result
 }
 
 /// Like [`copy_tree`], but symlink-safe for writing into a tree that may hold
-/// untrusted pre-existing entries (a btrfs container subvolume holding the base
-/// image). Before writing each destination entry, an existing symlink there is
-/// removed so the write cannot be redirected through it (in the worst case onto
-/// the host, since sdme runs as root and is not chrooted). Existing real
-/// directories are merged into rather than failed on. Use for `sdme cp` writes
-/// into a btrfs container; the overlay backend writes into a fresh upper layer
-/// and must use plain [`copy_tree`] (unchanged behavior).
+/// untrusted pre-existing entries (an imported rootfs, a btrfs container
+/// subvolume holding the base image, an overlay upper populated by a
+/// container run or an earlier copy). Before writing each destination entry,
+/// an existing symlink there is removed so the write cannot be redirected
+/// through it (in the worst case onto the host, since sdme runs as root and
+/// is not chrooted). Existing real directories are merged into rather than
+/// failed on. Use for `sdme cp` and `fs build` COPY writes into such trees.
 pub(crate) fn copy_tree_shadowed(src_dir: &Path, dst_dir: &Path, verbose: bool) -> Result<()> {
     let mut hardlinks = HardLinkMap::new();
     copy_tree_inner(src_dir, dst_dir, verbose, &mut hardlinks, true)
@@ -509,13 +509,13 @@ pub(crate) fn sanitize_dest_path(path: &Path) -> Result<PathBuf> {
 /// Reject a write whose path, resolved component by component under `root`,
 /// would traverse a symlink already present in the tree.
 ///
-/// The overlay backend writes into a fresh, empty upper layer, so an
-/// image-supplied symlink in the base rootfs (e.g. `/var/lib` -> `/etc`, a
-/// merged-usr `/bin` -> `usr/bin`, or an absolute symlink that resolves onto
-/// the host) can never redirect the write. The btrfs backend writes directly
-/// into the container's subvolume, which already holds the base tree, so such
-/// a symlink ancestor could redirect `create_dir_all`/`write` outside the
-/// subvolume, in the worst case onto the host filesystem. This walks each
+/// Writes into a container or rootfs destination land in a tree whose content
+/// sdme does not control: an imported rootfs, a btrfs subvolume holding the
+/// base image, or an overlay upper populated by a container run or an earlier
+/// copy can all hold symlinks (e.g. `/var/lib` -> `/etc`, a merged-usr
+/// `/bin` -> `usr/bin`, or an absolute symlink that resolves onto the host).
+/// Such a symlink ancestor could redirect `create_dir_all`/`write` outside
+/// the tree, in the worst case onto the host filesystem. This walks each
 /// existing component of `rel` under `root` and bails if any is a symlink, so
 /// only real directories are ever descended into.
 pub(crate) fn reject_symlinked_path(root: &Path, rel: &str) -> Result<()> {
@@ -537,11 +537,11 @@ pub(crate) fn reject_symlinked_path(root: &Path, rel: &str) -> Result<()> {
 }
 
 /// Remove a leaf path if it is a symlink, so a subsequent write creates a real
-/// file in place rather than following the base image's symlink (e.g. a Debian
+/// file in place rather than following the tree's symlink (e.g. a Debian
 /// `/etc/resolv.conf` -> systemd stub, or an absolute symlink that would escape
 /// onto the host). Mirrors how the overlay upper layer shadows a lower-layer
-/// symlink with a real file. Intended for the btrfs backend, whose writes land
-/// in the base tree itself.
+/// symlink with a real file. Intended for writes into trees whose content sdme
+/// does not control (imported rootfs, container subvolume or populated upper).
 pub(crate) fn shadow_symlink(path: &Path) -> Result<()> {
     if let Ok(m) = fs::symlink_metadata(path) {
         if m.file_type().is_symlink() {
@@ -705,6 +705,40 @@ mod tests {
         assert!(
             !escape_dir.join("f").exists(),
             "descent followed a symlinked directory and escaped"
+        );
+    }
+
+    #[test]
+    fn test_copy_tree_shadowed_hardlink_over_symlink() {
+        // Hard link preservation must not re-create a shadowed symlink: the
+        // first copied name for an inode shadows the symlink, and the second
+        // name links to the real file, regardless of read_dir order.
+        let tmp = crate::testutil::TempDataDir::new("shadow-hl");
+        let dst = tmp.path().join("dst");
+        fs::create_dir_all(&dst).unwrap();
+        let escape = tmp.path().join("escape");
+        unix_fs::symlink(&escape, dst.join("a")).unwrap();
+
+        let src = tmp.path().join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("a"), "payload").unwrap();
+        fs::hard_link(src.join("a"), src.join("b")).unwrap();
+
+        copy_tree_shadowed(&src, &dst, false).unwrap();
+
+        assert!(dst
+            .join("a")
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_file());
+        let ino_a = fs::metadata(dst.join("a")).unwrap().ino();
+        let ino_b = fs::metadata(dst.join("b")).unwrap().ino();
+        assert_eq!(ino_a, ino_b, "hard links should share the same inode");
+        assert_eq!(fs::read_to_string(dst.join("a")).unwrap(), "payload");
+        assert!(
+            !escape.exists(),
+            "hard link creation followed a symlink and escaped"
         );
     }
 
