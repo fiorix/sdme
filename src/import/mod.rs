@@ -89,7 +89,9 @@ pub struct ImportOptions<'a> {
     pub name: Option<&'a str>,
     /// Enable verbose output.
     pub verbose: bool,
-    /// Overwrite an existing rootfs with the same name.
+    /// Overwrite an existing rootfs with the same name. Refused while any
+    /// container references it; the old rootfs is replaced only after the
+    /// replacement has been fully acquired and validated.
     pub force: bool,
     /// Allow interactive prompts (e.g. package installation confirmation).
     pub interactive: bool,
@@ -1285,8 +1287,12 @@ fn prompt_install_systemd(
 /// the root filesystem, and its contents are copied to the staging directory.
 ///
 /// The import is transactional: files are copied/extracted into a staging
-/// directory and atomically renamed into place on success. Returns the final
-/// rootfs name, whether explicit or inferred from the source.
+/// directory and atomically renamed into place on success. A forced
+/// replacement (`force`) is refused while any container references the base;
+/// otherwise the old tree is parked and removed only after the replacement
+/// has been validated, and the rootfs and its metadata/environment sidecars
+/// are published as one state. Returns the final rootfs name, whether
+/// explicit or inferred from the source.
 pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<String> {
     let ImportOptions {
         source,
@@ -1321,24 +1327,20 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<String> {
 
     let rootfs_dir = datadir.join("fs");
     let final_dir = rootfs_dir.join(&name);
-    if final_dir.exists() {
+    let replacing = final_dir.exists();
+    if replacing {
         if !force {
             bail!(
                 "fs already exists: {name}; use --force to replace it or --name <name> to import separately"
             );
         }
-        if verbose {
-            eprintln!("removing existing fs '{name}' (forced)");
-        }
-        crate::copy::safe_remove_dir(&final_dir)?;
-        let meta_path = rootfs_dir.join(format!(".{name}.meta"));
-        let _ = fs::remove_file(meta_path);
-        let env_path = rootfs_dir.join(format!(".{name}.env"));
-        let _ = fs::remove_file(env_path);
-        // Drop the cached btrfs base subvolume for the old content so the
-        // replacement is re-materialized on the next container create
-        // (best-effort; overlay-only hosts have no pool).
-        let _ = crate::storage::btrfs::invalidate_base(datadir, &name, verbose);
+        // Forced replacement is refused while any container references the
+        // base, running or stopped, consistent with `fs rm`: swapping the
+        // lower tree out from under a container would silently change (or
+        // break) it. The exclusive fs lock held above excludes a concurrent
+        // `sdme create`, which takes the shared fs lock before claiming its
+        // state file, so this check cannot be raced by a cooperating create.
+        crate::rootfs::check_rootfs_in_use(datadir, &name)?;
     }
 
     fs::create_dir_all(&rootfs_dir)
@@ -1600,15 +1602,25 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<String> {
         }
     }
 
-    // --- Atomic rename to final location ---
+    // --- Publication: the tree and its sidecars as one replacement state ---
 
-    txn.commit(&final_dir)?;
+    // Build the metadata and environment sidecars before touching any
+    // visible state. They go to transaction-named temp files (reclaimed by
+    // the usual stale-transaction sweep if the import dies here) and are
+    // published by atomic rename below, so a crash never leaves a
+    // half-written sidecar, and a failure before publication leaves the old
+    // rootfs and its sidecars fully intact.
+    let pid = std::process::id();
+    let meta_tmp = rootfs_dir.join(format!(".{name}.meta.import-txn-{pid}"));
+    let env_tmp = rootfs_dir.join(format!(".{name}.env.import-txn-{pid}"));
+    let meta_path = rootfs_dir.join(format!(".{name}.meta"));
+    let env_path = rootfs_dir.join(format!(".{name}.env"));
 
-    // Write distro and OCI config metadata sidecar.
-    let distro = crate::rootfs::detect_distro(&final_dir);
+    let distro = crate::rootfs::detect_distro(&staging_dir);
     let mut meta = State::new();
     meta.set("DISTRO", &distro);
 
+    let mut new_env: Option<String> = None;
     if let Some(ref cc) = oci_config {
         if let Some(ref ep) = cc.entrypoint {
             if !ep.is_empty() {
@@ -1635,10 +1647,7 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<String> {
                 // Store env vars as newline-separated KEY=VALUE pairs.
                 // The State format uses first `=` as delimiter, so multi-line
                 // values aren't directly supported. Use a separate file.
-                let env_path = rootfs_dir.join(format!(".{name}.env"));
-                let content = env.join("\n") + "\n";
-                crate::atomic_write(&env_path, content.as_bytes())
-                    .with_context(|| format!("failed to write {}", env_path.display()))?;
+                new_env = Some(env.join("\n") + "\n");
             }
         }
         if let Some(ref ports) = cc.exposed_ports {
@@ -1658,8 +1667,102 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<String> {
         }
     }
 
-    let meta_path = rootfs_dir.join(format!(".{name}.meta"));
-    meta.write_to(&meta_path)?;
+    meta.write_to(&meta_tmp)?;
+    if let Some(ref content) = new_env {
+        fs::write(&env_tmp, content)
+            .with_context(|| format!("failed to write {}", env_tmp.display()))?;
+    }
+
+    if replacing {
+        // Drop the cached btrfs base subvolume for the old content before
+        // replacing, so it is re-materialized from the new rootfs on the next
+        // container create. Abort on error with the old rootfs untouched:
+        // publishing the new tree alongside a stale base would silently seed
+        // future containers with the old content. No-op without a pool.
+        crate::storage::btrfs::invalidate_base(datadir, &name, verbose)?;
+        if verbose {
+            eprintln!("replacing existing fs '{name}' (forced)");
+        }
+    }
+
+    // Move the replacement into place. When replacing, the old tree is first
+    // parked under a remove-txn name (hidden from `fs list`, reclaimed by gc
+    // if the import dies in this window) so the commit rename can proceed
+    // and a later failure can still be rolled back.
+    let remove_txn = if replacing {
+        Some(crate::txn::Txn::new(
+            &rootfs_dir,
+            &name,
+            crate::txn::TxnKind::Remove,
+            auto_gc,
+            verbose,
+        ))
+    } else {
+        None
+    };
+    if let Some(ref rtxn) = remove_txn {
+        fs::rename(&final_dir, rtxn.path()).with_context(|| {
+            format!(
+                "failed to park {} at {}",
+                final_dir.display(),
+                rtxn.path().display()
+            )
+        })?;
+        if let Err(e) = txn.commit(&final_dir) {
+            let _ = fs::rename(rtxn.path(), &final_dir);
+            return Err(e);
+        }
+    } else {
+        txn.commit(&final_dir)?;
+    }
+
+    // Publish the sidecars: install the new ones, and drop a stale
+    // environment file when the replacement carries none. The old
+    // environment file is parked (not deleted) first so a failure can be
+    // rolled back to the exact pre-import sidecar state; the parked file is
+    // removed once publication succeeds.
+    let env_parked = rootfs_dir.join(format!(".{name}.env.remove-txn-{pid}"));
+    let had_env = env_path.symlink_metadata().is_ok();
+    let publish = (|| -> Result<()> {
+        if had_env {
+            fs::rename(&env_path, &env_parked)
+                .with_context(|| format!("failed to park {}", env_path.display()))?;
+        }
+        if new_env.is_some() {
+            fs::rename(&env_tmp, &env_path)
+                .with_context(|| format!("failed to publish {}", env_path.display()))?;
+        }
+        fs::rename(&meta_tmp, &meta_path)
+            .with_context(|| format!("failed to publish {}", meta_path.display()))?;
+        Ok(())
+    })();
+    if let Err(e) = publish {
+        // Roll the tree and sidecars back to the pre-import state.
+        let _ = crate::copy::safe_remove_dir(&final_dir);
+        if let Some(ref rtxn) = remove_txn {
+            let _ = fs::rename(rtxn.path(), &final_dir);
+        }
+        let _ = fs::remove_file(&env_path);
+        if had_env {
+            let _ = fs::rename(&env_parked, &env_path);
+        }
+        let _ = fs::remove_file(&meta_tmp);
+        let _ = fs::remove_file(&env_tmp);
+        return Err(e);
+    }
+    let _ = fs::remove_file(&env_parked);
+
+    // Replacement complete: drop the parked old tree. A removal failure
+    // leaves a hidden transaction directory that a later stale-transaction
+    // sweep reclaims, so it does not fail the import.
+    if let Some(ref rtxn) = remove_txn {
+        if let Err(e) = crate::copy::safe_remove_dir(rtxn.path()) {
+            eprintln!(
+                "warning: failed to remove replaced rootfs at {}: {e}; left for fs gc",
+                rtxn.path().display()
+            );
+        }
+    }
 
     if verbose {
         eprintln!("imported fs '{name}' from {source}");
@@ -2010,6 +2113,190 @@ pub(crate) mod tests {
             err.to_string().contains("already exists"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn test_force_import_rejects_when_container_references_base() {
+        // Forced replacement is refused while any container references the
+        // base, including a stopped one, consistent with `fs rm`. The
+        // existing rootfs, its metadata, and the reference are preserved.
+        let tmp = tmp();
+        let src = TempSourceDir::new("force-ref");
+        fs::write(src.path().join("marker"), "v1").unwrap();
+        test_run(
+            tmp.path(),
+            src.path().to_str().unwrap(),
+            "base",
+            false,
+            true,
+        )
+        .unwrap();
+
+        let state_dir = tmp.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+        let mut state = State::new();
+        state.set("NAME", "c1");
+        state.set("ROOTFS", "base");
+        state.write_to(&state_dir.join("c1")).unwrap();
+
+        let err = test_run(
+            tmp.path(),
+            src.path().to_str().unwrap(),
+            "base",
+            false,
+            true,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("in use"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(
+            fs::read_to_string(tmp.path().join("fs/base/marker")).unwrap(),
+            "v1"
+        );
+        assert!(tmp.path().join("fs/.base.meta").exists());
+        // The container reference itself is untouched.
+        let state = State::read_from(&state_dir.join("c1")).unwrap();
+        assert_eq!(state.get("ROOTFS"), Some("base"));
+        assert_eq!(state.get("NAME"), Some("c1"));
+    }
+
+    #[test]
+    fn test_failed_force_import_preserves_rootfs_and_sidecars() {
+        // A failed forced import (corrupt replacement archive) must leave the
+        // previous rootfs, its metadata, and its environment sidecar intact.
+        let tmp = tmp();
+        let src = TempSourceDir::new("force-fail");
+        fs::write(src.path().join("marker"), "v1").unwrap();
+        test_run(
+            tmp.path(),
+            src.path().to_str().unwrap(),
+            "base",
+            false,
+            true,
+        )
+        .unwrap();
+        // Simulate an environment sidecar left by a previous OCI import.
+        fs::write(tmp.path().join("fs/.base.env"), "A=1\n").unwrap();
+
+        let bad = TempSourceDir::new("force-fail-src");
+        let bad_tar = bad.path().join("corrupt.tar.gz");
+        fs::write(&bad_tar, b"this is not a gzip stream").unwrap();
+
+        test_run(tmp.path(), bad_tar.to_str().unwrap(), "base", false, true).unwrap_err();
+
+        assert_eq!(
+            fs::read_to_string(tmp.path().join("fs/base/marker")).unwrap(),
+            "v1",
+            "failed replacement must not destroy the previous rootfs"
+        );
+        assert!(
+            tmp.path().join("fs/.base.meta").exists(),
+            "metadata sidecar must survive a failed replacement"
+        );
+        assert_eq!(
+            fs::read_to_string(tmp.path().join("fs/.base.env")).unwrap(),
+            "A=1\n",
+            "environment sidecar must survive a failed replacement"
+        );
+    }
+
+    #[test]
+    fn test_force_import_replaces_tree_and_drops_stale_env() {
+        // A successful forced replacement publishes the new tree with matching
+        // sidecars: updated metadata, and no stale environment when the
+        // replacement carries none.
+        let tmp = tmp();
+        let src1 = TempSourceDir::new("force-old");
+        fs::write(src1.path().join("old.txt"), "old").unwrap();
+        test_run(
+            tmp.path(),
+            src1.path().to_str().unwrap(),
+            "base",
+            false,
+            true,
+        )
+        .unwrap();
+        fs::write(tmp.path().join("fs/.base.env"), "A=1\n").unwrap();
+
+        let src2 = TempSourceDir::new("force-new");
+        fs::create_dir_all(src2.path().join("etc")).unwrap();
+        fs::write(
+            src2.path().join("etc/os-release"),
+            "PRETTY_NAME=\"New OS\"\n",
+        )
+        .unwrap();
+        fs::write(src2.path().join("new.txt"), "new").unwrap();
+        test_run(
+            tmp.path(),
+            src2.path().to_str().unwrap(),
+            "base",
+            false,
+            true,
+        )
+        .unwrap();
+
+        let rootfs = tmp.path().join("fs/base");
+        assert!(rootfs.join("new.txt").is_file());
+        assert!(
+            !rootfs.join("old.txt").exists(),
+            "replaced rootfs must not retain old content"
+        );
+        assert!(
+            !tmp.path().join("fs/.base.env").exists(),
+            "stale environment sidecar must be removed when the replacement has none"
+        );
+        let meta = State::read_from(&tmp.path().join("fs/.base.meta")).unwrap();
+        assert_eq!(meta.get("DISTRO"), Some("New OS"));
+    }
+
+    #[test]
+    fn test_force_import_sidecar_publish_failure_rolls_back() {
+        // If publishing the new metadata fails after the new tree is in
+        // place, the old tree and the old sidecars are rolled back: the
+        // filesystem and its sidecars move as one replacement state.
+        let tmp = tmp();
+        let src1 = TempSourceDir::new("pub-old");
+        fs::write(src1.path().join("marker"), "v1").unwrap();
+        test_run(
+            tmp.path(),
+            src1.path().to_str().unwrap(),
+            "base",
+            false,
+            true,
+        )
+        .unwrap();
+        fs::write(tmp.path().join("fs/.base.env"), "A=1\n").unwrap();
+
+        // Replace the metadata sidecar with a non-empty directory so the
+        // publish rename fails deterministically.
+        let meta_path = tmp.path().join("fs/.base.meta");
+        fs::remove_file(&meta_path).unwrap();
+        fs::create_dir_all(meta_path.join("child")).unwrap();
+
+        let src2 = TempSourceDir::new("pub-new");
+        fs::write(src2.path().join("marker"), "v2").unwrap();
+        test_run(
+            tmp.path(),
+            src2.path().to_str().unwrap(),
+            "base",
+            false,
+            true,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            fs::read_to_string(tmp.path().join("fs/base/marker")).unwrap(),
+            "v1",
+            "sidecar publish failure must roll the rootfs back to the old tree"
+        );
+        assert_eq!(
+            fs::read_to_string(tmp.path().join("fs/.base.env")).unwrap(),
+            "A=1\n",
+            "sidecar publish failure must restore the old environment sidecar"
+        );
+        assert!(meta_path.is_dir(), "injected obstacle should be untouched");
     }
 
     #[test]

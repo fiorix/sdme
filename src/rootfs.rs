@@ -238,7 +238,7 @@ pub fn import(datadir: &Path, opts: &crate::import::ImportOptions) -> Result<Str
 /// Remove an imported root filesystem.
 ///
 /// Validates the name, checks that no container references it, then removes
-/// the fs directory and its `.meta` sidecar.
+/// the fs directory and its `.meta` and `.env` sidecars.
 ///
 /// To prevent a TOCTOU race where `sdme create --fs <name>` could
 /// reference the rootfs between the usage check and the deletion, we
@@ -296,11 +296,21 @@ pub fn remove(datadir: &Path, name: &str, auto_gc: bool, verbose: bool) -> Resul
     txn.done();
 
     // Drop any cached btrfs base subvolume for this rootfs so it is not reused
-    // by a future container (best-effort; overlay-only hosts have no pool).
-    let _ = crate::storage::btrfs::invalidate_base(datadir, name, verbose);
+    // by a future container. The tree is already gone, so a failure here only
+    // leaves a stale cache behind; warn so it is not silently reused to seed
+    // a future same-named rootfs's containers (overlay-only hosts have no
+    // pool, making this a no-op).
+    if let Err(e) = crate::storage::btrfs::invalidate_base(datadir, name, verbose) {
+        eprintln!(
+            "warning: failed to invalidate btrfs base for '{name}': {e}; \
+             a stale base subvolume may seed future containers"
+        );
+    }
 
     let meta_path = datadir.join("fs").join(format!(".{name}.meta"));
     let _ = fs::remove_file(meta_path);
+    let env_path = datadir.join("fs").join(format!(".{name}.env"));
+    let _ = fs::remove_file(env_path);
 
     if verbose {
         eprintln!("removed fs '{name}'");
@@ -309,7 +319,12 @@ pub fn remove(datadir: &Path, name: &str, auto_gc: bool, verbose: bool) -> Resul
     Ok(())
 }
 
-fn check_rootfs_in_use(datadir: &Path, name: &str) -> Result<()> {
+/// Bail if any container state file references rootfs `name`.
+///
+/// Used by `fs rm` and by forced `fs import` replacement, which applies the
+/// same policy: a referenced base is never removed or replaced, whether the
+/// container is running or stopped.
+pub(crate) fn check_rootfs_in_use(datadir: &Path, name: &str) -> Result<()> {
     let state_dir = datadir.join("state");
     if !state_dir.is_dir() {
         return Ok(());
