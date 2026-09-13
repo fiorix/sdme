@@ -13,19 +13,34 @@ use super::{ensure_exists, volumes_dir};
 ///
 /// Refuses to remove anything when the unit state cannot be determined:
 /// an undetermined state is not proof that the container is stopped, so
-/// the filesystem teardown, state file, and drop-in are all left in
-/// place and the command stays retryable.
+/// no unit mutation, filesystem teardown, state file removal, or drop-in
+/// removal happens and the command stays retryable.
 pub fn remove(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
-    remove_with_state_query(datadir, name, verbose, systemd::unit_active_state)
+    remove_with_ops(
+        datadir,
+        name,
+        verbose,
+        &RemovalOps {
+            unit_state: &systemd::unit_active_state,
+            disable_unit: &systemd::disable_unit_only,
+            remove_dropin: &systemd::remove_limits_dropin,
+        },
+    )
 }
 
-/// Container removal with the unit-state query injected for testing.
-fn remove_with_state_query(
-    datadir: &Path,
-    name: &str,
-    verbose: bool,
-    unit_state: impl Fn(&str) -> Result<Option<String>>,
-) -> Result<()> {
+/// Host side effects of container removal, injected for testing.
+struct RemovalOps<'a> {
+    /// Query the unit's ActiveState; `Ok(None)` means confirmed absent,
+    /// `Err` means the state could not be determined.
+    unit_state: &'a dyn Fn(&str) -> Result<Option<String>>,
+    /// Disable the container's unit (best-effort, errors ignored).
+    disable_unit: &'a dyn Fn(&str) -> Result<()>,
+    /// Remove the container's systemd drop-in directory on the host.
+    remove_dropin: &'a dyn Fn(&str, bool) -> Result<()>,
+}
+
+/// Container removal with host side effects injected for testing.
+fn remove_with_ops(datadir: &Path, name: &str, verbose: bool, ops: &RemovalOps) -> Result<()> {
     ensure_exists(datadir, name)?;
 
     // Acquire exclusive lock to prevent removal while a build is reading from this container.
@@ -47,12 +62,20 @@ fn remove_with_state_query(
         (false, false)
     };
 
+    // Determine the unit state before any unit mutation or file removal.
+    // A failed query is not proof of absence: abort here so an
+    // undetermined state cannot be read as permission to delete, and the
+    // command stays retryable.
+    let active_state = (ops.unit_state)(name).with_context(|| {
+        format!("cannot determine whether container '{name}' is stopped; refusing to remove it")
+    })?;
+
     // Disable the unit if it was enabled (best-effort).
     if is_enabled {
         if verbose {
             eprintln!("disabling unit for '{name}'");
         }
-        let _ = systemd::disable_unit_only(name);
+        let _ = (ops.disable_unit)(name);
     }
 
     // Stop the container before deleting its files. Check the raw unit state
@@ -62,11 +85,6 @@ fn remove_with_state_query(
     // the directories we are about to delete. For the normal "active" case use
     // the existing graceful Terminate stop; for the abnormal states issue a real
     // StopUnit job (cancels the pending restart) and clear the failed latch.
-    // A failed query is not proof of absence: abort before touching any files
-    // when the state cannot be determined.
-    let active_state = unit_state(name).with_context(|| {
-        format!("cannot determine whether container '{name}' is stopped; refusing to remove it")
-    })?;
     match active_state.as_deref() {
         None | Some("inactive") => {}
         Some("active") => {
@@ -125,7 +143,7 @@ fn remove_with_state_query(
         }
     }
 
-    systemd::remove_limits_dropin(name, verbose)?;
+    (ops.remove_dropin)(name, verbose)?;
 
     if has_oci_volumes {
         let vol_dir = volumes_dir(datadir, name);
@@ -290,59 +308,121 @@ pub fn stop(name: &str, mode: StopMode, timeout_secs: u64, verbose: bool) -> Res
 mod tests {
     use super::*;
     use crate::testutil::TempDataDir;
+    use std::cell::RefCell;
     use std::path::PathBuf;
 
     /// Minimal container fixture: a state file plus a container directory
     /// with a sentinel file, satisfying remove's preconditions without
-    /// touching systemd or the host.
-    fn fixture(tmp: &TempDataDir, name: &str) -> (PathBuf, PathBuf) {
+    /// touching systemd or the host. `extra_state` is appended to the
+    /// state file (e.g. "ENABLED=yes\n").
+    fn fixture(tmp: &TempDataDir, name: &str, extra_state: &str) -> (PathBuf, PathBuf) {
         let state_dir = tmp.path().join("state");
         fs::create_dir_all(&state_dir).unwrap();
         let state_file = state_dir.join(name);
-        fs::write(&state_file, "NAME=fixture\nROOTFS=\n").unwrap();
+        fs::write(&state_file, format!("NAME=fixture\nROOTFS=\n{extra_state}")).unwrap();
         let container_dir = tmp.path().join("containers").join(name);
         fs::create_dir_all(container_dir.join("upper")).unwrap();
         fs::write(container_dir.join("upper").join("keep.txt"), "user data").unwrap();
         (state_file, container_dir)
     }
 
+    /// Recorded invocations of removal's injected host side effects.
+    #[derive(Default)]
+    struct OpLog {
+        disables: Vec<String>,
+        dropin_removals: Vec<String>,
+    }
+
+    /// Run removal with the given unit-state query and recording disable /
+    /// drop-in callbacks, so tests never touch host systemd state.
+    fn run_remove(
+        tmp: &TempDataDir,
+        name: &str,
+        query: &dyn Fn(&str) -> Result<Option<String>>,
+        log: &RefCell<OpLog>,
+    ) -> Result<()> {
+        let ops = RemovalOps {
+            unit_state: query,
+            disable_unit: &|n: &str| {
+                log.borrow_mut().disables.push(n.to_string());
+                Ok(())
+            },
+            remove_dropin: &|n: &str, _verbose: bool| {
+                log.borrow_mut().dropin_removals.push(n.to_string());
+                Ok(())
+            },
+        };
+        remove_with_ops(tmp.path(), name, false, &ops)
+    }
+
     #[test]
     fn test_remove_aborts_when_unit_state_uncertain() {
         let tmp = TempDataDir::new("remove-uncertain");
-        let (state_file, container_dir) = fixture(&tmp, "uncertainbox");
-        let err = remove_with_state_query(tmp.path(), "uncertainbox", false, |_| {
-            Err(anyhow::anyhow!("failed to connect to system dbus"))
-        })
+        let (state_file, container_dir) = fixture(&tmp, "uncertainbox", "");
+        let log = RefCell::new(OpLog::default());
+        let err = run_remove(
+            &tmp,
+            "uncertainbox",
+            &|_| Err(anyhow::anyhow!("failed to connect to system dbus")),
+            &log,
+        )
         .unwrap_err();
         let msg = format!("{err:#}");
         assert!(
             msg.contains("refusing to remove"),
             "unexpected error: {msg}"
         );
-        // Nothing destructive ran: the container storage and state file
-        // survive, so the command stays retryable.
+        // Nothing destructive ran: no drop-in removal, the container
+        // storage and state file survive, and the command stays retryable.
         assert!(state_file.exists());
         assert!(container_dir.join("upper").join("keep.txt").exists());
+        assert!(log.borrow().dropin_removals.is_empty());
+        assert!(log.borrow().disables.is_empty());
+    }
+
+    #[test]
+    fn test_remove_enabled_container_does_not_disable_when_state_uncertain() {
+        // The unit-state query must run before any unit mutation: an
+        // enabled container whose state cannot be determined keeps its
+        // enablement, storage, and state file.
+        let tmp = TempDataDir::new("remove-enabled-uncertain");
+        let (state_file, container_dir) = fixture(&tmp, "enabledbox", "ENABLED=yes\n");
+        let log = RefCell::new(OpLog::default());
+        let err = run_remove(
+            &tmp,
+            "enabledbox",
+            &|_| Err(anyhow::anyhow!("failed to connect to system dbus")),
+            &log,
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("refusing to remove"));
+        assert!(state_file.exists());
+        assert!(container_dir.join("upper").join("keep.txt").exists());
+        assert!(log.borrow().disables.is_empty());
+        assert!(log.borrow().dropin_removals.is_empty());
     }
 
     #[test]
     fn test_remove_proceeds_when_unit_confirmed_absent() {
         let tmp = TempDataDir::new("remove-absent");
-        let (state_file, container_dir) = fixture(&tmp, "gonebox");
-        remove_with_state_query(tmp.path(), "gonebox", false, |_| Ok(None)).unwrap();
+        let (state_file, container_dir) = fixture(&tmp, "gonebox", "");
+        let log = RefCell::new(OpLog::default());
+        run_remove(&tmp, "gonebox", &|_| Ok(None), &log).unwrap();
         assert!(!state_file.exists());
         assert!(!container_dir.exists());
+        assert_eq!(log.borrow().dropin_removals, vec!["gonebox"]);
+        assert!(log.borrow().disables.is_empty());
     }
 
     #[test]
     fn test_remove_proceeds_when_unit_inactive() {
         let tmp = TempDataDir::new("remove-inactive");
-        let (state_file, container_dir) = fixture(&tmp, "idlebox");
-        remove_with_state_query(tmp.path(), "idlebox", false, |_| {
-            Ok(Some("inactive".to_string()))
-        })
-        .unwrap();
+        let (state_file, container_dir) = fixture(&tmp, "idlebox", "ENABLED=yes\n");
+        let log = RefCell::new(OpLog::default());
+        run_remove(&tmp, "idlebox", &|_| Ok(Some("inactive".to_string())), &log).unwrap();
         assert!(!state_file.exists());
         assert!(!container_dir.exists());
+        assert_eq!(log.borrow().disables, vec!["idlebox"]);
+        assert_eq!(log.borrow().dropin_removals, vec!["idlebox"]);
     }
 }

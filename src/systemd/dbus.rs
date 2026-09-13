@@ -1160,25 +1160,35 @@ mod tests {
     }
 
     impl TestBus {
-        /// Returns None when dbus-daemon is not installed; tests skip.
+        /// Returns None only when dbus-daemon is not installed (tests skip
+        /// in that case). An installed daemon that fails to start fails the
+        /// test instead of skipping, so CI cannot silently lose coverage.
         fn spawn() -> Option<TestBus> {
-            use std::io::BufRead;
-            let mut daemon = std::process::Command::new("dbus-daemon")
+            use std::io::{BufRead, Read};
+            let mut daemon = match std::process::Command::new("dbus-daemon")
                 .args(["--session", "--nofork", "--print-address=1"])
                 .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped())
                 .spawn()
-                .ok()?;
+            {
+                Ok(child) => child,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+                Err(e) => panic!("failed to spawn dbus-daemon: {e}"),
+            };
             let stdout = daemon.stdout.take().unwrap();
             let mut line = String::new();
-            if std::io::BufReader::new(stdout)
-                .read_line(&mut line)
-                .is_err()
-                || line.trim().is_empty()
-            {
+            let read = std::io::BufReader::new(stdout).read_line(&mut line);
+            if read.is_err() || line.trim().is_empty() {
                 let _ = daemon.kill();
                 let _ = daemon.wait();
-                return None;
+                let mut stderr = String::new();
+                if let Some(mut err) = daemon.stderr.take() {
+                    let _ = err.read_to_string(&mut stderr);
+                }
+                panic!(
+                    "dbus-daemon is installed but failed to start \
+                     (read result: {read:?}, stderr: {stderr:?})"
+                );
             }
             Some(TestBus {
                 address: line.trim().to_string(),
