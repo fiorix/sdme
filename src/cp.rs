@@ -3,11 +3,13 @@
 //! Implements `sdme cp` for copying files and directories between the host
 //! filesystem and containers or imported root filesystems. One side must
 //! always be a host path; container-to-container copy is not supported.
-//! Writes into running containers are refused: the live tree can change
-//! between path checks and writes, which cannot be guarded against.
+//! Writes into running containers use the fd-relative contained copy engine
+//! (see `copy::copy_contained`), which stays safe under concurrent mutation
+//! of the live destination tree.
 //!
-//! Uses the same copy engine (`copy::copy_tree`, `copy::copy_entry`) and
-//! path validation (`copy::sanitize_dest_path`) as `fs build` COPY.
+//! Uses the same copy engine (`copy::copy_contained`, `copy::copy_tree`,
+//! `copy::copy_entry`) and path validation (`copy::sanitize_dest_path`) as
+//! `fs build` COPY.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -119,9 +121,8 @@ struct ResolvedSource {
 /// Holds resolved paths and RAII guards for a destination.
 struct ResolvedDest {
     /// Directory to write into (overlay upper/ or btrfs subvolume for stopped
-    /// containers, rootfs dir or host path directly). Running containers are
-    /// refused as destinations, so this tree is always quiescent under the
-    /// held locks.
+    /// containers, merged//proc-root for running, rootfs dir or host path
+    /// directly).
     write_dir: PathBuf,
     /// Directory to check for existing files (rootfs for stopped overlay
     /// containers, same as write_dir otherwise).
@@ -129,9 +130,13 @@ struct ResolvedDest {
     /// True when writes into `write_dir` must be guarded against symlinks
     /// already present in the tree. Set for every container/rootfs
     /// destination: an imported rootfs, a btrfs subvolume holding the base
-    /// tree, and an overlay upper populated by a container run or an earlier
-    /// copy can all hold symlinks that resolve onto the host.
+    /// tree, a running container's live root, and an overlay upper populated
+    /// by a container run or an earlier copy can all hold symlinks that
+    /// resolve onto the host. The guard is the fd-relative contained copy
+    /// engine, which stays sound even when the tree is mutated concurrently.
     protect_symlinks: bool,
+    /// True when the destination is a running container.
+    is_running: bool,
     _rootfs_lock: Option<lock::ResourceLock>,
     _lock: Option<lock::ResourceLock>,
 }
@@ -161,8 +166,8 @@ pub fn cp(datadir: &Path, src: &CpEndpoint, dst: &CpEndpoint, opts: &CpOptions) 
         check_host_safety(&resolved_src.path, opts)?;
     }
 
-    // Safety checks when copying TO a container/rootfs.
-    if !matches!(dst, CpEndpoint::Host(_)) {
+    // Safety checks when copying TO a stopped container or a rootfs.
+    if !matches!(dst, CpEndpoint::Host(_)) && !resolved_dst.is_running {
         check_container_dest_safety(&resolved_dst.write_dir, dst)?;
     }
 
@@ -352,6 +357,7 @@ fn resolve_destination(
             write_dir: path.clone(),
             check_dir: path.clone(),
             protect_symlinks: false,
+            is_running: false,
             _rootfs_lock: None,
             _lock: None,
         }),
@@ -369,6 +375,7 @@ fn resolve_destination(
                 // symlinks (e.g. etc -> /outside) that would redirect parent
                 // creation or writes onto the host, so guard the write.
                 protect_symlinks: true,
+                is_running: false,
                 _rootfs_lock: None,
                 _lock: Some(lock),
             })
@@ -376,28 +383,78 @@ fn resolve_destination(
         CpEndpoint::Container { name, path } => {
             let name = containers::resolve_name(datadir, name)?;
             containers::ensure_exists(datadir, &name)?;
+            let container_dir = datadir.join("containers").join(&name);
             let state = State::read_from(&datadir.join("state").join(&name))?;
             let backend = storage::Backend::from_state(&state);
             let running = systemd::is_active(&name)?;
 
             if running {
-                // Refuse writes into a running container. The destination
-                // tree is live: a container process can swap any checked path
-                // component for a symlink between the guard checks and the
-                // writes, and sdme runs as root without chroot, so a followed
-                // symlink (e.g. an absolute one in the host-visible merged/
-                // view) can write onto the host. No pathname-based guard
-                // closes that race, so fail safe: only a stopped container
-                // (whose tree cannot change under the lock) is a writable
-                // destination.
-                bail!(
-                    "cannot write to {} in running container '{name}': the live \
-                     filesystem can change between path checks and writes, which \
-                     cannot be guarded against; stop the container first, or use \
-                     'sdme exec {name} -- tee {}'",
-                    path.display(),
-                    path.display(),
+                let lock = lock::lock_shared(datadir, "containers", &name)
+                    .with_context(|| format!("cannot lock container '{name}' for writing"))?;
+                eprintln!(
+                    "warning: container '{name}' is running; filesystem is live and \
+                     consistency is not guaranteed"
                 );
+
+                let leader = systemd::get_machine_leader(&name)?
+                    .with_context(|| format!("container '{name}' disappeared (race)"))?;
+                let uses_userns = systemd::has_foreign_userns(leader);
+
+                let base = if uses_userns {
+                    // A running btrfs container's root is a subvolume mounted only
+                    // inside its own namespace, with no host-side merged/ view.
+                    if backend == storage::Backend::Btrfs {
+                        bail!(
+                            "cannot write to {} in running btrfs container '{name}' under \
+                             --userns; stop the container first, or use \
+                             'sdme exec {name} -- tee {}'",
+                            path.display(),
+                            path.display(),
+                        );
+                    }
+                    if is_under_shadowed_dir(path) {
+                        bail!(
+                            "cannot write to {} in running container '{name}': the kernel blocks \
+                             /proc/<pid>/root/ access for user namespace containers (--userns, \
+                             --hardened, --strict), and writing to merged/ would go under the \
+                             overlayfs layer instead of the live tmpfs at {}; use \
+                             'sdme exec {name} -- tee {}' as a workaround",
+                            path.display(),
+                            SHADOWED_DIRS
+                                .iter()
+                                .find(|d| {
+                                    let s = path.to_string_lossy();
+                                    s == **d || s.starts_with(&format!("{d}/"))
+                                })
+                                .unwrap(),
+                            path.display(),
+                        );
+                    }
+                    if verbose {
+                        eprintln!(
+                            "userns container: using merged/ (kernel blocks /proc/{leader}/root/)"
+                        );
+                    }
+                    container_dir.join("merged")
+                } else {
+                    if verbose {
+                        eprintln!("writing to /proc/{leader}/root/");
+                    }
+                    PathBuf::from(format!("/proc/{leader}/root"))
+                };
+
+                // The live tree can be mutated by the container mid-copy, so
+                // the write must go through the fd-relative contained engine:
+                // no path component is ever resolved through a symlink, even
+                // one swapped in concurrently.
+                Ok(ResolvedDest {
+                    write_dir: base.clone(),
+                    check_dir: base,
+                    protect_symlinks: true,
+                    is_running: true,
+                    _rootfs_lock: None,
+                    _lock: Some(lock),
+                })
             } else {
                 // Stopped: overlay writes into upper/ (checked against the lower
                 // rootfs); btrfs writes into its own subvolume, which already
@@ -455,6 +512,7 @@ fn resolve_destination(
                     // overlay upper too, since it can hold symlinks once
                     // populated (see above).
                     protect_symlinks: dest.protect_symlinks || backend == storage::Backend::Overlay,
+                    is_running: false,
                     _rootfs_lock: rootfs_lock,
                     _lock: Some(lock),
                 })
@@ -622,15 +680,14 @@ fn warn_rootfs_in_use(datadir: &Path, rootfs_name: &str) {
 
 /// Execute the file copy from resolved source to resolved destination.
 ///
-/// `protect_symlinks` guards writes that land in a tree the destination
-/// controls (an imported rootfs, a container's btrfs subvolume or populated
-/// overlay upper): before creating any parent directory or writing the
-/// target, it refuses to traverse a symlink ancestor already present in the
-/// tree and shadows a leaf symlink. The checks and the writes are separate
-/// path operations, so the guard is only sound against a tree that cannot
-/// change concurrently; callers establish that by refusing running-container
-/// destinations and by holding an exclusive container lock for stopped ones.
-/// Only host destinations skip it.
+/// `protect_symlinks` routes the write through the fd-relative contained
+/// copy engine (`copy::copy_contained`): every component of the destination
+/// path is resolved beneath an fd pinning `write_dir` with O_NOFOLLOW, so no
+/// symlink present in, or swapped into, the destination tree is ever
+/// traversed, even under concurrent mutation (a running container's live
+/// root). A symlink ancestor is rejected, a symlink or multiply-linked leaf
+/// is unlinked and recreated, and real directories are merged into. Only
+/// host destinations skip it.
 fn execute_copy(
     src_path: &Path,
     write_dir: &Path,
@@ -691,13 +748,13 @@ fn execute_copy(
     };
 
     let rel_dst = copy::sanitize_dest_path(dst_path)?;
-    let mut target = write_dir.join(&rel_dst);
+    let probe = write_dir.join(&rel_dst);
 
     // Check whether dst resolves to a directory in either layer.
-    let dst_is_dir = target.is_dir() || check_dir.join(&rel_dst).is_dir();
+    let dst_is_dir = probe.is_dir() || check_dir.join(&rel_dst).is_dir();
 
     // Check whether dst resolves to a file in either layer.
-    let dst_is_file = (!dst_is_dir) && (target.is_file() || check_dir.join(&rel_dst).is_file());
+    let dst_is_file = (!dst_is_dir) && (probe.is_file() || check_dir.join(&rel_dst).is_file());
 
     if meta.is_dir() && dst_is_file {
         bail!(
@@ -707,34 +764,32 @@ fn execute_copy(
         );
     }
 
-    // When dst is an existing directory, adjust the target.
-    if dst_is_dir {
-        if let Some(file_name) = src_path.file_name() {
-            target = target.join(file_name);
+    // Compute the destination relative to the write root, copying INTO dst
+    // when it is an existing directory.
+    let rel_target = if dst_is_dir {
+        match src_path.file_name() {
+            Some(file_name) => rel_dst.join(file_name),
+            None => rel_dst.clone(),
         }
-    }
-
-    // For container/rootfs destinations the write lands in a tree whose
-    // content sdme does not control (an imported rootfs can carry hostile
-    // symlinks; a container can plant them in its own upper or live root).
-    // Three layers keep the write inside the destination (sdme runs as root,
-    // so a followed symlink could otherwise write onto the host):
-    //   1. reject a symlink among the target's ancestors, so create_dir_all of
-    //      the parent chain cannot traverse one;
-    //   2. shadow a symlink at the target itself, so the top-level write (and,
-    //      for a directory, the descent into it) does not follow it;
-    //   3. use the shadowing copy engine below, which repeats (2) for every
-    //      recursive descendant before writing it.
-    if protect_symlinks {
-        let rel_target = target.strip_prefix(write_dir).unwrap_or(&rel_dst);
-        if let Some(parent_rel) = rel_target.parent() {
-            copy::reject_symlinked_path(write_dir, &parent_rel.to_string_lossy())?;
-        }
-        copy::shadow_symlink(&target)?;
-    }
+    } else {
+        rel_dst.clone()
+    };
+    let target = write_dir.join(&rel_target);
 
     if verbose {
         eprintln!("copy: {} -> {}", src_path.display(), target.display());
+    }
+
+    if protect_symlinks {
+        // Container/rootfs destinations are trees whose content sdme does
+        // not control (an imported rootfs can carry hostile symlinks; a
+        // container can plant or swap them in its own upper or live root).
+        // The contained engine never resolves a destination component
+        // through a symlink, under concurrency included; sdme runs as root,
+        // so a followed symlink could otherwise write onto the host.
+        copy::copy_contained(write_dir, &rel_target, src_path)
+            .with_context(|| format!("failed to copy {}", src_path.display()))?;
+        return Ok(());
     }
 
     // Create parent directories in the write layer.
@@ -746,15 +801,8 @@ fn execute_copy(
     if meta.is_dir() {
         fs::create_dir_all(&target)
             .with_context(|| format!("failed to create {}", target.display()))?;
-        if protect_symlinks {
-            copy::copy_tree_shadowed(src_path, &target, verbose)
-        } else {
-            copy::copy_tree(src_path, &target, verbose)
-        }
-        .with_context(|| format!("failed to copy directory {}", src_path.display()))?;
-    } else if protect_symlinks {
-        copy::copy_entry_shadowed(src_path, &target, verbose)
-            .with_context(|| format!("failed to copy {}", src_path.display()))?;
+        copy::copy_tree(src_path, &target, verbose)
+            .with_context(|| format!("failed to copy directory {}", src_path.display()))?;
     } else {
         copy::copy_entry(src_path, &target, verbose)
             .with_context(|| format!("failed to copy {}", src_path.display()))?;
@@ -1039,7 +1087,7 @@ mod tests {
             path: PathBuf::from("/bin/tool"),
         };
         let err = execute_copy(&src, &subvol, &subvol, true, &dst, false).unwrap_err();
-        assert!(err.to_string().contains("symlink"), "got: {err}");
+        assert!(format!("{err:#}").contains("symlink"), "got: {err:#}");
         // The symlink's target must not have been written through.
         assert!(!subvol.join("usr/bin/tool").exists());
     }

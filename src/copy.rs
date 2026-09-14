@@ -21,20 +21,38 @@ pub(crate) type HardLinkMap = HashMap<(u64, u64), PathBuf>;
 /// Recursively copy all entries from `src_dir` to `dst_dir`.
 pub(crate) fn copy_tree(src_dir: &Path, dst_dir: &Path, verbose: bool) -> Result<()> {
     let mut hardlinks = HardLinkMap::new();
-    copy_tree_inner(src_dir, dst_dir, verbose, &mut hardlinks, false)
+    copy_tree_inner(src_dir, dst_dir, verbose, &mut hardlinks)
 }
 
-/// Like [`copy_tree`], but symlink-safe for writing into a tree that may hold
+/// Like [`copy_tree`], but safe for writing into a tree that may hold
 /// untrusted pre-existing entries (an imported rootfs, a btrfs container
 /// subvolume holding the base image, an overlay upper populated by a
-/// container run or an earlier copy). Before writing each destination entry,
-/// an existing symlink there is removed so the write cannot be redirected
-/// through it (in the worst case onto the host, since sdme runs as root and
-/// is not chrooted). Existing real directories are merged into rather than
-/// failed on. Use for `sdme cp` and `fs build` COPY writes into such trees.
-pub(crate) fn copy_tree_shadowed(src_dir: &Path, dst_dir: &Path, verbose: bool) -> Result<()> {
-    let mut hardlinks = HardLinkMap::new();
-    copy_tree_inner(src_dir, dst_dir, verbose, &mut hardlinks, true)
+/// container run or an earlier copy), including under concurrent mutation of
+/// that tree. Implemented by the fd-relative contained engine below: no
+/// operation beneath `dst_dir` ever resolves a symlink present in (or swapped
+/// into) the tree. Existing real directories are merged into; a symlink leaf
+/// is unlinked and recreated. `dst_dir` itself must already exist and is now
+/// rejected if it is a symlink (previously it was followed).
+// Retained for API compatibility with callers on other branches; production
+// destinations go through copy_contained, which also contains the ancestors.
+#[allow(dead_code)]
+pub(crate) fn copy_tree_shadowed(src_dir: &Path, dst_dir: &Path, _verbose: bool) -> Result<()> {
+    let c = path_to_cstring(dst_dir)?;
+    let fd = unsafe {
+        libc::open(
+            c.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        let e = std::io::Error::last_os_error();
+        if e.raw_os_error() == Some(libc::ELOOP) {
+            return Err(refuse_symlink(dst_dir));
+        }
+        return Err(e).with_context(|| format!("failed to open directory {}", dst_dir.display()));
+    }
+    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    copy_children_at(&fd, dst_dir, src_dir, &mut FdHardLinkMap::new())
 }
 
 fn copy_tree_inner(
@@ -42,7 +60,6 @@ fn copy_tree_inner(
     dst_dir: &Path,
     verbose: bool,
     hardlinks: &mut HardLinkMap,
-    shadow: bool,
 ) -> Result<()> {
     let entries = fs::read_dir(src_dir)
         .with_context(|| format!("failed to read directory {}", src_dir.display()))?;
@@ -55,7 +72,7 @@ fn copy_tree_inner(
         let file_name = entry.file_name();
         let dst_path = dst_dir.join(&file_name);
 
-        copy_entry_inner(&src_path, &dst_path, verbose, hardlinks, shadow)
+        copy_entry_inner(&src_path, &dst_path, verbose, hardlinks)
             .with_context(|| format!("failed to copy {}", src_path.display()))?;
     }
 
@@ -65,13 +82,22 @@ fn copy_tree_inner(
 /// Copy a single filesystem entry (file, dir, symlink, device, fifo, socket).
 pub(crate) fn copy_entry(src: &Path, dst: &Path, verbose: bool) -> Result<()> {
     let mut hardlinks = HardLinkMap::new();
-    copy_entry_inner(src, dst, verbose, &mut hardlinks, false)
+    copy_entry_inner(src, dst, verbose, &mut hardlinks)
 }
 
-/// Symlink-safe variant of [`copy_entry`]; see [`copy_tree_shadowed`].
-pub(crate) fn copy_entry_shadowed(src: &Path, dst: &Path, verbose: bool) -> Result<()> {
-    let mut hardlinks = HardLinkMap::new();
-    copy_entry_inner(src, dst, verbose, &mut hardlinks, true)
+/// Contained variant of [`copy_entry`]; see [`copy_tree_shadowed`]. `dst` is
+/// interpreted as `parent + leaf name`; the parent is resolved once (it is
+/// the caller's trusted anchor), and the leaf is handled fd-relative beneath
+/// it, safe against concurrent swaps of the leaf.
+// Retained for API compatibility with callers on other branches; production
+// destinations go through copy_contained, which also contains the ancestors.
+#[allow(dead_code)]
+pub(crate) fn copy_entry_shadowed(src: &Path, dst: &Path, _verbose: bool) -> Result<()> {
+    let parent = dst.parent().unwrap_or(Path::new("/"));
+    let name = dst
+        .file_name()
+        .with_context(|| format!("invalid destination {}", dst.display()))?;
+    copy_contained(parent, Path::new(name), src)
 }
 
 fn copy_entry_inner(
@@ -79,32 +105,18 @@ fn copy_entry_inner(
     dst: &Path,
     verbose: bool,
     hardlinks: &mut HardLinkMap,
-    shadow: bool,
 ) -> Result<()> {
-    // When writing into a tree that may hold untrusted base-image symlinks,
-    // replace any pre-existing symlink at `dst` with the real entry so the
-    // write (and every recursive child write) cannot be redirected outside the
-    // tree. Without this, `fs::copy` opens the destination without O_NOFOLLOW
-    // and would follow a base-image symlink child onto the host.
-    if shadow {
-        shadow_symlink(dst)?;
-    }
-
     let stat = lstat_entry(src)?;
     let mode = stat.st_mode & libc::S_IFMT;
 
     match mode {
         libc::S_IFDIR => {
-            // In shadow mode an existing real directory (from the base image) is
-            // merged into rather than failed on; a symlink there was already
-            // removed above. Otherwise a fresh directory is expected.
-            if !(shadow && dst.is_dir()) {
-                fs::create_dir(dst)
-                    .with_context(|| format!("failed to create directory {}", dst.display()))?;
-            }
+            // A fresh directory is expected.
+            fs::create_dir(dst)
+                .with_context(|| format!("failed to create directory {}", dst.display()))?;
             copy_metadata_from_stat(dst, &stat)?;
             copy_xattrs(src, dst)?;
-            copy_tree_inner(src, dst, verbose, hardlinks, shadow)?;
+            copy_tree_inner(src, dst, verbose, hardlinks)?;
         }
         libc::S_IFREG => {
             if stat.st_nlink > 1 {
@@ -131,19 +143,6 @@ fn copy_entry_inner(
                     return Ok(());
                 }
                 hardlinks.insert(key, dst.to_path_buf());
-            }
-            // In shadow mode, an existing destination with other hard links
-            // must be unlinked first: fs::copy truncates in place, which
-            // would write the new content through every other link to the
-            // same inode, including a link planted outside the tree.
-            if shadow {
-                if let Ok(dst_stat) = lstat_entry(dst) {
-                    if dst_stat.st_nlink > 1 && (dst_stat.st_mode & libc::S_IFMT) == libc::S_IFREG {
-                        fs::remove_file(dst).with_context(|| {
-                            format!("failed to unlink hardlinked destination {}", dst.display())
-                        })?;
-                    }
-                }
             }
             fs::copy(src, dst).with_context(|| format!("failed to copy file {}", src.display()))?;
             copy_metadata_from_stat(dst, &stat)?;
@@ -582,6 +581,641 @@ pub(crate) fn path_to_cstring(path: &Path) -> Result<CString> {
         .with_context(|| format!("path contains null byte: {}", path.display()))
 }
 
+// --- fd-relative contained copy engine ---
+//
+// Writing into a destination tree that a container or another process can
+// mutate concurrently (a running container's live root via merged/ or
+// /proc/<pid>/root, an imported rootfs, a populated overlay upper) cannot be
+// made safe by checking a path and then writing to it: any component can be
+// swapped for a symlink between the check and the write, and sdme runs as
+// root without chroot. This engine instead pins the write root with an open
+// directory fd, resolves every component beneath it fd-relative with
+// O_NOFOLLOW, writes through the returned fds, applies metadata with
+// fd-relative calls, and recreates hard links with linkat(AT_EMPTY_PATH)
+// from the pinned first copy, so no operation ever resolves a symlink that
+// is present in, or swapped into, the destination tree.
+//
+// Policy matches the path-based guard above: a symlink among the
+// destination's ancestors is rejected, a symlink (or a multiply-linked
+// regular file) at the destination leaf is unlinked and recreated, existing
+// real directories are merged into, and source symlinks are recreated as
+// symlinks.
+
+use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+
+/// Maximum attempts to create or shadow a destination leaf while a
+/// concurrent process keeps swapping it; exceeding this fails the copy
+/// rather than spinning.
+const LEAF_SWAP_RETRIES: u32 = 8;
+
+/// Maps `(st_dev, st_ino)` to an open fd of the first destination copy, so a
+/// second name is linkat(AT_EMPTY_PATH)'d from the pinned inode instead of
+/// re-resolving its path.
+type FdHardLinkMap = HashMap<(u64, u64), OwnedFd>;
+
+fn cstring(name: &std::ffi::OsStr) -> Result<CString> {
+    CString::new(name.as_bytes()).with_context(|| "name contains null byte")
+}
+
+fn refuse_symlink(display: &Path) -> anyhow::Error {
+    anyhow::anyhow!(
+        "refusing to write through symlink {} in the destination; a malformed or \
+         hostile image could redirect the write outside the destination (use the \
+         symlink's real target path instead)",
+        display.display()
+    )
+}
+
+/// Open the write root as a directory fd. The anchor is sdme-controlled
+/// (the fs/ tree, a container's upper/ or merged/ view, /proc/<pid>/root)
+/// and resolved once; everything beneath it is fd-relative.
+fn open_dest_root(path: &Path) -> Result<OwnedFd> {
+    let c = path_to_cstring(path)?;
+    let fd = unsafe {
+        libc::open(
+            c.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("failed to open destination root {}", path.display()));
+    }
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+/// Open a directory beneath `parent`, never following a symlink.
+fn open_dir_nofollow(parent: &OwnedFd, name: &CString) -> std::io::Result<OwnedFd> {
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+fn unlink_at(parent: &OwnedFd, name: &CString, display: &Path) -> Result<()> {
+    let ret = unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), 0) };
+    if ret != 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("failed to remove destination leaf {}", display.display()));
+    }
+    Ok(())
+}
+
+fn mkdir_at(parent: &OwnedFd, name: &CString, display: &Path) -> Result<()> {
+    let ret = unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o777) };
+    if ret != 0 {
+        let e = std::io::Error::last_os_error();
+        if e.raw_os_error() != Some(libc::EEXIST) {
+            return Err(e)
+                .with_context(|| format!("failed to create directory {}", display.display()));
+        }
+    }
+    Ok(())
+}
+
+fn fstatat_nofollow(parent: &OwnedFd, name: &CString) -> std::io::Result<libc::stat> {
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    let ret = unsafe {
+        libc::fstatat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            &mut stat,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if ret != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(stat)
+}
+
+/// Stat `name` beneath `parent` without following; classifies the ENOTDIR
+/// that O_DIRECTORY|O_NOFOLLOW returns for a symlink-to-directory.
+fn classify_not_dir(parent: &OwnedFd, name: &CString, display: &Path) -> anyhow::Error {
+    match fstatat_nofollow(parent, name) {
+        Ok(st) if st.st_mode & libc::S_IFMT == libc::S_IFLNK => refuse_symlink(display),
+        _ => anyhow::anyhow!(
+            "destination component is not a directory: {}",
+            display.display()
+        ),
+    }
+}
+
+/// Open ancestor directory `name` beneath `parent`, creating it if missing.
+/// A symlink there is rejected, never raced: it could redirect the write
+/// outside the destination, and removing an ancestor under a concurrent
+/// writer cannot be done safely.
+fn ensure_dir_at(parent: &OwnedFd, name: &std::ffi::OsStr, display: &Path) -> Result<OwnedFd> {
+    let c = cstring(name)?;
+    match open_dir_nofollow(parent, &c) {
+        Ok(fd) => Ok(fd),
+        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => Err(refuse_symlink(display)),
+        Err(e) if e.raw_os_error() == Some(libc::ENOTDIR) => {
+            Err(classify_not_dir(parent, &c, display))
+        }
+        Err(e) if e.raw_os_error() == Some(libc::ENOENT) => {
+            mkdir_at(parent, &c, display)?;
+            // Open whatever is there now; a symlink planted in the race is
+            // rejected rather than followed.
+            match open_dir_nofollow(parent, &c) {
+                Ok(fd) => Ok(fd),
+                Err(e) if e.raw_os_error() == Some(libc::ELOOP) => Err(refuse_symlink(display)),
+                Err(e) if e.raw_os_error() == Some(libc::ENOTDIR) => {
+                    Err(classify_not_dir(parent, &c, display))
+                }
+                Err(e) => Err(e)
+                    .with_context(|| format!("failed to open directory {}", display.display())),
+            }
+        }
+        Err(e) => Err(e).with_context(|| format!("failed to open directory {}", display.display())),
+    }
+}
+
+/// Open or create the leaf directory for a directory copy: merge into an
+/// existing real directory, atomically shadow a symlink leaf, create a
+/// missing one. Retries bound the race against a concurrent process that
+/// keeps re-planting the leaf.
+fn open_leaf_dir_at(parent: &OwnedFd, name: &std::ffi::OsStr, display: &Path) -> Result<OwnedFd> {
+    let c = cstring(name)?;
+    for _ in 0..LEAF_SWAP_RETRIES {
+        match open_dir_nofollow(parent, &c) {
+            Ok(fd) => return Ok(fd),
+            Err(e)
+                if e.raw_os_error() == Some(libc::ELOOP)
+                    || e.raw_os_error() == Some(libc::ENOTDIR) =>
+            {
+                // A symlink leaf is shadowed (replaced by a real directory),
+                // never followed; a real non-directory leaf is an error.
+                match fstatat_nofollow(parent, &c) {
+                    Ok(st) if st.st_mode & libc::S_IFMT == libc::S_IFLNK => {
+                        unlink_at(parent, &c, display)?;
+                        mkdir_at(parent, &c, display)?;
+                    }
+                    _ => bail!("destination is not a directory: {}", display.display()),
+                }
+            }
+            Err(e) if e.raw_os_error() == Some(libc::ENOENT) => {
+                mkdir_at(parent, &c, display)?;
+            }
+            Err(e) => {
+                return Err(e)
+                    .with_context(|| format!("failed to open directory {}", display.display()))
+            }
+        }
+    }
+    bail!(
+        "destination {} keeps changing under concurrent mutation; aborting",
+        display.display()
+    )
+}
+
+/// Open the leaf file `name` for writing, creating or truncating it. A
+/// symlink leaf is unlinked first (shadowed); an existing regular file with
+/// other hard links is unlinked first so truncating cannot write through a
+/// shared inode (possibly outside the destination). Never follows a symlink,
+/// even one swapped in concurrently.
+fn create_file_at(parent: &OwnedFd, name: &std::ffi::OsStr, display: &Path) -> Result<OwnedFd> {
+    let c = cstring(name)?;
+    for _ in 0..LEAF_SWAP_RETRIES {
+        match fstatat_nofollow(parent, &c) {
+            Ok(st) => {
+                let ft = st.st_mode & libc::S_IFMT;
+                if ft == libc::S_IFLNK || (ft == libc::S_IFREG && st.st_nlink > 1) {
+                    unlink_at(parent, &c, display)?;
+                    continue;
+                }
+                // Other existing types (directory, device, ...): let the
+                // open below fail with its natural error.
+            }
+            Err(e) if e.raw_os_error() == Some(libc::ENOENT) => {}
+            Err(e) => {
+                return Err(e).with_context(|| format!("failed to stat {}", display.display()))
+            }
+        }
+        let fd = unsafe {
+            libc::openat(
+                parent.as_raw_fd(),
+                c.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0o666,
+            )
+        };
+        if fd >= 0 {
+            return Ok(unsafe { OwnedFd::from_raw_fd(fd) });
+        }
+        let e = std::io::Error::last_os_error();
+        if e.raw_os_error() == Some(libc::ELOOP) {
+            // Lost the race to a symlink; loop to shadow it.
+            continue;
+        }
+        return Err(e).with_context(|| format!("failed to create {}", display.display()));
+    }
+    bail!(
+        "destination {} keeps changing under concurrent mutation; aborting",
+        display.display()
+    )
+}
+
+/// Apply ownership, permissions, and timestamps from a stat result to an
+/// open fd.
+fn copy_metadata_to_fd(fd: RawFd, stat: &libc::stat, display: &Path) -> Result<()> {
+    let ret = unsafe { libc::fchown(fd, stat.st_uid, stat.st_gid) };
+    if ret != 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("fchown failed for {}", display.display()));
+    }
+    let ret = unsafe { libc::fchmod(fd, stat.st_mode & 0o7777) };
+    if ret != 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("fchmod failed for {}", display.display()));
+    }
+    let times = [
+        libc::timespec {
+            tv_sec: stat.st_atime,
+            tv_nsec: stat.st_atime_nsec,
+        },
+        libc::timespec {
+            tv_sec: stat.st_mtime,
+            tv_nsec: stat.st_mtime_nsec,
+        },
+    ];
+    let ret = unsafe { libc::futimens(fd, times.as_ptr()) };
+    if ret != 0 {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() != Some(libc::ENOTSUP) {
+            return Err(err).with_context(|| format!("futimens failed for {}", display.display()));
+        }
+    }
+    Ok(())
+}
+
+/// Apply ownership and timestamps to an unopenable leaf (symlink, device,
+/// fifo, socket) beneath a directory fd, never following it. Permission
+/// bits are set at creation by mknodat/mkfifoat; fchmodat2 fixes umask
+/// masking without following where the kernel supports it.
+fn copy_metadata_to_leaf_at(
+    parent: &OwnedFd,
+    name: &CString,
+    stat: &libc::stat,
+    display: &Path,
+) -> Result<()> {
+    let ret = unsafe {
+        libc::fchownat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            stat.st_uid,
+            stat.st_gid,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if ret != 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("fchownat failed for {}", display.display()));
+    }
+    let times = [
+        libc::timespec {
+            tv_sec: stat.st_atime,
+            tv_nsec: stat.st_atime_nsec,
+        },
+        libc::timespec {
+            tv_sec: stat.st_mtime,
+            tv_nsec: stat.st_mtime_nsec,
+        },
+    ];
+    let ret = unsafe {
+        libc::utimensat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            times.as_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if ret != 0 {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() != Some(libc::ENOTSUP) {
+            return Err(err).with_context(|| format!("utimensat failed for {}", display.display()));
+        }
+    }
+    if stat.st_mode & libc::S_IFMT != libc::S_IFLNK {
+        // fchmodat2 syscall number (452 on x86_64 and aarch64, the
+        // architectures sdme ships); libc 0.2.184 does not export it.
+        const SYS_FCHMODAT2: libc::c_long = 452;
+        let ret = unsafe {
+            libc::syscall(
+                SYS_FCHMODAT2,
+                parent.as_raw_fd(),
+                name.as_ptr(),
+                stat.st_mode & 0o7777,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if ret != 0 {
+            let err = std::io::Error::last_os_error();
+            match err.raw_os_error() {
+                Some(libc::ENOSYS) | Some(libc::ENOTSUP) => {
+                    eprintln!(
+                        "warning: cannot chmod {} without following symlinks \
+                         (kernel lacks fchmodat2); mode may be umask-masked",
+                        display.display()
+                    );
+                }
+                _ => {
+                    return Err(err)
+                        .with_context(|| format!("fchmodat2 failed for {}", display.display()))
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Copy extended attributes from `src` to an open fd, skipping
+/// security.selinux (see `read_xattrs` for rationale).
+fn copy_xattrs_to_fd(src: &Path, fd: RawFd, display: &Path) -> Result<()> {
+    let xattrs = read_xattrs(src)?;
+    for (c_name, val_buf) in &xattrs {
+        let ret = unsafe {
+            libc::fsetxattr(
+                fd,
+                c_name.as_ptr(),
+                val_buf.as_ptr() as *const libc::c_void,
+                val_buf.len(),
+                0,
+            )
+        };
+        if ret != 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::ENOTSUP) {
+                return Ok(());
+            }
+            return Err(err).with_context(|| {
+                format!(
+                    "fsetxattr failed for {} attr {}",
+                    display.display(),
+                    c_name.to_string_lossy()
+                )
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Copy metadata and xattrs to an unopenable leaf beneath a directory fd
+/// via an O_PATH handle (which fsetxattr accepts), verifying it is still the
+/// entry type just created before touching it.
+fn finish_leaf_at(
+    parent: &OwnedFd,
+    name: &CString,
+    src: &Path,
+    stat: &libc::stat,
+    display: &Path,
+) -> Result<()> {
+    copy_metadata_to_leaf_at(parent, name, stat, display)?;
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("failed to open {}", display.display()));
+    }
+    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    let ret = unsafe { libc::fstat(fd.as_raw_fd(), &mut st) };
+    if ret != 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("fstat failed for {}", display.display()));
+    }
+    if st.st_mode & libc::S_IFMT != stat.st_mode & libc::S_IFMT {
+        bail!(
+            "destination {} changed type during the copy; aborting",
+            display.display()
+        );
+    }
+    copy_xattrs_to_fd(src, fd.as_raw_fd(), display)
+}
+
+/// Copy one source entry to leaf `name` beneath `parent`, contained.
+fn copy_entry_at(
+    parent: &OwnedFd,
+    name: &std::ffi::OsStr,
+    display: &Path,
+    src: &Path,
+    links: &mut FdHardLinkMap,
+) -> Result<()> {
+    let stat = lstat_entry(src)?;
+    let mode = stat.st_mode & libc::S_IFMT;
+    let c_name = cstring(name)?;
+
+    match mode {
+        libc::S_IFDIR => {
+            let fd = open_leaf_dir_at(parent, name, display)?;
+            copy_metadata_to_fd(fd.as_raw_fd(), &stat, display)?;
+            copy_xattrs_to_fd(src, fd.as_raw_fd(), display)?;
+            copy_children_at(&fd, display, src, links)?;
+        }
+        libc::S_IFREG => {
+            if stat.st_nlink > 1 {
+                let key = (stat.st_dev, stat.st_ino);
+                if let Some(first) = links.get(&key) {
+                    // Link the pinned inode of the first copy; an existing
+                    // non-directory leaf is removed first (a directory fails).
+                    match fstatat_nofollow(parent, &c_name) {
+                        Ok(st) => {
+                            if st.st_mode & libc::S_IFMT == libc::S_IFDIR {
+                                bail!(
+                                    "cannot replace directory {} with a hard link",
+                                    display.display()
+                                );
+                            }
+                            unlink_at(parent, &c_name, display)?;
+                        }
+                        Err(e) if e.raw_os_error() == Some(libc::ENOENT) => {}
+                        Err(e) => {
+                            return Err(e)
+                                .with_context(|| format!("failed to stat {}", display.display()))
+                        }
+                    }
+                    let empty = c"";
+                    let ret = unsafe {
+                        libc::linkat(
+                            first.as_raw_fd(),
+                            empty.as_ptr(),
+                            parent.as_raw_fd(),
+                            c_name.as_ptr(),
+                            libc::AT_EMPTY_PATH,
+                        )
+                    };
+                    if ret != 0 {
+                        return Err(std::io::Error::last_os_error())
+                            .with_context(|| format!("failed to hard link {}", display.display()));
+                    }
+                    return Ok(());
+                }
+            }
+            let fd = create_file_at(parent, name, display)?;
+            let mut src_file = fs::File::open(src)
+                .with_context(|| format!("failed to open source {}", src.display()))?;
+            // The File owns a duplicate fd; the original stays open for
+            // metadata and the hardlink map.
+            let mut dst_file: fs::File = fd
+                .try_clone()
+                .map(fs::File::from)
+                .with_context(|| format!("failed to clone fd for {}", display.display()))?;
+            std::io::copy(&mut src_file, &mut dst_file)
+                .with_context(|| format!("failed to write {}", display.display()))?;
+            drop(dst_file);
+            copy_metadata_to_fd(fd.as_raw_fd(), &stat, display)?;
+            copy_xattrs_to_fd(src, fd.as_raw_fd(), display)?;
+            if stat.st_nlink > 1 {
+                links.insert((stat.st_dev, stat.st_ino), fd);
+            }
+        }
+        libc::S_IFLNK => {
+            let target = fs::read_link(src)
+                .with_context(|| format!("failed to read symlink {}", src.display()))?;
+            let c_target = path_to_cstring(&target)?;
+            // Shadow an existing symlink leaf; anything else existing fails
+            // the symlinkat with EEXIST, matching previous behavior.
+            for _ in 0..LEAF_SWAP_RETRIES {
+                let ret = unsafe {
+                    libc::symlinkat(c_target.as_ptr(), parent.as_raw_fd(), c_name.as_ptr())
+                };
+                if ret == 0 {
+                    break;
+                }
+                let e = std::io::Error::last_os_error();
+                if e.raw_os_error() == Some(libc::EEXIST) {
+                    match fstatat_nofollow(parent, &c_name) {
+                        Ok(st) if st.st_mode & libc::S_IFMT == libc::S_IFLNK => {
+                            unlink_at(parent, &c_name, display)?;
+                            continue;
+                        }
+                        _ => {
+                            return Err(e).with_context(|| {
+                                format!("failed to create symlink {}", display.display())
+                            })
+                        }
+                    }
+                }
+                return Err(e)
+                    .with_context(|| format!("failed to create symlink {}", display.display()));
+            }
+            finish_leaf_at(parent, &c_name, src, &stat, display)?;
+        }
+        libc::S_IFBLK | libc::S_IFCHR | libc::S_IFIFO | libc::S_IFSOCK => {
+            // Shadow an existing symlink leaf; an existing real node fails
+            // the creation with EEXIST, matching previous behavior.
+            if let Ok(st) = fstatat_nofollow(parent, &c_name) {
+                if st.st_mode & libc::S_IFMT == libc::S_IFLNK {
+                    unlink_at(parent, &c_name, display)?;
+                }
+            }
+            let ret = if mode == libc::S_IFIFO {
+                unsafe {
+                    libc::mkfifoat(parent.as_raw_fd(), c_name.as_ptr(), stat.st_mode & 0o7777)
+                }
+            } else {
+                let dev = if mode == libc::S_IFSOCK {
+                    0
+                } else {
+                    stat.st_rdev
+                };
+                unsafe { libc::mknodat(parent.as_raw_fd(), c_name.as_ptr(), stat.st_mode, dev) }
+            };
+            if ret != 0 {
+                return Err(std::io::Error::last_os_error())
+                    .with_context(|| format!("mknodat failed for {}", display.display()));
+            }
+            finish_leaf_at(parent, &c_name, src, &stat, display)?;
+        }
+        _ => {
+            eprintln!(
+                "warning: skipping unknown file type {:o} for {}",
+                mode,
+                src.display()
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Copy all children of `src_dir` beneath the open destination directory.
+fn copy_children_at(
+    dir_fd: &OwnedFd,
+    dir_display: &Path,
+    src_dir: &Path,
+    links: &mut FdHardLinkMap,
+) -> Result<()> {
+    let entries = fs::read_dir(src_dir)
+        .with_context(|| format!("failed to read directory {}", src_dir.display()))?;
+    for entry in entries {
+        check_interrupted()?;
+        let entry =
+            entry.with_context(|| format!("failed to read entry in {}", src_dir.display()))?;
+        let name = entry.file_name();
+        copy_entry_at(
+            dir_fd,
+            &name,
+            &dir_display.join(&name),
+            &entry.path(),
+            links,
+        )
+        .with_context(|| format!("failed to copy {}", entry.path().display()))?;
+    }
+    Ok(())
+}
+
+/// Copy `src` to `rel` beneath `root`, safe against concurrent mutation of
+/// the destination tree (a running container's live root, an imported
+/// rootfs, a populated overlay upper). Every component of `rel` is resolved
+/// fd-relative with O_NOFOLLOW beneath an fd pinning `root`; a symlink among
+/// the ancestors is rejected, a symlink or multiply-linked file at the leaf
+/// is unlinked and recreated, and existing real directories are merged into.
+pub(crate) fn copy_contained(root: &Path, rel: &Path, src: &Path) -> Result<()> {
+    let mut parts = Vec::new();
+    for comp in rel.components() {
+        match comp {
+            std::path::Component::Normal(c) => parts.push(c),
+            std::path::Component::CurDir => {}
+            _ => bail!("refusing unsafe destination component in {}", rel.display()),
+        }
+    }
+    let root_fd = open_dest_root(root)?;
+    let mut links = FdHardLinkMap::new();
+    let mut display = root.to_path_buf();
+    if parts.is_empty() {
+        // Copy the source directory's contents into the root itself.
+        if !src.is_dir() {
+            bail!(
+                "cannot copy {} onto destination root {}",
+                src.display(),
+                root.display()
+            );
+        }
+        return copy_children_at(&root_fd, &display, src, &mut links);
+    }
+    let (leaf, ancestors) = parts.split_last().unwrap();
+    let mut dir_fd = root_fd;
+    for anc in ancestors {
+        display = display.join(anc);
+        dir_fd = ensure_dir_at(&dir_fd, anc, &display)?;
+    }
+    display = display.join(leaf);
+    copy_entry_at(&dir_fd, leaf, &display, src, &mut links)
+}
+
 /// Change ownership of a path without following symlinks.
 pub(crate) fn lchown(path: &Path, uid: u32, gid: u32) -> Result<()> {
     let c_path = path_to_cstring(path)?;
@@ -810,6 +1444,208 @@ mod tests {
             1,
             "destination should be a fresh inode, unlinked from the outside file"
         );
+    }
+
+    // --- contained engine tests ---
+
+    #[test]
+    fn test_copy_contained_ordinary_copies() {
+        // Controls: ordinary file (with parent creation), directory tree
+        // merge into an existing real directory, source symlink recreation,
+        // and hard link preservation all work through the contained engine.
+        let tmp = crate::testutil::TempDataDir::new("contained-ordinary");
+        let root = tmp.path().join("root");
+        fs::create_dir_all(root.join("etc")).unwrap();
+
+        let src = tmp.path().join("src");
+        fs::create_dir_all(src.join("d/sub")).unwrap();
+        fs::write(src.join("d/a"), "aaa").unwrap();
+        fs::write(src.join("d/sub/b"), "bbb").unwrap();
+        unix_fs::symlink("a", src.join("d/link")).unwrap();
+        fs::write(src.join("d/h1"), "shared").unwrap();
+        fs::hard_link(src.join("d/h1"), src.join("d/h2")).unwrap();
+
+        // File to a new path, creating parents.
+        let f = tmp.path().join("conf");
+        fs::write(&f, "k=v").unwrap();
+        copy_contained(&root, Path::new("etc/app.conf"), &f).unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join("etc/app.conf")).unwrap(),
+            "k=v"
+        );
+
+        // Directory tree merged into an existing directory.
+        fs::create_dir_all(root.join("d")).unwrap();
+        fs::write(root.join("d/existing"), "old").unwrap();
+        copy_contained(&root, Path::new("d"), &src.join("d")).unwrap();
+        assert_eq!(fs::read_to_string(root.join("d/a")).unwrap(), "aaa");
+        assert_eq!(fs::read_to_string(root.join("d/sub/b")).unwrap(), "bbb");
+        assert_eq!(fs::read_to_string(root.join("d/existing")).unwrap(), "old");
+        assert_eq!(
+            fs::read_link(root.join("d/link"))
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "a",
+            "source symlink must be recreated as a symlink"
+        );
+        let ino1 = fs::metadata(root.join("d/h1")).unwrap().ino();
+        let ino2 = fs::metadata(root.join("d/h2")).unwrap().ino();
+        assert_eq!(ino1, ino2, "hard links must share an inode");
+        assert_eq!(fs::read_to_string(root.join("d/h2")).unwrap(), "shared");
+    }
+
+    #[test]
+    fn test_copy_contained_contents_into_root() {
+        // An empty relative path (e.g. COPY . /) copies the source
+        // directory's contents into the root itself.
+        let tmp = crate::testutil::TempDataDir::new("contained-root");
+        let root = tmp.path().join("root");
+        fs::create_dir_all(&root).unwrap();
+        let src = tmp.path().join("src");
+        fs::create_dir_all(src.join("sub")).unwrap();
+        fs::write(src.join("sub/x"), "x").unwrap();
+
+        copy_contained(&root, Path::new(""), &src).unwrap();
+        assert_eq!(fs::read_to_string(root.join("sub/x")).unwrap(), "x");
+    }
+
+    #[test]
+    fn test_copy_contained_rejects_ancestor_symlink() {
+        let tmp = crate::testutil::TempDataDir::new("contained-ancestor");
+        let root = tmp.path().join("root");
+        fs::create_dir_all(&root).unwrap();
+        let outside = tmp.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("victim"), "original").unwrap();
+        unix_fs::symlink(&outside, root.join("etc")).unwrap();
+
+        let src = tmp.path().join("payload");
+        fs::write(&src, "attacker").unwrap();
+        let err = copy_contained(&root, Path::new("etc/victim"), &src).unwrap_err();
+        assert!(format!("{err:#}").contains("symlink"), "got: {err:#}");
+        assert_eq!(
+            fs::read_to_string(outside.join("victim")).unwrap(),
+            "original"
+        );
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn test_copy_contained_shadows_leaf_symlink() {
+        let tmp = crate::testutil::TempDataDir::new("contained-leaf");
+        let root = tmp.path().join("root");
+        fs::create_dir_all(&root).unwrap();
+        let outside = tmp.path().join("outside");
+        unix_fs::symlink(&outside, root.join("f")).unwrap();
+
+        let src = tmp.path().join("payload");
+        fs::write(&src, "data").unwrap();
+        copy_contained(&root, Path::new("f"), &src).unwrap();
+
+        assert!(root
+            .join("f")
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_file());
+        assert_eq!(fs::read_to_string(root.join("f")).unwrap(), "data");
+        assert!(!outside.exists(), "write escaped through the leaf symlink");
+    }
+
+    #[test]
+    fn test_copy_contained_leaf_swap_churn_never_escapes() {
+        // A concurrent process swaps the destination leaf between a symlink
+        // to an outside path and nothing, in a loop, while copies land. The
+        // outside path must never be created or written; copies either
+        // succeed or fail, never escape.
+        let tmp = crate::testutil::TempDataDir::new("contained-leaf-churn");
+        let root = tmp.path().join("root");
+        fs::create_dir_all(root.join("d")).unwrap();
+        let outside = tmp.path().join("outside");
+        let src = tmp.path().join("payload");
+        fs::write(&src, "data").unwrap();
+
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let handle = {
+            let stop = stop.clone();
+            let leaf = root.join("d/f");
+            let outside = outside.clone();
+            std::thread::spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let _ = fs::remove_file(&leaf);
+                    let _ = unix_fs::symlink(&outside, &leaf);
+                }
+            })
+        };
+
+        for _ in 0..200 {
+            // Success or rejection are both fine; escaping is not.
+            let _ = copy_contained(&root, Path::new("d/f"), &src);
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        handle.join().unwrap();
+
+        assert!(
+            !outside.exists(),
+            "a copy escaped through a concurrently swapped leaf"
+        );
+        // After the churn stops, an ordinary copy succeeds.
+        copy_contained(&root, Path::new("d/f"), &src).unwrap();
+        assert_eq!(fs::read_to_string(root.join("d/f")).unwrap(), "data");
+    }
+
+    #[test]
+    fn test_copy_contained_ancestor_swap_churn_never_escapes() {
+        // A concurrent process swaps an ancestor directory for a symlink to
+        // an outside directory and back, in a loop. Copies may land in the
+        // (renamed, still in-tree) real directory or be rejected; the
+        // outside directory must never gain an entry.
+        let tmp = crate::testutil::TempDataDir::new("contained-anc-churn");
+        let root = tmp.path().join("root");
+        fs::create_dir_all(root.join("x")).unwrap();
+        let outside = tmp.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        let src = tmp.path().join("payload");
+        fs::write(&src, "data").unwrap();
+
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let handle = {
+            let stop = stop.clone();
+            let x = root.join("x");
+            let x_saved = root.join("x.saved");
+            let outside = outside.clone();
+            std::thread::spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    // Swap the real dir aside and plant a symlink; then undo.
+                    // Every step can lose the race; that is the point.
+                    if fs::rename(&x, &x_saved).is_ok() {
+                        if unix_fs::symlink(&outside, &x).is_ok() {
+                            let _ = fs::remove_file(&x);
+                        }
+                        let _ = fs::rename(&x_saved, &x);
+                    }
+                }
+            })
+        };
+
+        for i in 0..200 {
+            let rel = format!("x/f{i}");
+            let _ = copy_contained(&root, Path::new(&rel), &src);
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        handle.join().unwrap();
+
+        // Undo any in-flight swap so the assertions see a stable tree.
+        let _ = fs::remove_file(root.join("x"));
+        let _ = fs::rename(root.join("x.saved"), root.join("x"));
+        assert!(
+            fs::read_dir(&outside).unwrap().next().is_none(),
+            "a copy escaped through a concurrently swapped ancestor"
+        );
+        // After the churn stops, an ordinary copy succeeds.
+        copy_contained(&root, Path::new("x/final"), &src).unwrap();
+        assert_eq!(fs::read_to_string(root.join("x/final")).unwrap(), "data");
     }
 
     #[test]
