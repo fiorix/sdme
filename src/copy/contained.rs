@@ -34,12 +34,19 @@ struct LinkTarget {
     destination: PathBuf,
 }
 
+struct DirectoryAtime {
+    inode: InodeKey,
+    atime: libc::timespec,
+}
+
 /// Index selected aliases so each group can publish from one pinned inode and
 /// release it immediately. External-only aliases do not need retained state.
-/// Source paths are inventory, never handles for destination writes/metadata.
+/// Save directory atimes before inventory reads can change them. Source paths
+/// are inventory, never handles for destination writes/metadata.
 struct HardLinkPlan {
     pending: HashMap<InodeKey, Vec<LinkTarget>>,
     completed: HashMap<PathBuf, InodeKey>,
+    directory_atimes: HashMap<PathBuf, DirectoryAtime>,
     anchor_display: PathBuf,
 }
 
@@ -48,6 +55,7 @@ impl HardLinkPlan {
         let mut plan = Self {
             pending: HashMap::new(),
             completed: HashMap::new(),
+            directory_atimes: HashMap::new(),
             anchor_display: anchor_display.to_path_buf(),
         };
         if destination.as_os_str().is_empty() {
@@ -63,7 +71,19 @@ impl HardLinkPlan {
         check_interrupted()?;
         let stat = lstat_entry(source)?;
         match stat.st_mode & libc::S_IFMT {
-            libc::S_IFDIR => self.scan_children(source, destination)?,
+            libc::S_IFDIR => {
+                self.directory_atimes.insert(
+                    source.to_path_buf(),
+                    DirectoryAtime {
+                        inode: (stat.st_dev, stat.st_ino),
+                        atime: libc::timespec {
+                            tv_sec: stat.st_atime,
+                            tv_nsec: stat.st_atime_nsec,
+                        },
+                    },
+                );
+                self.scan_children(source, destination)?;
+            }
             libc::S_IFREG if stat.st_nlink > 1 => {
                 self.pending
                     .entry((stat.st_dev, stat.st_ino))
@@ -89,6 +109,25 @@ impl HardLinkPlan {
             self.scan(&entry.path(), &destination.join(entry.file_name()))?;
         }
         Ok(())
+    }
+
+    fn source_stat(&mut self, source: &Path) -> Result<libc::stat> {
+        let mut stat = lstat_entry(source)?;
+        if let Some(saved) = self.directory_atimes.remove(source) {
+            if stat.st_mode & libc::S_IFMT != libc::S_IFDIR
+                || (stat.st_dev, stat.st_ino) != saved.inode
+            {
+                bail!(
+                    "source directory {} changed during the copy",
+                    source.display()
+                );
+            }
+            // Only atime predates inventory; retain freshly read metadata for
+            // every other field and never apply saved atime to a new inode.
+            stat.st_atime = saved.atime.tv_sec;
+            stat.st_atime_nsec = saved.atime.tv_nsec;
+        }
+        Ok(stat)
     }
 
     fn is_completed(&self, source: &Path, stat: &libc::stat) -> Result<bool> {
@@ -619,7 +658,7 @@ fn copy_entry_at(
     root: &Path,
     anchor: &OwnedFd,
 ) -> Result<()> {
-    let stat = lstat_entry(src)?;
+    let stat = links.source_stat(src)?;
     if links.is_completed(src, &stat)? {
         return Ok(());
     }
@@ -1299,6 +1338,108 @@ mod tests {
             b"source xattr"
         );
     }
+    fn directory_atime_copy(nested: bool) {
+        let tmp = crate::testutil::TempDataDir::new("copy-directory-atime");
+        let src = tmp.path().join("source");
+        let directories: &[&str] = if nested {
+            &[
+                "",
+                "empty",
+                "branch",
+                "branch/nested",
+                "branch/nested/empty",
+            ]
+        } else {
+            &["", "empty"]
+        };
+        for directory in directories {
+            fs::create_dir_all(src.join(directory)).unwrap();
+        }
+        for (i, relative) in ["destination", ""].iter().enumerate() {
+            let root = tmp.path().join(format!("root-{i}"));
+            fs::create_dir(&root).unwrap();
+            let expected: Vec<_> = directories
+                .iter()
+                .map(|directory| {
+                    let source = src.join(directory);
+                    set_times(&source);
+                    fs::metadata(&source).unwrap()
+                })
+                .collect();
+            copy_contained(&root, Path::new(relative), &src).unwrap();
+            for (directory, before) in directories.iter().zip(&expected) {
+                if relative.is_empty() && directory.is_empty() {
+                    // Contents-only copying does not apply source-root metadata.
+                    continue;
+                }
+                let destination = root.join(relative).join(directory);
+                let after = fs::metadata(&destination).unwrap();
+                assert_eq!(
+                    (after.atime(), after.atime_nsec()),
+                    (before.atime(), before.atime_nsec()),
+                    "directory atime changed during inventory: {}",
+                    destination.display()
+                );
+                if directory.ends_with("empty") {
+                    // Child creation may change nonempty directory mtimes.
+                    assert_eq!(
+                        (after.mtime(), after.mtime_nsec()),
+                        (before.mtime(), before.mtime_nsec())
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_directory_atime_before_inventory_empty() {
+        directory_atime_copy(false);
+    }
+
+    #[test]
+    fn test_directory_atime_before_inventory_nested() {
+        directory_atime_copy(true);
+    }
+
+    #[test]
+    fn test_directory_atime_inventory_rejects_source_replacement() {
+        for replacement in ["directory", "file", "symlink"] {
+            let tmp = crate::testutil::TempDataDir::new("copy-directory-atime-change");
+            let src = tmp.path().join("source");
+            fs::create_dir_all(src.join("child")).unwrap();
+            set_times(&src.join("child"));
+            let root = tmp.path().join("root");
+            let destination = root.join("destination/child");
+            fs::create_dir_all(&destination).unwrap();
+            fs::write(destination.join("sentinel"), b"preserved").unwrap();
+            set_times(&destination);
+            let before = fs::metadata(&destination).unwrap();
+            let child = src.join("child");
+            let saved = tmp.path().join("saved-source-child");
+            AFTER_DIR_OPEN.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    // Keep the inventoried inode alive to exclude inode reuse.
+                    fs::rename(&child, &saved).unwrap();
+                    match replacement {
+                        "directory" => fs::create_dir(&child).unwrap(),
+                        "file" => fs::write(&child, b"replacement").unwrap(),
+                        "symlink" => std::os::unix::fs::symlink(&saved, &child).unwrap(),
+                        _ => unreachable!(),
+                    }
+                }))
+            });
+            let err = copy_contained(&root, Path::new("destination"), &src).unwrap_err();
+            let message = format!("{err:#}");
+            assert!(message.contains("source directory"), "{message}");
+            assert!(message.contains("changed during the copy"), "{message}");
+            assert_metadata_eq(&before, &fs::metadata(&destination).unwrap());
+            assert_eq!(
+                fs::read(destination.join("sentinel")).unwrap(),
+                b"preserved"
+            );
+        }
+    }
+
     fn bounded_descriptor_copy(test_name: &str, in_tree_groups: bool) {
         const CHILD_CASE: &str = "SDME_TEST_COPY_FD_CASE";
         if std::env::var(CHILD_CASE).as_deref() != Ok(test_name) {
