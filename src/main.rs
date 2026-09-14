@@ -396,6 +396,23 @@ it (like cp -r). When the source is a directory, its contents are copied
 recursively with ownership, permissions, timestamps, and extended
 attributes preserved.
 
+CONTAINER AND ROOTFS DESTINATIONS:
+    Regular files require O_TMPFILE support on the destination filesystem
+    and the host's /proc/self/fd. Each file is completed on a new inode
+    before publication; existing open readers retain the old inode.
+    Destination ancestor symlinks are rejected rather than followed.
+
+    Source symlinks, FIFOs, sockets, and devices require trusted same-mount
+    staging outside the write root. Without it, these copies fail explicitly,
+    including with --force. Live /proc/<leader>/root and merged/ roots lack
+    this staging in normal layouts; Btrfs subvolume boundaries can also
+    prevent publication. A recursive copy containing symlinks can therefore
+    fail even when regular-file copies to that destination succeed.
+
+    Copies are not atomic or snapshots. An error can leave earlier entries
+    copied, or a replaced destination name absent. Live writers can change
+    published files. The same restrictions apply to 'fs build' COPY.
+
 RUNNING CONTAINERS:
     Files are read/written through /proc/<leader>/root/, which provides
     access to the container's full mount namespace including tmpfs paths
@@ -409,25 +426,32 @@ RUNNING CONTAINERS:
     /var/tmp/ as an alternative, or 'sdme exec' to read/write those
     paths directly.
 
+    Running btrfs destinations under --userns are unsupported; stop the
+    container first or write through 'sdme exec'.
+
 STOPPED CONTAINERS:
     Source reads use a temporary read-only overlay mount. Destination
-    writes go directly to the overlayfs upper layer. Writes to /tmp, /run,
-    and /dev/shm are refused (systemd mounts tmpfs over them at boot).
+    writes go directly to the overlayfs upper layer. Btrfs reads and writes
+    use the container subvolume instead. Writes to /tmp, /run, and /dev/shm
+    are refused (systemd mounts tmpfs over them at boot).
 
 LOCKING:
-    Shared locks are held on containers and rootfs during the copy to
-    prevent concurrent deletion (sdme rm, sdme fs rm). The locks are
-    non-blocking: if a deletion is attempted during a copy, it fails
-    immediately with a message identifying the holder PID.
+    Sources, rootfs destinations, and running-container destinations hold
+    shared locks against deletion. Stopped-container destinations take an
+    exclusive lock and re-check that the container is stopped, excluding
+    a concurrent start. Locks are non-blocking; conflicts fail immediately
+    with a message identifying the holder PID.
 
 ROOT FILESYSTEMS:
-    Writes go directly to the rootfs directory. Running containers that
-    use this rootfs will NOT see changes (the kernel caches the overlayfs
-    lower layer). Stop and restart affected containers to pick up changes.
+    Writes go directly to the rootfs directory. Do not rely on running
+    containers seeing changes to their shared lower layer consistently.
+    Rootfs copies do not invalidate an existing btrfs base cache.
 
 SAFETY:
-    When copying to the host, device nodes are refused by default.
-    --force skips all safety checks (device nodes and setuid/setgid warnings).
+    Copying device nodes to the host requires confirmation or --force.
+    --force suppresses setuid/setgid warnings; it does not disable
+    destination containment or filesystem requirements. Destination
+    protection does not confine source reads.
 
 NOTES:
     Copy behavior (path handling, file type preservation, directory
@@ -539,6 +563,19 @@ NAME INFERENCE:
     name, provide --name explicitly. Existing names require --force to replace
     or a different --name to import separately.
 
+REPLACEMENT AND RECOVERY:
+    --force refuses replacement while any container references the rootfs,
+    including stopped containers. New data is acquired and validated before
+    old state is parked; the tree, metadata, and environment are published
+    separately, not as one atomic transaction.
+
+    Interrupted publication, rollback, or cleanup can leave .replace-recover
+    artifacts under {datadir}/fs. These are not removed by 'sdme fs gc'.
+    Import and fs rm refuse while artifacts remain and print inspection
+    guidance. Preserve visible state and artifacts, exclude other operations
+    on the rootfs, and verify a complete matching tree and sidecars before
+    manual reconciliation. Leftover artifacts may be incomplete backups.
+
 OCI REGISTRY IMAGES:
     --oci-mode controls how the image is classified:
 
@@ -622,6 +659,13 @@ BUILD CONFIG FORMAT:
     RUN commands execute via /bin/sh -c and support pipes, &&, etc.
     COPY writes through the merged overlayfs mount while the container
     stays running, so copied files are immediately visible inside.
+
+    Regular-file COPY requires O_TMPFILE and the host's /proc/self/fd.
+    Source symlinks, FIFOs, sockets, and devices require trusted same-mount
+    staging outside the write root, unavailable for normal live merged/
+    roots. Such entries fail explicitly, including inside source directories.
+    COPY is not atomic and can leave earlier entries copied after an error.
+    See 'sdme cp --help' for the shared destination restrictions.
 
     COPY does not support these destinations: /run, /dev/shm. systemd
     mounts tmpfs over them at boot, which hides files written to the
@@ -1156,7 +1200,7 @@ enum Command {
         source: String,
         /// Destination path (host path, NAME:/path, or fs:NAME:/path)
         destination: String,
-        /// Allow device nodes and skip safety prompts
+        /// Allow device nodes on the host and suppress setuid/setgid warnings
         #[arg(short, long)]
         force: bool,
     },
@@ -3965,6 +4009,57 @@ mod tests {
     fn test_top_level_help_mentions_dump_skill() {
         let help = Cli::command().render_long_help().to_string();
         assert!(help.contains("dump-skill"));
+    }
+
+    #[test]
+    fn test_copy_help_describes_destination_requirements() {
+        let mut command = Cli::command();
+        let help = command
+            .find_subcommand_mut("cp")
+            .unwrap()
+            .render_long_help()
+            .to_string();
+        for requirement in [
+            "O_TMPFILE",
+            "/proc/self/fd",
+            "Source symlinks",
+            "not atomic",
+        ] {
+            assert!(help.contains(requirement), "missing {requirement}");
+        }
+        assert!(help.contains("exclusive lock"));
+        assert!(!help.contains("skips all safety checks"));
+
+        let build_help = command
+            .find_subcommand_mut("fs")
+            .unwrap()
+            .find_subcommand_mut("build")
+            .unwrap()
+            .render_long_help()
+            .to_string();
+        for requirement in ["O_TMPFILE", "Source symlinks", "not atomic"] {
+            assert!(build_help.contains(requirement), "missing {requirement}");
+        }
+    }
+
+    #[test]
+    fn test_import_help_describes_partial_recovery_artifacts() {
+        let mut command = Cli::command();
+        let help = command
+            .find_subcommand_mut("fs")
+            .unwrap()
+            .find_subcommand_mut("import")
+            .unwrap()
+            .render_long_help()
+            .to_string();
+        for requirement in [
+            "including stopped containers",
+            ".replace-recover",
+            "not removed by 'sdme fs gc'",
+            "incomplete backups",
+        ] {
+            assert!(help.contains(requirement), "missing {requirement}");
+        }
     }
 
     #[test]

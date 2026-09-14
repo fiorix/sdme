@@ -142,7 +142,7 @@ Pod runtime state (volatile, recreated after reboot):
 
 **State files** are flat KEY=VALUE text files under `state/`. They record everything about a container: name, rootfs, creation timestamp, resource limits, network configuration, bind mounts, environment variables, opaque directories, and pod membership (`POD` and/or `OCI_POD`). The format is intentionally simple: readable with `cat`, parseable with `grep`, editable with `sed` in an emergency. The `State` type in the code uses a `BTreeMap<String, String>` for deterministic key ordering.
 
-**Transactional operations** ensure that failed or interrupted mutations never leave a half-written artifact in place. All mutating filesystem operations use atomic staging directories with a rename-on-success pattern. See [Reliability](#15-reliability) for details on staging, locking, and interrupt handling.
+**Transactional staging** keeps acquisition and validation separate from publication. A staging-directory rename is atomic, but publishing a rootfs together with its metadata and environment requires multiple operations. Interrupted replacement can require manual reconciliation; recursive copies are not transactions. See [Reliability](#15-reliability) for staging, locking, recovery, and interrupt handling.
 
 **Health detection** in `sdme ps` checks that a container's expected directories actually exist and that its rootfs (if specified) is present. A container whose rootfs has been removed shows as `broken`. OS detection uses a 5-step cascade to resolve the distro name shown in the listing:
 
@@ -215,7 +215,7 @@ The `fs` subsystem manages the catalogue of root filesystems that containers are
 
 `sdme fs import` auto-detects the source type by probing in order:
 
-Before importing, sdme resolves the rootfs name from `--name` or infers it from the source. OCI references use the final repository component and discard the tag; paths and URLs use their final component with a recognized import suffix removed. Inferred names are not sanitized: an invalid result must be overridden with `--name`. A collision requires either `--force` to replace the existing rootfs or another `--name`.
+Before importing, sdme resolves the rootfs name from `--name` or infers it from the source. OCI references use the final repository component and discard the tag; paths and URLs use their final component with a recognized import suffix removed. Inferred names are not sanitized: an invalid result must be overridden with `--name`. A collision requires either `--force` to replace the existing rootfs or another `--name`. Forced replacement refuses any existing container reference, including a stopped container, and acquires and validates the replacement before parking old state. See [Interrupted rootfs replacement](#interrupted-rootfs-replacement) for publication and recovery limits.
 
 - **URL**: `http://` or `https://` prefix. Downloads the file, then extracts as a tarball.
 - **OCI registry**: looks like a domain with a path (e.g. `docker.io/ubuntu`, `quay.io/fedora/fedora`). Pulled via the OCI Distribution Spec.
@@ -251,7 +251,17 @@ This means `sdme fs import rootfs.tar.zst --name ubuntu` works even if the file 
 
 **Rootfs patching** runs after systemd detection. Even when systemd is present, sdme patches the rootfs for nspawn compatibility: pre-existing `systemd-resolved.service` masks (symlinks to `/dev/null`) are removed so they don't leak through overlayfs and interfere with zone containers that need resolved, `systemd-logind` is unmasked if masked (some OCI images like CentOS/AlmaLinux mask it, but `machinectl shell` requires logind), and missing packages needed by `machinectl shell` (e.g. `util-linux` and `pam` on RHEL-family, which provide `/etc/pam.d/login`) are installed via chroot. The chroot commands that make a rootfs bootable are per-distro and configurable via `distros.<family>.import_prehook` in `/etc/sdme.conf` (see [Configuration](#13-configuration) for the full list of prehook keys and family names). Absent means use built-in defaults; an empty array explicitly does nothing. Service masking (e.g. `systemd-resolved`) is handled at container create time via the configurable `--masked-services` / `default_create_masked_services` mechanism, not at import time.
 
-Import uses transactional staging and cooperative interrupt handling to ensure that a failed or interrupted import never leaves a half-written rootfs. Ctrl+C cleanly cancels multi-gigabyte downloads and extractions. See [Reliability](#15-reliability) for details.
+Import stages downloads, extraction, and validation before publication and checks for cooperative interruption during that work. Publication of the tree and its sidecars is not atomic as a group; interrupted publication or rollback can leave state requiring inspection. See [Reliability](#15-reliability) for the exact recovery contract.
+
+### Contained copies
+
+`sdme cp` destinations inside containers or imported rootfs, and `fs build` COPY destinations, use `copy_contained()` rather than the pathname-based `copy_tree()` used for import/export. The write root and destination directories are pinned by file descriptors; ancestor symlinks are rejected. Existing real directories are merged, while regular-file destinations are replaced with new inodes. Open readers of a replaced file retain the old inode.
+
+Regular files require `O_TMPFILE` support on the destination filesystem and the host's `/proc/self/fd` view. Contents, ownership, permissions, timestamps, and required xattrs are applied to an anonymous inode before any destination name is published. Later hardlink names refer to that completed inode, not an attacker-replaceable destination pathname. Source `security.selinux` labels remain excluded from xattr copying.
+
+Source symlinks, FIFOs, sockets, and device nodes require private staging outside the mutable write root, on the same mount and filesystem as the destination. A directory inside the container is not a trusted staging location merely because its mode is 0700. Copies of these entries fail explicitly when protected staging or same-filesystem publication is unavailable, including with `--force`. Normal live `/proc/<pid>/root` and `merged/` roots have no qualifying staging parent; Btrfs subvolume boundaries can also prevent publication. A directory containing source symlinks can therefore fail to copy even when regular-file copies succeed. Normal build COPY uses the live merged mount and has the same restriction.
+
+These copies are neither snapshots nor atomic transactions. An error may leave earlier entries copied or a replaced destination name absent; concurrent live writers can change or remove published entries. Destination containment assumes a trusted host anchor and parent, and does not confine source reads or protect against an attacker who can move destination directories outside that boundary or introduce host bind mounts. Source reads may observe concurrent changes. See [Storage backend surface](@/docs/security.md#storage-backend-surface) for the security boundary.
 
 ### Storage backends: overlay and btrfs
 
@@ -275,9 +285,9 @@ B     ext4, xfs, other    {datadir}/btrfs-pool.img, a loopback
 
 **Snapshot lifecycle.** The base rootfs is materialized once into an immutable subvolume `{pool}/fs/{name}` (via the same `copy_tree()` engine, preserving hardlinks, devnodes, suid, and xattrs), serialized under a per-base lock so concurrent first-time creates do not each copy the whole tree. Each container is then `btrfs subvolume snapshot {pool}/fs/{name} {pool}/containers/{ctr}`, an instant CoW copy. sdme writes the per-container customization (hostname, hosts, resolv.conf, machine-id, fstab, masked-service symlinks) directly into the snapshot rather than an overlay upper layer. Because those writes land in an untrusted base tree, sdme refuses any customization path whose ancestor is an image-supplied symlink and shadows a leaf symlink with a real file, so a malformed or hostile image cannot redirect a write onto the host (see the [security model](@/docs/security.md)). The container's systemd drop-in points `--directory=` at the subvolume with no overlay mount, and rm destroys the subvolume with the `BTRFS_IOC_SNAP_DESTROY_V2` ioctl issued directly (one syscall, one errno), falling back to parking the subvolume in a per-pool `.trash` directory when the destroy is denied (see the nested section below); a later privileged `sdme prune` destroys trash entries. Subvolume inspection never shells out to btrfs-progs: a subvolume root is detected with `stat()` alone (a directory with inode number 256 on a btrfs filesystem), which needs no privilege.
 
-**Offline access.** `sdme cp`, `sdme fs export`, and `sdme diff` operate on the container without booting it. For overlay this means a temporary read-only overlay mount of `merged`; for btrfs the container root already is a full filesystem, so those commands read (and, for `cp`, write) the subvolume directly. A `cp` into a stopped btrfs container writes into the subvolume itself, so it takes an exclusive lock, re-checks that the container is stopped, and runs through a symlink-safe copy that shadows any pre-existing base-image symlink at each destination before writing, preventing an escape out of the subvolume.
+**Offline access.** `sdme cp`, `sdme fs export`, and `sdme diff` operate on the container without booting it. Overlay reads use a temporary read-only mount of `merged`, while stopped-container cp writes use `upper`; Btrfs reads and writes use the container subvolume directly. Writes to a stopped container on either backend take an exclusive lock and re-check the stopped state to exclude a concurrent start. The shared [contained-copy engine](#contained-copies) rejects destination ancestor symlinks and publishes completed regular inodes. Its `O_TMPFILE` and special-node staging requirements also apply to offline copies; stopping a Btrfs container does not remove a subvolume-boundary restriction.
 
-**Base invalidation.** The `{pool}/fs/{name}` base subvolume is a cache of the imported rootfs at materialization time. Removing (`fs rm`) or replacing (`fs import --force`, and `fs build -f` via the same removal path) a rootfs deletes its base subvolume so the next container re-materializes from the current content instead of seeding from stale content. This is safe while container snapshots exist: btrfs snapshots are independent of their source after creation.
+**Base invalidation.** The `{pool}/fs/{name}` base subvolume is a cache of the imported rootfs at materialization time. Forced import aborts if invalidation fails; removal (`fs rm`, also used by `fs build -f`) reports invalidation failures as warnings. Successful invalidation makes the next container re-materialize from current content. Direct rootfs edits through cp do not invalidate an existing base cache. Invalidating a base does not modify existing container snapshots, which are independent of their source after creation.
 
 **Disk quotas.** `--disk N` caps a btrfs container's root via a btrfs qgroup limit (see [Resource Limits](#12-resource-limits)). It has no cgroup equivalent and is ignored (with a warning) on overlay.
 
@@ -306,6 +316,8 @@ The build engine creates a staging container from the FROM rootfs, then eagerly 
 
 - **COPY** writes through the merged overlayfs mount while the container is running. This ensures the kernel's dcache stays consistent and files are immediately visible inside the container. Three source forms are supported: a host path (no prefix), an imported rootfs (`fs:name:/path`), or another container (`container-name:/path`).
 - **RUN** executes a command inside the container via `systemd-run --machine=NAME --pipe --wait --quiet`.
+
+COPY uses the [contained-copy engine](#contained-copies): regular files need `O_TMPFILE` and host procfd publication, while source symlinks and special nodes need protected same-mount staging outside the write root. Normal live merged roots cannot provide that staging, so these entries fail explicitly, including when encountered inside a copied directory. COPY can leave earlier entries after an error and does not provide snapshot consistency against the running container.
 
 Because the container is started once and stays running throughout the build, there are no stop/start cycles between COPY and RUN operations. `FROM` accepts an optional `fs:` prefix (`FROM fs:ubuntu` is equivalent to `FROM ubuntu`).
 
@@ -850,11 +862,26 @@ Multi-step operations in sdme are designed to fail cleanly rather than leave bro
 
 ### Transactional staging
 
-Mutating filesystem operations (import, build, export, kube create) write to enumerated staging directories named `.{name}.{kind}-txn-{pid}` (e.g. `.ubuntu.import-txn-42195`), then do an atomic `rename()` to the final path on success. If the operation fails or is interrupted, the staging directory is left behind; no cleanup runs during signal handling.
+Operations using `Txn` write to enumerated staging directories named `.{name}.{kind}-txn-{pid}` (e.g. `.ubuntu.import-txn-42195`). `Txn::commit()` atomically renames that directory to its final path; it does not make surrounding sidecar writes, mounts, or cleanup atomic. An uncommitted `Txn` leaves its staging directory for later cleanup. Signal handlers only record interruption; they do not perform filesystem cleanup.
 
 Stale staging from dead PIDs is automatically cleaned up on the next mutating operation when `auto_fs_gc` is enabled (default `true`; see [Configuration](#13-configuration)), or manually via `sdme fs gc`. The `Txn` type in `src/txn.rs` encodes the operation kind and creator PID; `cleanup_stale_txns()` detects dead PIDs via `/proc/{pid}` and removes their artifacts.
 
 Stopped container exports use a `Txn` with `TxnKind::Export` to mark the temporary read-only overlay mount lifetime, so `sdme fs gc` can detect and clean up stale mounts from interrupted exports.
+
+### Interrupted rootfs replacement
+
+`sdme fs import --force` holds an exclusive rootfs lock, refuses references from running or stopped containers, and acquires and validates the new tree and sidecars before changing visible old state. It invalidates the Btrfs base cache before publication and aborts on invalidation failure. Replacement parks the old tree and sidecars, publishes the new tree and sidecars in separate namespace operations, then removes the old artifacts. In-process failures attempt to undo only completed publication steps and report rollback failures.
+
+Recovery artifacts live under `{datadir}/fs/` as `.{name}.replace-recover`, `.{name}.meta.replace-recover`, and `.{name}.env.replace-recover`. They deliberately lack the transaction marker and are not removed by automatic transaction GC or `sdme fs gc`. A process interruption can leave mixed visible state; interruption during successful-publication cleanup can leave a partial old tree or only old sidecars. Neither artifact existence nor the absence of one artifact proves that a complete rollback set remains. No power-loss durability guarantee or automatic recovery journal is provided.
+
+Subsequent import and fs removal refuse while these artifacts remain and list paths for inspection, not shell commands. Other consumers, including cp, create, and export, do not have a persistent recovery gate. Reconcile manually:
+
+1. Exclude other operations and consumers of this rootfs throughout inspection and reconciliation; the failed command's advisory lock is no longer held.
+2. Preserve the visible tree, its `.{name}.meta` and `.{name}.env` sidecars where present, and all remaining recovery artifacts before changing anything.
+3. Determine which tree and sidecars form a complete matching state. Do not replace a complete visible tree with a partial backup or combine old sidecars with new contents.
+4. Reconcile the visible state and remaining artifacts only after that inspection, then retry the refused operation. `fs gc` is not a recovery procedure for these artifacts.
+
+A fresh import has no old-state recovery set: interruption between tree publication and sidecar publication can leave the new tree visible without matching sidecars. Ordinary contained copies also do not use a whole-copy rollback; their partial-result semantics are described in [Contained copies](#contained-copies).
 
 ### Resource locking
 
@@ -871,7 +898,7 @@ Examples:
 
 - `sdme fs build` holds shared locks on the FROM rootfs and any COPY source rootfs or container. `sdme fs rm` and `sdme rm` acquire exclusive locks, so they block while a build is using the resource.
 - `sdme fs export` holds shared locks on the container and/or rootfs for the duration of the export, preventing `sdme rm` / `sdme fs rm` from deleting resources mid-export.
-- `sdme cp` holds shared locks to prevent concurrent deletion during copy.
+- `sdme cp` holds shared locks on sources, rootfs destinations, and running-container destinations to prevent concurrent deletion. A stopped-container destination on either backend instead holds an exclusive container lock and re-checks the stopped state, excluding a concurrent start.
 - `stop` operates via D-Bus (`KillMachine`/`TerminateMachine`) and does **not** use flock, so stopping a container is never blocked by any lock.
 
 ### Cooperative interrupt handling
