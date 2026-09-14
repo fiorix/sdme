@@ -1181,10 +1181,17 @@ pub(crate) fn setup_app_image(
         .with_context(|| format!("failed to copy base rootfs from {}", base_dir.display()))?;
 
     // 3. Move OCI rootfs contents into staging_dir/oci/apps/{app_name}/root/.
-    let app_dir = staging_dir.join("oci/apps").join(app_name);
-    let app_root = app_dir.join("root");
-    fs::create_dir_all(&app_root)
-        .with_context(|| format!("failed to create {}", app_root.display()))?;
+    // Base-image ancestry must be confined before creating directories or
+    // moving entries, before setup_oci_app can check the combined tree.
+    let staging_canon = fs::canonicalize(staging_dir)
+        .with_context(|| format!("failed to resolve {}", staging_dir.display()))?;
+    let app_rel = Path::new("oci/apps").join(app_name);
+    let app_dir = staging_dir.join(&app_rel);
+    let app_root = resolve_app_dirs(staging_dir, &staging_canon, &app_rel.join("root"))?;
+    // Keep using the resolved directory if a moved entry replaces a
+    // base-image symlink that was part of the original path.
+    let app_root = fs::canonicalize(&app_root)
+        .with_context(|| format!("failed to resolve {}", app_root.display()))?;
 
     if verbose {
         eprintln!("moving OCI rootfs to {}", app_root.display());
@@ -1635,6 +1642,114 @@ mod tests {
     fn mode_of(path: &Path) -> u32 {
         use std::os::unix::fs::PermissionsExt;
         fs::metadata(path).unwrap().permissions().mode() & 0o7777
+    }
+
+    fn setup_test_app_image(datadir: &Path, staging: &Path) -> Result<()> {
+        let config = OciContainerConfig {
+            entrypoint: Some(vec!["/app/run".to_string()]),
+            ..OciContainerConfig::default()
+        };
+        setup_app_image(
+            datadir,
+            staging,
+            &AppImageOptions {
+                rootfs_dir: &datadir.join("fs"),
+                name: "image",
+                base_name: "base",
+                app_name: "demo",
+                config: &config,
+                image_ref: "example.com/demo:latest",
+                verbose: false,
+            },
+        )
+    }
+
+    #[test]
+    fn test_setup_app_image_rejects_base_symlink_before_move() {
+        let _lock = crate::import::tests::INTERRUPT_LOCK.lock().unwrap();
+        let tmp = crate::testutil::TempDataDir::new("setup-image-move");
+        for rel in ["oci", "oci/apps", "oci/apps/demo", "oci/apps/demo/root"] {
+            let datadir = tmp.path().join(rel.replace('/', "-"));
+            let base = datadir.join("fs/base");
+            let staging = datadir.join("fs/staging");
+            fs::create_dir_all(&staging).unwrap();
+            fs::write(staging.join("payload"), b"image bytes").unwrap();
+            let link = base.join(rel);
+            fs::create_dir_all(link.parent().unwrap()).unwrap();
+            let outside = datadir.join("outside");
+            let outside_root =
+                outside.join(Path::new("oci/apps/demo/root").strip_prefix(rel).unwrap());
+            fs::create_dir_all(&outside_root).unwrap();
+            let sentinel = outside_root.join("payload");
+            fs::write(&sentinel, b"host data").unwrap();
+            let original_mode = mode_of(&sentinel);
+            std::os::unix::fs::symlink(&outside, &link).unwrap();
+
+            let result = setup_test_app_image(&datadir, &staging);
+            assert_eq!(fs::read(&sentinel).unwrap(), b"host data", "via {rel}");
+            assert_eq!(mode_of(&sentinel), original_mode);
+            let err = result.unwrap_err();
+            assert!(err.to_string().contains("symlink"), "{err:#}");
+            assert_eq!(
+                fs::read(datadir.join("fs/.image.oci-tmp/payload")).unwrap(),
+                b"image bytes"
+            );
+        }
+    }
+
+    #[test]
+    fn test_setup_app_image_rejects_base_symlink_before_mkdir() {
+        let _lock = crate::import::tests::INTERRUPT_LOCK.lock().unwrap();
+        let tmp = crate::testutil::TempDataDir::new("setup-image-mkdir");
+        let base = tmp.path().join("fs/base");
+        let staging = tmp.path().join("fs/staging");
+        let outside = tmp.path().join("outside");
+        fs::create_dir_all(&base).unwrap();
+        fs::create_dir_all(&staging).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(staging.join("payload"), b"image bytes").unwrap();
+        fs::write(outside.join("sentinel"), b"host data").unwrap();
+        std::os::unix::fs::symlink(&outside, base.join("oci")).unwrap();
+
+        let result = setup_test_app_image(tmp.path(), &staging);
+        assert!(
+            !outside.join("apps").exists(),
+            "created outside directories"
+        );
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 1);
+        assert_eq!(fs::read(outside.join("sentinel")).unwrap(), b"host data");
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("symlink"), "{err:#}");
+    }
+
+    #[test]
+    fn test_setup_app_image_normal_and_contained_base_symlink() {
+        let _lock = crate::import::tests::INTERRUPT_LOCK.lock().unwrap();
+        let tmp = crate::testutil::TempDataDir::new("setup-image-normal");
+        for use_symlink in [false, true] {
+            let datadir = tmp.path().join(use_symlink.to_string());
+            let base = datadir.join("fs/base");
+            let staging = datadir.join("fs/staging");
+            fs::create_dir_all(&base).unwrap();
+            fs::create_dir_all(&staging).unwrap();
+            fs::write(base.join("base-marker"), b"base data").unwrap();
+            fs::write(staging.join("payload"), b"image bytes").unwrap();
+            if use_symlink {
+                fs::create_dir(base.join("app-storage")).unwrap();
+                std::os::unix::fs::symlink("app-storage", base.join("oci")).unwrap();
+            }
+
+            setup_test_app_image(&datadir, &staging).unwrap();
+            let app_root = staging.join("oci/apps/demo/root");
+            assert_eq!(fs::read(app_root.join("payload")).unwrap(), b"image bytes");
+            assert_eq!(fs::read(staging.join("base-marker")).unwrap(), b"base data");
+            assert_eq!(mode_of(&app_root.join("usr/sbin/sdme-isolate")), 0o111);
+            assert_eq!(mode_of(&app_root.join("usr/lib/sdme-devfd-shim.so")), 0o555);
+            assert!(staging
+                .join("etc/systemd/system/sdme-oci-demo.service")
+                .is_file());
+            assert!(!datadir.join("fs/.image.oci-tmp").exists());
+        }
     }
 
     #[test]
