@@ -5,6 +5,97 @@ use std::fs;
 use std::sync::Mutex;
 
 #[test]
+fn test_yaml_compatibility_aliases_scalars_and_nulls() {
+    let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata: {name: yaml-forms, labels: null}
+spec:
+  hostNetwork: false
+  restartPolicy: null
+  containers:
+  - name: app
+    image: &image docker.io/busybox:latest
+    command: [sh, -c]
+    args:
+    - |
+      echo first
+      echo second
+    env:
+    - {name: FLAG, value: "true"}
+    - {name: WORD, value: on}
+    - {name: COUNT, value: "0400"}
+  initContainers:
+  - name: init
+    image: *image
+  volumes:
+  - name: scratch
+    emptyDir: {}
+"#;
+    let (name, spec) = parse_yaml(yaml).unwrap();
+    assert_eq!(name, "yaml-forms");
+    assert!(!spec.host_network);
+    assert!(spec.restart_policy.is_none());
+    assert_eq!(spec.init_containers[0].image, spec.containers[0].image);
+    let container = &spec.containers[0];
+    assert_eq!(container.command.as_ref().unwrap(), &["sh", "-c"]);
+    assert_eq!(
+        container.args.as_ref().unwrap(),
+        &["echo first\necho second\n"]
+    );
+    let values: Vec<_> = container
+        .env
+        .iter()
+        .map(|env| env.value.as_deref())
+        .collect();
+    assert_eq!(values, [Some("true"), Some("on"), Some("0400")]);
+    assert!(spec.volumes[0].empty_dir.is_some());
+}
+
+#[test]
+fn test_yaml_compatibility_file_modes() {
+    for mode in ["0400", "\"0400\"", "0o400", "256"] {
+        let yaml = format!(
+            "kind: Pod\nspec:\n  containers: []\n  volumes:\n  - name: secret\n    secret:\n      secretName: credentials\n      defaultMode: {mode}\n"
+        );
+        let (_, spec) = parse_yaml(&yaml).unwrap();
+        assert_eq!(
+            spec.volumes[0].secret.as_ref().unwrap().default_mode,
+            0o400,
+            "{mode}"
+        );
+    }
+}
+
+#[test]
+fn test_yaml_compatibility_rejects_ambiguous_or_malformed_documents() {
+    for yaml in [
+        "kind: Pod\nkind: Deployment\nspec: {containers: []}\n",
+        "kind: Pod\nspec: {containers: [], containers: []}\n",
+        "kind: Pod\nspec: {containers: []}\n---\nkind: Pod\nspec: {containers: []}\n",
+        "kind: Pod\nspec: *undefined\n",
+        "kind: Pod\nspec: [\n",
+    ] {
+        let err = parse_yaml(yaml).unwrap_err();
+        assert_eq!(err.to_string(), "failed to parse Kubernetes YAML", "{yaml}");
+        assert!(err.chain().count() > 1);
+    }
+}
+
+#[test]
+fn test_yaml_compatibility_preserves_spec_errors() {
+    for (spec, detail) in [
+        ("{containers: wrong}", "invalid type"),
+        ("{containers: [{name: app}]}", "missing field `image`"),
+        ("{containers: [], volumes: [{name: secret, secret: {secretName: credentials, defaultMode: '0999'}}]}", "invalid octal file mode"),
+    ] {
+        let err = parse_yaml(&format!("kind: Pod\nspec: {spec}\n")).unwrap_err();
+        assert_eq!(err.to_string(), "failed to parse Pod spec");
+        assert!(format!("{err:#}").contains(detail), "{err:#}");
+    }
+}
+
+#[test]
 fn test_parse_simple_pod() {
     let yaml = r#"
 apiVersion: v1

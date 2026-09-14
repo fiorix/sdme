@@ -213,6 +213,64 @@ fn test_export_to_tar_gz() {
 }
 
 #[test]
+fn test_export_compression_roundtrip_and_truncation() {
+    use std::io::Read;
+
+    let _guard = lock_and_clear_interrupted();
+    let src = crate::testutil::TempDataDir::new("export-compression-src");
+    let dst = crate::testutil::TempDataDir::new("export-compression-dst");
+    let content: Vec<u8> = (0..131_072).map(|i| (i % 251) as u8).collect();
+    fs::write(src.path().join("payload"), &content).unwrap();
+    fs::write(src.path().join("empty"), []).unwrap();
+
+    for format in [ExportFormat::TarBz2, ExportFormat::TarZst] {
+        let output = dst.path().join(format!("{format:?}"));
+        let opts = ExportOptions {
+            format: &format,
+            size: None,
+            free_space: 0,
+            vm_opts: None,
+            verbose: false,
+            force: false,
+            timezone: None,
+        };
+        tar::export_to_tar(src.path(), &output, &opts).unwrap();
+        let compressed = fs::read(&output).unwrap();
+        let decode = |bytes: Vec<u8>| -> Box<dyn Read> {
+            let reader = std::io::Cursor::new(bytes);
+            match format {
+                ExportFormat::TarBz2 => Box::new(bzip2::read::BzDecoder::new(reader)),
+                ExportFormat::TarZst => Box::new(zstd::stream::read::Decoder::new(reader).unwrap()),
+                _ => unreachable!(),
+            }
+        };
+        let mut decoded = Vec::new();
+        decode(compressed.clone())
+            .read_to_end(&mut decoded)
+            .unwrap();
+        let mut archive = ::tar::Archive::new(decoded.as_slice());
+        let mut names = Vec::new();
+        for entry in archive.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            let name = entry.path().unwrap().into_owned();
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes).unwrap();
+            match name.to_str().unwrap() {
+                "payload" => assert_eq!(bytes, content),
+                "empty" => assert!(bytes.is_empty()),
+                other => panic!("unexpected archive entry: {other}"),
+            }
+            names.push(name);
+        }
+        names.sort();
+        assert_eq!(names, [Path::new("empty"), Path::new("payload")]);
+
+        let truncated = compressed[..compressed.len() / 2].to_vec();
+        assert!(decode(truncated).read_to_end(&mut Vec::new()).is_err());
+    }
+}
+
+#[test]
 fn test_export_to_tar_rejects_existing() {
     let src = crate::testutil::TempDataDir::new("export-tar-exist-src");
     let dst = crate::testutil::TempDataDir::new("export-tar-exist-dst");
