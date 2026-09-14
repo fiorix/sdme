@@ -30,6 +30,46 @@ jobs:
       - name: Run tests
         run: SDME_SKIP_PROBE=1 cargo test --locked --verbose
 
+  musl:
+    name: Cross-compile (musl)
+    runs-on: ubuntu-latest
+    # The release builds static musl binaries, and libc exposes a different
+    # surface there than on glibc: the statx family is gated behind a cfg that
+    # musl targets do not get. A glibc-only CI let that reach a release tag,
+    # where it failed the build after the version was already published. Build
+    # both release targets here so the same class of breakage fails on push.
+    # Debug is enough: build.rs still builds the embedded probe in release, and
+    # these are compile errors rather than codegen differences.
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@v5
+
+      # Keep ZIG_VERSION and ZIG_SHA256 in step with .github/workflows/release.yml.
+      - name: Install Zig
+        run: |
+          ZIG_VERSION="0.14.1"
+          ZIG_SHA256="24aeeec8af16c381934a6cd7d95c807a8cb2cf7df9fa40d359aa884195c4716c"
+          curl -sL -o zig.tar.xz "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
+          echo "${ZIG_SHA256}  zig.tar.xz" | sha256sum -c -
+          mkdir -p "$HOME/.zig"
+          tar -xJf zig.tar.xz -C "$HOME/.zig" --strip-components=1
+          echo "$HOME/.zig" >> "$GITHUB_PATH"
+          rm zig.tar.xz
+
+      - name: Install cargo-zigbuild
+        run: cargo install --locked cargo-zigbuild
+
+      - name: Add rustup target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Build
+        run: cargo zigbuild --locked --target ${{ matrix.target }}
+
   doc:
     name: Documentation
     runs-on: ubuntu-latest

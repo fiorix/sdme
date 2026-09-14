@@ -11,7 +11,7 @@
 %global crate sdme
 
 Name:           sdme
-Version:        0.19.0
+Version:        0.19.1
 Release:        1%{?dist}
 Summary:        The systemd machine editor
 
@@ -103,6 +103,15 @@ export SDME_SKIP_PROBE=1
 %{_datadir}/fish/vendor_completions.d/%{crate}.fish
 
 %changelog
+* Mon Sep 14 2026 Alexandre Fiori <fiorix@gmail.com> - 0.19.1-1
+- Build the static musl release binaries again. The contained copy engine
+  reached mount identity through the libc statx wrapper, which libc gates
+  behind a cfg that musl targets do not get, so both release targets failed to
+  compile. Call the statx syscall directly with in-crate kernel types, which
+  needs no statx symbol from the target libc.
+- Cross-compile both musl release targets in CI on every push, so this class
+  of breakage fails before a release tag rather than after one.
+
 * Mon Sep 14 2026 Alexandre Fiori <fiorix@gmail.com> - 0.19.0-1
 - Route sdme cp and fs build COPY through a descriptor-relative copy engine
   that pins the write root and every destination directory, rejects ancestor

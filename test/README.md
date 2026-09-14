@@ -148,11 +148,15 @@ The docker/registry tutorial test needs outbound internet inside a `--network-ve
 
 Last verified: 2026-09-14
 
-System: Linux 7.1.8-1-cachyos (x86_64), systemd 261, sdme 0.19.0 built from
+System: Linux 7.1.8-1-cachyos (x86_64), systemd 261, sdme 0.19.1 built from
 the working tree. Eight parallel jobs, timeout scale 1, wall clock 17m02s.
 The exact aggregate is `test-reports/summary-20260914-143109.md`, which
 records the binary as 0.18.0: the suite ran against this code before the
-version bump, and no code changed between that run and the bump.
+version bump, and no code changed between that run and the bump. The 0.19.0
+tag was never released. Its musl release build failed to compile because the
+contained copy engine used the libc statx wrapper, which libc gates behind a
+cfg that musl targets do not get. Nothing was published, the fix is in 0.19.1,
+and CI now cross-compiles both musl targets on every push.
 
 ```
 Test Suite                  Pass  Fail  Skip  Status
@@ -207,7 +211,7 @@ Totals                       677     0    13  24 suites
 
 ## Log
 
-### 0.19.0 -- contained copy, nspawn reclaim, kube grace period (2026-09-14, x86_64)
+### 0.19.1 -- contained copy, nspawn reclaim, kube grace period (2026-09-14, x86_64)
 
 Full `run-parallel.sh --jobs 8` on Linux 7.1.8-1-cachyos with systemd 261:
 677 passed, 0 failed, and 13 skipped across 24 suites in 17m02s. The aggregate

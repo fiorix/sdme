@@ -535,24 +535,95 @@ impl Drop for Staging {
     }
 }
 
+// statx is declared in-crate rather than taken from libc because the libc
+// crate gates its entire statx surface (the struct, the wrapper, and the mask
+// constants) behind an unstable `musl_v1_2_3` cfg, so none of it resolves for
+// the *-linux-musl release targets even though it resolves for glibc. statx is
+// a kernel interface, not a libc one: the mask bits and the struct layout are
+// kernel ABI and identical under every libc, so mirroring them here keeps a
+// single code path that compiles and behaves the same on both. Calling through
+// syscall(2) instead of a libc wrapper also drops the requirement that the
+// target libc export a `statx` symbol at all.
+//
+// Values and layout below were read from linux/stat.h UAPI (verified against
+// /usr/include/linux/stat.h).
+
+/// `STATX_BASIC_STATS`: request the fields of the classic `stat` struct.
+const STATX_BASIC_STATS: u32 = 0x0000_07ff;
+
+/// `STATX_MNT_ID`: request, and on return report, `stx_mnt_id`.
+const STATX_MNT_ID: u32 = 0x0000_1000;
+
+/// Kernel `struct statx_timestamp`.
+#[repr(C)]
+struct StatxTimestamp {
+    tv_sec: i64,
+    tv_nsec: u32,
+    __reserved: i32,
+}
+
+/// Kernel `struct statx`. Fields mirror linux/stat.h in order up to
+/// `stx_mnt_id`; the remainder of the 256-byte structure is space the kernel
+/// may write but this code never reads, so it is kept as opaque tail padding.
+// The kernel fills this buffer by offset, so a layout mistake would silently
+// yield the wrong mount identity rather than fail. Fields this code does not
+// read exist to pin those offsets, and the assertions below check them.
+#[allow(dead_code)]
+#[repr(C)]
+struct Statx {
+    stx_mask: u32,
+    stx_blksize: u32,
+    stx_attributes: u64,
+    stx_nlink: u32,
+    stx_uid: u32,
+    stx_gid: u32,
+    stx_mode: u16,
+    __spare0: [u16; 1],
+    stx_ino: u64,
+    stx_size: u64,
+    stx_blocks: u64,
+    stx_attributes_mask: u64,
+    stx_atime: StatxTimestamp,
+    stx_btime: StatxTimestamp,
+    stx_ctime: StatxTimestamp,
+    stx_mtime: StatxTimestamp,
+    stx_rdev_major: u32,
+    stx_rdev_minor: u32,
+    stx_dev_major: u32,
+    stx_dev_minor: u32,
+    stx_mnt_id: u64,
+    __tail: [u64; 13],
+}
+
+const _: () = {
+    assert!(std::mem::size_of::<Statx>() == 0x100);
+    assert!(std::mem::offset_of!(Statx, stx_mask) == 0x00);
+    assert!(std::mem::offset_of!(Statx, stx_dev_major) == 0x88);
+    assert!(std::mem::offset_of!(Statx, stx_dev_minor) == 0x8c);
+    assert!(std::mem::offset_of!(Statx, stx_mnt_id) == 0x90);
+};
+
 // Both matter: bind mounts can share st_dev, while distinct Btrfs subvolumes
 // can share a mount ID. linkat cannot cross either boundary.
 fn mount_identity(fd: &OwnedFd) -> Result<(u64, u32, u32)> {
-    let mut st: libc::statx = unsafe { std::mem::zeroed() };
+    let mut st: Statx = unsafe { std::mem::zeroed() };
+    // syscall(2) is variadic and reads every argument as a long, so widen the
+    // narrow arguments explicitly rather than relying on promotion.
     let ret = unsafe {
-        libc::statx(
-            fd.as_raw_fd(),
+        libc::syscall(
+            libc::SYS_statx,
+            fd.as_raw_fd() as libc::c_long,
             c"".as_ptr(),
-            libc::AT_EMPTY_PATH,
-            libc::STATX_MNT_ID | libc::STATX_BASIC_STATS,
-            &mut st,
+            libc::AT_EMPTY_PATH as libc::c_long,
+            (STATX_MNT_ID | STATX_BASIC_STATS) as libc::c_long,
+            &mut st as *mut Statx,
         )
     };
     if ret != 0 {
         return Err(std::io::Error::last_os_error())
             .context("cannot establish mount identity for protected staging");
     }
-    if st.stx_mask & libc::STATX_MNT_ID == 0 {
+    if st.stx_mask & STATX_MNT_ID == 0 {
         bail!("kernel does not report mount identity required for protected staging");
     }
     Ok((st.stx_mnt_id, st.stx_dev_major, st.stx_dev_minor))

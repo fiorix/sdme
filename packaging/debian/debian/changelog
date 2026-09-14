@@ -1,3 +1,15 @@
+sdme (0.19.1-1~resolute1) resolute; urgency=medium
+
+  * Build the static musl release binaries again. The contained copy engine
+    reached mount identity through the libc statx wrapper, which libc gates
+    behind a cfg that musl targets do not get, so both release targets failed
+    to compile. Call the statx syscall directly with in-crate kernel types,
+    which needs no statx symbol from the target libc.
+  * Cross-compile both musl release targets in CI on every push, so this class
+    of breakage fails before a release tag rather than after one.
+
+ -- Alexandre Fiori <fiorix@gmail.com>  Mon, 14 Sep 2026 18:05:00 +0100
+
 sdme (0.19.0-1~resolute1) resolute; urgency=medium
 
   * Route `sdme cp` and `sdme fs build` COPY through a descriptor-relative
