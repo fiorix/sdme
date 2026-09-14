@@ -154,9 +154,9 @@ For Kubernetes-specific failures, check Pod YAML parsing, probe readiness (`prob
 When changing sdme itself, start from the existing docs and source map instead of duplicating that material in the prompt or this skill:
 
 - `README.md`: project overview, install path, and user-facing positioning.
-- `site/content/docs/architecture.md`: main design and implementation map.
-- `site/content/docs/security.md`: security model and hardening trade-offs.
-- `site/content/tutorial/*.md`: user workflows and examples.
+- `docs/architecture.md`: main design and implementation map.
+- `docs/security.md`: security model and hardening trade-offs.
+- `docs/tutorial/*.md`: user workflows and examples.
 - `test/README.md`: live and end-to-end validation notes.
 - `Cargo.toml`: crate metadata, binaries, features, and dependencies.
 

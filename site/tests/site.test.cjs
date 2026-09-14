@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const { execFileSync } = require('node:child_process');
-const { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = require('node:fs');
+const { mkdtempSync, readFileSync, rmSync, writeFileSync } = require('node:fs');
 const { createServer } = require('node:http');
 const { tmpdir } = require('node:os');
 const { join, resolve } = require('node:path');
@@ -15,9 +15,8 @@ let server;
 let origin;
 
 before(async () => {
-  for (const entry of ['config.toml', 'content', 'templates', 'static']) {
-    cpSync(join(site, entry), join(temporary, entry), { recursive: true });
-  }
+  const { prepareSite } = await import('../scripts/content.mjs');
+  prepareSite(site, temporary);
   writeFileSync(join(temporary, 'content/docs/outline-disabled.md'), '+++\ntitle = "No outline"\nweight = 100\ntemplate = "doc.html"\n[extra]\nshow_outline = false\n+++\n\n## A heading\n\nContent.\n');
   writeFileSync(join(temporary, 'content/docs/outline-nesting.md'), '+++\ntitle = "Nested headings"\nweight = 101\ntemplate = "doc.html"\n+++\n\n# One\n\n### Three\n\n###### Six\n\n## Two\n\n## Two\n\n## Code `example` & text\n');
   server = createServer((request, response) => {
@@ -156,6 +155,26 @@ for (const engine of ['chromium', 'webkit']) {
       assert.equal(await page.locator('#fallback a').first().getAttribute('href'), 'https://github.com/fiorix/sdme/releases/latest');
       await page.goto(`${origin}/docs/ai-skill/`);
       assert.equal(await page.getByRole('button', { name: 'Copy code', exact: true }).count(), 2);
+    });
+  });
+
+  test(`${engine}: shared Markdown links and GitHub alerts render on the website`, async () => {
+    const { browser } = browsers.find(item => item.name === engine);
+    await withPage(browser, {}, async page => {
+      await page.goto(`${origin}/tutorial/first-container/`);
+      assert.equal(await page.getByRole('link', { name: 'installation page', exact: true }).getAttribute('href'), `${origin}/#installation`);
+      assert.equal(await page.locator('.markdown-alert-warning').count(), 2);
+      assert.equal(await page.locator('.markdown-alert-tip').count(), 1);
+      await page.getByRole('link', { name: 'Day-to-Day Management', exact: true }).click();
+      assert.equal(new URL(page.url()).pathname, '/tutorial/management/');
+      await page.goto(`${origin}/docs/security/`);
+      await page.getByRole('link', { name: 'Architecture, Section 14', exact: true }).first().click();
+      assert.equal(new URL(page.url()).pathname, '/docs/architecture/');
+      assert.equal(new URL(page.url()).hash, '#14-security');
+      await page.locator('[id="14-security"]').waitFor({ state: 'visible' });
+      assert.equal(await page.locator('[id="14-security"]').isVisible(), true);
+      const table = page.getByRole('table').filter({ hasText: 'Diff container against its base rootfs' });
+      assert.equal(await table.getByRole('cell', { name: 'NAME', exact: true }).count(), 1);
     });
   });
 }

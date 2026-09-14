@@ -7,3 +7,4 @@
 /verify-*.md
 /site/public/
 /site/node_modules/
+/site/.zola/

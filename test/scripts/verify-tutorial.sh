@@ -3,7 +3,7 @@ set -uo pipefail
 
 # verify-tutorial.sh - verify CLI commands match the website tutorials
 #
-# Each test function corresponds to a tutorial under site/content/tutorial/.
+# Each test function corresponds to a tutorial under docs/tutorial/.
 # Uses vfy-tut- prefix for all artifacts.
 #
 # Requires: root, sdme in PATH, network access for OCI registry pulls.

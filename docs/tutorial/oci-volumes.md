@@ -1,8 +1,4 @@
-+++
-title = "Running an OCI Database with Volumes"
-description = "Run PostgreSQL with automatically managed OCI volumes that persist data across container removal and re-creation."
-weight = 9
-+++
+# Running an OCI Database with Volumes
 
 Some OCI images declare volumes for data directories that should persist independently from the container. sdme detects these declarations and automatically creates host-side directories that are bind-mounted into the container.
 
@@ -10,7 +6,7 @@ This tutorial demonstrates OCI auto-volumes using PostgreSQL, which declares `/v
 
 ## Import PostgreSQL
 
-Make sure you have a base rootfs imported (see the [different rootfs](@/tutorial/different-rootfs.md) tutorial). Then import PostgreSQL as an OCI application:
+Make sure you have a base rootfs imported (see the [different rootfs](different-rootfs.md) tutorial). Then import PostgreSQL as an OCI application:
 
 ```sh
 sudo sdme fs import docker.io/postgres --base-fs ubuntu
@@ -120,4 +116,4 @@ Many database and stateful images declare volumes in their OCI config:
 - **postgres**: `/var/lib/postgresql`
 - **mongo**: `/data/db`, `/data/configdb`
 
-Not all images declare volumes. For example, redis and nginx do not. Use `--bind` to manage data directories for those images manually. See the [bind mounts](@/tutorial/bind-mounts-volumes.md) tutorial for details.
+Not all images declare volumes. For example, redis and nginx do not. Use `--bind` to manage data directories for those images manually. See the [bind mounts](bind-mounts-volumes.md) tutorial for details.

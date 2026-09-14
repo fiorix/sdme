@@ -1,9 +1,4 @@
-+++
-title = "AI Skill"
-description = "Embedded AI agent skill for using and troubleshooting sdme."
-weight = 3
-template = "doc.html"
-+++
+# AI Skill
 
 sdme ships an AI agent skill for agents that need to use or troubleshoot sdme. The skill covers the sdme operating model, common command workflows, systemd-nspawn and machined diagnostics, lifecycle failures, networking, OCI rootfs handling, and repository validation expectations.
 

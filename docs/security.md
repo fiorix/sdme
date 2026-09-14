@@ -1,13 +1,6 @@
-+++
-title = "Security"
-description = "Container isolation, hardening tiers, OCI workload security, and Kubernetes pod security."
-weight = 2
-template = "doc.html"
-+++
+# Security
 
-
-
-This document covers sdme's security model across three layers: nspawn container isolation (Part 1), OCI workload isolation inside containers (Part 2), and Kubernetes compatibility security (Part 3). For sdme's security implementation details (capabilities, seccomp, AppArmor, `--hardened`, `--strict`), see [Architecture, Section 14](@/docs/architecture.md#14-security).
+This document covers sdme's security model across three layers: nspawn container isolation (Part 1), OCI workload isolation inside containers (Part 2), and Kubernetes compatibility security (Part 3). For sdme's security implementation details (capabilities, seccomp, AppArmor, `--hardened`, `--strict`), see [Architecture, Section 14](architecture.md#14-security).
 
 ---
 
@@ -111,7 +104,7 @@ Docker retains roughly 14 capabilities, the minimum needed for typical applicati
 
 Docker doesn't need `CAP_SYS_ADMIN` because Docker containers don't run a full init system. This is a fundamental consequence of the different design: sdme runs full systemd (requiring broad capabilities), while Docker runs single-purpose application processes (requiring minimal capabilities).
 
-sdme (via nspawn) retains 26 capabilities by default, including `CAP_SYS_ADMIN`. See [Architecture, Section 14](@/docs/architecture.md#14-security) for the full capability list and sdme's `--drop-capability`/`--capability` controls.
+sdme (via nspawn) retains 26 capabilities by default, including `CAP_SYS_ADMIN`. See [Architecture, Section 14](architecture.md#14-security) for the full capability list and sdme's `--drop-capability`/`--capability` controls.
 
 ## 5. Seccomp Filtering
 
@@ -121,7 +114,7 @@ Docker's OCI default seccomp profile is more restrictive, blocking roughly 44 sy
 
 This means a compromised process inside sdme has access to more kernel surface than inside Docker. This is an inherent trade-off of running a full init system.
 
-See [Architecture, Section 14](@/docs/architecture.md#14-security) for nspawn's baseline filter details and sdme's `--system-call-filter` controls.
+See [Architecture, Section 14](architecture.md#14-security) for nspawn's baseline filter details and sdme's `--system-call-filter` controls.
 
 ## 6. Mandatory Access Control (MAC)
 
@@ -133,7 +126,7 @@ See [Architecture, Section 14](@/docs/architecture.md#14-security) for nspawn's 
 
 **SELinux is not supported.** sdme has no SELinux integration and does not provide MAC confinement on SELinux-only systems (Fedora, RHEL). During rootfs import (`sdme fs import`), `security.selinux` extended attributes are explicitly skipped because they do not transfer meaningfully between filesystems and would cause label conflicts on the host. Docker and Podman provide MAC confinement out of the box on both AppArmor and SELinux systems.
 
-See [Architecture, Section 14](@/docs/architecture.md#14-security) for the `sdme-default` profile details and installation instructions.
+See [Architecture, Section 14](architecture.md#14-security) for the `sdme-default` profile details and installation instructions.
 
 ## 7. Privilege Escalation Prevention
 
@@ -145,7 +138,7 @@ See [Architecture, Section 14](@/docs/architecture.md#14-security) for the `sdme
 
 All three provide read-only rootfs as an opt-in flag (`--read-only`).
 
-See [Architecture, Section 14](@/docs/architecture.md#14-security) for sdme's `--no-new-privileges` and `--read-only` implementation details.
+See [Architecture, Section 14](architecture.md#14-security) for sdme's `--no-new-privileges` and `--read-only` implementation details.
 
 ## 8. Network Isolation Deep Dive
 
@@ -178,7 +171,7 @@ This is closest to Docker's default networking model.
 
 ### Pod networking
 
-Pods give multiple containers a shared network namespace (see [Architecture, Section 10](@/docs/architecture.md#10-pods) for implementation details and lifecycle management).
+Pods give multiple containers a shared network namespace (see [Architecture, Section 10](architecture.md#10-pods) for implementation details and lifecycle management).
 
 Two mechanisms for joining a pod:
 
@@ -186,7 +179,7 @@ Two mechanisms for joining a pod:
 
 **`--oci-pod` (OCI app process only):** The pod's netns is bind-mounted into the container at `/run/sdme/oci-pod-netns`, and a systemd drop-in sets `NetworkNamespacePath=` on the OCI app service. Only the application process enters the pod's netns; the container's init and other services keep their own network namespace. This is for OCI app containers that need pod networking for their application but want systemd's own networking (e.g. journal remote, D-Bus) to remain independent.
 
-**Comparison with Podman pods.** Podman uses an "infra container" (a pause process) to hold the pod's network namespace. Podman pods support full external connectivity through slirp4netns/pasta or CNI/Netavark plugins. sdme pods are loopback-only by default. External connectivity can be added with `sdme pod net attach`, which creates a veth pair and delegates DHCP and NAT to the host's systemd-networkd (see [Architecture, Section 10](@/docs/architecture.md#10-pods) for details).
+**Comparison with Podman pods.** Podman uses an "infra container" (a pause process) to hold the pod's network namespace. Podman pods support full external connectivity through slirp4netns/pasta or CNI/Netavark plugins. sdme pods are loopback-only by default. External connectivity can be added with `sdme pod net attach`, which creates a veth pair and delegates DHCP and NAT to the host's systemd-networkd (see [Architecture, Section 10](architecture.md#10-pods) for details).
 
 **Comparison with Docker Compose.** Docker Compose creates shared bridge networks, not true pod semantics. Containers in a Compose service communicate via DNS names over a bridge, not via localhost. sdme pods are closer to Kubernetes pod semantics: shared localhost, shared ports.
 
@@ -218,7 +211,7 @@ Non-host `sdme cp` destinations and `fs build` COPY use the descriptor-relative 
 
 Source symlinks, FIFOs, sockets, and devices require private staging outside the mutable root on the destination's mount and filesystem, so their metadata cannot be redirected through a substituted destination name. Copies fail explicitly if this staging or same-filesystem publication is unavailable. Normal live proc-root and merged-root layouts lack a qualifying staging parent; Btrfs subvolume boundaries can also prevent publication. Thus a recursive copy containing symlinks, including normal build COPY, can fail while regular-file copies still work. A private mode-0700 directory inside a live root would not protect staging from container root and is not used as a fallback.
 
-Containment assumes sdme's host anchor and its parent are trusted and the destination writer cannot move directory inodes outside that boundary or introduce host bind mounts. It is not isolation from an attacker controlling the host mount namespace. Source reads remain uncontained. Copies are not snapshots or atomic transactions: live writers can alter published data, and an error can leave earlier copied entries or an absent replacement name. See [Contained copies](@/docs/architecture.md#contained-copies) for the compatibility contract.
+Containment assumes sdme's host anchor and its parent are trusted and the destination writer cannot move directory inodes outside that boundary or introduce host bind mounts. It is not isolation from an attacker controlling the host mount namespace. Source reads remain uncontained. Copies are not snapshots or atomic transactions: live writers can alter published data, and an error can leave earlier copied entries or an absent replacement name. See [Contained copies](architecture.md#contained-copies) for the compatibility contract.
 
 Stopped-container cp destinations on both backends take an exclusive container lock and re-check the stopped state, excluding a concurrent start. This preserves the selected offline access mode; live destinations still use the contained engine. Create-time Btrfs customization uses separate static-tree ancestor checks and leaf-symlink replacement while preparing the stopped container.
 
@@ -241,7 +234,7 @@ sdme has no persistent daemon. There is no equivalent of Docker's `containerd` s
 
 ## 10. Hardening Tiers
 
-sdme provides two convenience flags (`--hardened` and `--strict`) that bundle multiple security layers. See [Architecture, Section 14](@/docs/architecture.md#14-security) for full details on what each flag enables and its effects on host-rootfs containers.
+sdme provides two convenience flags (`--hardened` and `--strict`) that bundle multiple security layers. See [Architecture, Section 14](architecture.md#14-security) for full details on what each flag enables and its effects on host-rootfs containers.
 
 ### sdme hardening tiers
 
@@ -363,7 +356,7 @@ The `isolate` binary is a static ELF (under 2 KiB, no libc, raw syscalls) writte
 - **All apps**: PID namespace, IPC namespace, /proc remount, `CAP_SYS_ADMIN` drop
 - **Non-root apps**: additionally drops privileges via `setgroups`/`setgid`/`setuid`
 
-See [Architecture, Section 16](@/docs/architecture.md#16-oci-integration) for full details on the isolate binary.
+See [Architecture, Section 16](architecture.md#16-oci-integration) for full details on the isolate binary.
 
 ## 14. Systemd Hardening Directives
 
