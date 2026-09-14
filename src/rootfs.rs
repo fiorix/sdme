@@ -22,7 +22,8 @@ use crate::{validate_name, State};
 /// replacement is in flight they hold the only copy of the pre-replacement
 /// state. They are never restored or deleted automatically after an
 /// interruption; [`ensure_no_interrupted_replacement`] fails closed and
-/// tells the operator exactly how to reconcile them.
+/// requires the operator to inspect both visible state and remaining artifacts.
+/// Cleanup after publication can leave an incomplete tree or only old sidecars.
 pub(crate) struct ReplaceRecover {
     /// Parked old rootfs tree.
     pub tree: std::path::PathBuf,
@@ -46,57 +47,48 @@ fn path_present(p: &Path) -> bool {
     p.symlink_metadata().is_ok()
 }
 
-/// Fail closed if a previous forced-import replacement of `name` left
-/// recovery backups behind.
+/// Refuse a mutation while replacement artifacts remain, preserving all state.
 ///
-/// Must run under the exclusive fs lock for `name`, before the operation
-/// inspects the tree. Any backup means an earlier replacement did not
-/// finish. Rather than guess which state is complete from filesystem
-/// existence, the operation is refused, every backup is preserved, and the
-/// error names each preserved path with the exact commands to roll back to
-/// the pre-replacement state or to discard it.
+/// Must run under the exclusive fs lock for `name`. Existence cannot establish
+/// whether publication, rollback or cleanup was interrupted, or whether an old
+/// tree and its sidecars are complete. Recovery requires operator inspection.
 pub(crate) fn ensure_no_interrupted_replacement(rootfs_dir: &Path, name: &str) -> Result<()> {
     let rec = ReplaceRecover::new(rootfs_dir, name);
-    let final_dir = rootfs_dir.join(name);
-    let meta_path = rootfs_dir.join(format!(".{name}.meta"));
-    let env_path = rootfs_dir.join(format!(".{name}.env"));
-
-    let mut preserved: Vec<(&Path, &Path)> = Vec::new();
-    if path_present(&rec.tree) {
-        preserved.push((&rec.tree, &final_dir));
-    }
-    if path_present(&rec.meta) {
-        preserved.push((&rec.meta, &meta_path));
-    }
-    if path_present(&rec.env) {
-        preserved.push((&rec.env, &env_path));
-    }
+    let preserved: Vec<_> = [&rec.tree, &rec.meta, &rec.env]
+        .into_iter()
+        .filter(|path| path_present(path))
+        .collect();
     if preserved.is_empty() {
         return Ok(());
     }
 
     let mut listed = String::new();
-    let mut rollback = String::new();
-    let mut discard = String::new();
-    for (backup, visible) in &preserved {
-        listed.push_str(&format!("  {}\n", backup.display()));
-        if path_present(visible) {
-            rollback.push_str(&format!("  rm -rf {}\n", visible.display()));
-        }
-        rollback.push_str(&format!(
-            "  mv {} {}\n",
-            backup.display(),
-            visible.display()
-        ));
-        discard.push_str(&format!("  rm -rf {}\n", backup.display()));
+    for path in preserved {
+        listed.push_str(&format!("  {path:?}\n"));
+    }
+    let visible = [
+        rootfs_dir.join(name),
+        rootfs_dir.join(format!(".{name}.meta")),
+        rootfs_dir.join(format!(".{name}.env")),
+    ];
+    let mut current = String::new();
+    for path in visible {
+        current.push_str(&format!("  {path:?}\n"));
     }
     bail!(
-        "a previous forced import of fs '{name}' was interrupted mid-replacement; \
-         refusing to proceed so no state is lost.\n\
-         Preserved pre-replacement state:\n{listed}\
-         To roll back to it, inspect both states, then run:\n{rollback}\
-         To keep the current state instead, inspect it, then run:\n{discard}\
-         Retry the operation afterwards."
+        "a previous forced import of fs '{name}' left unresolved replacement artifacts; \
+         publication, rollback or cleanup may have been interrupted. Refusing to proceed; \
+         visible state and remaining artifacts are preserved.\n\
+         Remaining artifacts (paths, not shell commands):\n{listed}\
+         Visible state paths (some may be absent):\n{current}\
+         Artifacts may be partial cleanup leftovers after successful publication: \
+         the old tree may be incomplete or absent while old sidecars remain. \
+         Their existence does not establish a complete rollback state.\n\
+         Before changing anything, inspect the visible tree, its metadata and environment, \
+         and all remaining artifacts while other operations on this fs are excluded. \
+         Verify which tree and sidecars form a complete matching state; do not replace \
+         a complete visible tree with a partial backup or mix old sidecars with new contents. \
+         Preserve the state needed for recovery, reconcile the artifacts manually, then retry."
     )
 }
 
@@ -338,7 +330,7 @@ pub fn remove(datadir: &Path, name: &str, auto_gc: bool, verbose: bool) -> Resul
         .with_context(|| format!("cannot remove rootfs '{name}': in use"))?;
 
     // Refuse if an earlier forced-import replacement was interrupted; the
-    // recovery backups are the only copy of one of the two states.
+    // remaining artifacts may contain state needed for recovery.
     let rootfs_dir = datadir.join("fs");
     ensure_no_interrupted_replacement(&rootfs_dir, name)?;
 
@@ -700,8 +692,8 @@ mod tests {
             "guidance must name the backup: {msg}"
         );
         assert!(
-            msg.contains("mv") && msg.contains("rm -rf"),
-            "guidance must give exact recovery commands: {msg}"
+            msg.contains("inspect") && !msg.contains("rm -rf") && !msg.contains("  mv "),
+            "guidance must require inspection without destructive commands: {msg}"
         );
 
         assert_eq!(
@@ -747,6 +739,88 @@ mod tests {
             fs::read_to_string(fs_dir.join("base/marker")).unwrap(),
             "v1"
         );
+    }
+
+    fn assert_inspection_only(msg: &str) {
+        assert!(msg.contains("partial cleanup leftovers"), "got: {msg}");
+        assert!(msg.contains("inspect"), "got: {msg}");
+        assert!(
+            !msg.contains("Preserved pre-replacement state"),
+            "got: {msg}"
+        );
+        assert!(
+            !msg.contains("rm -rf") && !msg.contains("  mv "),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_recovery_partial_tree_cleanup_preserves_published_state() {
+        let tmp = make_base();
+        let fs_dir = tmp.path().join("fs");
+        let rec = ReplaceRecover::new(&fs_dir, "base");
+        fs::create_dir(&rec.tree).unwrap();
+        fs::write(rec.tree.join("remaining"), "old fragment").unwrap();
+        fs::write(&rec.meta, "DISTRO=old\n").unwrap();
+        fs::write(&rec.env, "OLD=1\n").unwrap();
+        // The rest of the old tree has already been removed after publication.
+        fs::write(fs_dir.join("base/marker"), "complete new tree").unwrap();
+        fs::write(fs_dir.join(".base.meta"), "DISTRO=new\n").unwrap();
+        fs::write(fs_dir.join(".base.env"), "NEW=1\n").unwrap();
+
+        let msg = format!(
+            "{:#}",
+            ensure_no_interrupted_replacement(&fs_dir, "base").unwrap_err()
+        );
+        assert_inspection_only(&msg);
+        assert_eq!(
+            fs::read(rec.tree.join("remaining")).unwrap(),
+            b"old fragment"
+        );
+        assert_eq!(fs::read(&rec.meta).unwrap(), b"DISTRO=old\n");
+        assert_eq!(fs::read(&rec.env).unwrap(), b"OLD=1\n");
+        assert_eq!(
+            fs::read(fs_dir.join("base/marker")).unwrap(),
+            b"complete new tree"
+        );
+        assert_eq!(
+            fs::read(fs_dir.join(".base.meta")).unwrap(),
+            b"DISTRO=new\n"
+        );
+        assert_eq!(fs::read(fs_dir.join(".base.env")).unwrap(), b"NEW=1\n");
+    }
+
+    #[test]
+    fn test_recovery_sidecar_cleanup_leftovers_with_quoted_datadir() {
+        let tmp = crate::testutil::TempDataDir::new("recovery-quotes");
+        let fs_dir = tmp.path().join("data dir's \"quoted\"/fs");
+        fs::create_dir_all(fs_dir.join("base")).unwrap();
+        fs::write(fs_dir.join("base/marker"), "new tree").unwrap();
+        fs::write(fs_dir.join(".base.meta"), "DISTRO=new\n").unwrap();
+        fs::write(fs_dir.join(".base.env"), "NEW=1\n").unwrap();
+        let rec = ReplaceRecover::new(&fs_dir, "base");
+        fs::write(&rec.meta, "DISTRO=old\n").unwrap();
+        fs::write(&rec.env, "OLD=1\n").unwrap();
+
+        let msg = format!(
+            "{:#}",
+            ensure_no_interrupted_replacement(&fs_dir, "base").unwrap_err()
+        );
+        assert_inspection_only(&msg);
+        assert!(msg.contains(&format!("{:?}", rec.meta)), "got: {msg}");
+        assert!(
+            msg.contains(&format!("{:?}", fs_dir.join("base"))),
+            "got: {msg}"
+        );
+        assert!(!rec.tree.exists());
+        assert_eq!(fs::read(&rec.meta).unwrap(), b"DISTRO=old\n");
+        assert_eq!(fs::read(&rec.env).unwrap(), b"OLD=1\n");
+        assert_eq!(fs::read(fs_dir.join("base/marker")).unwrap(), b"new tree");
+        assert_eq!(
+            fs::read(fs_dir.join(".base.meta")).unwrap(),
+            b"DISTRO=new\n"
+        );
+        assert_eq!(fs::read(fs_dir.join(".base.env")).unwrap(), b"NEW=1\n");
     }
 
     #[test]

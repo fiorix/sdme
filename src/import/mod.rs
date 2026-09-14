@@ -1327,8 +1327,8 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<String> {
 
     let rootfs_dir = datadir.join("fs");
     // Refuse if an earlier replacement was interrupted mid-flight; the
-    // recovery backups are the only copy of one of the two states, and the
-    // error tells the operator exactly how to reconcile them.
+    // remaining artifacts may contain state needed for recovery, and the
+    // error requires inspection before any manual reconciliation.
     crate::rootfs::ensure_no_interrupted_replacement(&rootfs_dir, &name)?;
 
     let final_dir = rootfs_dir.join(&name);
@@ -1696,7 +1696,7 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<String> {
     // copy of the old state while the replacement is in flight. They are
     // only removed here, in-process, after a successful publication; a
     // crash leaves them behind and the next locked fs operation fails
-    // closed with exact recovery guidance (ensure_no_interrupted_replacement).
+    // closed pending inspection (ensure_no_interrupted_replacement).
     let rec = crate::rootfs::ReplaceRecover::new(&rootfs_dir, &name);
     if replacing {
         fs::rename(&final_dir, &rec.tree).with_context(|| {
@@ -1796,17 +1796,24 @@ pub fn run(datadir: &Path, opts: &ImportOptions) -> Result<String> {
     }
 
     if replacing {
-        // Publication succeeded; discard the recovery backups. A removal
-        // failure leaves backups that fail the next fs operation closed
-        // (with exact recovery guidance), so it is reported, not fatal.
+        // Publication succeeded. Cleanup can leave a partial old tree or only
+        // old sidecars; the next mutation preserves these for inspection.
         if let Err(e) = crate::copy::safe_remove_dir(&rec.tree) {
             eprintln!(
                 "warning: failed to remove replaced rootfs at {}: {e}",
                 rec.tree.display()
             );
         }
-        let _ = fs::remove_file(&rec.meta);
-        let _ = fs::remove_file(&rec.env);
+        for path in [&rec.meta, &rec.env] {
+            if let Err(e) = fs::remove_file(path) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    eprintln!(
+                        "warning: failed to remove replacement artifact {}: {e}",
+                        path.display()
+                    );
+                }
+            }
+        }
     }
 
     if verbose {
@@ -2403,8 +2410,7 @@ pub(crate) mod tests {
     fn test_force_import_fails_closed_after_interrupted_replacement() {
         // Simulate a crash between parking the old tree and committing the
         // new one: the next import must refuse (the backup is the only copy
-        // of the old tree), preserve everything, and emit exact recovery
-        // guidance. Following the guidance unblocks the import.
+        // of the old tree), preserve everything, and require inspection.
         let tmp = tmp();
         let src1 = TempSourceDir::new("crash-old");
         fs::write(src1.path().join("marker"), "v1").unwrap();
@@ -2449,8 +2455,8 @@ pub(crate) mod tests {
         );
         assert!(!tmp.path().join("fs/base").exists());
 
-        // The documented rollback procedure (move the backup back) works,
-        // and the retried replacement completes.
+        // This fixture establishes that the old tree is complete and nothing
+        // was published. Restoring it allows the retried import to complete.
         fs::rename(
             tmp.path().join("fs/.base.replace-recover"),
             tmp.path().join("fs/base"),
