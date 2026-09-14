@@ -27,9 +27,136 @@ thread_local! {
     static BEFORE_LEAF_METADATA: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
-/// Maps `(st_dev, st_ino)` to an open fd of the first destination copy, so a
-/// second name is linked from the pinned inode instead of resolving its path.
-type FdHardLinkMap = HashMap<(u64, u64), OwnedFd>;
+type InodeKey = (u64, u64);
+
+struct LinkTarget {
+    source: PathBuf,
+    destination: PathBuf,
+}
+
+/// Index selected aliases so each group can publish from one pinned inode and
+/// release it immediately. External-only aliases do not need retained state.
+/// Source paths are inventory, never handles for destination writes/metadata.
+struct HardLinkPlan {
+    pending: HashMap<InodeKey, Vec<LinkTarget>>,
+    completed: HashMap<PathBuf, InodeKey>,
+    anchor_display: PathBuf,
+}
+
+impl HardLinkPlan {
+    fn new(source: &Path, destination: &Path, anchor_display: &Path) -> Result<Self> {
+        let mut plan = Self {
+            pending: HashMap::new(),
+            completed: HashMap::new(),
+            anchor_display: anchor_display.to_path_buf(),
+        };
+        if destination.as_os_str().is_empty() {
+            plan.scan_children(source, destination)?;
+        } else {
+            plan.scan(source, destination)?;
+        }
+        plan.pending.retain(|_, aliases| aliases.len() > 1);
+        Ok(plan)
+    }
+
+    fn scan(&mut self, source: &Path, destination: &Path) -> Result<()> {
+        check_interrupted()?;
+        let stat = lstat_entry(source)?;
+        match stat.st_mode & libc::S_IFMT {
+            libc::S_IFDIR => self.scan_children(source, destination)?,
+            libc::S_IFREG if stat.st_nlink > 1 => {
+                self.pending
+                    .entry((stat.st_dev, stat.st_ino))
+                    .or_default()
+                    .push(LinkTarget {
+                        source: source.to_path_buf(),
+                        destination: destination.to_path_buf(),
+                    });
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn scan_children(&mut self, source: &Path, destination: &Path) -> Result<()> {
+        check_interrupted()?;
+        let entries = fs::read_dir(source).with_context(|| {
+            format!("failed to inventory source directory {}", source.display())
+        })?;
+        for entry in entries {
+            let entry =
+                entry.with_context(|| format!("failed to inventory {}", source.display()))?;
+            self.scan(&entry.path(), &destination.join(entry.file_name()))?;
+        }
+        Ok(())
+    }
+
+    fn is_completed(&self, source: &Path, stat: &libc::stat) -> Result<bool> {
+        let Some(key) = self.completed.get(source) else {
+            return Ok(false);
+        };
+        verify_source_inode(source, stat, *key)?;
+        Ok(true)
+    }
+
+    fn publish_aliases(
+        &mut self,
+        source: &Path,
+        stat: &libc::stat,
+        fd: RawFd,
+        anchor: &OwnedFd,
+    ) -> Result<()> {
+        let key = (stat.st_dev, stat.st_ino);
+        let Some(aliases) = self.pending.remove(&key) else {
+            return Ok(());
+        };
+        for alias in aliases {
+            check_interrupted()?;
+            if alias.source != source {
+                verify_source_inode(&alias.source, &lstat_entry(&alias.source)?, key)?;
+                let name = alias
+                    .destination
+                    .file_name()
+                    .context("invalid hardlink destination")?;
+                let mut parent = anchor
+                    .try_clone()
+                    .context("failed to pin hardlink destination anchor")?;
+                let mut display = self.anchor_display.clone();
+                if let Some(ancestors) = alias.destination.parent() {
+                    for component in ancestors.components() {
+                        let std::path::Component::Normal(component) = component else {
+                            bail!(
+                                "invalid hardlink destination {}",
+                                alias.destination.display()
+                            );
+                        };
+                        display.push(component);
+                        // These ancestors are source directories inside the selected
+                        // copy, so use the same merge/shadow policy as their visit.
+                        parent = open_leaf_dir_at(&parent, component, &display)?;
+                    }
+                }
+                display.push(name);
+                let name = cstring(name)?;
+                publish_at(&parent, &name, &display, false, || {
+                    link_fd_at(fd, &parent, &name)
+                })?;
+            }
+            self.completed.insert(alias.source, key);
+        }
+        Ok(())
+    }
+}
+
+fn verify_source_inode(source: &Path, stat: &libc::stat, expected: InodeKey) -> Result<()> {
+    if stat.st_mode & libc::S_IFMT != libc::S_IFREG || (stat.st_dev, stat.st_ino) != expected {
+        bail!(
+            "source hardlink {} changed during the copy",
+            source.display()
+        );
+    }
+    Ok(())
+}
 
 fn cstring(name: &std::ffi::OsStr) -> Result<CString> {
     CString::new(name.as_bytes()).with_context(|| "name contains null byte")
@@ -488,10 +615,14 @@ fn copy_entry_at(
     name: &std::ffi::OsStr,
     display: &Path,
     src: &Path,
-    links: &mut FdHardLinkMap,
+    links: &mut HardLinkPlan,
     root: &Path,
+    anchor: &OwnedFd,
 ) -> Result<()> {
     let stat = lstat_entry(src)?;
+    if links.is_completed(src, &stat)? {
+        return Ok(());
+    }
     let mode = stat.st_mode & libc::S_IFMT;
     let c_name = cstring(name)?;
 
@@ -506,17 +637,10 @@ fn copy_entry_at(
             });
             copy_metadata_to_fd(fd.as_raw_fd(), &stat, display)?;
             copy_xattrs_to_fd(src, fd.as_raw_fd(), display)?;
-            copy_children_at(&fd, display, src, links, root)?;
+            copy_children_at(&fd, display, src, links, root, anchor)?;
         }
         libc::S_IFREG => {
-            if stat.st_nlink > 1 {
-                if let Some(first) = links.get(&(stat.st_dev, stat.st_ino)) {
-                    return publish_at(parent, &c_name, display, false, || {
-                        link_fd_at(first.as_raw_fd(), parent, &c_name)
-                    });
-                }
-            }
-            let fd = create_file_at(parent, display)?;
+            let mut dst_file = fs::File::from(create_file_at(parent, display)?);
             #[cfg(test)]
             AFTER_FILE_CREATE.with(|hook| {
                 if let Some(hook) = hook.borrow_mut().take() {
@@ -525,21 +649,15 @@ fn copy_entry_at(
             });
             let mut src_file = fs::File::open(src)
                 .with_context(|| format!("failed to open source {}", src.display()))?;
-            let mut dst_file: fs::File = fd
-                .try_clone()
-                .map(fs::File::from)
-                .with_context(|| format!("failed to clone fd for {}", display.display()))?;
             std::io::copy(&mut src_file, &mut dst_file)
                 .with_context(|| format!("failed to write {}", display.display()))?;
-            drop(dst_file);
-            copy_metadata_to_fd(fd.as_raw_fd(), &stat, display)?;
-            copy_xattrs_to_fd(src, fd.as_raw_fd(), display)?;
+            drop(src_file);
+            copy_metadata_to_fd(dst_file.as_raw_fd(), &stat, display)?;
+            copy_xattrs_to_fd(src, dst_file.as_raw_fd(), display)?;
             publish_at(parent, &c_name, display, false, || {
-                link_fd_at(fd.as_raw_fd(), parent, &c_name)
+                link_fd_at(dst_file.as_raw_fd(), parent, &c_name)
             })?;
-            if stat.st_nlink > 1 {
-                links.insert((stat.st_dev, stat.st_ino), fd);
-            }
+            links.publish_aliases(src, &stat, dst_file.as_raw_fd(), anchor)?;
         }
         libc::S_IFLNK | libc::S_IFBLK | libc::S_IFCHR | libc::S_IFIFO | libc::S_IFSOCK => {
             let stage = Staging::new(root, parent).with_context(|| {
@@ -602,8 +720,9 @@ fn copy_children_at(
     dir_fd: &OwnedFd,
     dir_display: &Path,
     src_dir: &Path,
-    links: &mut FdHardLinkMap,
+    links: &mut HardLinkPlan,
     root: &Path,
+    anchor: &OwnedFd,
 ) -> Result<()> {
     let entries = fs::read_dir(src_dir)
         .with_context(|| format!("failed to read directory {}", src_dir.display()))?;
@@ -619,6 +738,7 @@ fn copy_children_at(
             &entry.path(),
             links,
             root,
+            anchor,
         )
         .with_context(|| format!("failed to copy {}", entry.path().display()))?;
     }
@@ -634,7 +754,9 @@ fn copy_children_at(
 /// nodes require protected staging outside `root` on the destination mount;
 /// unavailable staging is an explicit error. The anchor and its parent must be
 /// trusted host paths, outside the destination writer's control. Regular-file
-/// copying requires O_TMPFILE support. Source reads are not contained here.
+/// copying requires O_TMPFILE support. Selected source hardlinks are inventoried
+/// and published group by group, with descriptor use bounded by traversal depth
+/// rather than group count. Source reads are not contained or snapshotted here.
 pub(crate) fn copy_contained(root: &Path, rel: &Path, src: &Path) -> Result<()> {
     let mut parts = Vec::new();
     for comp in rel.components() {
@@ -645,7 +767,6 @@ pub(crate) fn copy_contained(root: &Path, rel: &Path, src: &Path) -> Result<()> 
         }
     }
     let root_fd = open_dest_root(root)?;
-    let mut links = FdHardLinkMap::new();
     let mut display = root.to_path_buf();
     if parts.is_empty() {
         // Copy the source directory's contents into the root itself.
@@ -656,7 +777,8 @@ pub(crate) fn copy_contained(root: &Path, rel: &Path, src: &Path) -> Result<()> 
                 root.display()
             );
         }
-        return copy_children_at(&root_fd, &display, src, &mut links, root);
+        let mut links = HardLinkPlan::new(src, Path::new(""), &display)?;
+        return copy_children_at(&root_fd, &display, src, &mut links, root, &root_fd);
     }
     let (leaf, ancestors) = parts.split_last().unwrap();
     let mut dir_fd = root_fd;
@@ -664,8 +786,9 @@ pub(crate) fn copy_contained(root: &Path, rel: &Path, src: &Path) -> Result<()> 
         display = display.join(anc);
         dir_fd = ensure_dir_at(&dir_fd, anc, &display)?;
     }
+    let mut links = HardLinkPlan::new(src, Path::new(leaf), &display)?;
     display = display.join(leaf);
-    copy_entry_at(&dir_fd, leaf, &display, src, &mut links, root)
+    copy_entry_at(&dir_fd, leaf, &display, src, &mut links, root, &dir_fd)
 }
 
 /// Like [`super::copy_tree`], but safe for writing into a tree that may hold
@@ -695,7 +818,8 @@ pub(crate) fn copy_tree_shadowed(src_dir: &Path, dst_dir: &Path, _verbose: bool)
         return Err(e).with_context(|| format!("failed to open directory {}", dst_dir.display()));
     }
     let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-    copy_children_at(&fd, dst_dir, src_dir, &mut FdHardLinkMap::new(), dst_dir)
+    let mut links = HardLinkPlan::new(src_dir, Path::new(""), dst_dir)?;
+    copy_children_at(&fd, dst_dir, src_dir, &mut links, dst_dir, &fd)
 }
 
 /// Contained variant of [`super::copy_entry`]; see [`copy_tree_shadowed`]. `dst` is
@@ -1118,44 +1242,42 @@ mod tests {
     }
 
     #[test]
-    fn test_hardlink_map_does_not_resolve_replaced_first_name() {
-        let tmp = crate::testutil::TempDataDir::new("copy-hardlink-map");
+    fn test_hardlink_group_does_not_resolve_replaced_first_name() {
+        let tmp = crate::testutil::TempDataDir::new("copy-hardlink-group");
         let root = tmp.path().join("root");
         fs::create_dir(&root).unwrap();
         let src = tmp.path().join("src");
-        fs::write(&src, b"payload").unwrap();
-        fs::hard_link(&src, tmp.path().join("source-link")).unwrap();
+        fs::create_dir(&src).unwrap();
+        fs::write(src.join("first"), b"payload").unwrap();
+        fs::hard_link(src.join("first"), src.join("second")).unwrap();
         let outside = tmp.path().join("outside");
         fs::write(&outside, b"sentinel").unwrap();
         set_times(&outside);
         let before = fs::metadata(&outside).unwrap();
-        let parent = open_dest_root(&root).unwrap();
-        let mut links = FdHardLinkMap::new();
-        copy_entry_at(
-            &parent,
-            std::ffi::OsStr::new("first"),
-            &root.join("first"),
-            &src,
-            &mut links,
-            &root,
-        )
-        .unwrap();
-        fs::rename(root.join("first"), root.join("saved")).unwrap();
-        fs::hard_link(&outside, root.join("first")).unwrap();
-        copy_entry_at(
-            &parent,
-            std::ffi::OsStr::new("second"),
-            &root.join("second"),
-            &src,
-            &mut links,
-            &root,
-        )
-        .unwrap();
+        let destination = root.join("destination");
+        let copied = destination.clone();
+        let sentinel = outside.clone();
+        let replaced = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let first_name = replaced.clone();
+        AFTER_PUBLICATION.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                let first = fs::read_dir(&copied).unwrap().next().unwrap().unwrap();
+                *first_name.borrow_mut() = Some(first.file_name());
+                fs::rename(first.path(), copied.join("saved")).unwrap();
+                fs::hard_link(&sentinel, first.path()).unwrap();
+            }))
+        });
+        copy_contained(&root, Path::new("destination"), &src).unwrap();
+        let other = if replaced.borrow().as_deref() == Some(std::ffi::OsStr::new("first")) {
+            "second"
+        } else {
+            "first"
+        };
         assert_metadata_eq(&before, &fs::metadata(&outside).unwrap());
-        assert_eq!(fs::read(root.join("second")).unwrap(), b"payload");
+        assert_eq!(fs::read(destination.join(other)).unwrap(), b"payload");
         assert_eq!(
-            fs::metadata(root.join("second")).unwrap().ino(),
-            fs::metadata(root.join("saved")).unwrap().ino()
+            fs::metadata(destination.join(other)).unwrap().ino(),
+            fs::metadata(destination.join("saved")).unwrap().ino()
         );
         assert_eq!(fs::read(&outside).unwrap(), b"sentinel");
     }
@@ -1221,5 +1343,239 @@ mod tests {
             read_xattrs(&root.join("saved")).unwrap()[0].1,
             b"source xattr"
         );
+    }
+    fn bounded_descriptor_copy(test_name: &str, in_tree_groups: bool) {
+        const CHILD_CASE: &str = "SDME_TEST_COPY_FD_CASE";
+        if std::env::var(CHILD_CASE).as_deref() != Ok(test_name) {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", test_name, "--nocapture", "--test-threads=1"])
+                .env(CHILD_CASE, test_name)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "bounded-descriptor child failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        // Limit only the fresh child process; parallel tests retain their limits.
+        let mut limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        assert_eq!(
+            unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) },
+            0
+        );
+        assert!(limit.rlim_cur >= 64);
+        limit.rlim_cur = 64;
+        assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
+
+        let tmp = crate::testutil::TempDataDir::new("copy-fd-budget");
+        let root = tmp.path().join("root");
+        let src = tmp.path().join("source");
+        let outside = tmp.path().join("source-links-outside");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&src).unwrap();
+        fs::create_dir(&outside).unwrap();
+        let prefixes: &[&str] = if in_tree_groups {
+            &["first", "second", "third/nested"]
+        } else {
+            &[""]
+        };
+        for prefix in prefixes {
+            fs::create_dir_all(src.join(prefix)).unwrap();
+        }
+        let mut expected = Vec::new();
+        for i in 0..192 {
+            let name = format!("file-{i:04}");
+            let first = src.join(prefixes[0]).join(&name);
+            fs::write(&first, b"payload").unwrap();
+            fs::set_permissions(&first, fs::Permissions::from_mode(0o640)).unwrap();
+            set_times(&first);
+            set_xattr(&first, b"required xattr");
+            fs::hard_link(&first, outside.join(&name)).unwrap();
+            for prefix in &prefixes[1..] {
+                fs::hard_link(&first, src.join(prefix).join(&name)).unwrap();
+            }
+            expected.push(fs::metadata(&first).unwrap());
+        }
+        // A procfd root preserves the live regular-copy contract without
+        // introducing any requirement for protected special-node staging.
+        let root_fd = open_dest_root(&root).unwrap();
+        let alias = PathBuf::from(format!("/proc/self/fd/{}", root_fd.as_raw_fd()));
+        let peak = std::rc::Rc::new(std::cell::Cell::new(0));
+        let observed = peak.clone();
+        BEFORE_PUBLICATION.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                let count = fs::read_dir("/proc/self/fd").unwrap().count();
+                observed.set(observed.get().max(count));
+            }))
+        });
+        let result = copy_contained(&alias, Path::new("destination"), &src);
+        BEFORE_PUBLICATION.with(|hook| hook.borrow_mut().take());
+        assert!(
+            result.is_ok(),
+            "all selected files must copy with 64 descriptors: {result:#?}"
+        );
+        assert!(
+            peak.get() < 32,
+            "unexpected descriptor growth: peak {}",
+            peak.get()
+        );
+        for (i, before) in expected.iter().enumerate() {
+            let name = format!("file-{i:04}");
+            let first = root.join("destination").join(prefixes[0]).join(&name);
+            let first_meta = fs::metadata(&first).unwrap();
+            assert_ne!(
+                (first_meta.dev(), first_meta.ino()),
+                (before.dev(), before.ino())
+            );
+            for prefix in prefixes {
+                let destination = root.join("destination").join(prefix).join(&name);
+                let copied = fs::metadata(&destination).unwrap();
+                assert_metadata_eq(before, &copied);
+                assert_eq!(copied.ino(), first_meta.ino(), "hardlink group {i}");
+                assert_eq!(copied.nlink(), prefixes.len() as u64);
+                assert_eq!(read_xattrs(&destination).unwrap()[0].1, b"required xattr");
+            }
+            // Read only after checking all aliases' atimes.
+            assert_eq!(fs::read(&first).unwrap(), b"payload");
+            assert_eq!(fs::read(outside.join(&name)).unwrap(), b"payload");
+        }
+        println!(
+            "192 groups, {} selected names, peak {} descriptors with RLIMIT_NOFILE=64",
+            192 * prefixes.len(),
+            peak.get()
+        );
+    }
+
+    #[test]
+    fn test_bounded_descriptors_external_only_links() {
+        bounded_descriptor_copy(
+            "copy::contained::tests::test_bounded_descriptors_external_only_links",
+            false,
+        );
+    }
+
+    #[test]
+    fn test_bounded_descriptors_many_in_tree_groups() {
+        bounded_descriptor_copy(
+            "copy::contained::tests::test_bounded_descriptors_many_in_tree_groups",
+            true,
+        );
+    }
+    #[test]
+    fn test_grouped_alias_parent_swap_preserves_outside() {
+        let tmp = crate::testutil::TempDataDir::new("copy-alias-parent");
+        let root = tmp.path().join("root");
+        let src = tmp.path().join("source");
+        let outside = tmp.path().join("outside");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir_all(src.join("left")).unwrap();
+        fs::create_dir(src.join("right")).unwrap();
+        fs::write(src.join("left/file"), b"payload").unwrap();
+        fs::hard_link(src.join("left/file"), src.join("right/file")).unwrap();
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("file"), b"sentinel").unwrap();
+        set_times(&outside);
+        set_xattr(&outside, b"outside directory");
+        let before = fs::metadata(&outside).unwrap();
+        let before_file = fs::metadata(outside.join("file")).unwrap();
+        let destination = root.join("destination");
+        let copied = destination.clone();
+        let sentinel = outside.clone();
+        AFTER_PUBLICATION.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                let other = if copied.join("left/file").exists() {
+                    "right"
+                } else {
+                    "left"
+                };
+                std::os::unix::fs::symlink(&sentinel, copied.join(other)).unwrap();
+            }))
+        });
+        copy_contained(&root, Path::new("destination"), &src).unwrap();
+        assert_metadata_eq(&before, &fs::metadata(&outside).unwrap());
+        assert_metadata_eq(&before_file, &fs::metadata(outside.join("file")).unwrap());
+        assert_eq!(read_xattrs(&outside).unwrap()[0].1, b"outside directory");
+        assert_eq!(fs::read(outside.join("file")).unwrap(), b"sentinel");
+        assert_eq!(fs::read(destination.join("left/file")).unwrap(), b"payload");
+        assert_eq!(
+            fs::metadata(destination.join("left/file")).unwrap().ino(),
+            fs::metadata(destination.join("right/file")).unwrap().ino()
+        );
+    }
+
+    #[test]
+    fn test_grouped_alias_source_change_is_reported_before_publication() {
+        let tmp = crate::testutil::TempDataDir::new("copy-alias-source-change");
+        let root = tmp.path().join("root");
+        let src = tmp.path().join("source");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&src).unwrap();
+        fs::write(src.join("first"), b"payload").unwrap();
+        fs::hard_link(src.join("first"), src.join("second")).unwrap();
+        let outside = tmp.path().join("outside");
+        fs::write(&outside, b"sentinel").unwrap();
+        set_times(&outside);
+        set_xattr(&outside, b"outside xattr");
+        let before = fs::metadata(&outside).unwrap();
+        let destination = root.join("destination");
+        let changing = src.clone();
+        let sentinel = outside.clone();
+        AFTER_PUBLICATION.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                let first = fs::read_dir(&destination).unwrap().next().unwrap().unwrap();
+                let other = if first.file_name() == "first" {
+                    "second"
+                } else {
+                    "first"
+                };
+                fs::remove_file(changing.join(other)).unwrap();
+                fs::write(changing.join(other), b"changed source").unwrap();
+                fs::hard_link(&sentinel, destination.join(other)).unwrap();
+            }))
+        });
+        let err = copy_contained(&root, Path::new("destination"), &src).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("changed during the copy"),
+            "{err:#}"
+        );
+        assert_metadata_eq(&before, &fs::metadata(&outside).unwrap());
+        assert_eq!(read_xattrs(&outside).unwrap()[0].1, b"outside xattr");
+        assert_eq!(fs::read(&outside).unwrap(), b"sentinel");
+    }
+
+    #[test]
+    fn test_hardlink_inventory_for_directory_contents_controls() {
+        let tmp = crate::testutil::TempDataDir::new("copy-group-contents");
+        let src = tmp.path().join("source");
+        fs::create_dir(&src).unwrap();
+        fs::write(src.join("a"), b"payload").unwrap();
+        fs::create_dir(src.join("nested")).unwrap();
+        fs::hard_link(src.join("a"), src.join("nested/b")).unwrap();
+        let source_alias = tmp.path().join("source-alias");
+        std::os::unix::fs::symlink(&src, &source_alias).unwrap();
+        for (i, source) in [&src, &source_alias].iter().enumerate() {
+            let root = tmp.path().join(format!("root-{i}"));
+            fs::create_dir(&root).unwrap();
+            copy_contained(&root, Path::new(""), source).unwrap();
+            assert_eq!(fs::read(root.join("nested/b")).unwrap(), b"payload");
+            assert_eq!(
+                fs::metadata(root.join("a")).unwrap().ino(),
+                fs::metadata(root.join("nested/b")).unwrap().ino()
+            );
+            let shadowed = tmp.path().join(format!("shadowed-{i}"));
+            fs::create_dir(&shadowed).unwrap();
+            copy_tree_shadowed(source, &shadowed, false).unwrap();
+            assert_eq!(
+                fs::metadata(shadowed.join("a")).unwrap().ino(),
+                fs::metadata(shadowed.join("nested/b")).unwrap().ino()
+            );
+        }
     }
 }
