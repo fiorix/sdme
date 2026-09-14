@@ -19,7 +19,7 @@ mod tests;
 pub use create::{create, validate_opaque_dirs, CreateOptions};
 pub use exec::{exec, exec_oci, join, ShellOptions};
 pub use list::{list, ContainerInfo, KubeInfo};
-pub use manage::{remove, set_limits, stop, StopMode};
+pub use manage::{reclaim_nspawn_runtime, remove, set_limits, stop, StopMode};
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;

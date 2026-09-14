@@ -11,7 +11,7 @@
 %global crate sdme
 
 Name:           sdme
-Version:        0.18.0
+Version:        0.19.0
 Release:        1%{?dist}
 Summary:        The systemd machine editor
 
@@ -103,6 +103,31 @@ export SDME_SKIP_PROBE=1
 %{_datadir}/fish/vendor_completions.d/%{crate}.fish
 
 %changelog
+* Mon Sep 14 2026 Alexandre Fiori <fiorix@gmail.com> - 0.19.0-1
+- Route sdme cp and fs build COPY through a descriptor-relative copy engine
+  that pins the write root and every destination directory, rejects ancestor
+  symlinks, and publishes only completed inodes. Symlinks and other special
+  nodes now publish on live container roots as well, so build COPY can copy
+  /etc/os-release and directories containing symlinks.
+- Reclaim leftover systemd-nspawn runtime state at /run/systemd/nspawn/<name>
+  on container start and removal, after confirming through both systemd and
+  machined that nothing of that name is running. A container killed rather
+  than stopped cleanly previously blocked the next start of the same name.
+- Default Kubernetes terminationGracePeriodSeconds to 30 seconds as the spec
+  requires. Pods that omitted the field previously inherited systemd's 90
+  second stop timeout.
+- Make forced rootfs replacement atomic and crash-recoverable, refuse
+  replacing a rootfs referenced by any container, and require inspection of
+  partial replacement artifacts before a later import or removal proceeds.
+- Refuse container removal when D-Bus cannot confirm unit state, so a
+  connection, permission, or decoding error no longer permits teardown.
+- Validate OCI digests before deriving cache paths, keep layer download
+  scratch outside the extracted tree, confine OCI app setup writes to the
+  staging tree, and validate app ancestry before moving image entries.
+- Refresh dependencies and replace serde_yml.
+- Move reference documentation and tutorials to docs/ as plain Markdown
+  shared by GitHub and the website.
+
 * Tue Jul 21 2026 Alexandre Fiori <fiorix@gmail.com> - 0.18.0-1
 - Make rootfs imports source-first and infer names from OCI repositories,
   paths, and URLs; add --name for explicit aliases and actionable collision

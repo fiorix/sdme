@@ -481,18 +481,25 @@ struct Staging {
 }
 
 impl Staging {
-    fn new(root: &Path, destination: &OwnedFd) -> Result<Self> {
-        let parent = root
-            .parent()
-            .context("destination root has no trusted staging parent")?;
+    /// `Ok(None)` reports that no protected staging exists on the destination
+    /// mount. A live root (a running container's merged mount, or
+    /// `/proc/<pid>/root`) is the entire mount the container sees, so no
+    /// directory is both on that mount and outside the container. Callers fall
+    /// back to descriptor-pinned publication rather than failing the copy.
+    fn try_new(root: &Path, destination: &OwnedFd) -> Result<Option<Self>> {
+        let Some(parent) = root.parent() else {
+            return Ok(None);
+        };
         let parent = if parent.as_os_str().is_empty() {
             Path::new(".")
         } else {
             parent
         };
-        let parent_fd = open_dest_root(parent)?;
+        let Ok(parent_fd) = open_dest_root(parent) else {
+            return Ok(None);
+        };
         if mount_identity(&parent_fd)? != mount_identity(destination)? {
-            bail!("special-node copy requires protected staging on the destination mount; no such staging is available outside {}", root.display());
+            return Ok(None);
         }
         let mut template =
             path_to_cstring(&parent.join(".sdme-copy-XXXXXX"))?.into_bytes_with_nul();
@@ -509,7 +516,7 @@ impl Staging {
                 return Err(e);
             }
         };
-        Ok(Self { path, fd })
+        Ok(Some(Self { path, fd }))
     }
 
     fn node_path(&self) -> PathBuf {
@@ -612,20 +619,23 @@ fn copy_xattrs_to_fd(src: &Path, fd: RawFd, display: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Finish an inode while its only name is in protected staging. Path-based
-/// metadata calls are safe here because neither parent nor leaf is mutable by
-/// the destination writer. lsetxattr supports special nodes without opening
-/// devices or relying on fsetxattr accepting O_PATH descriptors.
-fn finish_staged_leaf(stage: &Staging, src: &Path, stat: &libc::stat) -> Result<()> {
+/// Finish a special inode whose only name is reachable through a pinned
+/// directory descriptor. lsetxattr supports special nodes without opening
+/// devices or relying on fsetxattr, which returns EBADF for O_PATH descriptors.
+///
+/// In protected staging neither parent nor leaf is mutable by the destination
+/// writer. On a live root the pinned parent cannot be redirected outside the
+/// write root, and publication resolves the pinned inode rather than this name,
+/// so a substituted name cannot redirect what gets published.
+fn finish_leaf_at(path: &Path, src: &Path, stat: &libc::stat) -> Result<()> {
     #[cfg(test)]
     BEFORE_LEAF_METADATA.with(|hook| {
         if let Some(hook) = hook.borrow_mut().take() {
             hook();
         }
     });
-    let path = stage.node_path();
-    super::copy_metadata_from_stat(&path, stat)?;
-    let c_path = path_to_cstring(&path)?;
+    super::copy_metadata_from_stat(path, stat)?;
+    let c_path = path_to_cstring(path)?;
     for (name, value) in read_xattrs(src)? {
         let ret = unsafe {
             libc::lsetxattr(
@@ -646,6 +656,208 @@ fn finish_staged_leaf(stage: &Staging, src: &Path, stat: &libc::stat) -> Result<
         }
     }
     Ok(())
+}
+
+/// Stat the inode a descriptor pins, without resolving any name.
+fn fstat_empty_path(fd: &OwnedFd) -> std::io::Result<libc::stat> {
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    let ret = unsafe {
+        libc::fstatat(
+            fd.as_raw_fd(),
+            c"".as_ptr(),
+            &mut st,
+            libc::AT_EMPTY_PATH | libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if ret != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(st)
+}
+
+/// A destination name that must not survive a failed copy attempt.
+struct TempName<'a> {
+    parent: &'a OwnedFd,
+    name: CString,
+}
+
+impl Drop for TempName<'_> {
+    fn drop(&mut self) {
+        unsafe { libc::unlinkat(self.parent.as_raw_fd(), self.name.as_ptr(), 0) };
+    }
+}
+
+/// Build the special node inside protected staging and publish it by hard link.
+fn publish_special_staged(
+    stage: &Staging,
+    parent: &OwnedFd,
+    c_name: &CString,
+    display: &Path,
+    src: &Path,
+    stat: &libc::stat,
+    mode: u32,
+) -> Result<()> {
+    let ret = if mode == libc::S_IFLNK {
+        let target = fs::read_link(src)
+            .with_context(|| format!("failed to read symlink {}", src.display()))?;
+        let target = path_to_cstring(&target)?;
+        unsafe { libc::symlinkat(target.as_ptr(), stage.fd.as_raw_fd(), c"node".as_ptr()) }
+    } else {
+        unsafe {
+            libc::mknodat(
+                stage.fd.as_raw_fd(),
+                c"node".as_ptr(),
+                stat.st_mode,
+                stat.st_rdev,
+            )
+        }
+    };
+    if ret != 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("failed to stage {}", src.display()));
+    }
+    finish_leaf_at(&stage.node_path(), src, stat)?;
+    publish_at(parent, c_name, display, true, || {
+        let ret = unsafe {
+            libc::linkat(
+                stage.fd.as_raw_fd(),
+                c"node".as_ptr(),
+                parent.as_raw_fd(),
+                c_name.as_ptr(),
+                0,
+            )
+        };
+        if ret != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    })
+}
+
+/// Publish a special node when the destination mount offers no protected
+/// staging. The node is created under a temporary name in the destination
+/// directory, pinned by descriptor, completed, and then published with `linkat`
+/// AT_EMPTY_PATH, which resolves the pinned inode. Renaming or replacing the
+/// temporary name cannot redirect publication onto another inode.
+///
+/// The temporary name is briefly visible to a writer inside the destination.
+/// That writer already controls its own tree and the pinned parent keeps every
+/// operation inside the write root, so the exposure does not widen containment.
+/// Metadata is applied through the pinned parent, then the name is re-checked
+/// against the pinned inode so a substitution fails the copy instead of
+/// publishing an inode that never received its metadata.
+fn publish_special_in_place(
+    parent: &OwnedFd,
+    c_name: &CString,
+    display: &Path,
+    src: &Path,
+    stat: &libc::stat,
+    mode: u32,
+) -> Result<()> {
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = CString::new(format!(".sdme-copy-{}-{sequence}", std::process::id()))
+        .expect("temporary name has no interior nul");
+
+    // A name left behind by an interrupted attempt must not block creation.
+    unsafe { libc::unlinkat(parent.as_raw_fd(), tmp.as_ptr(), 0) };
+
+    let ret = if mode == libc::S_IFLNK {
+        let target = fs::read_link(src)
+            .with_context(|| format!("failed to read symlink {}", src.display()))?;
+        let target = path_to_cstring(&target)?;
+        unsafe { libc::symlinkat(target.as_ptr(), parent.as_raw_fd(), tmp.as_ptr()) }
+    } else {
+        unsafe { libc::mknodat(parent.as_raw_fd(), tmp.as_ptr(), stat.st_mode, stat.st_rdev) }
+    };
+    if ret != 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("failed to stage {}", src.display()));
+    }
+    let staged = TempName {
+        parent,
+        name: tmp.clone(),
+    };
+
+    let raw = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            tmp.as_ptr(),
+            libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if raw < 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("failed to pin staged {}", display.display()));
+    }
+    let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+
+    let pinned = fstat_empty_path(&fd)
+        .with_context(|| format!("failed to stat staged {}", display.display()))?;
+    if pinned.st_mode & libc::S_IFMT != mode {
+        bail!(
+            "staged {} changed type before publication",
+            display.display()
+        );
+    }
+
+    let node = PathBuf::from(format!(
+        "/proc/self/fd/{}/{}",
+        parent.as_raw_fd(),
+        Path::new(std::ffi::OsStr::from_bytes(tmp.as_bytes())).display()
+    ));
+    finish_leaf_at(&node, src, stat)?;
+
+    let after = fstatat_nofollow(parent, &tmp)
+        .with_context(|| format!("failed to re-check staged {}", display.display()))?;
+    if (after.st_ino, after.st_dev) != (pinned.st_ino, pinned.st_dev) {
+        bail!(
+            "staged {} was replaced before publication",
+            display.display()
+        );
+    }
+
+    publish_at(parent, c_name, display, true, || {
+        let ret = unsafe {
+            libc::linkat(
+                fd.as_raw_fd(),
+                c"".as_ptr(),
+                parent.as_raw_fd(),
+                c_name.as_ptr(),
+                libc::AT_EMPTY_PATH,
+            )
+        };
+        if ret != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    })?;
+    drop(staged);
+    Ok(())
+}
+
+/// Copy a symlink, device node, FIFO, or socket into the destination, using
+/// protected staging where the destination mount provides it.
+fn copy_special_at(
+    parent: &OwnedFd,
+    c_name: &CString,
+    display: &Path,
+    src: &Path,
+    stat: &libc::stat,
+    mode: u32,
+    root: &Path,
+) -> Result<()> {
+    let staging = Staging::try_new(root, parent).with_context(|| {
+        format!(
+            "cannot safely copy special node {} to {}",
+            src.display(),
+            display.display()
+        )
+    })?;
+    match staging {
+        Some(stage) => publish_special_staged(&stage, parent, c_name, display, src, stat, mode),
+        None => publish_special_in_place(parent, c_name, display, src, stat, mode),
+    }
 }
 
 /// Copy one source entry to leaf `name` beneath `parent`, contained.
@@ -699,48 +911,7 @@ fn copy_entry_at(
             links.publish_aliases(src, &stat, dst_file.as_raw_fd(), anchor)?;
         }
         libc::S_IFLNK | libc::S_IFBLK | libc::S_IFCHR | libc::S_IFIFO | libc::S_IFSOCK => {
-            let stage = Staging::new(root, parent).with_context(|| {
-                format!(
-                    "cannot safely copy special node {} to {}",
-                    src.display(),
-                    display.display()
-                )
-            })?;
-            let ret = if mode == libc::S_IFLNK {
-                let target = fs::read_link(src)
-                    .with_context(|| format!("failed to read symlink {}", src.display()))?;
-                let target = path_to_cstring(&target)?;
-                unsafe { libc::symlinkat(target.as_ptr(), stage.fd.as_raw_fd(), c"node".as_ptr()) }
-            } else {
-                unsafe {
-                    libc::mknodat(
-                        stage.fd.as_raw_fd(),
-                        c"node".as_ptr(),
-                        stat.st_mode,
-                        stat.st_rdev,
-                    )
-                }
-            };
-            if ret != 0 {
-                return Err(std::io::Error::last_os_error())
-                    .with_context(|| format!("failed to stage {}", src.display()));
-            }
-            finish_staged_leaf(&stage, src, &stat)?;
-            publish_at(parent, &c_name, display, true, || {
-                let ret = unsafe {
-                    libc::linkat(
-                        stage.fd.as_raw_fd(),
-                        c"node".as_ptr(),
-                        parent.as_raw_fd(),
-                        c_name.as_ptr(),
-                        0,
-                    )
-                };
-                if ret != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            })?;
+            copy_special_at(parent, &c_name, display, src, &stat, mode, root)?;
         }
         _ => {
             eprintln!(
@@ -1121,9 +1292,9 @@ mod tests {
         fs::write(&src, b"data").unwrap();
         set_xattr(&src, b"required value");
         let parent = open_dest_root(&root).unwrap();
-        let stage = Staging::new(&root, &parent).unwrap();
+        let stage = Staging::try_new(&root, &parent).unwrap().unwrap();
         fs::write(stage.node_path(), b"").unwrap();
-        finish_staged_leaf(&stage, &src, &lstat_entry(&src).unwrap()).unwrap();
+        finish_leaf_at(&stage.node_path(), &src, &lstat_entry(&src).unwrap()).unwrap();
         assert_eq!(
             read_xattrs(&stage.node_path()).unwrap(),
             read_xattrs(&src).unwrap()
@@ -1132,8 +1303,12 @@ mod tests {
         make_fifo(&stage.node_path(), 0o600);
         // Linux rejects user.* xattrs on FIFOs. Required xattrs must not vanish
         // behind a successful copy result when the destination rejects them.
-        let err = finish_staged_leaf(&stage, &src, &lstat_entry(&stage.node_path()).unwrap())
-            .unwrap_err();
+        let err = finish_leaf_at(
+            &stage.node_path(),
+            &src,
+            &lstat_entry(&stage.node_path()).unwrap(),
+        )
+        .unwrap_err();
         assert!(format!("{err:#}").contains("preserve xattr"));
     }
 
@@ -1173,19 +1348,24 @@ mod tests {
     }
 
     #[test]
-    fn test_live_root_alias_keeps_regular_copies_and_refuses_unavailable_staging() {
+    fn test_live_root_alias_publishes_special_nodes_without_protected_staging() {
         let tmp = crate::testutil::TempDataDir::new("copy-live-root-alias");
         let root = tmp.path().join("root");
         fs::create_dir(&root).unwrap();
         let root_fd = open_dest_root(&root).unwrap();
         // A procfs root anchor has no writable same-mount host parent, as with
-        // /proc/pid/root. This exercises refusal without a privileged mount.
+        // /proc/pid/root and a running container's merged mount. Special nodes
+        // must still publish there; a build COPY has no other destination.
         let alias = PathBuf::from(format!("/proc/self/fd/{}", root_fd.as_raw_fd()));
         let src = tmp.path().join("src");
         fs::write(&src, b"live payload").unwrap();
         copy_contained(&alias, Path::new("target"), &src).unwrap();
         assert_eq!(fs::read(root.join("target")).unwrap(), b"live payload");
-        for kind in [libc::S_IFIFO, libc::S_IFSOCK, libc::S_IFLNK] {
+        for (kind, leaf) in [
+            (libc::S_IFIFO, "node-fifo"),
+            (libc::S_IFSOCK, "node-sock"),
+            (libc::S_IFLNK, "node-link"),
+        ] {
             fs::remove_file(&src).unwrap();
             if kind == libc::S_IFLNK {
                 std::os::unix::fs::symlink("missing", &src).unwrap();
@@ -1193,10 +1373,25 @@ mod tests {
                 let path = path_to_cstring(&src).unwrap();
                 assert_eq!(unsafe { libc::mknod(path.as_ptr(), kind | 0o600, 0) }, 0);
             }
-            let err = copy_contained(&alias, Path::new("target"), &src).unwrap_err();
-            assert!(format!("{err:#}").contains("protected staging"), "{err:#}");
-            assert_eq!(fs::read(root.join("target")).unwrap(), b"live payload");
+            copy_contained(&alias, Path::new(leaf), &src).unwrap();
+            let published = lstat_entry(&root.join(leaf)).unwrap();
+            assert_eq!(published.st_mode & libc::S_IFMT, kind);
+            if kind == libc::S_IFLNK {
+                assert_eq!(
+                    fs::read_link(root.join(leaf)).unwrap(),
+                    Path::new("missing")
+                );
+            }
+            // No temporary name may outlive the copy.
+            let leftover: Vec<_> = fs::read_dir(&root)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_name().to_string_lossy().starts_with(".sdme-copy-"))
+                .collect();
+            assert!(leftover.is_empty(), "staging name leaked into destination");
         }
+        // The earlier regular copy is untouched by special-node publication.
+        assert_eq!(fs::read(root.join("target")).unwrap(), b"live payload");
     }
     #[test]
     fn test_publication_substitution_never_receives_metadata() {

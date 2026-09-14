@@ -310,6 +310,70 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Test 13: symlink copies into both destination kinds
+#
+# Special nodes publish differently from regular files. A stopped container is
+# written through upper/, whose parent provides protected staging; a running
+# container is written through its live root, which is the whole mount the
+# container sees and so offers no staging outside itself. Both must publish the
+# symlink with its target intact. fs build COPY only ever has the live form.
+# ---------------------------------------------------------------------------
+echo "=== Test 13: symlink copies ==="
+
+sym_src="$TMPDIR/sym-src"
+mkdir -p "$sym_src"
+echo "symlink-data" > "$sym_src/target.txt"
+ln -s target.txt "$sym_src/link.txt"
+
+if $SDME cp "$sym_src/link.txt" "$CTR_STOPPED:/var/lib/sym-link" $VFLAG 2>/dev/null; then
+    upper="${DATADIR:-/var/lib/sdme}/containers/$CTR_STOPPED/upper/var/lib/sym-link"
+    if [[ -L "$upper" && "$(readlink "$upper")" == "target.txt" ]]; then
+        ok "symlink into stopped container"
+    else
+        fail "symlink into stopped container: not a symlink, or wrong target"
+    fi
+else
+    fail "symlink into stopped container: sdme cp failed"
+fi
+
+$SDME start "$CTR_RUNNING" --timeout "$BOOT_TIMEOUT" $VFLAG
+
+if $SDME cp "$sym_src/link.txt" "$CTR_RUNNING:/var/lib/sym-link" $VFLAG 2>/dev/null; then
+    actual=$($SDME exec "$CTR_RUNNING" -- /usr/bin/readlink /var/lib/sym-link 2>/dev/null) || true
+    if [[ "$actual" == "target.txt" ]]; then
+        ok "symlink into running container"
+    else
+        fail "symlink into running container: target '$actual', expected 'target.txt'"
+    fi
+else
+    fail "symlink into running container: sdme cp failed"
+fi
+
+if $SDME cp "$sym_src" "$CTR_RUNNING:/var/lib/sym-dir" $VFLAG 2>/dev/null; then
+    linked=$($SDME exec "$CTR_RUNNING" -- /usr/bin/readlink /var/lib/sym-dir/link.txt 2>/dev/null) || true
+    content=$($SDME exec "$CTR_RUNNING" -- /usr/bin/cat /var/lib/sym-dir/target.txt 2>/dev/null) || true
+    if [[ "$linked" == "target.txt" && "$content" == "symlink-data" ]]; then
+        ok "directory holding a symlink into running container"
+    else
+        fail "directory holding a symlink: link '$linked', content '$content'"
+    fi
+else
+    fail "directory holding a symlink into running container: sdme cp failed"
+fi
+
+# Publication must not leave its temporary name behind in the destination.
+leftover=$($SDME exec "$CTR_RUNNING" -- /bin/sh -c \
+    'ls -a /var/lib 2>/dev/null | grep -c "^\.sdme-copy-"' 2>/dev/null) || true
+leftover=$(echo "$leftover" | tr -dc '0-9')
+if [[ "${leftover:-0}" == "0" ]]; then
+    ok "symlink copy leaves no staging name behind"
+else
+    fail "symlink copy left $leftover staging name(s) under /var/lib"
+fi
+
+stop_container "$CTR_RUNNING"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 print_summary

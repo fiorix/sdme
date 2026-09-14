@@ -703,7 +703,13 @@ pub(crate) fn validate_and_plan(
         ports,
         host_network: spec.host_network,
         host_binds,
-        termination_grace_period: spec.termination_grace_period_seconds,
+        // Kubernetes defaults terminationGracePeriodSeconds to 30. Leaving it
+        // unset would fall through to systemd's 90s TimeoutStopSec, so an app
+        // that does not act on SIGTERM stalls shutdown three times as long as
+        // the spec allows. sdme-isolate ignores SIGTERM by design and the
+        // workload runs as PID 1 of a new PID namespace, where the kernel drops
+        // handler-less signals, so this timeout is what actually bounds stop.
+        termination_grace_period: Some(spec.termination_grace_period_seconds.unwrap_or(30)),
         run_as_user,
         run_as_group,
         seccomp_profile_type: pod_seccomp_type,

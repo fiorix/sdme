@@ -120,6 +120,18 @@ NixOS activation replaces /etc/systemd/system with an immutable symlink to the N
 
 Redis 8+ treats locale config failure as fatal. Set `LANG=C.UTF-8` via `--oci-env` or kube YAML `env`. The test suite applies this automatically via `fix_redis_oci()` in lib.sh.
 
+### OCI app shutdown relies on the stop timeout
+
+`sdme-isolate` sets SIGTERM, SIGINT, SIGHUP, and SIGQUIT to `SIG_IGN` so that it
+can wait for its child, and the workload runs as PID 1 of a new PID namespace,
+where the kernel discards signals that have no installed handler. A workload
+that installs a SIGTERM handler stops on the signal; one that does not, such as
+`sleep infinity`, is killed when `TimeoutStopSec` expires. Container units
+therefore end in failed state with `Result=timeout` after such a shutdown, and
+`systemctl --failed` lists them until `systemctl reset-failed` runs. This is
+cosmetic: leaked nspawn runtime state is now reclaimed on the next start, so a
+hard kill no longer blocks a later container of the same name.
+
 ### Docker-in-container needs working veth DHCP
 
 The docker/registry tutorial test needs outbound internet inside a `--network-veth` container, which depends on the host's nspawn DHCP/NAT (systemd-networkd's `80-container-ve.network`). Hosts where the container never gets a lease (no default route on `host0`) skip the network-dependent steps (`docker/install` onward) instead of failing.
@@ -134,62 +146,123 @@ The docker/registry tutorial test needs outbound internet inside a `--network-ve
 
 ## Results
 
-Last verified: 2026-07-21
+Last verified: 2026-09-14
 
-System: Linux 7.0.0-28-generic (x86_64), systemd 259.5, sdme 0.18.0
-release binary. Eight parallel jobs, timeout scale 1, wall clock 38m01s.
-This is the exact release-candidate run; failures are retained as failures
-rather than relabeled after triage.
+System: Linux 7.1.8-1-cachyos (x86_64), systemd 261, sdme 0.19.0 built from
+the working tree. Eight parallel jobs, timeout scale 1, wall clock 17m02s.
+The exact aggregate is `test-reports/summary-20260914-143109.md`, which
+records the binary as 0.18.0: the suite ran against this code before the
+version bump, and no code changed between that run and the bump.
 
 ```
-Test Suite                 Pass  Fail  Skip  Status
--------------------------  ----  ----  ----  ------
-verify-build                 11     0     0  PASS
-verify-cp                    17     0     0  PASS
-verify-diff                   9     0     0  PASS
-verify-distro-boot           63     0     0  PASS
-verify-distro-oci           175     0     0  PASS
-verify-export                22     0     1  PASS
-verify-kube-L1-basic         14     0     0  PASS
-verify-kube-L2-probes        41     0     0  PASS
-verify-kube-L2-security      16     0     1  PASS
-verify-kube-L2-spec          12     0     0  PASS
-verify-kube-L3-secrets       16     0     0  PASS
-verify-kube-L3-volumes       39     0     0  PASS
-verify-kube-L4-networking     6     0     0  PASS
-verify-kube-L5-redis-stack    6     0     0  PASS
-verify-kube-L6-gitea-stack    8     1     6  FAIL
-verify-nested                 4     1     0  FAIL
-verify-nested-userns          7     0     0  PASS
-verify-network                7     2     0  FAIL
-verify-nixos                 26     0     0  PASS
-verify-oci                   18     0     0  PASS
-verify-pods                   9     0     0  PASS
-verify-security              41     0     0  PASS
-verify-storage               11     0     0  PASS
-verify-tutorial              83     1     7  FAIL
--------------------------  ----  ----  ----  ------
-Totals                      661     5    15  24 suites
+Test Suite                  Pass  Fail  Skip  Status
+--------------------------  ----  ----  ----  ------
+verify-build                  11     0     0  PASS
+verify-cp                     21     0     0  PASS
+verify-diff                    9     0     0  PASS
+verify-distro-boot            63     0     0  PASS
+verify-distro-oci            175     0     0  PASS
+verify-export                 23     0     0  PASS
+verify-kube-L1-basic          14     0     0  PASS
+verify-kube-L2-probes         41     0     0  PASS
+verify-kube-L2-security       17     0     0  PASS
+verify-kube-L2-spec           12     0     0  PASS
+verify-kube-L3-secrets        16     0     0  PASS
+verify-kube-L3-volumes        39     0     0  PASS
+verify-kube-L4-networking      6     0     0  PASS
+verify-kube-L5-redis-stack     6     0     0  PASS
+verify-kube-L6-gitea-stack    15     0     0  PASS
+verify-nested                 14     0     2  PASS
+verify-nested-userns           7     0     0  PASS
+verify-network                 9     0     0  PASS
+verify-nixos                  26     0     0  PASS
+verify-oci                    18     0     0  PASS
+verify-pods                    9     0     0  PASS
+verify-security               35     0     2  PASS
+verify-storage                 8     0     1  PASS
+verify-tutorial               83     0     8  PASS
+--------------------------  ----  ----  ----  ------
+Totals                       677     0    13  24 suites
 ```
 
-- On Ubuntu 26.04 with Linux 7.0.0-28-generic and systemd 259.5,
-  `verify-network` reproduced the environment's known unmanaged zone bridge:
-  no route to the zone peer and no LLMNR response. Bridge networking passed.
-  A clean serial rerun reproduced the same 7/2 result.
-- `verify-nested` failed when Docker Hub DNS resolution temporarily failed
-  inside the outer container. A clean serial rerun passed 16/16, including
-  import, btrfs cleanup, preflight, and kube coverage.
-- `verify-tutorial` failed because `start --all` included the stopped
-  `gitea-pod` left by the preceding failed suite. A clean serial rerun passed
-  84/84 with seven expected Docker/veth DHCP skips.
-- On the same Ubuntu 26.04 environment, `verify-kube-L6-gitea-stack` remains
-  unresolved. The canonical serial stage timed out waiting for MySQL port
-  3306. A clean serial rerun cleared MySQL but timed out waiting for Gitea port
-  3000, producing 9 passed, 1 failed, and 5 skipped. This records an observed
-  environment result, not a confirmed product regression; it remains retained
-  as a review failure.
+- All 24 suites pass. The 13 skips are expected on this host and are not
+  failures: eight tutorial Docker checks skip because the host veth receives
+  no default route, two `verify-security` checks skip because AppArmor is not
+  active, two `verify-nested` checks skip because `/var/lib/sdme` is a
+  directory on the btrfs root rather than its own mount (toggling
+  `user_subvol_rm_allowed` needs a superblock option that survives remount and
+  has no negative form, so it would require a reboot to clear), and one
+  `verify-storage` check skips for a missing optional tool. Preflight also
+  warns that `kubeconform` and `qemu-nbd` are absent.
+- `verify-nested` reports 16 checks here against 5 in the 0.18.0 review. The
+  earlier run exited at test 2, so tests 3 through 7 never executed. The count
+  grew because the suite now runs to completion, not because tests were added.
+- The run leaves no leaked `/run/systemd/nspawn/<name>/unix-export` mounts.
+  Before the reclaim fix, twelve accumulated over a single morning of runs.
+- Seven `sdme@*.service` units remain in failed state afterwards with
+  `Result=timeout` and `status=9/KILL`. Container shutdown reaches its stop
+  timeout because an OCI app's workload does not act on SIGTERM, so systemd
+  falls back to SIGKILL. This is cosmetic now that leaked mounts are reclaimed,
+  and is tracked as a known limitation below.
 
 ## Log
+
+### 0.19.0 -- contained copy, nspawn reclaim, kube grace period (2026-09-14, x86_64)
+
+Full `run-parallel.sh --jobs 8` on Linux 7.1.8-1-cachyos with systemd 261:
+677 passed, 0 failed, and 13 skipped across 24 suites in 17m02s. The aggregate
+is `test-reports/summary-20260914-143109.md`. The first run of this review
+returned 659 passed, 5 failed, and 11 skipped; three product bugs and two test
+bugs were fixed between the two runs.
+
+Product fixes:
+
+- Copying a symlink, FIFO, socket, or device node into a live container root
+  failed unconditionally, so `fs build` COPY could not copy `/etc/os-release`
+  or any directory containing a symlink. Special nodes were built in protected
+  staging outside the write root and published with a hard link, but a live
+  root is the whole mount the container sees, so no directory is both on that
+  mount and outside the container. Such nodes are now created under a
+  temporary name in the destination directory, pinned by file descriptor, and
+  published with `linkat` `AT_EMPTY_PATH`, which resolves the pinned inode.
+  Renaming the temporary name cannot redirect publication. Caught by
+  `verify-build` at 9/2; `verify-cp` missed it because it had no symlink
+  coverage, which has been added and confirmed to fail against the old binary.
+- systemd-nspawn leaves `/run/systemd/nspawn/<name>/unix-export` mounted when
+  a container is killed rather than stopped cleanly, and refuses to start the
+  next container of that name. sdme now reclaims that state on start and on
+  rm, after confirming through both systemd and machined that nothing of that
+  name is running. This produced an alternating pass/fail pattern in
+  `verify-kube-L3-volumes` and `verify-kube-L1-basic`: a run leaked a mount,
+  the next run failed instantly with "Mount point exists already, refusing",
+  and the failed start cleared it. Twelve leaked mounts had accumulated over
+  one morning of runs.
+- `terminationGracePeriodSeconds` was parsed but not defaulted, so a pod that
+  omitted it fell through to systemd's 90s `TimeoutStopSec` instead of the 30s
+  Kubernetes specifies. Measured stop time for an OCI app dropped from 90s to
+  30s.
+
+Test fixes:
+
+- `verify-nested` failed at test 2 with a name resolution error that was
+  actually total loss of connectivity. The host runs ufw with default deny
+  incoming and had allow rules for its own bridges but none for the bridge the
+  test creates, so the container's DHCPDISCOVER was dropped without logging and
+  it never obtained an address, route, or nameserver. The suite now opens the
+  bridge for the duration of the run and removes only a rule it added, and
+  waits for resolution inside the outer container so the firewall cause is
+  named directly. sdme itself configures DNS correctly for bridged containers.
+- `test_import_inferred_directory_name` failed about one run in ten of the
+  unit suite. It called `run()` directly instead of through the helper that
+  holds `INTERRUPT_LOCK`, so a concurrent test flipping the process-global
+  `INTERRUPTED` flag aborted its import. Routed through the shared helper.
+  Verified across 52 consecutive full-suite runs.
+
+A dead cleanup loop in `test/scripts/lib.sh` globbed
+`/run/systemd/nspawn/unix-export/<prefix>*` with the path components inverted,
+so it never matched. It was an earlier attempt at the leak above and has been
+removed now that the product reclaims the state.
+
 
 ### 0.18.0 -- source-first import and --name migration (2026-07-21, x86_64)
 

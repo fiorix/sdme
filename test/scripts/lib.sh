@@ -57,6 +57,21 @@ fi
 # test scripts append `--storage $KUBE_STORAGE` to every `sdme kube create/apply`
 # invocation so the full kube suite can run against a non-default backend.
 KUBE_STORAGE="${KUBE_STORAGE:-}"
+# Pick a resolv.conf usable inside a chroot. A systemd-resolved host points
+# /etc/resolv.conf at the 127.0.0.53 stub, which nothing answers inside a
+# chroot or container, so prefer whichever file carries real upstream servers.
+host_resolv_conf() {
+    local candidate
+    for candidate in /etc/resolv.conf /run/systemd/resolve/resolv.conf; do
+        [[ -r "$candidate" ]] || continue
+        grep -qE '^[[:space:]]*nameserver[[:space:]]+' "$candidate" || continue
+        grep -qE '^[[:space:]]*nameserver[[:space:]]+127\.' "$candidate" && continue
+        echo "$candidate"
+        return 0
+    done
+    echo /etc/resolv.conf
+}
+
 kube_storage_args() {
     if [[ -n "$KUBE_STORAGE" ]]; then
         echo "--storage $KUBE_STORAGE"
@@ -405,7 +420,7 @@ ensure_python3_in_rootfs() {
     fi
 
     rm -f "$root/etc/resolv.conf"
-    cp -L /etc/resolv.conf "$root/etc/resolv.conf"
+    cp -L "$(host_resolv_conf)" "$root/etc/resolv.conf"
 
     if DEBIAN_FRONTEND=noninteractive chroot "$root" apt-get -o APT::Sandbox::User="" update && \
        DEBIAN_FRONTEND=noninteractive chroot "$root" apt-get -o APT::Sandbox::User="" install -y python3 && \
@@ -621,16 +636,6 @@ cleanup_prefix() {
     names=$($SDME kube configmap ls 2>/dev/null | awk 'NR>1 {print $1}' | grep "^${prefix}" || true)
     for name in $names; do
         $SDME kube configmap rm "$name" 2>/dev/null || true
-    done
-
-    # Clean stale nspawn unix-export mounts left behind when a container is
-    # SIGKILLed (e.g. after a boot-timeout stop). A leftover mount point makes
-    # the next start of the same name fail with "Mount point exists already".
-    local stale
-    for stale in "/run/systemd/nspawn/unix-export/${prefix}"*; do
-        [[ -e "$stale" ]] || continue
-        umount "$stale" 2>/dev/null || true
-        rm -rf "$stale" 2>/dev/null || true
     done
 }
 

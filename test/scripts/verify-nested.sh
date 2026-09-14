@@ -17,6 +17,9 @@ set -euo pipefail
 #   5. Subvolume deletion: without user_subvol_rm_allowed the destroy ioctl
 #      EPERMs and the subvolume is parked in .trash (with the warning); with
 #      the option, destroy succeeds and nested `sdme prune` empties the trash.
+#      The second half is skipped when the datadir has no dedicated mount,
+#      since the option can then only be set on the root filesystem and btrfs
+#      offers no way to clear it short of a reboot.
 #   6. Nested kube create fails fast with the same mknod preflight.
 #   7. After cleanup, zero stale subvolumes remain (verified from the host).
 #
@@ -61,6 +64,8 @@ pool_subroot() {
 }
 outer_root() { echo "$(pool_subroot)/containers/$OUTER"; }
 nested_datadir() { echo "$(outer_root)/var/lib/sdme"; }
+# Mirrors storage::btrfs::TRASH_SUBDIR.
+TRASH_SUBDIR=".trash"
 
 state_key() {
     local name="$1" key="$2"
@@ -79,6 +84,15 @@ mount_unit() {
     systemd-escape -p --suffix=mount "$DATADIR"
 }
 
+# user_subvol_rm_allowed is a mount option, so the toggle needs the datadir to
+# be its own mount. When it is just a directory on the root filesystem, turning
+# the option on would mean remounting / with it, and because btrfs mount
+# options are sticky, turning it back off would mean rebooting. Phase B of
+# test 5 is skipped on such hosts rather than touching the root mount.
+datadir_is_own_mount() {
+    mountpoint -q "$DATADIR"
+}
+
 # btrfs mount options are sticky across remounts: an omitted option is kept,
 # so clearing user_subvol_rm_allowed needs a fresh mount. Prefer restarting
 # the systemd mount unit when one manages the datadir; fall back to a manual
@@ -92,6 +106,13 @@ set_rm_allowed() {
     fi
     if ! mount_has_rm_allowed; then
         return 0
+    fi
+    if ! datadir_is_own_mount; then
+        # The option is set on the filesystem carrying the datadir, not on a
+        # mount this script may replace, and btrfs has no way to clear it short
+        # of a fresh mount of that filesystem. Report it instead of unmounting
+        # a path that is not a mount point.
+        return 1
     fi
     local unit
     unit=$(mount_unit)
@@ -108,16 +129,49 @@ set_rm_allowed() {
 # Networking for the outer container. On a devsrv host, the platform bridge
 # vz-devsrv-plat (DHCP+NAT, already allowed by the host firewall) is the exact
 # topology the tiers use. Elsewhere, create a self-owned bridge with a runtime
-# networkd file providing DHCP+NAT; note that a restrictive host firewall may
-# need an inbound allow rule for it (UFW default-deny drops DHCP replies).
+# networkd file providing DHCP+NAT.
+#
+# Either way the bridge needs an inbound firewall allow rule. The outer
+# container gets its address, default route and DNS server over DHCP from the
+# bridge, and a host firewall that defaults to deny-incoming silently drops the
+# container's DHCPDISCOVER as it arrives on the bridge. The container then
+# settles on a link-local 169.254.x address with no route and no nameserver,
+# and the nested registry pull fails with a name resolution error that looks
+# like a DNS misconfiguration. allow_bridge_traffic opens the bridge for the
+# duration of the run; teardown removes any rule this script added.
 BRIDGE="vz-devsrv-plat"
 FALLBACK_BRIDGE="vznested"
+FIREWALL_RULE_ADDED=0
+
+ufw_active() {
+    command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'
+}
+
+allow_bridge_traffic() {
+    ufw_active || return 0
+    # A host that already allows the bridge (the devsrv platform bridge is set
+    # up that way) needs nothing, and must not have its rule deleted later.
+    if ufw status 2>/dev/null | grep -qE "[[:space:]]on[[:space:]]+${BRIDGE}[[:space:]]"; then
+        return 0
+    fi
+    if ufw allow in on "$BRIDGE" comment "sdme ${PREFIX} test bridge" >/dev/null 2>&1; then
+        FIREWALL_RULE_ADDED=1
+    fi
+}
+
+revoke_bridge_traffic() {
+    [[ "$FIREWALL_RULE_ADDED" == "1" ]] || return 0
+    ufw delete allow in on "$BRIDGE" >/dev/null 2>&1 || true
+    FIREWALL_RULE_ADDED=0
+}
+
 setup_network() {
     if [[ -f /etc/systemd/network/80-container-vz.network ]]; then
         if ! ip link show "$BRIDGE" >/dev/null 2>&1; then
             ip link add "$BRIDGE" type bridge
             ip link set "$BRIDGE" up
         fi
+        allow_bridge_traffic
         return
     fi
     BRIDGE="$FALLBACK_BRIDGE"
@@ -140,11 +194,13 @@ DNS=8.8.8.8
 EOF
     ip link show "$BRIDGE" >/dev/null 2>&1 || ip link add "$BRIDGE" type bridge
     ip link set "$BRIDGE" up
+    allow_bridge_traffic
     networkctl reload
     sleep 2
 }
 
 teardown_network() {
+    revoke_bridge_traffic
     if [[ "$BRIDGE" == "$FALLBACK_BRIDGE" ]]; then
         rm -f "/run/systemd/network/60-sdme-${PREFIX}.network"
         ip link del "$BRIDGE" 2>/dev/null || true
@@ -203,7 +259,7 @@ if [[ -e "$root_fs/etc/resolv.conf" || -L "$root_fs/etc/resolv.conf" ]]; then
     had_resolv=1
 fi
 rm -f "$root_fs/etc/resolv.conf"
-cp -L /etc/resolv.conf "$root_fs/etc/resolv.conf"
+cp -L "$(host_resolv_conf)" "$root_fs/etc/resolv.conf"
 seed_ok=0
 if DEBIAN_FRONTEND=noninteractive chroot "$root_fs" apt-get -o APT::Sandbox::User="" update >/dev/null 2>&1 && \
    DEBIAN_FRONTEND=noninteractive chroot "$root_fs" apt-get -o APT::Sandbox::User="" install -y systemd-container btrfs-progs >/dev/null 2>&1; then
@@ -261,6 +317,28 @@ if nsdme --version >/dev/null 2>&1; then
     ok "nested sdme runs inside the outer container"
 else
     fail "nested sdme does not run"
+    print_summary
+    exit 1
+fi
+
+# The outer container has its own network namespace and configures it over
+# DHCP from the bridge, which is what supplies its default route and DNS
+# server; its /etc/resolv.conf is a symlink into the container's own
+# systemd-resolved runtime dir, so overwriting the file is both pointless and
+# transient. Wait for the lease to land instead: without it the nested import
+# fails with a name resolution error several minutes later.
+net_ready=0
+for _ in $(seq 1 30); do
+    if timeout "$EXEC_TIMEOUT" "$SDME" exec "$OUTER" -- \
+        /bin/sh -c 'getent hosts registry-1.docker.io >/dev/null' >/dev/null 2>&1; then
+        net_ready=1
+        break
+    fi
+    sleep 2
+done
+if [[ $net_ready -ne 1 ]]; then
+    fail "outer container has no DNS on $BRIDGE after 60s (DHCP lease missing; \
+a host firewall that denies inbound traffic on the bridge drops the request)"
     print_summary
     exit 1
 fi
@@ -375,31 +453,47 @@ else
     fail "subvolume was not parked in .trash as expected"
 fi
 
-# Phase B: with the option, destroy succeeds directly.
-set_rm_allowed on
-if ! mount_has_rm_allowed; then
-    fail "test setup: could not set user_subvol_rm_allowed"
-fi
+# Phase B: with the option, destroy succeeds directly, and the nested prune
+# can then empty the phase A trash entry. Both need the option ON, which needs
+# a dedicated datadir mount to toggle.
+if datadir_is_own_mount; then
+    set_rm_allowed on
+    if ! mount_has_rm_allowed; then
+        fail "test setup: could not set user_subvol_rm_allowed"
+    fi
 
-inject_legacy "$LEGACY_B"
-rc=0
-output=$(nsdme rm "$LEGACY_B" 2>&1) || rc=$?
-if [[ $rc -eq 0 ]] && \
-   ! sudo btrfs subvolume list "$DATADIR" | grep -qF "containers/${LEGACY_B}" && \
-   ! sudo btrfs subvolume list "$DATADIR" | grep -qF ".trash/${LEGACY_B}."; then
-    ok "destroy with user_subvol_rm_allowed removed the subvolume directly"
-else
-    fail "destroy with the option failed (rc=$rc): $(echo "$output" | tail -3)"
-fi
+    inject_legacy "$LEGACY_B"
+    rc=0
+    output=$(nsdme rm "$LEGACY_B" 2>&1) || rc=$?
+    if [[ $rc -eq 0 ]] && \
+       ! sudo btrfs subvolume list "$DATADIR" | grep -qF "containers/${LEGACY_B}" && \
+       ! sudo btrfs subvolume list "$DATADIR" | grep -qF ".trash/${LEGACY_B}."; then
+        ok "destroy with user_subvol_rm_allowed removed the subvolume directly"
+    else
+        fail "destroy with the option failed (rc=$rc): $(echo "$output" | tail -3)"
+    fi
 
-# Nested prune destroys the phase A trash entry. The base rootfs is excluded:
-# with no containers yet it is an "unused filesystem" prune candidate too.
-rc=0
-output=$(nsdme prune --force --except="$NESTED_FS" 2>&1) || rc=$?
-if ! sudo btrfs subvolume list "$DATADIR" | grep -qF ".trash/${LEGACY_A}."; then
-    ok "nested sdme prune destroyed the parked trash entry"
+    # Nested prune destroys the phase A trash entry. The base rootfs is
+    # excluded: with no containers yet it is an "unused filesystem" prune
+    # candidate too.
+    rc=0
+    output=$(nsdme prune --force --except="$NESTED_FS" 2>&1) || rc=$?
+    if ! sudo btrfs subvolume list "$DATADIR" | grep -qF ".trash/${LEGACY_A}."; then
+        ok "nested sdme prune destroyed the parked trash entry"
+    else
+        fail "trash entry survived nested prune (rc=$rc): $(echo "$output" | tail -3)"
+    fi
 else
-    fail "trash entry survived nested prune (rc=$rc): $(echo "$output" | tail -3)"
+    skipped "destroy with user_subvol_rm_allowed ($DATADIR has no dedicated mount to toggle)"
+    skipped "nested sdme prune destroyed the parked trash entry (same reason)"
+    # Without the option the nested prune can only re-park the phase A entry,
+    # so destroy it from the host, where the ioctl is not restricted. Cleanup
+    # would get it anyway when the outer container's subvolume tree goes away,
+    # but only if the run reaches cleanup.
+    for parked in "$(nested_datadir)/btrfs/containers/$TRASH_SUBDIR/${LEGACY_A}."*; do
+        [[ -d "$parked" ]] || continue
+        btrfs subvolume delete "$parked" >/dev/null 2>&1 || true
+    done
 fi
 
 # ---------------------------------------------------------------------------

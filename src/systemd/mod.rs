@@ -301,6 +301,15 @@ pub fn start(cfg: &ServiceConfig) -> Result<()> {
     let limits = ResourceLimits::from_state(&state);
     write_limits_dropin(name, &limits, verbose)?;
 
+    // An unclean exit of a previous container with this name (SIGKILL after a
+    // stop timeout, a host crash) leaves /run/systemd/nspawn/<name>/unix-export
+    // mounted, and nspawn refuses to start onto an existing mount point. Reclaim
+    // it immediately before the start job so the window for a concurrent start
+    // to have created that mount is as small as possible.
+    if let Err(e) = crate::containers::reclaim_nspawn_runtime(name, verbose) {
+        eprintln!("warning: {e:#}; a leftover nspawn mount may refuse this start");
+    }
+
     if verbose {
         eprintln!("starting unit: {}", service_name(name));
     }

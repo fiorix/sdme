@@ -24,6 +24,7 @@ pub fn remove(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
             unit_state: &systemd::unit_active_state,
             disable_unit: &systemd::disable_unit_only,
             remove_dropin: &systemd::remove_limits_dropin,
+            reclaim_runtime: &reclaim_nspawn_runtime,
         },
     )
 }
@@ -37,6 +38,8 @@ struct RemovalOps<'a> {
     disable_unit: &'a dyn Fn(&str) -> Result<()>,
     /// Remove the container's systemd drop-in directory on the host.
     remove_dropin: &'a dyn Fn(&str, bool) -> Result<()>,
+    /// Reclaim the container's systemd-nspawn runtime state under `/run`.
+    reclaim_runtime: &'a dyn Fn(&str, bool) -> Result<()>,
 }
 
 /// Container removal with host side effects injected for testing.
@@ -135,6 +138,17 @@ fn remove_with_ops(datadir: &Path, name: &str, verbose: bool, ops: &RemovalOps) 
         }
     }
 
+    // systemd-nspawn's per-container state under /run outlives an unclean
+    // exit, and nothing else on the host owns it once the container is gone.
+    // Best-effort: the container is already torn down, so a failure here only
+    // leaves a stale mount that a future start would have to reclaim.
+    if let Err(e) = (ops.reclaim_runtime)(name, verbose) {
+        eprintln!(
+            "warning: {e:#}; leftover systemd-nspawn runtime state may block \
+             a future container named '{name}'"
+        );
+    }
+
     if state_file.exists() {
         fs::remove_file(&state_file)
             .with_context(|| format!("failed to remove {}", state_file.display()))?;
@@ -152,6 +166,117 @@ fn remove_with_ops(datadir: &Path, name: &str, verbose: bool, ops: &RemovalOps) 
         }
     }
 
+    Ok(())
+}
+
+/// Host directory where systemd-nspawn keeps per-container runtime state.
+const NSPAWN_RUNTIME_DIR: &str = "/run/systemd/nspawn";
+
+/// Entries under `NSPAWN_RUNTIME_DIR` that belong to systemd-nspawn itself
+/// rather than to one container. Both pass `validate_name`, so they are
+/// rejected by name to keep shared state out of reach.
+const NSPAWN_SHARED_ENTRIES: &[&str] = &["locks", "propagate"];
+
+/// Whether a container is running, as far as the host can prove.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Liveness {
+    /// systemd and machined both confirm nothing by this name is running.
+    Stopped,
+    /// The unit is active, starting, or shutting down, or machined has a
+    /// machine registered under this name.
+    Running,
+    /// A query failed, so the answer is unknown. Callers that would destroy
+    /// state must treat this as "may be running".
+    Unknown,
+}
+
+/// Ask systemd and machined whether a container of this name is running.
+///
+/// Both are consulted because they can disagree: a machine started outside
+/// sdme has no `sdme@<name>.service` unit yet still owns nspawn runtime
+/// state. Only a confirmed "does not exist" counts as absence; a bus,
+/// permission, or decode failure is `Unknown`, never `Stopped`.
+fn probe_liveness(name: &str) -> Liveness {
+    let unit_idle = match systemd::unit_active_state(name) {
+        Ok(None) => true,
+        // "inactive" and "failed" mean no nspawn process is attached to the
+        // unit. Every other state may still have one, including "activating"
+        // (an auto-restart in flight) and "deactivating" (a shutdown in
+        // progress that has not released the mount yet).
+        Ok(Some(state)) => state == "inactive" || state == "failed",
+        Err(_) => return Liveness::Unknown,
+    };
+    if !unit_idle {
+        return Liveness::Running;
+    }
+    match systemd::get_machine_leader(name) {
+        Ok(None) => Liveness::Stopped,
+        Ok(Some(_)) => Liveness::Running,
+        Err(_) => Liveness::Unknown,
+    }
+}
+
+/// Reclaim leftover systemd-nspawn runtime state for a container.
+///
+/// systemd-nspawn bind-mounts `/run/systemd/nspawn/<name>/unix-export` for
+/// the lifetime of a container and tears it down on a clean exit. An unclean
+/// exit (SIGKILL after a stop timeout, a host crash) leaves the mount behind,
+/// and nspawn refuses to start the next container of that name with
+/// "Mount point ... exists already, refusing". sdme owns the container
+/// lifecycle, so it reclaims the leftovers on start and on removal.
+///
+/// Nothing is touched unless both systemd and machined confirm no container
+/// of this name is running. Tearing down live runtime state would break a
+/// running container, so an undetermined state is an error rather than a
+/// licence to delete. Callers report failures as warnings: a start or a
+/// removal is still valid without this cleanup.
+pub fn reclaim_nspawn_runtime(name: &str, verbose: bool) -> Result<()> {
+    reclaim_nspawn_runtime_in(
+        Path::new(NSPAWN_RUNTIME_DIR),
+        name,
+        verbose,
+        &probe_liveness,
+    )
+}
+
+/// Runtime reclamation with the runtime root and the liveness probe injected,
+/// so tests exercise the decisions without touching `/run` or the host bus.
+fn reclaim_nspawn_runtime_in(
+    runtime_dir: &Path,
+    name: &str,
+    verbose: bool,
+    liveness: &dyn Fn(&str) -> Liveness,
+) -> Result<()> {
+    // The name becomes a path component under a host runtime directory, so it
+    // is validated before it is ever joined onto that directory.
+    crate::validate_name(name).with_context(|| format!("invalid container name {name:?}"))?;
+    if NSPAWN_SHARED_ENTRIES.contains(&name) {
+        anyhow::bail!("'{name}' names shared systemd-nspawn state, not a container's");
+    }
+
+    let dir = runtime_dir.join(name);
+    if !dir.exists() {
+        return Ok(());
+    }
+
+    match liveness(name) {
+        // Live state, not a leftover.
+        Liveness::Running => return Ok(()),
+        Liveness::Unknown => anyhow::bail!(
+            "cannot determine whether container '{name}' is running; \
+             leaving {} alone",
+            dir.display()
+        ),
+        Liveness::Stopped => {}
+    }
+
+    // safe_remove_dir unmounts what it finds underneath before deleting, and
+    // refuses to delete through a mount it could not release.
+    crate::copy::safe_remove_dir(&dir)
+        .with_context(|| format!("failed to reclaim {}", dir.display()))?;
+    if verbose {
+        eprintln!("reclaimed leftover nspawn runtime state {}", dir.display());
+    }
     Ok(())
 }
 
@@ -331,6 +456,7 @@ mod tests {
     struct OpLog {
         disables: Vec<String>,
         dropin_removals: Vec<String>,
+        reclaims: Vec<String>,
     }
 
     /// Run removal with the given unit-state query and recording disable /
@@ -349,6 +475,10 @@ mod tests {
             },
             remove_dropin: &|n: &str, _verbose: bool| {
                 log.borrow_mut().dropin_removals.push(n.to_string());
+                Ok(())
+            },
+            reclaim_runtime: &|n: &str, _verbose: bool| {
+                log.borrow_mut().reclaims.push(n.to_string());
                 Ok(())
             },
         };
@@ -378,6 +508,7 @@ mod tests {
         assert!(container_dir.join("upper").join("keep.txt").exists());
         assert!(log.borrow().dropin_removals.is_empty());
         assert!(log.borrow().disables.is_empty());
+        assert!(log.borrow().reclaims.is_empty());
     }
 
     #[test]
@@ -400,6 +531,7 @@ mod tests {
         assert!(container_dir.join("upper").join("keep.txt").exists());
         assert!(log.borrow().disables.is_empty());
         assert!(log.borrow().dropin_removals.is_empty());
+        assert!(log.borrow().reclaims.is_empty());
     }
 
     #[test]
@@ -412,6 +544,9 @@ mod tests {
         assert!(!container_dir.exists());
         assert_eq!(log.borrow().dropin_removals, vec!["gonebox"]);
         assert!(log.borrow().disables.is_empty());
+        // Removal reclaims the container's nspawn runtime state so a future
+        // container reusing the name is not refused by a leftover mount.
+        assert_eq!(log.borrow().reclaims, vec!["gonebox"]);
     }
 
     #[test]
@@ -424,5 +559,122 @@ mod tests {
         assert!(!container_dir.exists());
         assert_eq!(log.borrow().disables, vec!["idlebox"]);
         assert_eq!(log.borrow().dropin_removals, vec!["idlebox"]);
+        assert_eq!(log.borrow().reclaims, vec!["idlebox"]);
+    }
+
+    /// Stand-in for what systemd-nspawn leaves under /run: a per-container
+    /// directory holding the `unix-export` mount point. Returns the runtime
+    /// root and the container's directory inside it.
+    fn runtime_fixture(tmp: &TempDataDir, name: &str) -> (PathBuf, PathBuf) {
+        let root = tmp.path().join("nspawn");
+        let dir = root.join(name);
+        fs::create_dir_all(dir.join("unix-export")).unwrap();
+        (root, dir)
+    }
+
+    /// Liveness probe that always answers `verdict` and records its calls.
+    fn probe<'a>(
+        verdict: Liveness,
+        calls: &'a RefCell<Vec<String>>,
+    ) -> impl Fn(&str) -> Liveness + 'a {
+        move |n: &str| {
+            calls.borrow_mut().push(n.to_string());
+            verdict
+        }
+    }
+
+    #[test]
+    fn test_reclaim_removes_leftover_when_container_stopped() {
+        let tmp = TempDataDir::new("reclaim-stopped");
+        let (root, dir) = runtime_fixture(&tmp, "deadbox");
+        let calls = RefCell::new(Vec::new());
+        reclaim_nspawn_runtime_in(&root, "deadbox", false, &probe(Liveness::Stopped, &calls))
+            .unwrap();
+        assert!(!dir.exists());
+        assert_eq!(calls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn test_reclaim_keeps_runtime_state_of_running_container() {
+        // The whole point of the liveness check: a running container's
+        // unix-export mount is live state, not a leftover.
+        let tmp = TempDataDir::new("reclaim-running");
+        let (root, dir) = runtime_fixture(&tmp, "livebox");
+        let calls = RefCell::new(Vec::new());
+        reclaim_nspawn_runtime_in(&root, "livebox", false, &probe(Liveness::Running, &calls))
+            .unwrap();
+        assert!(dir.join("unix-export").exists());
+    }
+
+    #[test]
+    fn test_reclaim_refuses_when_liveness_unknown() {
+        // An undetermined state is not proof that the container is stopped.
+        let tmp = TempDataDir::new("reclaim-unknown");
+        let (root, dir) = runtime_fixture(&tmp, "maybebox");
+        let calls = RefCell::new(Vec::new());
+        let err =
+            reclaim_nspawn_runtime_in(&root, "maybebox", false, &probe(Liveness::Unknown, &calls))
+                .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("cannot determine whether"),
+            "unexpected error: {err:#}"
+        );
+        assert!(dir.join("unix-export").exists());
+    }
+
+    #[test]
+    fn test_reclaim_rejects_shared_nspawn_entries() {
+        // "locks" and "propagate" are shared by every container on the host
+        // and pass validate_name, so they must be rejected by name.
+        let tmp = TempDataDir::new("reclaim-shared");
+        let calls = RefCell::new(Vec::new());
+        for shared in NSPAWN_SHARED_ENTRIES {
+            let (root, dir) = runtime_fixture(&tmp, shared);
+            let err =
+                reclaim_nspawn_runtime_in(&root, shared, false, &probe(Liveness::Stopped, &calls))
+                    .unwrap_err();
+            assert!(
+                format!("{err:#}").contains("shared systemd-nspawn state"),
+                "unexpected error: {err:#}"
+            );
+            assert!(dir.exists());
+        }
+        // Rejected before any liveness query, so no bus traffic either.
+        assert!(calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn test_reclaim_rejects_invalid_names() {
+        // The name becomes a path component under the runtime root, so
+        // traversal and other invalid names never reach the filesystem.
+        let tmp = TempDataDir::new("reclaim-invalid");
+        let root = tmp.path().join("nspawn");
+        let sibling = tmp.path().join("keep");
+        fs::create_dir_all(&sibling).unwrap();
+        fs::create_dir_all(&root).unwrap();
+        let calls = RefCell::new(Vec::new());
+        for bad in ["../keep", "..", "", "Upper", "a/b"] {
+            let err =
+                reclaim_nspawn_runtime_in(&root, bad, false, &probe(Liveness::Stopped, &calls))
+                    .unwrap_err();
+            assert!(
+                format!("{err:#}").contains("invalid container name"),
+                "unexpected error for {bad:?}: {err:#}"
+            );
+        }
+        assert!(sibling.exists());
+        assert!(calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn test_reclaim_without_leftover_state_asks_nothing() {
+        // The common case: no leftover directory, so no D-Bus round trips.
+        let tmp = TempDataDir::new("reclaim-absent");
+        let root = tmp.path().join("nspawn");
+        fs::create_dir_all(&root).unwrap();
+        let calls = RefCell::new(Vec::new());
+        reclaim_nspawn_runtime_in(&root, "cleanbox", false, &probe(Liveness::Stopped, &calls))
+            .unwrap();
+        assert!(calls.borrow().is_empty());
     }
 }

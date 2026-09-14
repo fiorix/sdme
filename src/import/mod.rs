@@ -1844,6 +1844,23 @@ pub(crate) mod tests {
         verbose: bool,
         force: bool,
     ) -> Result<String> {
+        test_run_named(datadir, source, Some(name), verbose, force)
+    }
+
+    /// Helper to run import in tests with an optional name, bypassing
+    /// systemd checks. Pass `None` for `name` to exercise name inference
+    /// from the source.
+    ///
+    /// Every test that drives `run()` must go through this helper: `run()`
+    /// calls `check_interrupted()`, which reads the process-global
+    /// `INTERRUPTED` flag that concurrent InterruptGuard tests flip.
+    pub(crate) fn test_run_named(
+        datadir: &Path,
+        source: &str,
+        name: Option<&str>,
+        verbose: bool,
+        force: bool,
+    ) -> Result<String> {
         // Acquire the interrupt lock to prevent concurrent InterruptGuard
         // tests from poisoning check_interrupted() calls inside run().
         let _lock = INTERRUPT_LOCK.lock().unwrap();
@@ -1856,7 +1873,7 @@ pub(crate) mod tests {
             datadir,
             &ImportOptions {
                 source,
-                name: Some(name),
+                name,
                 verbose,
                 force,
                 interactive: false,
@@ -2059,30 +2076,7 @@ pub(crate) mod tests {
         fs::create_dir(&source).unwrap();
         fs::write(source.join("hello.txt"), "hello\n").unwrap();
 
-        let cfg = crate::config::Config {
-            oci_cache_max_size: "0".to_string(),
-            ..crate::config::Config::default()
-        };
-        let cache = crate::oci::cache::BlobCache::from_config(&cfg).unwrap();
-        let name = run(
-            tmp.path(),
-            &ImportOptions {
-                source: source.to_str().unwrap(),
-                name: None,
-                verbose: false,
-                force: true,
-                interactive: false,
-                install_packages: InstallPackages::No,
-                oci_mode: OciMode::Auto,
-                base_fs: None,
-                docker_credentials: None,
-                cache: &cache,
-                http: cfg.http_config().unwrap(),
-                auto_gc: true,
-                distros: &HashMap::new(),
-            },
-        )
-        .unwrap();
+        let name = test_run_named(tmp.path(), source.to_str().unwrap(), None, false, true).unwrap();
 
         assert_eq!(name, "inferred");
         assert!(tmp.path().join("fs/inferred/hello.txt").is_file());
