@@ -392,16 +392,16 @@ struct CopyContext<'a> {
 fn do_copy(ctx: &CopyContext, src: &Path, dst: &Path) -> Result<()> {
     check_shadowed_dest(dst, ctx.shadowed, ctx.opaque_dirs)?;
     let rel_dst = sanitize_dest_path(dst)?;
-    let mut target = ctx.upper_dir.join(&rel_dst);
+    let probe = ctx.upper_dir.join(&rel_dst);
 
     let meta =
         fs::symlink_metadata(src).with_context(|| format!("failed to stat {}", src.display()))?;
 
     // Check whether dst resolves to a directory in either layer.
-    let dst_is_dir = target.is_dir() || ctx.check_dir.join(&rel_dst).is_dir();
+    let dst_is_dir = probe.is_dir() || ctx.check_dir.join(&rel_dst).is_dir();
 
     // Check whether dst resolves to a file in either layer.
-    let dst_is_file = (!dst_is_dir) && (target.is_file() || ctx.check_dir.join(&rel_dst).is_file());
+    let dst_is_file = (!dst_is_dir) && (probe.is_file() || ctx.check_dir.join(&rel_dst).is_file());
 
     // Cannot copy a directory onto an existing file.
     if meta.is_dir() && dst_is_file {
@@ -415,31 +415,29 @@ fn do_copy(ctx: &CopyContext, src: &Path, dst: &Path) -> Result<()> {
     // When dst is an existing directory, adjust the target:
     // - If src has a file_name (file or named dir), copy INTO the directory.
     // - If src has no file_name (bare "."), copy contents directly into dst.
-    if dst_is_dir {
-        if let Some(file_name) = src.file_name() {
-            target = target.join(file_name);
+    let rel_target = if dst_is_dir {
+        match src.file_name() {
+            Some(file_name) => rel_dst.join(file_name),
+            None => rel_dst.clone(),
         }
-    }
+    } else {
+        rel_dst.clone()
+    };
 
     if ctx.verbose {
-        eprintln!("copy: {} -> {}", src.display(), target.display());
+        eprintln!(
+            "copy: {} -> {}",
+            src.display(),
+            ctx.upper_dir.join(&rel_target).display()
+        );
     }
 
-    // Create parent directories in the upper layer.
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-
-    if meta.is_dir() {
-        fs::create_dir_all(&target)
-            .with_context(|| format!("failed to create {}", target.display()))?;
-        copy::copy_tree(src, &target, ctx.verbose)
-            .with_context(|| format!("failed to copy directory {}", src.display()))?;
-    } else {
-        copy::copy_entry(src, &target, ctx.verbose)
-            .with_context(|| format!("failed to copy {}", src.display()))?;
-    }
+    // COPY steps accumulate in a single upper layer, and the build container
+    // can run between steps, so the upper may hold (or concurrently gain)
+    // symlinks. The contained engine never resolves a destination component
+    // through one; same guard as `sdme cp`.
+    copy::copy_contained(ctx.upper_dir, &rel_target, src)
+        .with_context(|| format!("failed to copy {}", src.display()))?;
 
     Ok(())
 }
@@ -1400,6 +1398,71 @@ mod tests {
         // Valid paths should still work.
         do_copy(&ctx, &src_file, Path::new("/opt/safe")).unwrap();
         assert!(upper.join("opt/safe").is_file());
+    }
+
+    #[test]
+    fn test_do_copy_rejects_symlink_ancestor_in_upper() {
+        // COPY steps accumulate in one upper layer, so a symlink already
+        // present there (from an earlier step or a reused build container)
+        // must not redirect a later COPY outside the layer; same guard as
+        // `sdme cp`.
+        let (_tmp, upper, lower) = make_layers("symlink-guard");
+        let outside = _tmp.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("victim"), "original").unwrap();
+        std::os::unix::fs::symlink(&outside, upper.join("data")).unwrap();
+
+        let src_dir = _tmp.path().join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+        let src_file = src_dir.join("payload");
+        fs::write(&src_file, "attacker").unwrap();
+
+        let ctx = CopyContext {
+            upper_dir: &upper,
+            check_dir: &lower,
+            shadowed: SHADOWED_DIRS,
+            opaque_dirs: &[],
+            verbose: false,
+        };
+        let err = do_copy(&ctx, &src_file, Path::new("/data/victim")).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("symlink"),
+            "should reject a symlink ancestor in the upper layer, got: {err:#}"
+        );
+        assert_eq!(
+            fs::read_to_string(outside.join("victim")).unwrap(),
+            "original"
+        );
+    }
+
+    #[test]
+    fn test_do_copy_shadows_leaf_symlink_in_upper() {
+        // A leaf symlink in the upper is replaced by the copied file, not
+        // followed onto the host.
+        let (_tmp, upper, lower) = make_layers("leaf-guard");
+        fs::create_dir_all(upper.join("etc")).unwrap();
+        let outside = _tmp.path().join("outside-target");
+        fs::write(&outside, "keep").unwrap();
+        std::os::unix::fs::symlink(&outside, upper.join("etc/conf")).unwrap();
+
+        let src_dir = _tmp.path().join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+        let src_file = src_dir.join("newconf");
+        fs::write(&src_file, "new").unwrap();
+
+        let ctx = CopyContext {
+            upper_dir: &upper,
+            check_dir: &lower,
+            shadowed: SHADOWED_DIRS,
+            opaque_dirs: &[],
+            verbose: false,
+        };
+        do_copy(&ctx, &src_file, Path::new("/etc/conf")).unwrap();
+
+        let written = upper.join("etc/conf");
+        assert!(written.symlink_metadata().unwrap().file_type().is_file());
+        assert_eq!(fs::read_to_string(&written).unwrap(), "new");
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "keep");
     }
 
     #[test]
