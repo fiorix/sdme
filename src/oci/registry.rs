@@ -683,6 +683,86 @@ fn resolve_manifest(
 
 // --- Layer download + extraction ---
 
+/// Create a fresh private subdirectory of `parent`, never reusing or
+/// following an existing path.
+///
+/// `mkdir` is atomic: an existing entry (directory, symlink, or file) at a
+/// candidate name fails with EEXIST and the next suffix is tried, so a
+/// preplanted name is always skipped rather than adopted. The directory is
+/// created mode 0o700.
+fn create_fresh_dir(parent: &Path, base: &str) -> Result<PathBuf> {
+    use std::os::unix::fs::DirBuilderExt;
+    for n in 0..1000u32 {
+        let candidate = parent.join(format!("{base}-{n}"));
+        match fs::DirBuilder::new().mode(0o700).create(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                return Err(e).with_context(|| format!("failed to create {}", candidate.display()));
+            }
+        }
+    }
+    bail!(
+        "could not allocate a fresh scratch directory under {}",
+        parent.display()
+    );
+}
+
+/// Scratch directory for layer downloads, created as a sibling of the
+/// staging tree rather than inside it.
+///
+/// Download temp files must stay outside the tree being extracted: an
+/// earlier layer can plant a symlink at the next download's pathname, and
+/// both the cache copy and the network write would follow it onto the
+/// host. The directory is freshly allocated (never a preexisting path) next
+/// to the canonical location of the staging tree, and is removed on drop,
+/// covering success, failure, and interruption exits from
+/// `download_layers`.
+struct LayerScratch {
+    dir: PathBuf,
+}
+
+impl LayerScratch {
+    fn new(staging_dir: &Path) -> Result<Self> {
+        // A single-component relative staging path has parent Some("");
+        // treat it as the current directory.
+        let parent = staging_dir
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        // The scratch must sit next to the real staging tree. If the given
+        // staging path reaches its directory through a final symlink, its
+        // lexical parent is not the directory that actually holds the tree;
+        // refuse rather than allocate scratch next to a detached path.
+        let staging_canon = fs::canonicalize(staging_dir)
+            .with_context(|| format!("failed to resolve staging dir {}", staging_dir.display()))?;
+        let parent_canon = fs::canonicalize(parent)
+            .with_context(|| format!("failed to resolve {}", parent.display()))?;
+        if staging_canon.parent() != Some(parent_canon.as_path()) {
+            bail!(
+                "staging dir {} resolves to a different subtree; refusing to allocate layer scratch",
+                staging_dir.display()
+            );
+        }
+        let name = staging_dir
+            .file_name()
+            .unwrap_or_else(|| std::ffi::OsStr::new("staging"));
+        let base = format!(".{}.layers-{}", name.to_string_lossy(), std::process::id());
+        let dir = create_fresh_dir(&parent_canon, &base)?;
+        Ok(Self { dir })
+    }
+
+    fn layer_path(&self, index: usize) -> PathBuf {
+        self.dir.join(format!("layer-{index}.tmp"))
+    }
+}
+
+impl Drop for LayerScratch {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.dir);
+    }
+}
+
 /// Options for downloading a blob from an OCI registry.
 struct DownloadBlobOptions<'a> {
     ctx: &'a PullContext<'a>,
@@ -700,6 +780,11 @@ fn download_blob(opts: &DownloadBlobOptions<'_>) -> Result<()> {
     let dest = opts.dest;
     let verbose = ctx.verbose;
     let registry = opts.registry;
+    // Layer descriptors come from the registry and are untrusted: reject
+    // malformed digests before they reach a URL or a filesystem path.
+    if super::cache::parse_sha256_hex(digest).is_none() {
+        bail!("malformed or unsupported layer digest: {digest}");
+    }
     // Check cache first.
     if let Some(cached_path) = ctx.cache.get(digest, verbose) {
         fs::copy(&cached_path, dest)
@@ -1035,13 +1120,17 @@ fn download_layers(
     fs::create_dir_all(staging_dir)
         .with_context(|| format!("failed to create staging dir {}", staging_dir.display()))?;
 
+    // Downloads land in a scratch dir outside the extracted tree; see
+    // LayerScratch.
+    let scratch = LayerScratch::new(staging_dir)?;
+
     // Share a decompression size limit across all layers.
     let limit = DecompressLimit::new(ctx.max_download_size);
 
     for (i, layer) in manifest.layers.iter().enumerate() {
         check_interrupted()?;
 
-        let temp_path = staging_dir.join(format!(".layer-{i}.tmp"));
+        let temp_path = scratch.layer_path(i);
 
         let result = (|| -> Result<()> {
             eprintln!(
@@ -1381,6 +1470,433 @@ mod tests {
 
         assert!(msg.contains("failed to fetch required image config sha256:abc"));
         assert!(msg.contains("timeout: resolve"));
+    }
+
+    #[test]
+    fn test_download_blob_rejects_malformed_digest() {
+        let tmp = std::env::temp_dir().join(format!(
+            "sdme-test-blob-digest-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        let cfg = crate::config::Config {
+            oci_cache_max_size: "0".to_string(),
+            ..crate::config::Config::default()
+        };
+        let cache = crate::oci::cache::BlobCache::from_config(&cfg).unwrap();
+        let agent = build_http_agent(false, 5, 5).unwrap();
+        let ctx = PullContext {
+            agent: &agent,
+            token: None,
+            cache: &cache,
+            verbose: false,
+            max_download_size: 0,
+        };
+        let dest = tmp.join("dest.blob");
+
+        let sentinel = tmp.join("sentinel");
+        fs::write(&sentinel, b"untouched").unwrap();
+        let abs_digest = format!("sha256:{}", sentinel.display());
+
+        for bad in [
+            abs_digest.as_str(),
+            "sha256:../escape",
+            "sha256:abcd",
+            "sha512:aaaaaaaa",
+        ] {
+            let err = download_blob(&DownloadBlobOptions {
+                ctx: &ctx,
+                registry: "127.0.0.1:1",
+                repository: "test/img",
+                digest: bad,
+                dest: &dest,
+            })
+            .unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("malformed or unsupported layer digest"),
+                "unexpected error for {bad}: {err}"
+            );
+            assert!(!dest.exists(), "dest created for digest {bad}");
+        }
+        assert_eq!(fs::read(&sentinel).unwrap(), b"untouched");
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// Build a gzipped tar layer with regular files and symlinks.
+    fn build_layer_gz(files: &[(&str, &[u8])], symlinks: &[(&str, &str)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        {
+            let encoder = flate2::write::GzEncoder::new(&mut out, flate2::Compression::default());
+            let mut builder = tar::Builder::new(encoder);
+            for (path, content) in files {
+                let mut header = tar::Header::new_ustar();
+                header.set_path(path).unwrap();
+                header.set_size(content.len() as u64);
+                header.set_mode(0o644);
+                header.set_uid(unsafe { libc::getuid() } as u64);
+                header.set_gid(unsafe { libc::getgid() } as u64);
+                header.set_cksum();
+                builder.append(&header, *content).unwrap();
+            }
+            for (path, target) in symlinks {
+                let mut header = tar::Header::new_ustar();
+                header.set_path(path).unwrap();
+                header.set_entry_type(tar::EntryType::Symlink);
+                header.set_link_name(target).unwrap();
+                header.set_size(0);
+                header.set_mode(0o777);
+                header.set_uid(unsafe { libc::getuid() } as u64);
+                header.set_gid(unsafe { libc::getgid() } as u64);
+                header.set_cksum();
+                builder.append(&header, &b""[..]).unwrap();
+            }
+            let encoder = builder.into_inner().unwrap();
+            encoder.finish().unwrap();
+        }
+        out
+    }
+
+    fn sha256_hex(data: &[u8]) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(data);
+        format!("{:x}", hasher.finalize())
+    }
+
+    struct LayerFixture {
+        _tmp: crate::testutil::TempDataDir,
+        staging: PathBuf,
+        sentinel: PathBuf,
+        cache: crate::oci::cache::BlobCache,
+        image: ImageReference,
+        manifest: ImageManifest,
+    }
+
+    /// Two valid SHA-256-addressed layers where the first plants a symlink at
+    /// the second download's legacy pathname (`staging/.layer-1.tmp`).
+    fn layer_symlink_fixture(test: &str, layer2: Vec<u8>, cache_layer2: bool) -> LayerFixture {
+        let tmp = crate::testutil::TempDataDir::new(test);
+        let staging = tmp.path().join("staging");
+        let sentinel = tmp.path().join("host-sentinel");
+        fs::write(&sentinel, b"host data").unwrap();
+
+        let layer1 = build_layer_gz(
+            &[("base.txt", b"base\n")],
+            &[(".layer-1.tmp", sentinel.to_str().unwrap())],
+        );
+        let d1 = format!("sha256:{}", sha256_hex(&layer1));
+        let d2 = format!("sha256:{}", sha256_hex(&layer2));
+
+        let cache_dir = tmp.path().join("cache");
+        let cfg = crate::config::Config {
+            oci_cache_dir: cache_dir.to_string_lossy().into_owned(),
+            oci_cache_max_size: "1G".to_string(),
+            ..crate::config::Config::default()
+        };
+        let cache = crate::oci::cache::BlobCache::from_config(&cfg).unwrap();
+        let blob1 = tmp.path().join("blob1");
+        fs::write(&blob1, &layer1).unwrap();
+        cache.put(&d1, &blob1, false).unwrap();
+        if cache_layer2 {
+            let blob2 = tmp.path().join("blob2");
+            fs::write(&blob2, &layer2).unwrap();
+            cache.put(&d2, &blob2, false).unwrap();
+        }
+
+        let image = ImageReference {
+            registry: "127.0.0.1:1".to_string(),
+            repository: "test/img".to_string(),
+            reference: "latest".to_string(),
+        };
+        let manifest: ImageManifest = serde_json::from_value(serde_json::json!({
+            "layers": [
+                {"digest": d1, "size": layer1.len()},
+                {"digest": d2, "size": layer2.len()},
+            ]
+        }))
+        .unwrap();
+
+        LayerFixture {
+            _tmp: tmp,
+            staging,
+            sentinel,
+            cache,
+            image,
+            manifest,
+        }
+    }
+
+    /// Any leftover scratch dir next to the staging tree, by name prefix.
+    fn leftover_scratch(staging: &Path) -> Vec<PathBuf> {
+        let prefix = format!(
+            ".{}.layers-",
+            staging.file_name().unwrap().to_string_lossy()
+        );
+        fs::read_dir(staging.parent().unwrap())
+            .unwrap()
+            .filter_map(|e| {
+                let e = e.ok()?;
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with(&prefix)
+                    .then(|| e.path())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_download_layers_cached_symlink_cannot_redirect_download() {
+        let _lock = crate::import::tests::INTERRUPT_LOCK.lock().unwrap();
+        let fx = layer_symlink_fixture(
+            "layers-cached",
+            build_layer_gz(&[("app.txt", b"layer two\n")], &[]),
+            true,
+        );
+        let agent = build_http_agent(false, 5, 5).unwrap();
+        let ctx = PullContext {
+            agent: &agent,
+            token: None,
+            cache: &fx.cache,
+            verbose: false,
+            max_download_size: 0,
+        };
+
+        download_layers(&ctx, &fx.image, &fx.manifest, &fx.staging).unwrap();
+
+        // The outside file the planted symlink points at is untouched.
+        assert_eq!(fs::read(&fx.sentinel).unwrap(), b"host data");
+        // Both layers extracted the expected content.
+        assert_eq!(fs::read(fx.staging.join("base.txt")).unwrap(), b"base\n");
+        assert_eq!(
+            fs::read(fx.staging.join("app.txt")).unwrap(),
+            b"layer two\n"
+        );
+        // The planted symlink remains inert image content.
+        assert!(fx
+            .staging
+            .join(".layer-1.tmp")
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        // No download scratch is left behind, inside or outside the tree.
+        assert!(leftover_scratch(&fx.staging).is_empty());
+        assert!(!fx.staging.join(".layer-0.tmp").exists());
+        assert!(!fx.staging.join("layer-0.tmp").exists());
+    }
+
+    #[test]
+    fn test_download_layers_network_failure_removes_scratch() {
+        let _lock = crate::import::tests::INTERRUPT_LOCK.lock().unwrap();
+        // Layer 2 is valid-format but absent from the cache, and the
+        // registry address is a closed loopback port: the download fails.
+        let fx = layer_symlink_fixture(
+            "layers-netfail",
+            build_layer_gz(&[("app.txt", b"layer two\n")], &[]),
+            false,
+        );
+        let agent = build_http_agent(false, 5, 5).unwrap();
+        let ctx = PullContext {
+            agent: &agent,
+            token: None,
+            cache: &fx.cache,
+            verbose: false,
+            max_download_size: 0,
+        };
+
+        let scratch = leftover_scratch(&fx.staging);
+        download_layers(&ctx, &fx.image, &fx.manifest, &fx.staging).unwrap_err();
+
+        assert!(
+            leftover_scratch(&fx.staging).is_empty(),
+            "scratch dir left behind after failure: {scratch:?}"
+        );
+        assert_eq!(fs::read(&fx.sentinel).unwrap(), b"host data");
+    }
+
+    #[test]
+    fn test_download_layers_extract_failure_removes_scratch() {
+        let _lock = crate::import::tests::INTERRUPT_LOCK.lock().unwrap();
+        // Layer 2 is cached but is not a readable tar stream.
+        let fx = layer_symlink_fixture("layers-badtar", b"not a tar archive".to_vec(), true);
+        let agent = build_http_agent(false, 5, 5).unwrap();
+        let ctx = PullContext {
+            agent: &agent,
+            token: None,
+            cache: &fx.cache,
+            verbose: false,
+            max_download_size: 0,
+        };
+
+        let scratch = leftover_scratch(&fx.staging);
+        download_layers(&ctx, &fx.image, &fx.manifest, &fx.staging).unwrap_err();
+
+        assert!(
+            leftover_scratch(&fx.staging).is_empty(),
+            "scratch dir left behind after failure: {scratch:?}"
+        );
+        assert_eq!(fs::read(&fx.sentinel).unwrap(), b"host data");
+    }
+
+    #[test]
+    fn test_create_fresh_dir_retries_past_existing_entries() {
+        let tmp = crate::testutil::TempDataDir::new("fresh-dir-retry");
+        let parent = tmp.path().join("parent");
+        fs::create_dir_all(&parent).unwrap();
+        let outside = tmp.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+
+        // base-0 is a symlink to an outside directory; base-1 is a real
+        // directory holding a hostile preplanted layer file.
+        std::os::unix::fs::symlink(&outside, parent.join("base-0")).unwrap();
+        fs::create_dir_all(parent.join("base-1")).unwrap();
+        std::os::unix::fs::symlink(&outside, parent.join("base-1/layer-0.tmp")).unwrap();
+
+        let dir = create_fresh_dir(&parent, "base").unwrap();
+        assert_eq!(dir, parent.join("base-2"));
+        let md = dir.symlink_metadata().unwrap();
+        assert!(md.is_dir() && !md.file_type().is_symlink());
+        assert_eq!(mode_of_dir(&dir), 0o700);
+
+        // Preplanted entries and the outside directory are untouched.
+        assert!(fs::read_dir(&outside).unwrap().next().is_none());
+        assert!(parent.join("base-1/layer-0.tmp").symlink_metadata().is_ok());
+
+        // A second allocation gets the next free suffix.
+        let dir2 = create_fresh_dir(&parent, "base").unwrap();
+        assert_eq!(dir2, parent.join("base-3"));
+    }
+
+    fn mode_of_dir(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(path).unwrap().permissions().mode() & 0o7777
+    }
+
+    #[test]
+    fn test_layer_scratch_never_reuses_preplanted_path() {
+        let tmp = crate::testutil::TempDataDir::new("scratch-preplant");
+        let staging = tmp.path().join("staging");
+        fs::create_dir_all(&staging).unwrap();
+        let outside = tmp.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+
+        // Preplant the legacy predictable scratch name as a symlink to an
+        // outside directory. Allocation must not reuse or follow it.
+        let preplanted = tmp
+            .path()
+            .join(format!(".staging.layers-{}", std::process::id()));
+        std::os::unix::fs::symlink(&outside, &preplanted).unwrap();
+
+        let scratch = LayerScratch::new(&staging).unwrap();
+        let scratch_dir = scratch.dir.clone();
+        assert_ne!(scratch_dir, preplanted);
+        let md = scratch_dir.symlink_metadata().unwrap();
+        assert!(md.is_dir() && !md.file_type().is_symlink());
+        assert!(
+            fs::read_dir(&outside).unwrap().next().is_none(),
+            "scratch allocation reached through the preplanted symlink"
+        );
+        // The preplanted symlink is left in place.
+        assert!(preplanted
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink());
+
+        drop(scratch);
+        assert!(!scratch_dir.exists(), "scratch dir not removed on drop");
+    }
+
+    #[test]
+    fn test_layer_scratch_rejects_detached_staging() {
+        let tmp = crate::testutil::TempDataDir::new("scratch-detached");
+        // The real staging tree lives in a different subtree; the path we
+        // are handed reaches it through a symlink.
+        let elsewhere = tmp.path().join("elsewhere");
+        fs::create_dir_all(elsewhere.join("staging")).unwrap();
+        let link = tmp.path().join("staging-link");
+        std::os::unix::fs::symlink(elsewhere.join("staging"), &link).unwrap();
+
+        assert!(
+            LayerScratch::new(&link).is_err(),
+            "scratch allocated for a staging path that is itself a symlink"
+        );
+        // Nothing was created in either location.
+        assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 1);
+        assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn test_layer_scratch_single_component_relative_staging() {
+        // A bare relative staging name has parent Some(""), which must be
+        // treated as "." rather than failing to canonicalize. Uses a unique
+        // directory in the process cwd instead of chdir (process-global).
+        let name = format!(
+            "sdme-test-rel-staging-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        );
+        let cwd = std::env::current_dir().unwrap();
+        let staging_abs = cwd.join(&name);
+        let _ = fs::remove_dir_all(&staging_abs);
+        fs::create_dir_all(&staging_abs).unwrap();
+
+        let scratch = LayerScratch::new(Path::new(&name)).unwrap();
+        let scratch_dir = scratch.dir.clone();
+        assert!(scratch_dir.is_absolute());
+        assert_eq!(scratch_dir.parent(), Some(cwd.as_path()));
+        assert!(scratch_dir.is_dir());
+
+        drop(scratch);
+        assert!(!scratch_dir.exists());
+        fs::remove_dir_all(&staging_abs).unwrap();
+    }
+
+    #[test]
+    fn test_layer_scratch_repeated_and_concurrent_allocations_are_distinct() {
+        let tmp = crate::testutil::TempDataDir::new("scratch-concurrent");
+        let staging = tmp.path().join("staging");
+        fs::create_dir_all(&staging).unwrap();
+
+        // Repeated allocations while previous ones are still alive.
+        let a = LayerScratch::new(&staging).unwrap();
+        let b = LayerScratch::new(&staging).unwrap();
+        assert_ne!(a.dir, b.dir);
+        assert!(a.dir.is_dir() && b.dir.is_dir());
+
+        // Concurrent allocations from multiple threads. The scratches are
+        // kept alive until after the join so the allocations overlap.
+        let scratches: Vec<LayerScratch> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..4)
+                .map(|_| {
+                    s.spawn(|| {
+                        (0..4)
+                            .map(|_| LayerScratch::new(&staging).unwrap())
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|h| h.join().unwrap())
+                .collect()
+        });
+        let dirs: Vec<&PathBuf> = scratches.iter().map(|s| &s.dir).collect();
+        let unique: std::collections::HashSet<_> = dirs.iter().collect();
+        assert_eq!(unique.len(), 16, "concurrent scratch dirs collide");
+        assert!(!unique.contains(&&a.dir) && !unique.contains(&&b.dir));
+        for d in &dirs {
+            assert!(d.is_dir(), "scratch dir missing: {}", d.display());
+        }
+
+        drop(scratches);
+        drop(a);
+        drop(b);
+        assert!(leftover_scratch(&staging).is_empty());
     }
 
     #[test]
