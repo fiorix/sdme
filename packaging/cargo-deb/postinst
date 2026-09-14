@@ -1,4 +1,5 @@
 #!/bin/sh
+# Consumed by cargo-deb via maintainer-scripts in Cargo.toml.
 set -e
 
 # Load the sdme AppArmor profile if AppArmor is available.

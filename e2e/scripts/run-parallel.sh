@@ -14,7 +14,7 @@ set -uo pipefail
 #   3. Destructive: verify-tutorial.sh (batch ops affect all containers)
 #
 # Usage:
-#   sudo ./test/scripts/run-parallel.sh [OPTIONS]
+#   sudo ./e2e/scripts/run-parallel.sh [OPTIONS]
 
 source "$(dirname "$0")/lib.sh"
 

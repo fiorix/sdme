@@ -7,7 +7,7 @@ set -uo pipefail
 # This is the gate test: if smoke fails, all other tests should be skipped.
 #
 # Usage:
-#   sudo ./test/scripts/smoke.sh [--base-fs NAME] [--report-dir DIR]
+#   sudo ./e2e/scripts/smoke.sh [--base-fs NAME] [--report-dir DIR]
 
 source "$(dirname "$0")/lib.sh"
 

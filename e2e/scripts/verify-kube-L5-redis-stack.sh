@@ -20,7 +20,7 @@ DATADIR="/var/lib/sdme"
 REPORT_DIR="."
 
 POD_NAME="vfy-kube-redis"
-YAML_FILE="test/kube/redis-pod.yaml"
+YAML_FILE="e2e/kube/redis-pod.yaml"
 
 # Timeouts (seconds)
 TIMEOUT_CREATE=$(scale_timeout 600)

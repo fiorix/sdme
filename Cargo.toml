@@ -60,7 +60,7 @@ depends = "systemd (>= 255), systemd-container"
 suggests = "qemu-utils, apparmor"
 section = "admin"
 priority = "optional"
-maintainer-scripts = "packaging/deb"
+maintainer-scripts = "packaging/cargo-deb"
 assets = [
     ["target/release/sdme", "usr/bin/", "755"],
     ["packaging/out/completions/sdme.bash", "usr/share/bash-completion/completions/sdme", "644"],

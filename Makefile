@@ -45,16 +45,16 @@ clean:
 	rm -rf packaging/out
 
 e2e:
-	sudo test/scripts/run-parallel.sh
+	sudo e2e/scripts/run-parallel.sh
 
 e2e-quick:
-	sudo test/scripts/run-parallel.sh --only verify-export \
+	sudo e2e/scripts/run-parallel.sh --only verify-export \
 		--only verify-build --only verify-interrupt
 
 e2e-smoke:
-	sudo test/scripts/smoke.sh
+	sudo e2e/scripts/smoke.sh
 
 e2e-preflight:
-	sudo test/scripts/preflight.sh
+	sudo e2e/scripts/preflight.sh
 
 .PHONY: all install install-extras install-completions uninstall uninstall-completions deb rpm pkg clean e2e e2e-quick e2e-smoke e2e-preflight

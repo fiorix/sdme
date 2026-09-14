@@ -157,7 +157,7 @@ When changing sdme itself, start from the existing docs and source map instead o
 - `docs/architecture.md`: main design and implementation map.
 - `docs/security.md`: security model and hardening trade-offs.
 - `docs/tutorial/*.md`: user workflows and examples.
-- `test/README.md`: live and end-to-end validation notes.
+- `e2e/README.md`: live and end-to-end validation notes.
 - `Cargo.toml`: crate metadata, binaries, features, and dependencies.
 
 Find code by responsibility:

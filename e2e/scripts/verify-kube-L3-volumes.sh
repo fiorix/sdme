@@ -277,11 +277,11 @@ test_create_secret_pod() {
     local yaml_file
     yaml_file=$(dirname "$0")/../kube/secret-pod.yaml
     if [[ ! -f "$yaml_file" ]]; then
-        record "$test_name" FAIL "test/kube/secret-pod.yaml not found"
+        record "$test_name" FAIL "e2e/kube/secret-pod.yaml not found"
         return
     fi
 
-    echo "--- $test_name: creating pod from test/kube/secret-pod.yaml ---"
+    echo "--- $test_name: creating pod from e2e/kube/secret-pod.yaml ---"
     local output
     if output=$(timeout "$TIMEOUT_CREATE" "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" $KFLAG -v 2>&1); then
         record "$test_name" PASS
@@ -404,11 +404,11 @@ test_create_configmap_pod() {
     local yaml_file
     yaml_file=$(dirname "$0")/../kube/configmap-pod.yaml
     if [[ ! -f "$yaml_file" ]]; then
-        record "$test_name" FAIL "test/kube/configmap-pod.yaml not found"
+        record "$test_name" FAIL "e2e/kube/configmap-pod.yaml not found"
         return
     fi
 
-    echo "--- $test_name: creating pod from test/kube/configmap-pod.yaml ---"
+    echo "--- $test_name: creating pod from e2e/kube/configmap-pod.yaml ---"
     local output
     if output=$(timeout "$TIMEOUT_CREATE" "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" $KFLAG -v 2>&1); then
         record "$test_name" PASS
@@ -649,11 +649,11 @@ test_create_pvc_pod() {
     local yaml_file
     yaml_file=$(dirname "$0")/../kube/pvc-pod.yaml
     if [[ ! -f "$yaml_file" ]]; then
-        record "$test_name" FAIL "test/kube/pvc-pod.yaml not found"
+        record "$test_name" FAIL "e2e/kube/pvc-pod.yaml not found"
         return
     fi
 
-    echo "--- $test_name: creating pod from test/kube/pvc-pod.yaml ---"
+    echo "--- $test_name: creating pod from e2e/kube/pvc-pod.yaml ---"
     local output
     if output=$(timeout "$TIMEOUT_CREATE" "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" $KFLAG -v 2>&1); then
         record "$test_name" PASS

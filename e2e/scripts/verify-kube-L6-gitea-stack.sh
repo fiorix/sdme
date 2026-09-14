@@ -19,7 +19,7 @@ DATADIR="/var/lib/sdme"
 REPORT_DIR="."
 
 POD_NAME="gitea-pod"
-YAML_FILE="test/kube/gitea-stack.yaml"
+YAML_FILE="e2e/kube/gitea-stack.yaml"
 
 # Timeouts (seconds)
 TIMEOUT_CREATE=$(scale_timeout 600)
@@ -51,6 +51,9 @@ test_create_pod() {
     local test_name="create/kube"
     echo "--- $test_name: creating kube pod ---"
 
+    if [[ ! -f "$YAML_FILE" ]]; then
+        YAML_FILE="$(dirname "$0")/../kube/gitea-stack.yaml"
+    fi
     if [[ ! -f "$YAML_FILE" ]]; then
         record "$test_name" FAIL "YAML file not found: $YAML_FILE"
         return

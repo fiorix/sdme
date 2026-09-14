@@ -1,4 +1,8 @@
 #!/bin/sh
+# Consumed by debhelper. dh_installdeb substitutes its token globally, every
+# occurrence on every line (Dh_Lib.pm applies the substitution with /g), so the
+# token is spelled exactly once, at the end of this file. Spelling it anywhere
+# else, a comment included, would inject the generated snippets twice.
 set -e
 
 # Load the sdme AppArmor profile if AppArmor is available.

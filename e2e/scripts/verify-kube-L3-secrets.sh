@@ -160,7 +160,7 @@ test_secret_duplicate() {
 
 # --- Pod with secret volumes (from K8s docs) ---------------------------------
 
-# Uses test/kube/secret-pod.yaml which is based on the K8s documentation:
+# Uses e2e/kube/secret-pod.yaml which is based on the K8s documentation:
 # - pods/inject/secret-pod.yaml (all keys mounted at /etc/secret-volume)
 # - projected keys example (key "username" projected to "my-group/my-username")
 # - defaultMode example (0400 permissions)
@@ -174,11 +174,11 @@ test_create_pod() {
     local yaml_file
     yaml_file=$(dirname "$0")/../kube/secret-pod.yaml
     if [[ ! -f "$yaml_file" ]]; then
-        record "$test_name" FAIL "test/kube/secret-pod.yaml not found"
+        record "$test_name" FAIL "e2e/kube/secret-pod.yaml not found"
         return
     fi
 
-    echo "--- $test_name: creating pod from test/kube/secret-pod.yaml ---"
+    echo "--- $test_name: creating pod from e2e/kube/secret-pod.yaml ---"
     local output
     if output=$(timeout "$TIMEOUT_CREATE" "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" $KFLAG -v 2>&1); then
         record "$test_name" PASS

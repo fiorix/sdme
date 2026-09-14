@@ -22,8 +22,8 @@ make e2e-quick          # export + build + interrupt tests only
 Individual scripts are self-contained and can be run standalone:
 
 ```bash
-sudo ./test/scripts/verify-export.sh
-sudo ./test/scripts/verify-kube-L1-basic.sh --base-fs ubuntu
+sudo ./e2e/scripts/verify-export.sh
+sudo ./e2e/scripts/verify-kube-L1-basic.sh --base-fs ubuntu
 ```
 
 Options accepted by all scripts: `--report-dir DIR`, `--help`. Set `VERBOSE=1` for detailed output on any script.
@@ -91,7 +91,7 @@ verify-nested.sh             sdme-in-sdme: nested btrfs state ops, storage
 Set `KUBE_STORAGE=btrfs` to run all kube suites against the btrfs storage backend instead of the default overlayfs:
 
 ```bash
-sudo env KUBE_STORAGE=btrfs ./test/scripts/verify-kube-L1-basic.sh
+sudo env KUBE_STORAGE=btrfs ./e2e/scripts/verify-kube-L1-basic.sh
 sudo env KUBE_STORAGE=btrfs make e2e
 ```
 
@@ -262,7 +262,7 @@ Test fixes:
   `INTERRUPTED` flag aborted its import. Routed through the shared helper.
   Verified across 52 consecutive full-suite runs.
 
-A dead cleanup loop in `test/scripts/lib.sh` globbed
+A dead cleanup loop in `e2e/scripts/lib.sh` globbed
 `/run/systemd/nspawn/unix-export/<prefix>*` with the path components inverted,
 so it never matched. It was an earlier attempt at the leak above and has been
 removed now that the product reclaims the state.

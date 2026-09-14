@@ -23,7 +23,7 @@ The probe binary (`sdme-kube-probe`) is built and embedded by `build.rs`. Overri
 
 ### E2E Tests
 
-Staged parallel test suite in `test/scripts/`. Run with `sudo ./test/scripts/run-parallel.sh`. Covers core operations, distro boot/OCI, networking, security, pods, and Kubernetes L1-L6. Tested distros: Debian, Ubuntu, Fedora, CentOS, AlmaLinux, Arch Linux, openSUSE, NixOS. E2E tests must pass before version bumps. When adding new functionality, add E2E tests and verify they pass across supported distros. Record test results in [`test/README.md`](test/README.md).
+Staged parallel test suite in `e2e/scripts/`. Run with `sudo ./e2e/scripts/run-parallel.sh`. Covers core operations, distro boot/OCI, networking, security, pods, and Kubernetes L1-L6. Tested distros: Debian, Ubuntu, Fedora, CentOS, AlmaLinux, Arch Linux, openSUSE, NixOS. E2E tests must pass before version bumps. When adding new functionality, add E2E tests and verify they pass across supported distros. Record test results in [`e2e/README.md`](e2e/README.md).
 
 ### Release
 
@@ -84,4 +84,4 @@ These rules apply when adding or modifying code, on top of the Project Principle
 - **Architecture and design**: [`docs/architecture.md`](docs/architecture.md)
 - **Security model**: [`docs/security.md`](docs/security.md)
 - **CLI reference**: `sdme --help` and subcommand `--help` (`*_HELP` constants in `src/main.rs`)
-- **Tutorials**: [`docs/tutorial/`](docs/tutorial/) (kept in sync with E2E tests in `test/scripts/`)
+- **Tutorials**: [`docs/tutorial/`](docs/tutorial/) (kept in sync with E2E tests in `e2e/scripts/`)

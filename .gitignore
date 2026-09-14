@@ -2,7 +2,7 @@
 /dev/
 /.Drafts/
 /packaging/out/
-/test/reports/
+/e2e/reports/
 /test-reports/
 /verify-*.md
 /site/public/

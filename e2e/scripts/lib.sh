@@ -127,7 +127,7 @@ kube_container_merged() {
     fi
 }
 
-# Resolve the repo root (two levels up from test/scripts/).
+# Resolve the repo root (two levels up from e2e/scripts/).
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 # Result counters.

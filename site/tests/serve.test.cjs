@@ -15,7 +15,7 @@ test('live preview regenerates canonical Markdown and serves relative assets', {
     cpSync(join(root, entry), join(temporary, entry), { recursive: true });
   }
   symlinkSync(join(root, 'site/node_modules'), join(temporary, 'site/node_modules'), 'dir');
-  symlinkSync(join(root, 'test'), join(temporary, 'test'), 'dir');
+  symlinkSync(join(root, 'e2e'), join(temporary, 'e2e'), 'dir');
   const reserve = createServer();
   reserve.listen(0, '127.0.0.1');
   await once(reserve, 'listening');

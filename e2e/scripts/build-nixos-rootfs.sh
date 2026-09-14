@@ -23,7 +23,7 @@ Usage: $(basename "$0") <rootfs-name> [OPTIONS]
 Build a NixOS rootfs from docker.io/nixos/nix and import it via sdme.
 
 Options:
-  --nix-file FILE   Path to .nix expression (default: test/nix/sdme-nixos.nix)
+  --nix-file FILE   Path to .nix expression (default: e2e/nix/sdme-nixos.nix)
   --channel CHAN     Nixpkgs channel (default: nixos-unstable)
   -v, --verbose     Verbose output
   --help            Show help

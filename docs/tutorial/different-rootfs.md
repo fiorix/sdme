@@ -112,7 +112,7 @@ sudo sdme fs import registry.opensuse.org/opensuse/tumbleweed --name opensuse
 
 ### NixOS
 
-NixOS requires a separate build process. See the [build script](../../test/scripts/build-nixos-rootfs.sh) and [nix expression](../../test/nix/sdme-nixos.nix) in the repository for an example.
+NixOS requires a separate build process. See the [build script](../../e2e/scripts/build-nixos-rootfs.sh) and [nix expression](../../e2e/nix/sdme-nixos.nix) in the repository for an example.
 
 ### Cloud images
 

@@ -8,7 +8,7 @@ set -euo pipefail
 # pass, 1 otherwise. Writes a gate file for the runner.
 #
 # Usage:
-#   sudo ./test/scripts/preflight.sh
+#   sudo ./e2e/scripts/preflight.sh
 
 source "$(dirname "$0")/lib.sh"
 
