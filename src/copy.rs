@@ -17,9 +17,6 @@ use crate::check_interrupted;
 
 mod contained;
 pub(crate) use contained::copy_contained;
-// Keep the shared compatibility entry points available to copy callers.
-#[allow(unused_imports)]
-pub(crate) use contained::{copy_entry_shadowed, copy_tree_shadowed};
 
 /// Maps `(st_dev, st_ino)` to the first destination path for hard link preservation.
 pub(crate) type HardLinkMap = HashMap<(u64, u64), PathBuf>;
@@ -631,7 +628,7 @@ mod tests {
     }
 
     #[test]
-    fn test_copy_tree_shadowed_merges_and_shadows_nested() {
+    fn test_copy_contained_merges_and_shadows_nested() {
         // Merges into an existing real directory and shadows a nested symlink
         // child (an absolute symlink that must never be followed), while a plain
         // copy_tree would follow it and write through onto the escape target.
@@ -646,7 +643,7 @@ mod tests {
         fs::write(src.join("sub/link"), "real").unwrap(); // collides with the symlink
         fs::write(src.join("new"), "added").unwrap();
 
-        copy_tree_shadowed(&src, &dst, false).unwrap();
+        copy_contained(&dst, Path::new(""), &src).unwrap();
 
         // The colliding entry is now a real file in dst, not a followed symlink.
         let landed = dst.join("sub/link");
@@ -661,7 +658,7 @@ mod tests {
     }
 
     #[test]
-    fn test_copy_tree_shadowed_symlink_dir_ancestor() {
+    fn test_copy_contained_shadows_nested_directory_symlink() {
         // A nested directory child that exists as a symlink in the destination
         // is shadowed (replaced by a real dir) before descending, so files
         // written beneath it stay inside dst.
@@ -676,7 +673,7 @@ mod tests {
         fs::create_dir_all(src.join("d")).unwrap();
         fs::write(src.join("d/f"), "x").unwrap();
 
-        copy_tree_shadowed(&src, &dst, false).unwrap();
+        copy_contained(&dst, Path::new(""), &src).unwrap();
 
         assert!(dst
             .join("d")
@@ -743,10 +740,10 @@ mod tests {
     }
 
     #[test]
-    fn test_copy_entry_shadowed_unlinks_hardlinked_destination() {
+    fn test_copy_contained_unlinks_hardlinked_destination() {
         // A destination file hardlinked to an outside file shares its inode:
         // truncating it in place would write the new content through the
-        // other link. Shadowed copies must unlink such a destination first.
+        // other link. Contained copies must replace the destination inode.
         let tmp = crate::testutil::TempDataDir::new("shadow-hl-dest");
         let src = tmp.path().join("source");
         let outside = tmp.path().join("outside");
@@ -756,7 +753,7 @@ mod tests {
         fs::write(&outside, b"outside original").unwrap();
         fs::hard_link(&outside, root.join("target")).unwrap();
 
-        copy_entry_shadowed(&src, &root.join("target"), false).unwrap();
+        copy_contained(&root, Path::new("target"), &src).unwrap();
 
         assert_eq!(fs::read(root.join("target")).unwrap(), b"replacement");
         assert_eq!(
@@ -974,7 +971,7 @@ mod tests {
     }
 
     #[test]
-    fn test_copy_tree_shadowed_hardlink_over_symlink() {
+    fn test_copy_contained_hardlink_over_symlink() {
         // Hard link preservation must not re-create a shadowed symlink: the
         // first copied name for an inode shadows the symlink, and the second
         // name links to the real file, regardless of read_dir order.
@@ -989,7 +986,7 @@ mod tests {
         fs::write(src.join("a"), "payload").unwrap();
         fs::hard_link(src.join("a"), src.join("b")).unwrap();
 
-        copy_tree_shadowed(&src, &dst, false).unwrap();
+        copy_contained(&dst, Path::new(""), &src).unwrap();
 
         assert!(dst
             .join("a")

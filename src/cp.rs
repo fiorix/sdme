@@ -480,13 +480,11 @@ fn resolve_destination(
                 } else {
                     None
                 };
-                // Take an EXCLUSIVE lock (which excludes a concurrent
-                // `sdme start`, itself a shared lock) and re-verify the
-                // container is still stopped under it. This closes a TOCTOU
-                // where a start between the is_active() check above and the
-                // write would make the destination tree live mid-copy,
-                // reopening a symlink-follow race that the guard below
-                // cannot close against a running container.
+                // Hold an exclusive lock (excluding the shared lock taken by
+                // `sdme start`) and re-verify that the container is stopped.
+                // This serializes stopped-container destination setup and
+                // copying with lifecycle operations. The contained copy engine
+                // also protects writes against mutation of a live destination.
                 let lock = lock::lock_exclusive(datadir, "containers", &name)
                     .with_context(|| format!("cannot lock container '{name}' for writing"))?;
                 if systemd::is_active(&name)? {
