@@ -685,9 +685,11 @@ fn warn_rootfs_in_use(datadir: &Path, rootfs_name: &str) {
 /// path is resolved beneath an fd pinning `write_dir` with O_NOFOLLOW, so no
 /// symlink present in, or swapped into, the destination tree is ever
 /// traversed, even under concurrent mutation (a running container's live
-/// root). A symlink ancestor is rejected, a symlink or multiply-linked leaf
-/// is unlinked and recreated, and real directories are merged into. Only
-/// host destinations skip it.
+/// root). A symlink ancestor is rejected, regular-file leaves are replaced
+/// with completed anonymous inodes, and real directories are merged into.
+/// Symlinks and special nodes require protected staging outside the write root
+/// on the same mount; unsupported copies fail explicitly. Only host
+/// destinations skip the contained engine.
 fn execute_copy(
     src_path: &Path,
     write_dir: &Path,
