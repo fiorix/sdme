@@ -15,6 +15,83 @@ use anyhow::{bail, Context, Result};
 
 use crate::{validate_name, State};
 
+/// Recovery backup paths for a rootfs replacement (forced import).
+///
+/// The names deliberately lack the `-txn-` marker, so neither the
+/// stale-transaction sweep nor `sdme fs gc` ever deletes them: while a
+/// replacement is in flight they hold the only copy of the pre-replacement
+/// state. They are never restored or deleted automatically after an
+/// interruption; [`ensure_no_interrupted_replacement`] fails closed and
+/// requires the operator to inspect both visible state and remaining artifacts.
+/// Cleanup after publication can leave an incomplete tree or only old sidecars.
+pub(crate) struct ReplaceRecover {
+    /// Parked old rootfs tree.
+    pub tree: std::path::PathBuf,
+    /// Parked old metadata sidecar.
+    pub meta: std::path::PathBuf,
+    /// Parked old environment sidecar.
+    pub env: std::path::PathBuf,
+}
+
+impl ReplaceRecover {
+    pub(crate) fn new(rootfs_dir: &Path, name: &str) -> Self {
+        Self {
+            tree: rootfs_dir.join(format!(".{name}.replace-recover")),
+            meta: rootfs_dir.join(format!(".{name}.meta.replace-recover")),
+            env: rootfs_dir.join(format!(".{name}.env.replace-recover")),
+        }
+    }
+}
+
+fn path_present(p: &Path) -> bool {
+    p.symlink_metadata().is_ok()
+}
+
+/// Refuse a mutation while replacement artifacts remain, preserving all state.
+///
+/// Must run under the exclusive fs lock for `name`. Existence cannot establish
+/// whether publication, rollback or cleanup was interrupted, or whether an old
+/// tree and its sidecars are complete. Recovery requires operator inspection.
+pub(crate) fn ensure_no_interrupted_replacement(rootfs_dir: &Path, name: &str) -> Result<()> {
+    let rec = ReplaceRecover::new(rootfs_dir, name);
+    let preserved: Vec<_> = [&rec.tree, &rec.meta, &rec.env]
+        .into_iter()
+        .filter(|path| path_present(path))
+        .collect();
+    if preserved.is_empty() {
+        return Ok(());
+    }
+
+    let mut listed = String::new();
+    for path in preserved {
+        listed.push_str(&format!("  {path:?}\n"));
+    }
+    let visible = [
+        rootfs_dir.join(name),
+        rootfs_dir.join(format!(".{name}.meta")),
+        rootfs_dir.join(format!(".{name}.env")),
+    ];
+    let mut current = String::new();
+    for path in visible {
+        current.push_str(&format!("  {path:?}\n"));
+    }
+    bail!(
+        "a previous forced import of fs '{name}' left unresolved replacement artifacts; \
+         publication, rollback or cleanup may have been interrupted. Refusing to proceed; \
+         visible state and remaining artifacts are preserved.\n\
+         Remaining artifacts (paths, not shell commands):\n{listed}\
+         Visible state paths (some may be absent):\n{current}\
+         Artifacts may be partial cleanup leftovers after successful publication: \
+         the old tree may be incomplete or absent while old sidecars remain. \
+         Their existence does not establish a complete rollback state.\n\
+         Before changing anything, inspect the visible tree, its metadata and environment, \
+         and all remaining artifacts while other operations on this fs are excluded. \
+         Verify which tree and sidecars form a complete matching state; do not replace \
+         a complete visible tree with a partial backup or mix old sidecars with new contents. \
+         Preserve the state needed for recovery, reconcile the artifacts manually, then retry."
+    )
+}
+
 /// An entry returned by [`list`].
 #[derive(serde::Serialize)]
 pub struct RootfsEntry {
@@ -238,7 +315,7 @@ pub fn import(datadir: &Path, opts: &crate::import::ImportOptions) -> Result<Str
 /// Remove an imported root filesystem.
 ///
 /// Validates the name, checks that no container references it, then removes
-/// the fs directory and its `.meta` sidecar.
+/// the fs directory and its `.meta` and `.env` sidecars.
 ///
 /// To prevent a TOCTOU race where `sdme create --fs <name>` could
 /// reference the rootfs between the usage check and the deletion, we
@@ -248,14 +325,19 @@ pub fn import(datadir: &Path, opts: &crate::import::ImportOptions) -> Result<Str
 pub fn remove(datadir: &Path, name: &str, auto_gc: bool, verbose: bool) -> Result<()> {
     validate_name(name)?;
 
-    let rootfs_path = datadir.join("fs").join(name);
-    if !rootfs_path.exists() {
-        bail!("fs not found: {name}");
-    }
-
     // Acquire exclusive lock to prevent removal while a build is using this rootfs.
     let _lock = crate::lock::lock_exclusive(datadir, "fs", name)
         .with_context(|| format!("cannot remove rootfs '{name}': in use"))?;
+
+    // Refuse if an earlier forced-import replacement was interrupted; the
+    // remaining artifacts may contain state needed for recovery.
+    let rootfs_dir = datadir.join("fs");
+    ensure_no_interrupted_replacement(&rootfs_dir, name)?;
+
+    let rootfs_path = rootfs_dir.join(name);
+    if !rootfs_path.exists() {
+        bail!("fs not found: {name}");
+    }
 
     // Check that no container is using this rootfs (first pass).
     check_rootfs_in_use(datadir, name)?;
@@ -263,7 +345,6 @@ pub fn remove(datadir: &Path, name: &str, auto_gc: bool, verbose: bool) -> Resul
     // Atomically rename the fs entry to a staging name so that any concurrent
     // `sdme create --fs <name>` will fail with "fs not found" instead
     // of creating a container with a dangling reference.
-    let rootfs_dir = datadir.join("fs");
     let mut txn = crate::txn::Txn::new(
         &rootfs_dir,
         name,
@@ -296,11 +377,21 @@ pub fn remove(datadir: &Path, name: &str, auto_gc: bool, verbose: bool) -> Resul
     txn.done();
 
     // Drop any cached btrfs base subvolume for this rootfs so it is not reused
-    // by a future container (best-effort; overlay-only hosts have no pool).
-    let _ = crate::storage::btrfs::invalidate_base(datadir, name, verbose);
+    // by a future container. The tree is already gone, so a failure here only
+    // leaves a stale cache behind; warn so it is not silently reused to seed
+    // a future same-named rootfs's containers (overlay-only hosts have no
+    // pool, making this a no-op).
+    if let Err(e) = crate::storage::btrfs::invalidate_base(datadir, name, verbose) {
+        eprintln!(
+            "warning: failed to invalidate btrfs base for '{name}': {e}; \
+             a stale base subvolume may seed future containers"
+        );
+    }
 
     let meta_path = datadir.join("fs").join(format!(".{name}.meta"));
     let _ = fs::remove_file(meta_path);
+    let env_path = datadir.join("fs").join(format!(".{name}.env"));
+    let _ = fs::remove_file(env_path);
 
     if verbose {
         eprintln!("removed fs '{name}'");
@@ -309,7 +400,12 @@ pub fn remove(datadir: &Path, name: &str, auto_gc: bool, verbose: bool) -> Resul
     Ok(())
 }
 
-fn check_rootfs_in_use(datadir: &Path, name: &str) -> Result<()> {
+/// Bail if any container state file references rootfs `name`.
+///
+/// Used by `fs rm` and by forced `fs import` replacement, which applies the
+/// same policy: a referenced base is never removed or replaced, whether the
+/// container is running or stopped.
+pub(crate) fn check_rootfs_in_use(datadir: &Path, name: &str) -> Result<()> {
     let state_dir = datadir.join("state");
     if !state_dir.is_dir() {
         return Ok(());
@@ -558,6 +654,212 @@ mod tests {
         assert!(list(tmp.path()).unwrap().is_empty());
         assert!(!tmp.path().join("fs/alpha").exists());
         assert!(!tmp.path().join("fs/beta").exists());
+    }
+
+    // --- Interrupted replacement detection (fail closed) ---
+
+    /// Helper: a datadir with fs/base (marker v1) and its sidecars.
+    fn make_base() -> TempDataDir {
+        let tmp = tmp();
+        let fs_dir = tmp.path().join("fs");
+        fs::create_dir_all(fs_dir.join("base")).unwrap();
+        fs::write(fs_dir.join("base/marker"), "v1").unwrap();
+        fs::write(fs_dir.join(".base.meta"), "DISTRO=old\n").unwrap();
+        fs::write(fs_dir.join(".base.env"), "A=1\n").unwrap();
+        tmp
+    }
+
+    #[test]
+    fn test_ensure_no_interrupted_replacement_clean_state() {
+        let tmp = make_base();
+        ensure_no_interrupted_replacement(&tmp.path().join("fs"), "base").unwrap();
+    }
+
+    #[test]
+    fn test_interrupted_replacement_refuses_and_preserves() {
+        // A parked old tree (crash before or after the commit) fails the
+        // next operation closed: the error names the backup with recovery
+        // guidance, and nothing is moved or deleted.
+        let tmp = make_base();
+        let fs_dir = tmp.path().join("fs");
+        fs::rename(fs_dir.join("base"), fs_dir.join(".base.replace-recover")).unwrap();
+
+        let err = ensure_no_interrupted_replacement(&fs_dir, "base").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("interrupted"), "got: {msg}");
+        assert!(
+            msg.contains(".base.replace-recover"),
+            "guidance must name the backup: {msg}"
+        );
+        assert!(
+            msg.contains("inspect") && !msg.contains("rm -rf") && !msg.contains("  mv "),
+            "guidance must require inspection without destructive commands: {msg}"
+        );
+
+        assert_eq!(
+            fs::read_to_string(fs_dir.join(".base.replace-recover/marker")).unwrap(),
+            "v1",
+            "the backup must be preserved exactly"
+        );
+        assert!(!fs_dir.join("base").exists());
+    }
+
+    #[test]
+    fn test_interrupted_replacement_sidecar_backups_refuse_and_preserve() {
+        // Sidecar backups without the tree backup (a crash deep in
+        // publication, or a failed in-run rollback) also fail closed.
+        let tmp = make_base();
+        let fs_dir = tmp.path().join("fs");
+        fs::rename(
+            fs_dir.join(".base.meta"),
+            fs_dir.join(".base.meta.replace-recover"),
+        )
+        .unwrap();
+        fs::rename(
+            fs_dir.join(".base.env"),
+            fs_dir.join(".base.env.replace-recover"),
+        )
+        .unwrap();
+
+        let err = ensure_no_interrupted_replacement(&fs_dir, "base").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains(".base.meta.replace-recover"), "got: {msg}");
+        assert!(msg.contains(".base.env.replace-recover"), "got: {msg}");
+
+        assert_eq!(
+            fs::read_to_string(fs_dir.join(".base.meta.replace-recover")).unwrap(),
+            "DISTRO=old\n"
+        );
+        assert_eq!(
+            fs::read_to_string(fs_dir.join(".base.env.replace-recover")).unwrap(),
+            "A=1\n"
+        );
+        // The visible tree is untouched.
+        assert_eq!(
+            fs::read_to_string(fs_dir.join("base/marker")).unwrap(),
+            "v1"
+        );
+    }
+
+    fn assert_inspection_only(msg: &str) {
+        assert!(msg.contains("partial cleanup leftovers"), "got: {msg}");
+        assert!(msg.contains("inspect"), "got: {msg}");
+        assert!(
+            !msg.contains("Preserved pre-replacement state"),
+            "got: {msg}"
+        );
+        assert!(
+            !msg.contains("rm -rf") && !msg.contains("  mv "),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_recovery_partial_tree_cleanup_preserves_published_state() {
+        let tmp = make_base();
+        let fs_dir = tmp.path().join("fs");
+        let rec = ReplaceRecover::new(&fs_dir, "base");
+        fs::create_dir(&rec.tree).unwrap();
+        fs::write(rec.tree.join("remaining"), "old fragment").unwrap();
+        fs::write(&rec.meta, "DISTRO=old\n").unwrap();
+        fs::write(&rec.env, "OLD=1\n").unwrap();
+        // The rest of the old tree has already been removed after publication.
+        fs::write(fs_dir.join("base/marker"), "complete new tree").unwrap();
+        fs::write(fs_dir.join(".base.meta"), "DISTRO=new\n").unwrap();
+        fs::write(fs_dir.join(".base.env"), "NEW=1\n").unwrap();
+
+        let msg = format!(
+            "{:#}",
+            ensure_no_interrupted_replacement(&fs_dir, "base").unwrap_err()
+        );
+        assert_inspection_only(&msg);
+        assert_eq!(
+            fs::read(rec.tree.join("remaining")).unwrap(),
+            b"old fragment"
+        );
+        assert_eq!(fs::read(&rec.meta).unwrap(), b"DISTRO=old\n");
+        assert_eq!(fs::read(&rec.env).unwrap(), b"OLD=1\n");
+        assert_eq!(
+            fs::read(fs_dir.join("base/marker")).unwrap(),
+            b"complete new tree"
+        );
+        assert_eq!(
+            fs::read(fs_dir.join(".base.meta")).unwrap(),
+            b"DISTRO=new\n"
+        );
+        assert_eq!(fs::read(fs_dir.join(".base.env")).unwrap(), b"NEW=1\n");
+    }
+
+    #[test]
+    fn test_recovery_sidecar_cleanup_leftovers_with_quoted_datadir() {
+        let tmp = crate::testutil::TempDataDir::new("recovery-quotes");
+        let fs_dir = tmp.path().join("data dir's \"quoted\"/fs");
+        fs::create_dir_all(fs_dir.join("base")).unwrap();
+        fs::write(fs_dir.join("base/marker"), "new tree").unwrap();
+        fs::write(fs_dir.join(".base.meta"), "DISTRO=new\n").unwrap();
+        fs::write(fs_dir.join(".base.env"), "NEW=1\n").unwrap();
+        let rec = ReplaceRecover::new(&fs_dir, "base");
+        fs::write(&rec.meta, "DISTRO=old\n").unwrap();
+        fs::write(&rec.env, "OLD=1\n").unwrap();
+
+        let msg = format!(
+            "{:#}",
+            ensure_no_interrupted_replacement(&fs_dir, "base").unwrap_err()
+        );
+        assert_inspection_only(&msg);
+        assert!(msg.contains(&format!("{:?}", rec.meta)), "got: {msg}");
+        assert!(
+            msg.contains(&format!("{:?}", fs_dir.join("base"))),
+            "got: {msg}"
+        );
+        assert!(!rec.tree.exists());
+        assert_eq!(fs::read(&rec.meta).unwrap(), b"DISTRO=old\n");
+        assert_eq!(fs::read(&rec.env).unwrap(), b"OLD=1\n");
+        assert_eq!(fs::read(fs_dir.join("base/marker")).unwrap(), b"new tree");
+        assert_eq!(
+            fs::read(fs_dir.join(".base.meta")).unwrap(),
+            b"DISTRO=new\n"
+        );
+        assert_eq!(fs::read(fs_dir.join(".base.env")).unwrap(), b"NEW=1\n");
+    }
+
+    #[test]
+    fn test_remove_refuses_interrupted_replacement() {
+        // fs rm also fails closed rather than deleting a rootfs whose
+        // replacement state is unresolved.
+        let tmp = make_base();
+        let fs_dir = tmp.path().join("fs");
+        fs::rename(
+            fs_dir.join(".base.meta"),
+            fs_dir.join(".base.meta.replace-recover"),
+        )
+        .unwrap();
+
+        let err = remove(tmp.path(), "base", true, false).unwrap_err();
+        assert!(format!("{err:#}").contains("interrupted"), "got: {err:#}");
+        assert!(fs_dir.join("base/marker").is_file());
+        assert!(fs_dir.join(".base.meta.replace-recover").is_file());
+    }
+
+    #[test]
+    fn test_recovery_artifacts_survive_txn_gc() {
+        // Recovery backups use names outside the -txn- pattern: neither the
+        // stale-transaction sweep nor `sdme fs gc` may delete the only copy
+        // of a recoverable state.
+        let tmp = make_base();
+        let fs_dir = tmp.path().join("fs");
+        fs::rename(fs_dir.join("base"), fs_dir.join(".base.replace-recover")).unwrap();
+        fs::rename(
+            fs_dir.join(".base.meta"),
+            fs_dir.join(".base.meta.replace-recover"),
+        )
+        .unwrap();
+
+        crate::txn::cleanup_stale_txns(&fs_dir, "base", false).unwrap();
+        crate::txn::gc(&fs_dir, false).unwrap();
+
+        assert!(fs_dir.join(".base.replace-recover/marker").is_file());
+        assert!(fs_dir.join(".base.meta.replace-recover").is_file());
     }
 
     #[test]

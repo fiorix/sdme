@@ -15,26 +15,16 @@ use anyhow::{bail, Context, Result};
 
 use crate::check_interrupted;
 
+mod contained;
+pub(crate) use contained::copy_contained;
+
 /// Maps `(st_dev, st_ino)` to the first destination path for hard link preservation.
 pub(crate) type HardLinkMap = HashMap<(u64, u64), PathBuf>;
 
 /// Recursively copy all entries from `src_dir` to `dst_dir`.
 pub(crate) fn copy_tree(src_dir: &Path, dst_dir: &Path, verbose: bool) -> Result<()> {
     let mut hardlinks = HardLinkMap::new();
-    copy_tree_inner(src_dir, dst_dir, verbose, &mut hardlinks, false)
-}
-
-/// Like [`copy_tree`], but symlink-safe for writing into a tree that may hold
-/// untrusted pre-existing entries (a btrfs container subvolume holding the base
-/// image). Before writing each destination entry, an existing symlink there is
-/// removed so the write cannot be redirected through it (in the worst case onto
-/// the host, since sdme runs as root and is not chrooted). Existing real
-/// directories are merged into rather than failed on. Use for `sdme cp` writes
-/// into a btrfs container; the overlay backend writes into a fresh upper layer
-/// and must use plain [`copy_tree`] (unchanged behavior).
-pub(crate) fn copy_tree_shadowed(src_dir: &Path, dst_dir: &Path, verbose: bool) -> Result<()> {
-    let mut hardlinks = HardLinkMap::new();
-    copy_tree_inner(src_dir, dst_dir, verbose, &mut hardlinks, true)
+    copy_tree_inner(src_dir, dst_dir, verbose, &mut hardlinks)
 }
 
 fn copy_tree_inner(
@@ -42,7 +32,6 @@ fn copy_tree_inner(
     dst_dir: &Path,
     verbose: bool,
     hardlinks: &mut HardLinkMap,
-    shadow: bool,
 ) -> Result<()> {
     let entries = fs::read_dir(src_dir)
         .with_context(|| format!("failed to read directory {}", src_dir.display()))?;
@@ -55,7 +44,7 @@ fn copy_tree_inner(
         let file_name = entry.file_name();
         let dst_path = dst_dir.join(&file_name);
 
-        copy_entry_inner(&src_path, &dst_path, verbose, hardlinks, shadow)
+        copy_entry_inner(&src_path, &dst_path, verbose, hardlinks)
             .with_context(|| format!("failed to copy {}", src_path.display()))?;
     }
 
@@ -65,13 +54,7 @@ fn copy_tree_inner(
 /// Copy a single filesystem entry (file, dir, symlink, device, fifo, socket).
 pub(crate) fn copy_entry(src: &Path, dst: &Path, verbose: bool) -> Result<()> {
     let mut hardlinks = HardLinkMap::new();
-    copy_entry_inner(src, dst, verbose, &mut hardlinks, false)
-}
-
-/// Symlink-safe variant of [`copy_entry`]; see [`copy_tree_shadowed`].
-pub(crate) fn copy_entry_shadowed(src: &Path, dst: &Path, verbose: bool) -> Result<()> {
-    let mut hardlinks = HardLinkMap::new();
-    copy_entry_inner(src, dst, verbose, &mut hardlinks, true)
+    copy_entry_inner(src, dst, verbose, &mut hardlinks)
 }
 
 fn copy_entry_inner(
@@ -79,37 +62,34 @@ fn copy_entry_inner(
     dst: &Path,
     verbose: bool,
     hardlinks: &mut HardLinkMap,
-    shadow: bool,
 ) -> Result<()> {
-    // When writing into a tree that may hold untrusted base-image symlinks,
-    // replace any pre-existing symlink at `dst` with the real entry so the
-    // write (and every recursive child write) cannot be redirected outside the
-    // tree. Without this, `fs::copy` opens the destination without O_NOFOLLOW
-    // and would follow a base-image symlink child onto the host.
-    if shadow {
-        shadow_symlink(dst)?;
-    }
-
     let stat = lstat_entry(src)?;
     let mode = stat.st_mode & libc::S_IFMT;
 
     match mode {
         libc::S_IFDIR => {
-            // In shadow mode an existing real directory (from the base image) is
-            // merged into rather than failed on; a symlink there was already
-            // removed above. Otherwise a fresh directory is expected.
-            if !(shadow && dst.is_dir()) {
-                fs::create_dir(dst)
-                    .with_context(|| format!("failed to create directory {}", dst.display()))?;
-            }
+            // A fresh directory is expected.
+            fs::create_dir(dst)
+                .with_context(|| format!("failed to create directory {}", dst.display()))?;
             copy_metadata_from_stat(dst, &stat)?;
             copy_xattrs(src, dst)?;
-            copy_tree_inner(src, dst, verbose, hardlinks, shadow)?;
+            copy_tree_inner(src, dst, verbose, hardlinks)?;
         }
         libc::S_IFREG => {
             if stat.st_nlink > 1 {
                 let key = (stat.st_dev, stat.st_ino);
                 if let Some(existing) = hardlinks.get(&key) {
+                    // link(2) refuses to replace an existing destination, so
+                    // remove a non-directory destination first: re-copying
+                    // over a populated tree must behave like the fs::copy
+                    // branch, which truncates an existing destination file. A
+                    // directory is left alone and fails the link below.
+                    if let Ok(m) = fs::symlink_metadata(dst) {
+                        if !m.is_dir() {
+                            fs::remove_file(dst)
+                                .with_context(|| format!("failed to replace {}", dst.display()))?;
+                        }
+                    }
                     fs::hard_link(existing, dst).with_context(|| {
                         format!(
                             "failed to hard link {} -> {}",
@@ -509,13 +489,13 @@ pub(crate) fn sanitize_dest_path(path: &Path) -> Result<PathBuf> {
 /// Reject a write whose path, resolved component by component under `root`,
 /// would traverse a symlink already present in the tree.
 ///
-/// The overlay backend writes into a fresh, empty upper layer, so an
-/// image-supplied symlink in the base rootfs (e.g. `/var/lib` -> `/etc`, a
-/// merged-usr `/bin` -> `usr/bin`, or an absolute symlink that resolves onto
-/// the host) can never redirect the write. The btrfs backend writes directly
-/// into the container's subvolume, which already holds the base tree, so such
-/// a symlink ancestor could redirect `create_dir_all`/`write` outside the
-/// subvolume, in the worst case onto the host filesystem. This walks each
+/// Writes into a container or rootfs destination land in a tree whose content
+/// sdme does not control: an imported rootfs, a btrfs subvolume holding the
+/// base image, or an overlay upper populated by a container run or an earlier
+/// copy can all hold symlinks (e.g. `/var/lib` -> `/etc`, a merged-usr
+/// `/bin` -> `usr/bin`, or an absolute symlink that resolves onto the host).
+/// Such a symlink ancestor could redirect `create_dir_all`/`write` outside
+/// the tree, in the worst case onto the host filesystem. This walks each
 /// existing component of `rel` under `root` and bails if any is a symlink, so
 /// only real directories are ever descended into.
 pub(crate) fn reject_symlinked_path(root: &Path, rel: &str) -> Result<()> {
@@ -537,11 +517,11 @@ pub(crate) fn reject_symlinked_path(root: &Path, rel: &str) -> Result<()> {
 }
 
 /// Remove a leaf path if it is a symlink, so a subsequent write creates a real
-/// file in place rather than following the base image's symlink (e.g. a Debian
+/// file in place rather than following the tree's symlink (e.g. a Debian
 /// `/etc/resolv.conf` -> systemd stub, or an absolute symlink that would escape
 /// onto the host). Mirrors how the overlay upper layer shadows a lower-layer
-/// symlink with a real file. Intended for the btrfs backend, whose writes land
-/// in the base tree itself.
+/// symlink with a real file. Intended for writes into trees whose content sdme
+/// does not control (imported rootfs, container subvolume or populated upper).
 pub(crate) fn shadow_symlink(path: &Path) -> Result<()> {
     if let Ok(m) = fs::symlink_metadata(path) {
         if m.file_type().is_symlink() {
@@ -648,7 +628,7 @@ mod tests {
     }
 
     #[test]
-    fn test_copy_tree_shadowed_merges_and_shadows_nested() {
+    fn test_copy_contained_merges_and_shadows_nested() {
         // Merges into an existing real directory and shadows a nested symlink
         // child (an absolute symlink that must never be followed), while a plain
         // copy_tree would follow it and write through onto the escape target.
@@ -663,7 +643,7 @@ mod tests {
         fs::write(src.join("sub/link"), "real").unwrap(); // collides with the symlink
         fs::write(src.join("new"), "added").unwrap();
 
-        copy_tree_shadowed(&src, &dst, false).unwrap();
+        copy_contained(&dst, Path::new(""), &src).unwrap();
 
         // The colliding entry is now a real file in dst, not a followed symlink.
         let landed = dst.join("sub/link");
@@ -678,7 +658,7 @@ mod tests {
     }
 
     #[test]
-    fn test_copy_tree_shadowed_symlink_dir_ancestor() {
+    fn test_copy_contained_shadows_nested_directory_symlink() {
         // A nested directory child that exists as a symlink in the destination
         // is shadowed (replaced by a real dir) before descending, so files
         // written beneath it stay inside dst.
@@ -693,7 +673,7 @@ mod tests {
         fs::create_dir_all(src.join("d")).unwrap();
         fs::write(src.join("d/f"), "x").unwrap();
 
-        copy_tree_shadowed(&src, &dst, false).unwrap();
+        copy_contained(&dst, Path::new(""), &src).unwrap();
 
         assert!(dst
             .join("d")
@@ -705,6 +685,322 @@ mod tests {
         assert!(
             !escape_dir.join("f").exists(),
             "descent followed a symlinked directory and escaped"
+        );
+    }
+
+    #[test]
+    fn test_copy_tree_hardlink_overwrites_existing_destination() {
+        // Re-copying a hardlinked pair over a destination that already has
+        // real files at those names must replace them (the fs::copy branch
+        // truncates; the hardlink branch must not fail with EEXIST).
+        let src = crate::testutil::TempDataDir::new("copy-hl-over-src");
+        let dst = crate::testutil::TempDataDir::new("copy-hl-over-dst");
+        let out = dst.path().join("out");
+        fs::create_dir(&out).unwrap();
+
+        fs::write(src.path().join("a"), "new-content").unwrap();
+        fs::hard_link(src.path().join("a"), src.path().join("b")).unwrap();
+        fs::write(out.join("a"), "old-content").unwrap();
+        fs::write(out.join("b"), "old-content").unwrap();
+
+        copy_tree(src.path(), &out, false).unwrap();
+
+        assert_eq!(fs::read_to_string(out.join("a")).unwrap(), "new-content");
+        let ino_a = fs::metadata(out.join("a")).unwrap().ino();
+        let ino_b = fs::metadata(out.join("b")).unwrap().ino();
+        assert_eq!(ino_a, ino_b, "replaced files should share the same inode");
+        assert_eq!(fs::metadata(out.join("a")).unwrap().nlink(), 2);
+    }
+
+    #[test]
+    fn test_copy_tree_hardlink_destination_directory_errors() {
+        // A directory at the link name is not removed; the link fails instead
+        // of silently replacing the directory.
+        let src = crate::testutil::TempDataDir::new("copy-hl-dir-src");
+        let dst = crate::testutil::TempDataDir::new("copy-hl-dir-dst");
+        let out = dst.path().join("out");
+        fs::create_dir(&out).unwrap();
+
+        fs::write(src.path().join("a"), "content").unwrap();
+        fs::hard_link(src.path().join("a"), src.path().join("b")).unwrap();
+        fs::create_dir(out.join("b")).unwrap();
+
+        let err = copy_tree(src.path(), &out, false).unwrap_err();
+        // Depending on read_dir order this fails in the fs::copy branch
+        // (EISDIR) or the hard link branch; either way it must error.
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("hard link") || msg.contains("Is a directory"),
+            "unexpected error: {msg}"
+        );
+        assert!(
+            out.join("b").symlink_metadata().unwrap().is_dir(),
+            "destination directory must not be removed"
+        );
+    }
+
+    #[test]
+    fn test_copy_contained_unlinks_hardlinked_destination() {
+        // A destination file hardlinked to an outside file shares its inode:
+        // truncating it in place would write the new content through the
+        // other link. Contained copies must replace the destination inode.
+        let tmp = crate::testutil::TempDataDir::new("shadow-hl-dest");
+        let src = tmp.path().join("source");
+        let outside = tmp.path().join("outside");
+        let root = tmp.path().join("root");
+        fs::create_dir(&root).unwrap();
+        fs::write(&src, b"replacement").unwrap();
+        fs::write(&outside, b"outside original").unwrap();
+        fs::hard_link(&outside, root.join("target")).unwrap();
+
+        copy_contained(&root, Path::new("target"), &src).unwrap();
+
+        assert_eq!(fs::read(root.join("target")).unwrap(), b"replacement");
+        assert_eq!(
+            fs::read(&outside).unwrap(),
+            b"outside original",
+            "write went through a destination hard link and escaped"
+        );
+        assert_eq!(
+            fs::metadata(&outside).unwrap().nlink(),
+            1,
+            "destination should be a fresh inode, unlinked from the outside file"
+        );
+    }
+
+    // --- contained engine tests ---
+
+    #[test]
+    fn test_copy_contained_ordinary_copies() {
+        // Controls: ordinary file (with parent creation), directory tree
+        // merge into an existing real directory, source symlink recreation,
+        // and hard link preservation all work through the contained engine.
+        let tmp = crate::testutil::TempDataDir::new("contained-ordinary");
+        let root = tmp.path().join("root");
+        fs::create_dir_all(root.join("etc")).unwrap();
+
+        let src = tmp.path().join("src");
+        fs::create_dir_all(src.join("d/sub")).unwrap();
+        fs::write(src.join("d/a"), "aaa").unwrap();
+        fs::write(src.join("d/sub/b"), "bbb").unwrap();
+        unix_fs::symlink("a", src.join("d/link")).unwrap();
+        fs::write(src.join("d/h1"), "shared").unwrap();
+        fs::hard_link(src.join("d/h1"), src.join("d/h2")).unwrap();
+
+        // File to a new path, creating parents.
+        let f = tmp.path().join("conf");
+        fs::write(&f, "k=v").unwrap();
+        copy_contained(&root, Path::new("etc/app.conf"), &f).unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join("etc/app.conf")).unwrap(),
+            "k=v"
+        );
+
+        // Directory tree merged into an existing directory.
+        fs::create_dir_all(root.join("d")).unwrap();
+        fs::write(root.join("d/existing"), "old").unwrap();
+        copy_contained(&root, Path::new("d"), &src.join("d")).unwrap();
+        assert_eq!(fs::read_to_string(root.join("d/a")).unwrap(), "aaa");
+        assert_eq!(fs::read_to_string(root.join("d/sub/b")).unwrap(), "bbb");
+        assert_eq!(fs::read_to_string(root.join("d/existing")).unwrap(), "old");
+        assert_eq!(
+            fs::read_link(root.join("d/link"))
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "a",
+            "source symlink must be recreated as a symlink"
+        );
+        let ino1 = fs::metadata(root.join("d/h1")).unwrap().ino();
+        let ino2 = fs::metadata(root.join("d/h2")).unwrap().ino();
+        assert_eq!(ino1, ino2, "hard links must share an inode");
+        assert_eq!(fs::read_to_string(root.join("d/h2")).unwrap(), "shared");
+    }
+
+    #[test]
+    fn test_copy_contained_contents_into_root() {
+        // An empty relative path (e.g. COPY . /) copies the source
+        // directory's contents into the root itself.
+        let tmp = crate::testutil::TempDataDir::new("contained-root");
+        let root = tmp.path().join("root");
+        fs::create_dir_all(&root).unwrap();
+        let src = tmp.path().join("src");
+        fs::create_dir_all(src.join("sub")).unwrap();
+        fs::write(src.join("sub/x"), "x").unwrap();
+
+        copy_contained(&root, Path::new(""), &src).unwrap();
+        assert_eq!(fs::read_to_string(root.join("sub/x")).unwrap(), "x");
+    }
+
+    #[test]
+    fn test_copy_contained_rejects_ancestor_symlink() {
+        let tmp = crate::testutil::TempDataDir::new("contained-ancestor");
+        let root = tmp.path().join("root");
+        fs::create_dir_all(&root).unwrap();
+        let outside = tmp.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("victim"), "original").unwrap();
+        unix_fs::symlink(&outside, root.join("etc")).unwrap();
+
+        let src = tmp.path().join("payload");
+        fs::write(&src, "attacker").unwrap();
+        let err = copy_contained(&root, Path::new("etc/victim"), &src).unwrap_err();
+        assert!(format!("{err:#}").contains("symlink"), "got: {err:#}");
+        assert_eq!(
+            fs::read_to_string(outside.join("victim")).unwrap(),
+            "original"
+        );
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn test_copy_contained_shadows_leaf_symlink() {
+        let tmp = crate::testutil::TempDataDir::new("contained-leaf");
+        let root = tmp.path().join("root");
+        fs::create_dir_all(&root).unwrap();
+        let outside = tmp.path().join("outside");
+        unix_fs::symlink(&outside, root.join("f")).unwrap();
+
+        let src = tmp.path().join("payload");
+        fs::write(&src, "data").unwrap();
+        copy_contained(&root, Path::new("f"), &src).unwrap();
+
+        assert!(root
+            .join("f")
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_file());
+        assert_eq!(fs::read_to_string(root.join("f")).unwrap(), "data");
+        assert!(!outside.exists(), "write escaped through the leaf symlink");
+    }
+
+    #[test]
+    fn test_copy_contained_leaf_swap_churn_never_escapes() {
+        // A concurrent process swaps the destination leaf between a symlink
+        // to an outside path and nothing, in a loop, while copies land. The
+        // outside path must never be created or written; copies either
+        // succeed or fail, never escape.
+        let tmp = crate::testutil::TempDataDir::new("contained-leaf-churn");
+        let root = tmp.path().join("root");
+        fs::create_dir_all(root.join("d")).unwrap();
+        let outside = tmp.path().join("outside");
+        let src = tmp.path().join("payload");
+        fs::write(&src, "data").unwrap();
+
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let handle = {
+            let stop = stop.clone();
+            let leaf = root.join("d/f");
+            let outside = outside.clone();
+            std::thread::spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let _ = fs::remove_file(&leaf);
+                    let _ = unix_fs::symlink(&outside, &leaf);
+                }
+            })
+        };
+
+        for _ in 0..200 {
+            // Success or rejection are both fine; escaping is not.
+            let _ = copy_contained(&root, Path::new("d/f"), &src);
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        handle.join().unwrap();
+
+        assert!(
+            !outside.exists(),
+            "a copy escaped through a concurrently swapped leaf"
+        );
+        // After the churn stops, an ordinary copy succeeds.
+        copy_contained(&root, Path::new("d/f"), &src).unwrap();
+        assert_eq!(fs::read_to_string(root.join("d/f")).unwrap(), "data");
+    }
+
+    #[test]
+    fn test_copy_contained_ancestor_swap_churn_never_escapes() {
+        // A concurrent process swaps an ancestor directory for a symlink to
+        // an outside directory and back, in a loop. Copies may land in the
+        // (renamed, still in-tree) real directory or be rejected; the
+        // outside directory must never gain an entry.
+        let tmp = crate::testutil::TempDataDir::new("contained-anc-churn");
+        let root = tmp.path().join("root");
+        fs::create_dir_all(root.join("x")).unwrap();
+        let outside = tmp.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        let src = tmp.path().join("payload");
+        fs::write(&src, "data").unwrap();
+
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let handle = {
+            let stop = stop.clone();
+            let x = root.join("x");
+            let x_saved = root.join("x.saved");
+            let outside = outside.clone();
+            std::thread::spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    // Swap the real dir aside and plant a symlink; then undo.
+                    // Every step can lose the race; that is the point.
+                    if fs::rename(&x, &x_saved).is_ok() {
+                        if unix_fs::symlink(&outside, &x).is_ok() {
+                            let _ = fs::remove_file(&x);
+                        }
+                        let _ = fs::rename(&x_saved, &x);
+                    }
+                }
+            })
+        };
+
+        for i in 0..200 {
+            let rel = format!("x/f{i}");
+            let _ = copy_contained(&root, Path::new(&rel), &src);
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        handle.join().unwrap();
+
+        // Undo any in-flight swap so the assertions see a stable tree.
+        let _ = fs::remove_file(root.join("x"));
+        let _ = fs::rename(root.join("x.saved"), root.join("x"));
+        assert!(
+            fs::read_dir(&outside).unwrap().next().is_none(),
+            "a copy escaped through a concurrently swapped ancestor"
+        );
+        // After the churn stops, an ordinary copy succeeds.
+        copy_contained(&root, Path::new("x/final"), &src).unwrap();
+        assert_eq!(fs::read_to_string(root.join("x/final")).unwrap(), "data");
+    }
+
+    #[test]
+    fn test_copy_contained_hardlink_over_symlink() {
+        // Hard link preservation must not re-create a shadowed symlink: the
+        // first copied name for an inode shadows the symlink, and the second
+        // name links to the real file, regardless of read_dir order.
+        let tmp = crate::testutil::TempDataDir::new("shadow-hl");
+        let dst = tmp.path().join("dst");
+        fs::create_dir_all(&dst).unwrap();
+        let escape = tmp.path().join("escape");
+        unix_fs::symlink(&escape, dst.join("a")).unwrap();
+
+        let src = tmp.path().join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("a"), "payload").unwrap();
+        fs::hard_link(src.join("a"), src.join("b")).unwrap();
+
+        copy_contained(&dst, Path::new(""), &src).unwrap();
+
+        assert!(dst
+            .join("a")
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_file());
+        let ino_a = fs::metadata(dst.join("a")).unwrap().ino();
+        let ino_b = fs::metadata(dst.join("b")).unwrap().ino();
+        assert_eq!(ino_a, ino_b, "hard links should share the same inode");
+        assert_eq!(fs::read_to_string(dst.join("a")).unwrap(), "payload");
+        assert!(
+            !escape.exists(),
+            "hard link creation followed a symlink and escaped"
         );
     }
 

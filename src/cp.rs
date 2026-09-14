@@ -3,9 +3,13 @@
 //! Implements `sdme cp` for copying files and directories between the host
 //! filesystem and containers or imported root filesystems. One side must
 //! always be a host path; container-to-container copy is not supported.
+//! Writes into running containers use the fd-relative contained copy engine
+//! (see `copy::copy_contained`), which stays safe under concurrent mutation
+//! of the live destination tree.
 //!
-//! Uses the same copy engine (`copy::copy_tree`, `copy::copy_entry`) and
-//! path validation (`copy::sanitize_dest_path`) as `fs build` COPY.
+//! Uses the same copy engine (`copy::copy_contained`, `copy::copy_tree`,
+//! `copy::copy_entry`) and path validation (`copy::sanitize_dest_path`) as
+//! `fs build` COPY.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -123,8 +127,13 @@ struct ResolvedDest {
     /// Directory to check for existing files (rootfs for stopped overlay
     /// containers, same as write_dir otherwise).
     check_dir: PathBuf,
-    /// True when writes into `write_dir` must be guarded against base-image
-    /// symlinks (a stopped btrfs container whose subvolume holds the base tree).
+    /// True when writes into `write_dir` must be guarded against symlinks
+    /// already present in the tree. Set for every container/rootfs
+    /// destination: an imported rootfs, a btrfs subvolume holding the base
+    /// tree, a running container's live root, and an overlay upper populated
+    /// by a container run or an earlier copy can all hold symlinks that
+    /// resolve onto the host. The guard is the fd-relative contained copy
+    /// engine, which stays sound even when the tree is mutated concurrently.
     protect_symlinks: bool,
     /// True when the destination is a running container.
     is_running: bool,
@@ -157,7 +166,7 @@ pub fn cp(datadir: &Path, src: &CpEndpoint, dst: &CpEndpoint, opts: &CpOptions) 
         check_host_safety(&resolved_src.path, opts)?;
     }
 
-    // Safety checks when copying TO a container/rootfs.
+    // Safety checks when copying TO a stopped container or a rootfs.
     if !matches!(dst, CpEndpoint::Host(_)) && !resolved_dst.is_running {
         check_container_dest_safety(&resolved_dst.write_dir, dst)?;
     }
@@ -362,7 +371,10 @@ fn resolve_destination(
             Ok(ResolvedDest {
                 write_dir: rootfs_dir.clone(),
                 check_dir: rootfs_dir,
-                protect_symlinks: false,
+                // An imported rootfs is untrusted content: it can contain
+                // symlinks (e.g. etc -> /outside) that would redirect parent
+                // creation or writes onto the host, so guard the write.
+                protect_symlinks: true,
                 is_running: false,
                 _rootfs_lock: None,
                 _lock: Some(lock),
@@ -431,10 +443,14 @@ fn resolve_destination(
                     PathBuf::from(format!("/proc/{leader}/root"))
                 };
 
+                // The live tree can be mutated by the container mid-copy, so
+                // the write must go through the fd-relative contained engine:
+                // no path component is ever resolved through a symlink, even
+                // one swapped in concurrently.
                 Ok(ResolvedDest {
                     write_dir: base.clone(),
                     check_dir: base,
-                    protect_symlinks: false,
+                    protect_symlinks: true,
                     is_running: true,
                     _rootfs_lock: None,
                     _lock: Some(lock),
@@ -442,8 +458,11 @@ fn resolve_destination(
             } else {
                 // Stopped: overlay writes into upper/ (checked against the lower
                 // rootfs); btrfs writes into its own subvolume, which already
-                // holds the base tree, so writes are guarded against base-image
-                // symlinks (protect_symlinks).
+                // holds the base tree. Both are guarded against symlinks
+                // already present in the write tree: open_write_dest only
+                // requests the guard for btrfs, on the assumption that an
+                // overlay upper is fresh and empty, but that stops being true
+                // once the container has run or an earlier copy populated it.
                 let rootfs_name = state.rootfs();
                 let rootfs_dir = if rootfs_name.is_empty() {
                     PathBuf::from("/")
@@ -461,29 +480,19 @@ fn resolve_destination(
                 } else {
                     None
                 };
-                // A btrfs container write lands directly in its live subvolume,
-                // so take an EXCLUSIVE lock (which excludes a concurrent
-                // `sdme start`, itself a shared lock) and re-verify the
-                // container is still stopped under it. This closes a TOCTOU
-                // where a start between the is_active() check above and the
-                // write would make the subvolume the running container's root
-                // mid-copy, reopening a symlink-follow escape. The overlay
-                // backend writes into a separate upper/ layer and keeps the
-                // shared lock (unchanged behavior).
-                let lock = if backend == storage::Backend::Btrfs {
-                    let l = lock::lock_exclusive(datadir, "containers", &name)
-                        .with_context(|| format!("cannot lock container '{name}' for writing"))?;
-                    if systemd::is_active(&name)? {
-                        bail!(
-                            "container '{name}' is running; stop it before copying into a \
-                             btrfs container"
-                        );
-                    }
-                    l
-                } else {
-                    lock::lock_shared(datadir, "containers", &name)
-                        .with_context(|| format!("cannot lock container '{name}' for writing"))?
-                };
+                // Hold an exclusive lock (excluding the shared lock taken by
+                // `sdme start`) and re-verify that the container is stopped.
+                // This serializes stopped-container destination setup and
+                // copying with lifecycle operations. The contained copy engine
+                // also protects writes against mutation of a live destination.
+                let lock = lock::lock_exclusive(datadir, "containers", &name)
+                    .with_context(|| format!("cannot lock container '{name}' for writing"))?;
+                if systemd::is_active(&name)? {
+                    bail!(
+                        "container '{name}' started while the copy was being set up; \
+                         stop it before copying into it"
+                    );
+                }
 
                 let dest =
                     containers::open_write_dest(datadir, &name, backend, &rootfs_dir, verbose)?;
@@ -497,7 +506,10 @@ fn resolve_destination(
                 Ok(ResolvedDest {
                     write_dir: dest.write_dir,
                     check_dir: dest.check_dir,
-                    protect_symlinks: dest.protect_symlinks,
+                    // Strengthen the backend's own assessment: guard the
+                    // overlay upper too, since it can hold symlinks once
+                    // populated (see above).
+                    protect_symlinks: dest.protect_symlinks || backend == storage::Backend::Overlay,
                     is_running: false,
                     _rootfs_lock: rootfs_lock,
                     _lock: Some(lock),
@@ -666,11 +678,16 @@ fn warn_rootfs_in_use(datadir: &Path, rootfs_name: &str) {
 
 /// Execute the file copy from resolved source to resolved destination.
 ///
-/// `protect_symlinks` guards writes that land directly in the container's own
-/// tree (a stopped btrfs container's subvolume): before creating any parent
-/// directory or writing the target, it refuses to traverse a base-image
-/// symlink ancestor and shadows a leaf symlink. The overlay backend writes
-/// into a fresh upper layer and needs no such guard.
+/// `protect_symlinks` routes the write through the fd-relative contained
+/// copy engine (`copy::copy_contained`): every component of the destination
+/// path is resolved beneath an fd pinning `write_dir` with O_NOFOLLOW, so no
+/// symlink present in, or swapped into, the destination tree is ever
+/// traversed, even under concurrent mutation (a running container's live
+/// root). A symlink ancestor is rejected, regular-file leaves are replaced
+/// with completed anonymous inodes, and real directories are merged into.
+/// Symlinks and special nodes require protected staging outside the write root
+/// on the same mount; unsupported copies fail explicitly. Only host
+/// destinations skip the contained engine.
 fn execute_copy(
     src_path: &Path,
     write_dir: &Path,
@@ -731,13 +748,13 @@ fn execute_copy(
     };
 
     let rel_dst = copy::sanitize_dest_path(dst_path)?;
-    let mut target = write_dir.join(&rel_dst);
+    let probe = write_dir.join(&rel_dst);
 
     // Check whether dst resolves to a directory in either layer.
-    let dst_is_dir = target.is_dir() || check_dir.join(&rel_dst).is_dir();
+    let dst_is_dir = probe.is_dir() || check_dir.join(&rel_dst).is_dir();
 
     // Check whether dst resolves to a file in either layer.
-    let dst_is_file = (!dst_is_dir) && (target.is_file() || check_dir.join(&rel_dst).is_file());
+    let dst_is_file = (!dst_is_dir) && (probe.is_file() || check_dir.join(&rel_dst).is_file());
 
     if meta.is_dir() && dst_is_file {
         bail!(
@@ -747,35 +764,32 @@ fn execute_copy(
         );
     }
 
-    // When dst is an existing directory, adjust the target.
-    if dst_is_dir {
-        if let Some(file_name) = src_path.file_name() {
-            target = target.join(file_name);
+    // Compute the destination relative to the write root, copying INTO dst
+    // when it is an existing directory.
+    let rel_target = if dst_is_dir {
+        match src_path.file_name() {
+            Some(file_name) => rel_dst.join(file_name),
+            None => rel_dst.clone(),
         }
-    }
-
-    // For a stopped btrfs container the write lands directly in the subvolume,
-    // which already holds the untrusted base image. Three layers keep the write
-    // inside the container (sdme runs as root, so a followed base-image symlink
-    // could otherwise write onto the host):
-    //   1. reject a symlink among the target's ancestors, so create_dir_all of
-    //      the parent chain cannot traverse one;
-    //   2. shadow a symlink at the target itself, so the top-level write (and,
-    //      for a directory, the descent into it) does not follow it;
-    //   3. use the shadowing copy engine below, which repeats (2) for every
-    //      recursive descendant before writing it.
-    // The overlay upper layer is a fresh, empty tree, so protect_symlinks is
-    // false there and this is a no-op.
-    if protect_symlinks {
-        let rel_target = target.strip_prefix(write_dir).unwrap_or(&rel_dst);
-        if let Some(parent_rel) = rel_target.parent() {
-            copy::reject_symlinked_path(write_dir, &parent_rel.to_string_lossy())?;
-        }
-        copy::shadow_symlink(&target)?;
-    }
+    } else {
+        rel_dst.clone()
+    };
+    let target = write_dir.join(&rel_target);
 
     if verbose {
         eprintln!("copy: {} -> {}", src_path.display(), target.display());
+    }
+
+    if protect_symlinks {
+        // Container/rootfs destinations are trees whose content sdme does
+        // not control (an imported rootfs can carry hostile symlinks; a
+        // container can plant or swap them in its own upper or live root).
+        // The contained engine never resolves a destination component
+        // through a symlink, under concurrency included; sdme runs as root,
+        // so a followed symlink could otherwise write onto the host.
+        copy::copy_contained(write_dir, &rel_target, src_path)
+            .with_context(|| format!("failed to copy {}", src_path.display()))?;
+        return Ok(());
     }
 
     // Create parent directories in the write layer.
@@ -787,15 +801,8 @@ fn execute_copy(
     if meta.is_dir() {
         fs::create_dir_all(&target)
             .with_context(|| format!("failed to create {}", target.display()))?;
-        if protect_symlinks {
-            copy::copy_tree_shadowed(src_path, &target, verbose)
-        } else {
-            copy::copy_tree(src_path, &target, verbose)
-        }
-        .with_context(|| format!("failed to copy directory {}", src_path.display()))?;
-    } else if protect_symlinks {
-        copy::copy_entry_shadowed(src_path, &target, verbose)
-            .with_context(|| format!("failed to copy {}", src_path.display()))?;
+        copy::copy_tree(src_path, &target, verbose)
+            .with_context(|| format!("failed to copy directory {}", src_path.display()))?;
     } else {
         copy::copy_entry(src_path, &target, verbose)
             .with_context(|| format!("failed to copy {}", src_path.display()))?;
@@ -1080,7 +1087,7 @@ mod tests {
             path: PathBuf::from("/bin/tool"),
         };
         let err = execute_copy(&src, &subvol, &subvol, true, &dst, false).unwrap_err();
-        assert!(err.to_string().contains("symlink"), "got: {err}");
+        assert!(format!("{err:#}").contains("symlink"), "got: {err:#}");
         // The symlink's target must not have been written through.
         assert!(!subvol.join("usr/bin/tool").exists());
     }
@@ -1151,8 +1158,10 @@ mod tests {
 
     #[test]
     fn test_execute_copy_overlay_ignores_symlink_guard() {
-        // With protect_symlinks=false (overlay), an existing symlink at the
-        // target is overwritten by copy_entry as usual; no guard applies.
+        // With protect_symlinks=false (host-style direct execute_copy use), an
+        // existing symlink at the target is overwritten by copy_entry as
+        // usual; no guard applies. Production container/rootfs destinations
+        // always pass true.
         let (_tmp, upper, lower) = make_layers("overlay-noguard");
         fs::create_dir_all(upper.join("etc")).unwrap();
         let src = _tmp.path().join("file");
@@ -1163,6 +1172,252 @@ mod tests {
         };
         execute_copy(&src, &upper, &lower, false, &dst, false).unwrap();
         assert_eq!(fs::read_to_string(upper.join("etc/file")).unwrap(), "data");
+    }
+
+    // --- rootfs / populated destination symlink-escape regressions ---
+
+    /// Helper: create a datadir holding an imported rootfs `fs/<name>`.
+    fn make_rootfs(name: &str) -> (TempDataDir, PathBuf) {
+        let tmp = TempDataDir::new(&format!("cp-rootfs-{name}"));
+        let rootfs = tmp.path().join("fs").join(name);
+        fs::create_dir_all(&rootfs).unwrap();
+        (tmp, rootfs)
+    }
+
+    fn test_opts() -> CpOptions {
+        CpOptions {
+            force: false,
+            verbose: false,
+            interactive: false,
+        }
+    }
+
+    fn rootfs_ep(name: &str, path: &str) -> CpEndpoint {
+        CpEndpoint::Rootfs {
+            name: name.to_string(),
+            path: PathBuf::from(path),
+        }
+    }
+
+    #[test]
+    fn test_cp_rootfs_dest_rejects_ancestor_symlink_escape() {
+        // Regression: an imported rootfs can contain an ancestor symlink
+        // pointing anywhere on the host (etc -> /outside). A copy through it
+        // must be refused, not redirected onto the host, with force=false.
+        let (tmp, rootfs) = make_rootfs("escape");
+        let outside = tmp.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("victim"), "original").unwrap();
+        std::os::unix::fs::symlink(&outside, rootfs.join("etc")).unwrap();
+
+        let payload = tmp.path().join("payload");
+        fs::write(&payload, "attacker").unwrap();
+
+        let src = CpEndpoint::Host(payload);
+        let dst = rootfs_ep("escape", "/etc/victim");
+        let err = cp(tmp.path(), &src, &dst, &test_opts()).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("symlink"),
+            "expected symlink rejection, got: {err:#}"
+        );
+        assert_eq!(
+            fs::read_to_string(outside.join("victim")).unwrap(),
+            "original"
+        );
+        assert_eq!(
+            fs::read_dir(&outside).unwrap().count(),
+            1,
+            "no entry may be created through the symlink"
+        );
+    }
+
+    #[test]
+    fn test_cp_rootfs_dest_rejects_dangling_ancestor_symlink() {
+        // A dangling ancestor symlink (data -> missing outside dir) must be
+        // rejected before create_dir_all materializes the outside directory.
+        let (tmp, rootfs) = make_rootfs("dangling");
+        let missing = tmp.path().join("no/such/dir");
+        std::os::unix::fs::symlink(&missing, rootfs.join("data")).unwrap();
+
+        let payload = tmp.path().join("payload");
+        fs::write(&payload, "attacker").unwrap();
+
+        let src = CpEndpoint::Host(payload);
+        let dst = rootfs_ep("dangling", "/data/file");
+        let err = cp(tmp.path(), &src, &dst, &test_opts()).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("symlink"),
+            "expected symlink rejection, got: {err:#}"
+        );
+        assert!(
+            !tmp.path().join("no").exists(),
+            "create_dir_all materialized the dangling symlink target outside"
+        );
+    }
+
+    #[test]
+    fn test_cp_rootfs_dest_shadows_leaf_symlinks() {
+        // Leaf symlinks are shadowed (replaced by a real file), never
+        // followed: an existing outside target stays untouched and a dangling
+        // outside target is never created.
+        let (tmp, rootfs) = make_rootfs("leaf");
+        fs::create_dir_all(rootfs.join("etc")).unwrap();
+
+        let outside_file = tmp.path().join("outside-target");
+        fs::write(&outside_file, "keep").unwrap();
+        std::os::unix::fs::symlink(&outside_file, rootfs.join("etc/resolv.conf")).unwrap();
+
+        let p1 = tmp.path().join("p1");
+        fs::write(&p1, "new").unwrap();
+        cp(
+            tmp.path(),
+            &CpEndpoint::Host(p1),
+            &rootfs_ep("leaf", "/etc/resolv.conf"),
+            &test_opts(),
+        )
+        .unwrap();
+        let written = rootfs.join("etc/resolv.conf");
+        assert!(
+            written.symlink_metadata().unwrap().file_type().is_file(),
+            "leaf symlink should be replaced by a real file"
+        );
+        assert_eq!(fs::read_to_string(&written).unwrap(), "new");
+        assert_eq!(fs::read_to_string(&outside_file).unwrap(), "keep");
+
+        let missing_target = tmp.path().join("no/such/target");
+        std::os::unix::fs::symlink(&missing_target, rootfs.join("etc/dangling")).unwrap();
+        let p2 = tmp.path().join("p2");
+        fs::write(&p2, "d").unwrap();
+        cp(
+            tmp.path(),
+            &CpEndpoint::Host(p2),
+            &rootfs_ep("leaf", "/etc/dangling"),
+            &test_opts(),
+        )
+        .unwrap();
+        assert!(rootfs
+            .join("etc/dangling")
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_file());
+        assert!(
+            !missing_target.exists(),
+            "write followed a dangling leaf symlink outside"
+        );
+    }
+
+    #[test]
+    fn test_cp_rootfs_dest_ordinary_copies_still_work() {
+        // The guard must not disable legitimate copies: file to a new path,
+        // file into an existing real directory, and a directory tree.
+        let (tmp, rootfs) = make_rootfs("ordinary");
+        fs::create_dir_all(rootfs.join("etc")).unwrap();
+        fs::create_dir_all(rootfs.join("usr/bin")).unwrap();
+
+        let f1 = tmp.path().join("conf");
+        fs::write(&f1, "k=v").unwrap();
+        cp(
+            tmp.path(),
+            &CpEndpoint::Host(f1),
+            &rootfs_ep("ordinary", "/etc/app.conf"),
+            &test_opts(),
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(rootfs.join("etc/app.conf")).unwrap(),
+            "k=v"
+        );
+
+        let f2 = tmp.path().join("tool");
+        fs::write(&f2, "ELF").unwrap();
+        cp(
+            tmp.path(),
+            &CpEndpoint::Host(f2),
+            &rootfs_ep("ordinary", "/usr/bin"),
+            &test_opts(),
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(rootfs.join("usr/bin/tool")).unwrap(),
+            "ELF"
+        );
+
+        let d = tmp.path().join("skel");
+        fs::create_dir_all(d.join("sub")).unwrap();
+        fs::write(d.join("sub/x"), "x").unwrap();
+        // An existing destination directory receives the source inside it.
+        fs::create_dir_all(rootfs.join("opt")).unwrap();
+        cp(
+            tmp.path(),
+            &CpEndpoint::Host(d),
+            &rootfs_ep("ordinary", "/opt"),
+            &test_opts(),
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(rootfs.join("opt/skel/sub/x")).unwrap(),
+            "x"
+        );
+    }
+
+    #[test]
+    fn test_execute_copy_populated_upper_symlink_escape_rejected() {
+        // An overlay upper is only empty until the container (or an earlier
+        // copy) populates it. A symlink planted there must not redirect a
+        // later copy onto the host.
+        let (_tmp, upper, lower) = make_layers("upper-escape");
+        let outside = _tmp.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("victim"), "original").unwrap();
+        std::os::unix::fs::symlink(&outside, upper.join("etc")).unwrap();
+
+        let src = _tmp.path().join("payload");
+        fs::write(&src, "attacker").unwrap();
+        let dst = CpEndpoint::Container {
+            name: "c".to_string(),
+            path: PathBuf::from("/etc/victim"),
+        };
+        let err = execute_copy(&src, &upper, &lower, true, &dst, false).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("symlink"),
+            "expected symlink rejection, got: {err:#}"
+        );
+        assert_eq!(
+            fs::read_to_string(outside.join("victim")).unwrap(),
+            "original"
+        );
+    }
+
+    #[test]
+    fn test_execute_copy_populated_upper_dir_copy_shadows_child() {
+        // Populated overlay upper, directory merge: a hostile symlink child in
+        // the upper is shadowed, not followed, and real siblings still merge.
+        let (_tmp, upper, lower) = make_layers("upper-dir-merge");
+        fs::create_dir_all(upper.join("etc")).unwrap();
+        fs::write(upper.join("etc/keep"), "old").unwrap();
+        let outside = _tmp.path().join("outside");
+        std::os::unix::fs::symlink(&outside, upper.join("etc/pwn")).unwrap();
+
+        let src = _tmp.path().join("etc");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("pwn"), "real").unwrap();
+        fs::write(src.join("keep"), "new").unwrap();
+
+        let dst = CpEndpoint::Container {
+            name: "c".to_string(),
+            path: PathBuf::from("/"),
+        };
+        execute_copy(&src, &upper, &lower, true, &dst, false).unwrap();
+
+        let written = upper.join("etc/pwn");
+        assert!(written.symlink_metadata().unwrap().file_type().is_file());
+        assert_eq!(fs::read_to_string(&written).unwrap(), "real");
+        assert_eq!(fs::read_to_string(upper.join("etc/keep")).unwrap(), "new");
+        assert!(
+            !outside.exists(),
+            "directory copy escaped through the upper"
+        );
     }
 
     // --- check_container_dest_safety tests ---

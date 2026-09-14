@@ -8,7 +8,7 @@ pub(super) struct KubeManifest {
     pub _api_version: Option<String>,
     pub kind: String,
     pub metadata: Option<Metadata>,
-    pub spec: Option<serde_yml::Value>,
+    pub spec: Option<serde_norway::Value>,
 }
 
 /// Kubernetes object metadata (name, labels, etc.).
@@ -17,7 +17,7 @@ pub(super) struct Metadata {
     pub name: Option<String>,
     /// Labels (accepted but not used).
     #[serde(default, rename = "labels")]
-    pub _labels: Option<serde_yml::Value>,
+    pub _labels: Option<serde_norway::Value>,
 }
 
 /// Deployment spec wrapper to extract the pod template.
@@ -271,7 +271,7 @@ pub(crate) struct Volume {
     pub(crate) name: String,
     #[serde(default)]
     #[allow(dead_code)]
-    pub(crate) empty_dir: Option<serde_yml::Value>,
+    pub(crate) empty_dir: Option<serde_norway::Value>,
     #[serde(default)]
     pub(crate) host_path: Option<HostPathVolume>,
     #[serde(default)]
@@ -306,7 +306,7 @@ fn default_secret_mode() -> u32 {
 
 /// Deserialize a file mode from either a YAML integer or an octal string.
 ///
-/// YAML 1.2 (used by serde_yml) treats `0400` as a string, not an octal
+/// YAML 1.2 (used by serde_norway) treats `0400` as a string, not an octal
 /// integer like YAML 1.1. Kubernetes YAML files commonly use this syntax
 /// for `defaultMode`, so we accept both forms.
 pub(super) fn deserialize_file_mode<'de, D>(deserializer: D) -> std::result::Result<u32, D::Error>

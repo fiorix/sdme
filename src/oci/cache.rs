@@ -55,6 +55,27 @@ pub struct CacheEntry {
 /// Parsed index: digest to (size, atime).
 type Index = Vec<(String, u64, u64)>;
 
+/// Extract the hex portion of a `sha256:` digest, or `None` when the digest
+/// is not exactly `sha256:` followed by 64 lowercase hex characters.
+///
+/// Digests come from registry descriptors and are untrusted: an unchecked
+/// suffix can be an absolute path or contain `..` components, which would
+/// make cache lookups read, write, or delete files outside the cache
+/// directory. Every operation that maps a digest to a filesystem path must
+/// go through this check.
+pub(crate) fn parse_sha256_hex(digest: &str) -> Option<&str> {
+    let hex = digest.strip_prefix("sha256:")?;
+    if hex.len() == 64
+        && hex
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        Some(hex)
+    } else {
+        None
+    }
+}
+
 impl BlobCache {
     /// Create from config. Resolves cache_dir relative to datadir.
     pub fn from_config(cfg: &Config) -> Result<Self> {
@@ -90,7 +111,12 @@ impl BlobCache {
         if !self.is_enabled() {
             return None;
         }
-        let hex = digest.strip_prefix("sha256:")?;
+        let Some(hex) = parse_sha256_hex(digest) else {
+            if verbose {
+                eprintln!("cache: ignoring malformed digest: {digest}");
+            }
+            return None;
+        };
         let blob_path = self.dir.join("sha256").join(hex);
         if !blob_path.exists() {
             if verbose {
@@ -153,9 +179,8 @@ impl BlobCache {
         if !self.is_enabled() {
             return Ok(());
         }
-        let hex = match digest.strip_prefix("sha256:") {
-            Some(h) => h,
-            None => bail!("unsupported digest format: {digest}"),
+        let Some(hex) = parse_sha256_hex(digest) else {
+            bail!("malformed or unsupported digest: {digest}");
         };
 
         let sha_dir = self.dir.join("sha256");
@@ -296,7 +321,9 @@ impl BlobCache {
             if current <= self.max_size {
                 break;
             }
-            if let Some(hex) = digest.strip_prefix("sha256:") {
+            // Malformed index entries are dropped from the index below but
+            // must never name a filesystem path.
+            if let Some(hex) = parse_sha256_hex(digest) {
                 let blob_path = self.dir.join("sha256").join(hex);
                 if let Err(e) = fs::remove_file(&blob_path) {
                     if verbose {
@@ -325,7 +352,7 @@ impl BlobCache {
         let mut freed: u64 = 0;
 
         for (digest, size, _) in &index {
-            if let Some(hex) = digest.strip_prefix("sha256:") {
+            if let Some(hex) = parse_sha256_hex(digest) {
                 let blob_path = self.dir.join("sha256").join(hex);
                 if fs::remove_file(&blob_path).is_ok() {
                     if verbose {
@@ -527,7 +554,7 @@ mod tests {
         let cfg = test_config(&cache_dir, "1G");
         let cache = BlobCache::from_config(&cfg).unwrap();
 
-        assert!(cache.get("sha256:nonexistent", false).is_none());
+        assert!(cache.get(&digest64('0'), false).is_none());
     }
 
     #[test]
@@ -582,16 +609,15 @@ mod tests {
         // Create a blob and cache it.
         let blob = tmp.path().join("blob");
         write_test_blob(&blob, b"data");
-        let digest = "sha256:aaaa";
-        cache.put(digest, &blob, false).unwrap();
+        let digest = digest64('a');
+        cache.put(&digest, &blob, false).unwrap();
 
         // Now delete the blob file directly (simulate stale state).
-        let hex = "aaaa";
-        let blob_path = cache_dir.join("sha256").join(hex);
+        let blob_path = cache_dir.join("sha256").join("a".repeat(64));
         fs::remove_file(&blob_path).unwrap();
 
         // get should return None and clean the index.
-        assert!(cache.get(digest, false).is_none());
+        assert!(cache.get(&digest, false).is_none());
     }
 
     #[test]
@@ -608,7 +634,7 @@ mod tests {
 
         let blob = tmp.path().join("blob");
         write_test_blob(&blob, b"data123");
-        cache.put("sha256:test1234", &blob, false).unwrap();
+        cache.put(&digest64('d'), &blob, false).unwrap();
 
         let info = cache.info().unwrap();
         assert_eq!(info.blob_count, 1);
@@ -624,8 +650,8 @@ mod tests {
 
         let blob = tmp.path().join("blob");
         write_test_blob(&blob, b"data");
-        cache.put("sha256:aaaa", &blob, false).unwrap();
-        cache.put("sha256:bbbb", &blob, false).unwrap();
+        cache.put(&digest64('e'), &blob, false).unwrap();
+        cache.put(&digest64('f'), &blob, false).unwrap();
 
         let freed = cache.clean(true, false).unwrap();
         assert!(freed > 0);
@@ -643,12 +669,175 @@ mod tests {
 
         let blob = tmp.path().join("blob");
         write_test_blob(&blob, b"data");
-        cache.put("sha256:aaaa", &blob, false).unwrap();
+        let digest = digest64('9');
+        cache.put(&digest, &blob, false).unwrap();
 
         let entries = cache.list().unwrap();
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].digest, "sha256:aaaa");
+        assert_eq!(entries[0].digest, digest);
         assert_eq!(entries[0].size, 4);
+    }
+
+    fn digest64(c: char) -> String {
+        format!("sha256:{}", c.to_string().repeat(64))
+    }
+
+    #[test]
+    fn test_parse_sha256_hex() {
+        let good = digest64('a');
+        assert_eq!(parse_sha256_hex(&good), Some(&"a".repeat(64)[..]));
+        assert_eq!(
+            parse_sha256_hex(
+                "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            ),
+            Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+        );
+
+        // Absolute path, traversal, wrong length, non-hex, uppercase,
+        // unsupported algorithm, missing prefix, empty suffix.
+        for bad in [
+            "sha256:/etc/passwd",
+            "sha256:../escape",
+            "sha256:",
+            "sha256:abcd",
+            "plain",
+            &format!("sha256:{}", "a".repeat(63)),
+            &format!("sha256:{}", "a".repeat(65)),
+            &format!("sha256:{}", "g".repeat(64)),
+            &format!("sha256:{}", "A".repeat(64)),
+            &format!("sha512:{}", "a".repeat(128)),
+        ] {
+            assert_eq!(parse_sha256_hex(bad), None, "accepted {bad}");
+        }
+    }
+
+    #[test]
+    fn test_cache_get_malformed_digest_preserves_outside_files() {
+        let tmp = TempDataDir::new("cache-malformed-get");
+        let cache_dir = tmp.path().join("cache");
+        let cfg = test_config(&cache_dir, "1G");
+        let cache = BlobCache::from_config(&cfg).unwrap();
+
+        // Sentinel outside the cache, named by an absolute digest suffix.
+        let sentinel = tmp.path().join("sentinel.txt");
+        write_test_blob(&sentinel, b"do not delete");
+        let abs_digest = format!("sha256:{}", sentinel.display());
+
+        // Empty index: the lookup must not touch the named file.
+        assert!(cache.get(&abs_digest, false).is_none());
+        assert_eq!(fs::read(&sentinel).unwrap(), b"do not delete");
+
+        // A `..` suffix must not name a file next to the blob directory.
+        fs::create_dir_all(cache_dir.join("sha256")).unwrap();
+        let neighbor = cache_dir.join("neighbor.txt");
+        write_test_blob(&neighbor, b"neighbor data");
+        assert!(cache.get("sha256:../neighbor.txt", false).is_none());
+        assert_eq!(fs::read(&neighbor).unwrap(), b"neighbor data");
+
+        // Wrong length, non-hex content, and unsupported formats.
+        for bad in [
+            "sha256:",
+            "sha256:abcd",
+            "not-a-digest",
+            &format!("sha256:{}", "a".repeat(63)),
+            &format!("sha256:{}", "a".repeat(65)),
+            &format!("sha256:{}", "g".repeat(64)),
+            &format!("sha256:{}", "A".repeat(64)),
+            &format!("sha512:{}", "a".repeat(128)),
+        ] {
+            assert!(cache.get(bad, false).is_none(), "digest accepted: {bad}");
+        }
+
+        // Populated cache: a valid entry must survive malformed lookups.
+        let blob = tmp.path().join("blob");
+        write_test_blob(&blob, b"real layer");
+        let good = digest64('a');
+        cache.put(&good, &blob, false).unwrap();
+
+        assert!(cache.get(&abs_digest, false).is_none());
+        assert_eq!(fs::read(&sentinel).unwrap(), b"do not delete");
+
+        // A traversal suffix resolving to the cached blob must not delete it
+        // as stale.
+        let traversal = format!("sha256:../sha256/{}", "a".repeat(64));
+        assert!(cache.get(&traversal, false).is_none());
+        let hit = cache
+            .get(&good, false)
+            .expect("valid digest must still hit");
+        assert_eq!(fs::read(&hit).unwrap(), b"real layer");
+    }
+
+    #[test]
+    fn test_cache_put_rejects_malformed_digest() {
+        let tmp = TempDataDir::new("cache-malformed-put");
+        let cache_dir = tmp.path().join("cache");
+        let cfg = test_config(&cache_dir, "1G");
+        let cache = BlobCache::from_config(&cfg).unwrap();
+
+        let blob = tmp.path().join("blob");
+        write_test_blob(&blob, b"layer bytes");
+
+        // An absolute suffix must not create a file outside the cache.
+        let escape = tmp.path().join("escape-target");
+        let abs_digest = format!("sha256:{}", escape.display());
+        assert!(cache.put(&abs_digest, &blob, false).is_err());
+        assert!(!escape.exists());
+
+        for bad in [
+            "sha256:../traversal",
+            "sha256:abcd",
+            "plain-hex-without-prefix",
+            &format!("sha512:{}", "a".repeat(128)),
+        ] {
+            assert!(cache.put(bad, &blob, false).is_err(), "put accepted {bad}");
+        }
+
+        // Valid digests still store and load.
+        let good = digest64('b');
+        cache.put(&good, &blob, false).unwrap();
+        let hit = cache.get(&good, false).unwrap();
+        assert_eq!(fs::read(&hit).unwrap(), b"layer bytes");
+    }
+
+    #[test]
+    fn test_cache_eviction_skips_malformed_index_entries() {
+        let tmp = TempDataDir::new("cache-malformed-evict");
+        let cache_dir = tmp.path().join("cache");
+        fs::create_dir_all(cache_dir.join("sha256")).unwrap();
+
+        // Sentinel outside the cache, named by a malicious index entry.
+        let sentinel = tmp.path().join("evict-sentinel");
+        write_test_blob(&sentinel, b"keep me");
+        let evil_digest = format!("sha256:{}", sentinel.display());
+
+        // A valid blob sharing the index.
+        let good = digest64('c');
+        let good_path = cache_dir.join("sha256").join("c".repeat(64));
+        write_test_blob(&good_path, b"real blob");
+
+        let index: Index = vec![(evil_digest, 7, 1000), (good.clone(), 9, 2000)];
+        fs::write(cache_dir.join("index"), serialize_index(&index)).unwrap();
+
+        // Force LRU eviction over the hand-written index.
+        let cfg = test_config(&cache_dir, "1");
+        let cache = BlobCache::from_config(&cfg).unwrap();
+        cache.clean(false, false).unwrap();
+        assert_eq!(fs::read(&sentinel).unwrap(), b"keep me");
+        assert!(!good_path.exists(), "valid blob should have been evicted");
+
+        // Rebuild and exercise clean(all).
+        write_test_blob(&good_path, b"real blob");
+        fs::write(
+            cache_dir.join("index"),
+            serialize_index(&vec![
+                (format!("sha256:{}", sentinel.display()), 7, 1000),
+                (good, 9, 2000),
+            ]),
+        )
+        .unwrap();
+        cache.clean(true, false).unwrap();
+        assert_eq!(fs::read(&sentinel).unwrap(), b"keep me");
+        assert!(!good_path.exists());
     }
 
     #[test]
