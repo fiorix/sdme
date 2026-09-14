@@ -1,8 +1,4 @@
-+++
-title = "Using sdme on Windows"
-description = "Run sdme inside WSL 2 on Windows."
-weight = 2
-+++
+# Using sdme on Windows
 
 sdme requires Linux with systemd. On Windows, use [WSL 2](https://learn.microsoft.com/en-us/windows/wsl/), which runs a real Linux kernel; current Ubuntu WSL images boot systemd by default.
 

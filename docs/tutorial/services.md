@@ -1,14 +1,10 @@
-+++
-title = "Running Long-Lived Services"
-description = "Install and run services like nginx inside sdme containers."
-weight = 6
-+++
+# Running Long-Lived Services
 
 Since sdme containers boot a full systemd, you can install and run services the same way you would on a regular Linux system.
 
 ## Import a rootfs
 
-Import a rootfs to use as a container template. This example uses Fedora, but any [supported distribution](@/tutorial/different-rootfs.md#supported-distributions) works:
+Import a rootfs to use as a container template. This example uses Fedora, but any [supported distribution](different-rootfs.md#supported-distributions) works:
 
 ```sh
 sudo sdme fs import quay.io/fedora/fedora
@@ -19,7 +15,7 @@ sudo sdme fs import quay.io/fedora/fedora
 We recommend using `--network-zone` and `--hardened` for service containers:
 
 - `--network-zone=services` gives the container its own network namespace with DNS, avoiding port conflicts with the host. Other containers can later join the same zone and reach each other by hostname.
-- `--hardened` enables user namespace isolation so root inside the container is not root on the host. See the [security architecture](@/docs/security.md#10-hardening-tiers) for details on what this enables.
+- `--hardened` enables user namespace isolation so root inside the container is not root on the host. See the [security architecture](../security.md#10-hardening-tiers) for details on what this enables.
 
 ```sh
 sudo sdme new --name mywebserver -r fedora --network-zone=services --hardened
@@ -84,8 +80,8 @@ If you need to run interactive programs inside the container (like a terminal mu
 systemd-run --scope tmux
 ```
 
-Without `systemd-run --scope`, systemd terminates all processes in your login session when you exit. See the [your first container](@/tutorial/first-container.md#running-tmux-and-other-background-processes) tutorial for more details.
+Without `systemd-run --scope`, systemd terminates all processes in your login session when you exit. See the [your first container](first-container.md#running-tmux-and-other-background-processes) tutorial for more details.
 
 ## Sharing files with the host
 
-You can bind-mount host directories into the container at creation time using the `-b` flag. See the [bind mounts and OCI volumes](@/tutorial/bind-mounts-volumes.md) tutorial for examples.
+You can bind-mount host directories into the container at creation time using the `-b` flag. See the [bind mounts and OCI volumes](bind-mounts-volumes.md) tutorial for examples.

@@ -1,0 +1,90 @@
+{
+  "docs/ai-skill.md": {
+    "source": "docs/ai-skill.md",
+    "description": "Embedded AI agent skill for using and troubleshooting sdme.",
+    "weight": 3,
+    "template": "doc.html"
+  },
+  "docs/architecture.md": {
+    "source": "docs/architecture.md",
+    "description": "How sdme works: overlayfs, systemd integration, OCI support, and Kubernetes pods.",
+    "weight": 1,
+    "template": "doc.html"
+  },
+  "docs/security.md": {
+    "source": "docs/security.md",
+    "description": "Container isolation, hardening tiers, OCI workload security, and Kubernetes pod security.",
+    "weight": 2,
+    "template": "doc.html"
+  },
+  "tutorial/bind-mounts-volumes.md": {
+    "source": "docs/tutorial/bind-mounts-volumes.md",
+    "description": "Share files between host and containers using bind mounts and OCI volumes.",
+    "weight": 8
+  },
+  "tutorial/building-rootfs.md": {
+    "source": "docs/tutorial/building-rootfs.md",
+    "description": "Build custom root filesystems with sdme fs build using Dockerfile-like configs.",
+    "weight": 13
+  },
+  "tutorial/different-rootfs.md": {
+    "source": "docs/tutorial/different-rootfs.md",
+    "description": "Import other Linux distributions and create containers from them.",
+    "weight": 4
+  },
+  "tutorial/docker-in-container.md": {
+    "source": "docs/tutorial/docker-in-container.md",
+    "description": "Run a full Docker engine and a private registry inside an sdme container, backed by btrfs storage.",
+    "weight": 14
+  },
+  "tutorial/first-container.md": {
+    "source": "docs/tutorial/first-container.md",
+    "description": "Create a container, manage it, and learn how to run background processes like tmux.",
+    "weight": 3
+  },
+  "tutorial/kubernetes-pods.md": {
+    "source": "docs/tutorial/kubernetes-pods.md",
+    "description": "Deploy OCI applications from Kubernetes Pod YAML manifests.",
+    "weight": 12
+  },
+  "tutorial/macos.md": {
+    "source": "docs/tutorial/macos.md",
+    "description": "Set up a Linux VM with lima-vm to run sdme on your Mac.",
+    "weight": 1
+  },
+  "tutorial/management.md": {
+    "source": "docs/tutorial/management.md",
+    "description": "Essential commands for managing containers: listing, logs, copying files, and troubleshooting.",
+    "weight": 5
+  },
+  "tutorial/networking.md": {
+    "source": "docs/tutorial/networking.md",
+    "description": "Configure container networking: host network, private network, veth, zones, bridges, and port forwarding.",
+    "weight": 10
+  },
+  "tutorial/oci-apps.md": {
+    "source": "docs/tutorial/oci-apps.md",
+    "description": "Import and run OCI application images like nginx as systemd services inside sdme containers.",
+    "weight": 7
+  },
+  "tutorial/oci-volumes.md": {
+    "source": "docs/tutorial/oci-volumes.md",
+    "description": "Run PostgreSQL with automatically managed OCI volumes that persist data across container removal and re-creation.",
+    "weight": 9
+  },
+  "tutorial/pod-networking.md": {
+    "source": "docs/tutorial/pod-networking.md",
+    "description": "Share a network namespace between containers so they communicate via localhost.",
+    "weight": 11
+  },
+  "tutorial/services.md": {
+    "source": "docs/tutorial/services.md",
+    "description": "Install and run services like nginx inside sdme containers.",
+    "weight": 6
+  },
+  "tutorial/windows.md": {
+    "source": "docs/tutorial/windows.md",
+    "description": "Run sdme inside WSL 2 on Windows.",
+    "weight": 2
+  }
+}

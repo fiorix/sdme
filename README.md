@@ -32,4 +32,4 @@ For .deb, .rpm, and .pkg packages, see the [downloads page](https://sdme.io/#dow
 
 ## Tutorials and documentation
 
-**[sdme.io](https://sdme.io/)**
+Read the [documentation and tutorials](docs/README.md) here on GitHub or on [sdme.io](https://sdme.io/).

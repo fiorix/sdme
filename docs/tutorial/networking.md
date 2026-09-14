@@ -1,12 +1,8 @@
-+++
-title = "Network Configuration"
-description = "Configure container networking: host network, private network, veth, zones, bridges, and port forwarding."
-weight = 10
-+++
+# Network Configuration
 
 sdme containers share the host network by default. This tutorial covers all available network modes, from full isolation to multi-container networking.
 
-See also the [architecture documentation](@/docs/architecture.md#9-networking) for implementation details.
+See also the [architecture documentation](../architecture.md#9-networking) for implementation details.
 
 ## Host network (default)
 
@@ -44,9 +40,9 @@ sudo sdme new --name myweb -r nginx --network-veth --port 8080:80
 
 This forwards host port 8080 to container port 80. Format:
 
-<pre class="diagram">
+```text
 --port HOST:CONTAINER --port HOST:CONTAINER/tcp --port HOST:CONTAINER/udp
-</pre>
+```
 
 Multiple `--port` flags can be used. TCP is the default protocol.
 
@@ -122,9 +118,10 @@ sudo sdme start server
 
 `--network-bridge` implies `--private-network`.
 
-{% callout(type="tip", title="Tip") %}
-Zones are simpler than bridges for most use cases. Use bridges when you need to integrate containers with an existing host bridge or require static IP assignments.
-{% end %}
+> [!TIP]
+> **Tip**
+>
+> Zones are simpler than bridges for most use cases. Use bridges when you need to integrate containers with an existing host bridge or require static IP assignments.
 
 ## DNS and resolved
 
@@ -152,7 +149,7 @@ The default masked services are controlled by the `default_create_masked_service
 
 ## Summary
 
-<pre class="diagram">
+```text
 Mode             Flag                Internet  Multi-container  Setup
 ---------------  ------------------  --------  ---------------  ----------
 Host (default)   (none)              Yes       Shared ports     None
@@ -160,6 +157,6 @@ Private          --private-network   No        No               None
 Veth             --network-veth      Yes       No               None
 Zone             --network-zone=X    Yes       Yes (auto DNS)   None
 Bridge           --network-bridge=X  Yes       Yes (manual IP)  Host bridge
-</pre>
+```
 
 Port forwarding (`--port`) works with veth, zone, and bridge modes for external access. From the host, use the container's IP directly.

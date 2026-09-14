@@ -1,12 +1,8 @@
-+++
-title = "Multi-Container Pod Networking"
-description = "Share a network namespace between containers so they communicate via localhost."
-weight = 11
-+++
+# Multi-Container Pod Networking
 
 Pods let multiple containers share a network namespace, so they can communicate over `127.0.0.1` without any port forwarding or bridge configuration. This is the same model used by Kubernetes pods.
 
-See also the [architecture documentation](@/docs/architecture.md#10-pods) for implementation details.
+See also the [architecture documentation](../architecture.md#10-pods) for implementation details.
 
 ## Creating a pod
 
@@ -32,7 +28,7 @@ sudo sdme pod rm -a -f    # force: also stop and remove attached containers
 
 The `--pod` flag puts the entire container into the pod's network namespace. All processes inside the container share it.
 
-Create a pod and two containers. We use the OCI nginx rootfs (from the [OCI tutorial](@/tutorial/oci-apps.md)) since pod containers only have loopback and cannot download packages.
+Create a pod and two containers. We use the OCI nginx rootfs (from the [OCI tutorial](oci-apps.md)) since pod containers only have loopback and cannot download packages.
 
 ```sh
 sudo sdme pod new webpod
@@ -126,11 +122,11 @@ You should see `PONG`. Both containers share the pod's network namespace and com
 
 ## --pod vs --oci-pod
 
-<pre class="diagram">
+```text
 Feature            --pod                  --oci-pod -----------------  ---------------------  ------------------------- Scope              Entire container       OCI app service only Container types    Any                    OCI app rootfs required Userns/hardened    Compatible             Compatible Requires           (nothing extra)        --private-network or
                                           --hardened/--strict
 Use case           General-purpose pods   Security-hardened apps
-</pre>
+```
 
 Both flags can be used on different containers in the same pod. The pod's network namespace is shared regardless of which flag each container uses to join it.
 

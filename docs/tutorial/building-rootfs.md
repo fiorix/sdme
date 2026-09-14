@@ -1,8 +1,4 @@
-+++
-title = "Building Root Filesystems"
-description = "Build custom root filesystems with sdme fs build using Dockerfile-like configs."
-weight = 13
-+++
+# Building Root Filesystems
 
 The `sdme fs build` command creates custom root filesystems from a simple build config. The config format uses `FROM`, `RUN`, and `COPY` directives, similar to a Dockerfile. Each `RUN` step executes inside a booted systemd-nspawn container, so you get a real systemd environment with working package managers, services, and networking.
 

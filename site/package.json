@@ -2,9 +2,16 @@
   "name": "sdme-site",
   "private": true,
   "scripts": {
+    "build": "node scripts/zola.mjs build",
+    "check": "node scripts/zola.mjs check --skip-external-links",
+    "serve": "node scripts/zola.mjs serve",
+    "test:content": "node --test tests/content.test.cjs",
     "test": "node --test tests/*.test.cjs"
   },
   "devDependencies": {
+    "github-slugger": "2.0.0",
+    "micromark": "4.0.2",
+    "micromark-util-decode-string": "2.0.1",
     "playwright": "1.63.0"
   }
 }

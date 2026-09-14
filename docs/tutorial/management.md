@@ -1,8 +1,4 @@
-+++
-title = "Day-to-Day Management"
-description = "Essential commands for managing containers: listing, logs, copying files, and troubleshooting."
-weight = 5
-+++
+# Day-to-Day Management
 
 This tutorial covers the commands you'll use daily when working with sdme containers.
 
@@ -221,9 +217,10 @@ If start fails, the container is preserved on disk. Check the logs:
 sudo sdme logs mycontainer
 ```
 
-{% callout(type="tip", title="Tip") %}
-Use `--hardened` and `--strict` with imported rootfs (e.g. `-r ubuntu`) rather than host rootfs clones. Imported rootfs are clean and don't carry host-specific xattrs that can interfere with user namespace isolation.
-{% end %}
+> [!TIP]
+> **Tip**
+>
+> Use `--hardened` and `--strict` with imported rootfs (e.g. `-r ubuntu`) rather than host rootfs clones. Imported rootfs are clean and don't carry host-specific xattrs that can interfere with user namespace isolation.
 
 ## Pruning unused resources
 
@@ -261,6 +258,7 @@ sudo sdme prune --except=secret:myapp,container:myapp
 
 The configured `default_base_fs` is always excluded from pruning.
 
-{% callout(type="tip", title="Tip") %}
-Kube secrets and configmaps are always listed for pruning because they are copied into the container at create time and not referenced at runtime. Use `--except` to keep any you plan to reuse in future `kube apply` commands.
-{% end %}
+> [!TIP]
+> **Tip**
+>
+> Kube secrets and configmaps are always listed for pruning because they are copied into the container at create time and not referenced at runtime. Use `--except` to keep any you plan to reuse in future `kube apply` commands.

@@ -190,12 +190,12 @@ code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monosp
 .asset-row { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0.25rem 0.75rem; margin-bottom: 0.35rem; font-size: 0.875rem; overflow-wrap: anywhere; }
 .asset-row .size { color: var(--text-secondary); font-size: 0.75rem; white-space: nowrap; }
 .checksum-link { text-align: center; margin-top: 1rem; font-size: 0.85rem; }
-.callout { border-radius: 6px; padding: 1rem 1.25rem; margin-bottom: 1.5rem; font-size: 0.9rem; }
-.callout-warn { background: var(--warn-bg); border: 1px solid var(--warn-border); color: var(--warn-text); }
-.callout-tip { background: var(--tip-bg); border: 1px solid var(--tip-border); color: var(--tip-text); }
-.callout strong { display: block; margin-bottom: 0.25rem; }
-.callout p { margin-bottom: 0; }
-.callout p + p { margin-top: 0.5rem; }
+.document-content blockquote[class^="markdown-alert-"] { border-radius: 6px; padding: 1rem 1.25rem; margin: 0 0 1.5rem; font-size: 0.9rem; }
+.document-content .markdown-alert-warning, .document-content .markdown-alert-caution { background: var(--warn-bg); border: 1px solid var(--warn-border); color: var(--warn-text); }
+.document-content .markdown-alert-tip { background: var(--tip-bg); border: 1px solid var(--tip-border); color: var(--tip-text); }
+.document-content .markdown-alert-note, .document-content .markdown-alert-important { background: var(--link-soft); border: 1px solid var(--border); color: var(--text); }
+.document-content blockquote[class^="markdown-alert-"] p { margin-bottom: 0.5rem; }
+.document-content blockquote[class^="markdown-alert-"] p:last-child { margin-bottom: 0; }
 .doc-links { list-style: none; padding-left: 0; }
 .doc-links .desc { color: var(--text-secondary); }
 .coming-soon { text-align: center; padding: 4rem 1rem; color: var(--text-secondary); }

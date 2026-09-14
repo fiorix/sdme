@@ -1,14 +1,10 @@
-+++
-title = "Running Kubernetes Pods"
-description = "Deploy OCI applications from Kubernetes Pod YAML manifests."
-weight = 12
-+++
+# Running Kubernetes Pods
 
 sdme can create containers from Kubernetes Pod YAML manifests without requiring Kubernetes, Docker, Podman, or any OCI runtime. Everything is wired through sdme and systemd: OCI images are pulled directly from registries and run as systemd services inside nspawn containers.
 
-Kubernetes Pod YAML describes one or more OCI images to run as isolated services (environment variables, volumes, probes) in a single file that sdme parses and deploys. This is not the same as the [sdme pod](@/tutorial/pod-networking.md) networking feature.
+Kubernetes Pod YAML describes one or more OCI images to run as isolated services (environment variables, volumes, probes) in a single file that sdme parses and deploys. This is not the same as the [sdme pod](pod-networking.md) networking feature.
 
-See also the [architecture documentation](@/docs/architecture.md#17-kubernetes-pod-support) for implementation details.
+See also the [architecture documentation](../architecture.md#17-kubernetes-pod-support) for implementation details.
 
 ## How it works
 
@@ -29,7 +25,7 @@ spec:
     image: nginx
 ```
 
-The base rootfs can be any [supported distribution](@/tutorial/different-rootfs.md#supported-distributions). Import one if you haven't already (Ubuntu for example):
+The base rootfs can be any [supported distribution](different-rootfs.md#supported-distributions). Import one if you haven't already (Ubuntu for example):
 
 ```sh
 sudo sdme fs import docker.io/ubuntu
@@ -56,13 +52,14 @@ Exit the shell with `Ctrl+D`; the container keeps running. From the host, you ca
 sudo sdme logs my-nginx --oci nginx
 ```
 
-{% callout(type="tip", title="Image registry") %}
-Short image names like `redis` or `nginx` are resolved using the `default_kube_registry` config (default: `docker.io`). Fully qualified names like `quay.io/nginx/nginx-unprivileged` are used as-is. To use a different default registry: `sudo sdme config set default_kube_registry registry.example.com`
-{% end %}
+> [!TIP]
+> **Image registry**
+>
+> Short image names like `redis` or `nginx` are resolved using the `default_kube_registry` config (default: `docker.io`). Fully qualified names like `quay.io/nginx/nginx-unprivileged` are used as-is. To use a different default registry: `sudo sdme config set default_kube_registry registry.example.com`
 
 ## Reaching kube pods from other containers
 
-All containers on the same network zone can reach each other by hostname. You can use any [supported distribution](@/tutorial/different-rootfs.md#supported-distributions) here (Arch Linux for example):
+All containers on the same network zone can reach each other by hostname. You can use any [supported distribution](different-rootfs.md#supported-distributions) here (Arch Linux for example):
 
 ```sh
 sudo sdme fs import docker.io/lopsided/archlinux
@@ -232,7 +229,7 @@ sudo sdme kube apply -f nginx-pod.yaml --hardened --network-zone=kube
 sudo sdme kube apply -f nginx-pod.yaml --base-fs ubuntu --storage btrfs --disk 4G --hardened --network-zone=kube
 ```
 
-With `--storage btrfs`, the combined pod rootfs is built as a copy-on-write subvolume snapshot of `--base-fs`, so multi-container pods get fast copy-on-write clones, native user-namespace idmapping, and optional per-pod disk quotas. `--disk` requires btrfs simple quotas (btrfs-progs and kernel 6.7 or newer). See [storage backends](@/tutorial/different-rootfs.md#storage-backends) for the backend model and requirements.
+With `--storage btrfs`, the combined pod rootfs is built as a copy-on-write subvolume snapshot of `--base-fs`, so multi-container pods get fast copy-on-write clones, native user-namespace idmapping, and optional per-pod disk quotas. `--disk` requires btrfs simple quotas (btrfs-progs and kernel 6.7 or newer). See [storage backends](different-rootfs.md#storage-backends) for the backend model and requirements.
 
 ## Networking
 
@@ -240,7 +237,7 @@ All examples in this tutorial use `--network-zone=kube`, which gives each contai
 
 The Kubernetes `hostNetwork: true` field is supported and keeps the container on the host network.
 
-See the [network configuration](@/tutorial/networking.md) tutorial for details on each mode.
+See the [network configuration](networking.md) tutorial for details on each mode.
 
 ## What's supported
 

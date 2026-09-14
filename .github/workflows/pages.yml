@@ -3,7 +3,7 @@ name: Deploy site
 on:
   push:
     branches: [main]
-    paths: [site/**]
+    paths: [site/**, docs/**, README.md, .github/workflows/pages.yml]
   release:
     types: [published]
   workflow_dispatch:
@@ -23,6 +23,20 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+
+      - name: Install site dependencies
+        run: npm ci
+        working-directory: site
+
+      - name: Check shared Markdown
+        run: npm run test:content
+        working-directory: site
+
       - name: Install Zola
         run: |
           ZOLA_VERSION="0.22.1"
@@ -32,7 +46,7 @@ jobs:
           chmod +x zola
 
       - name: Build
-        run: ../zola build
+        run: ZOLA_BIN="$GITHUB_WORKSPACE/zola" npm run build
         working-directory: site
 
       - name: Upload artifact

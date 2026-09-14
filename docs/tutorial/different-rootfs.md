@@ -1,8 +1,4 @@
-+++
-title = "Using a Different Root Filesystem"
-description = "Import other Linux distributions and create containers from them."
-weight = 4
-+++
+# Using a Different Root Filesystem
 
 By default, `sdme new` creates an overlayfs clone of your host root filesystem. You can also import and use other distributions.
 
@@ -50,7 +46,7 @@ sudo sdme new --name build -r ubuntu --storage btrfs --disk 4G
 
 `sdme ps` then shows a `DISK` column with used and limit for capped containers, and a write past the cap fails with "No space left on device". You can change the cap later with `sudo sdme set build --disk 8G`.
 
-The btrfs backend needs `btrfs-progs` installed, and `--disk` additionally needs btrfs simple quotas (btrfs-progs and a kernel from the 6.7 series or newer). See the [architecture guide](@/docs/architecture.md) for the storage model and its trade-offs.
+The btrfs backend needs `btrfs-progs` installed, and `--disk` additionally needs btrfs simple quotas (btrfs-progs and a kernel from the 6.7 series or newer). See the [architecture guide](../architecture.md) for the storage model and its trade-offs.
 
 ## List imported rootfs
 
@@ -116,7 +112,7 @@ sudo sdme fs import registry.opensuse.org/opensuse/tumbleweed --name opensuse
 
 ### NixOS
 
-NixOS requires a separate build process. See the [build script](https://github.com/fiorix/sdme/blob/main/test/scripts/build-nixos-rootfs.sh) and [nix expression](https://github.com/fiorix/sdme/blob/main/test/nix/sdme-nixos.nix) in the repository for an example.
+NixOS requires a separate build process. See the [build script](../../test/scripts/build-nixos-rootfs.sh) and [nix expression](../../test/nix/sdme-nixos.nix) in the repository for an example.
 
 ### Cloud images
 

@@ -1,8 +1,4 @@
-+++
-title = "Using sdme on macOS"
-description = "Set up a Linux VM with lima-vm to run sdme on your Mac."
-weight = 1
-+++
+# Using sdme on macOS
 
 sdme requires Linux with systemd. On macOS, use [lima-vm](https://lima-vm.io/) to run a Linux VM.
 

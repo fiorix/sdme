@@ -1,8 +1,4 @@
-+++
-title = "Your First Container"
-description = "Create a container, manage it, and learn how to run background processes like tmux."
-weight = 3
-+++
+# Your First Container
 
 sdme runs full Linux systems as containers, not just application processes. Each container boots its own [systemd](https://systemd.io/) init, has its own journal, and supports `systemctl`, `journalctl`, and everything you would expect on a real machine. If you are coming from Docker or Podman, think of it as a lightweight VM without the hypervisor overhead.
 
@@ -16,11 +12,12 @@ curl -fsSL https://sdme.io/install.sh | sudo sh
 
 This installs a single static binary to `/usr/local/bin/sdme`. Your system also needs `systemd-container` so that [systemd-nspawn](https://www.freedesktop.org/software/systemd/man/latest/systemd-nspawn.html) and [machinectl](https://www.freedesktop.org/software/systemd/man/latest/machinectl.html) are available. On Debian/Ubuntu: `sudo apt install systemd-container`. On Fedora/CentOS: `sudo dnf install systemd-container`. Arch Linux includes it in the base `systemd` package.
 
-For other installation methods, see the [installation page](@/_index.md#installation).
+For other installation methods, see the [installation page](../../README.md#installation).
 
-{% callout(type="warn", title="Note") %}
-sdme requires root for all operations. Every `sdme` command in this tutorial must be run as root or with `sudo`.
-{% end %}
+> [!WARNING]
+> **Note**
+>
+> sdme requires root for all operations. Every `sdme` command in this tutorial must be run as root or with `sudo`.
 
 ## Create and enter a container
 
@@ -50,9 +47,10 @@ You are now inside the container. It looks and feels like your host system but a
 
 Type `exit` or press `Ctrl+]` three times quickly. This detaches from the container shell; the container keeps running in the background.
 
-{% callout(type="tip", title="Tip") %}
-All sdme commands support name prefix matching. If your container is called `araciubaia`, typing `sudo sdme join ara` is enough, as long as no other container name starts with `ara`.
-{% end %}
+> [!TIP]
+> **Tip**
+>
+> All sdme commands support name prefix matching. If your container is called `araciubaia`, typing `sudo sdme join ara` is enough, as long as no other container name starts with `ara`.
 
 ## Naming your containers
 
@@ -85,15 +83,16 @@ Stop and delete the container when you're done:
 sudo sdme rm foobar
 ```
 
-For listing, stopping, starting, restarting, and other daily operations, see [Day-to-Day Management](@/tutorial/management.md).
+For listing, stopping, starting, restarting, and other daily operations, see [Day-to-Day Management](management.md).
 
 ## Running tmux (and other background processes)
 
 Once inside the container, you might want to start `tmux` to keep processes running after you detach from the shell. If you try running `tmux` directly, you'll notice that it gets killed as soon as you exit the shell.
 
-{% callout(type="warn", title="Why does tmux die when I exit?") %}
-systemd tracks every process inside a login session using [cgroups](https://docs.kernel.org/admin-guide/cgroup-v2.html) (process groups used for resource tracking and lifecycle management). When your shell exits, systemd terminates all remaining processes in that session scope, including tmux.
-{% end %}
+> [!WARNING]
+> **Why does tmux die when I exit?**
+>
+> systemd tracks every process inside a login session using [cgroups](https://docs.kernel.org/admin-guide/cgroup-v2.html) (process groups used for resource tracking and lifecycle management). When your shell exits, systemd terminates all remaining processes in that session scope, including tmux.
 
 The fix is to run tmux (or any long-lived process) inside its own systemd scope, which gives it an independent lifecycle from your login session:
 

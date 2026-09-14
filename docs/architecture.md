@@ -1,10 +1,4 @@
-+++
-title = "Architecture and Design"
-description = "How sdme works: overlayfs, systemd integration, OCI support, and Kubernetes pods."
-weight = 1
-template = "doc.html"
-+++
-
+# Architecture and Design
 
 ## 1. Introduction
 
@@ -273,7 +267,7 @@ B     ext4, xfs, other    {datadir}/btrfs-pool.img, a loopback
 
 **Mode A** is the production-preferred layout: the datadir already sits on btrfs, so subvolumes live directly under it with no loop device. **Mode B** creates a single shared btrfs filesystem inside a sparse loopback image (a 20G pool costs almost nothing until containers write) and mounts it once via a generated systemd `.mount` unit, so the mount is tracked by systemd, ordered before container units, and re-established after a reboot. Ad-hoc operations (cp, export, diff, rm) that run outside a systemd start mount the pool on demand.
 
-**Snapshot lifecycle.** The base rootfs is materialized once into an immutable subvolume `{pool}/fs/{name}` (via the same `copy_tree()` engine, preserving hardlinks, devnodes, suid, and xattrs), serialized under a per-base lock so concurrent first-time creates do not each copy the whole tree. Each container is then `btrfs subvolume snapshot {pool}/fs/{name} {pool}/containers/{ctr}`, an instant CoW copy. sdme writes the per-container customization (hostname, hosts, resolv.conf, machine-id, fstab, masked-service symlinks) directly into the snapshot rather than an overlay upper layer. Because those writes land in an untrusted base tree, sdme refuses any customization path whose ancestor is an image-supplied symlink and shadows a leaf symlink with a real file, so a malformed or hostile image cannot redirect a write onto the host (see the [security model](@/docs/security.md)). The container's systemd drop-in points `--directory=` at the subvolume with no overlay mount, and rm destroys the subvolume with the `BTRFS_IOC_SNAP_DESTROY_V2` ioctl issued directly (one syscall, one errno), falling back to parking the subvolume in a per-pool `.trash` directory when the destroy is denied (see the nested section below); a later privileged `sdme prune` destroys trash entries. Subvolume inspection never shells out to btrfs-progs: a subvolume root is detected with `stat()` alone (a directory with inode number 256 on a btrfs filesystem), which needs no privilege.
+**Snapshot lifecycle.** The base rootfs is materialized once into an immutable subvolume `{pool}/fs/{name}` (via the same `copy_tree()` engine, preserving hardlinks, devnodes, suid, and xattrs), serialized under a per-base lock so concurrent first-time creates do not each copy the whole tree. Each container is then `btrfs subvolume snapshot {pool}/fs/{name} {pool}/containers/{ctr}`, an instant CoW copy. sdme writes the per-container customization (hostname, hosts, resolv.conf, machine-id, fstab, masked-service symlinks) directly into the snapshot rather than an overlay upper layer. Because those writes land in an untrusted base tree, sdme refuses any customization path whose ancestor is an image-supplied symlink and shadows a leaf symlink with a real file, so a malformed or hostile image cannot redirect a write onto the host (see the [security model](security.md)). The container's systemd drop-in points `--directory=` at the subvolume with no overlay mount, and rm destroys the subvolume with the `BTRFS_IOC_SNAP_DESTROY_V2` ioctl issued directly (one syscall, one errno), falling back to parking the subvolume in a per-pool `.trash` directory when the destroy is denied (see the nested section below); a later privileged `sdme prune` destroys trash entries. Subvolume inspection never shells out to btrfs-progs: a subvolume root is detected with `stat()` alone (a directory with inode number 256 on a btrfs filesystem), which needs no privilege.
 
 **Offline access.** `sdme cp`, `sdme fs export`, and `sdme diff` operate on the container without booting it. For overlay this means a temporary read-only overlay mount of `merged`; for btrfs the container root already is a full filesystem, so those commands read (and, for `cp`, write) the subvolume directly. A `cp` into a stopped btrfs container writes into the subvolume itself, so it takes an exclusive lock, re-checks that the container is stopped, and runs through a symlink-safe copy that shadows any pre-existing base-image symlink at each destination before writing, preventing an escape out of the subvolume.
 
@@ -644,7 +638,7 @@ Config files are written with mode `0600`.
 
 ## 14. Security
 
-This section documents sdme's security implementation: capabilities, seccomp, AppArmor, the `--hardened` and `--strict` flags, and input sanitization. For comparisons with Docker and Podman, see [Security documentation](@/docs/security.md).
+This section documents sdme's security implementation: capabilities, seccomp, AppArmor, the `--hardened` and `--strict` flags, and input sanitization. For comparisons with Docker and Podman, see [Security documentation](security.md).
 
 ### Capability bounding set
 
@@ -890,18 +884,9 @@ A global `INTERRUPTED` `AtomicBool` flag is set by a POSIX signal handler for bo
 
 The HEALTH column in `sdme ps` layers three signals, checked from the host inward; the first one that reports a problem wins:
 
-  1. State integrity. A missing container directory, missing rootfs,
-     or unreadable state file is reported directly (`missing fs`,
-     `missing container dir`, `unreadable state file`) rather than
-     crashing or silently hiding the container.
-  2. Host unit state. If the container's `sdme@NAME.service` is in
-     failed state, health is `failed`.
-  3. In-container systemd state. For running containers, sdme runs
-     `systemctl --machine=NAME is-system-running`. `running` maps to
-     `ok`; any other state (`degraded`, `starting`, `maintenance`) is
-     shown as-is. If the query fails (D-Bus not up yet, wedged init),
-     health is `unknown` rather than `ok`: an unreachable container is
-     never reported healthy.
+  1. State integrity. A missing container directory, missing rootfs, or unreadable state file is reported directly (`missing fs`, `missing container dir`, `unreadable state file`) rather than crashing or silently hiding the container.
+  2. Host unit state. If the container's `sdme@NAME.service` is in failed state, health is `failed`.
+  3. In-container systemd state. For running containers, sdme runs `systemctl --machine=NAME is-system-running`. `running` maps to `ok`; any other state (`degraded`, `starting`, `maintenance`) is shown as-is. If the query fails (D-Bus not up yet, wedged init), health is `unknown` rather than `ok`: an unreachable container is never reported healthy.
 
 A failed unit inside a running container (a web server that crashed at boot, for example) therefore surfaces as `degraded` in `sdme ps` without any per-container probe configuration. The query shells out to systemctl rather than using zbus because reaching a userns container's bus from the host requires a forked-helper connection that systemctl (like busctl) already implements; the full rationale is documented at `wait_for_dbus` in `src/systemd/dbus.rs`.
 
@@ -917,19 +902,11 @@ If you find a way to leave sdme's state inconsistent (a container that can't be 
 
 The analysis phase is read-only. It scans every resource type and collects items that can be safely removed:
 
-  - Filesystems with no containers using them (except the configured
-    `default_base_fs`)
-  - Stopped containers with non-ok health status (missing dirs, broken
-    state, failed, not-ready). Live containers are never candidates:
-    a running container can report transient health (`degraded`,
-    `starting`, `unknown`) that signals an operational problem, not
-    garbage to collect
+  - Filesystems with no containers using them (except the configured `default_base_fs`)
+  - Stopped containers with non-ok health status (missing dirs, broken state, failed, not-ready). Live containers are never candidates: a running container can report transient health (`degraded`, `starting`, `unknown`) that signals an operational problem, not garbage to collect
   - Pods with no containers attached
-  - Kube secrets and configmaps (all are candidates because they are
-    copied into the container rootfs at `kube create` time, not
-    referenced at runtime)
-  - Orphaned volume directories under `{datadir}/volumes/` that no
-    container binds reference
+  - Kube secrets and configmaps (all are candidates because they are copied into the container rootfs at `kube create` time, not referenced at runtime)
+  - Orphaned volume directories under `{datadir}/volumes/` that no container binds reference
   - Stale transaction staging directories (same as `sdme fs gc`)
 
 After displaying a categorized summary, prune asks for confirmation in interactive mode. `--dry-run` shows the analysis without removing anything. `--except` excludes items by name, with optional `category:name` prefixes to disambiguate when a name appears in multiple categories.
@@ -1590,20 +1567,9 @@ The banner is one line, goes to stderr, and directs the user to `sudo sdme upgra
 7. Prompt the user unless `-y` is given. Strict upgrades default to yes (`[Y/n]`); downgrades and unparseable directions default to no (`[y/N]`).
 8. Render `binary_url_template` and `checksums_url_template`. Both must start with `https://`; `http://` is refused.
 9. Download the binary to `.sdme.upgrade.<pid>` in the same directory as the running binary (same filesystem guarantees atomic rename), streaming through a SHA-256 hasher and enforcing a 128 MiB cap. A drop-guard unlinks the temp on any early return.
-10. Fetch `SHA256SUMS`, parse the line matching `sdme-<arch>-linux`,
-    and compare against the streamed hash. A mismatch aborts and the
-    drop-guard removes the temp.
-11. `chmod 0755` the temp and `rename(2)` it over the running binary.
-    Linux keeps the old inode mapped until the process exits, so the
-    replacement is safe in-flight.
-12. Rewrite the state file via `post_upgrade_state` so
-    `maybe_print_banner_from_env` stays silent for the rest of this
-    process. The running binary is still the pre-upgrade version at
-    this point, so storing the true `latest_version` here would
-    immediately trigger the "update available" banner right after the
-    success line. Dropping `latest_version` (and the URL fields) forces
-    the banner's None-path early return; the next background probe
-    repopulates the fields authoritatively for the new binary.
+10. Fetch `SHA256SUMS`, parse the line matching `sdme-<arch>-linux`, and compare against the streamed hash. A mismatch aborts and the drop-guard removes the temp.
+11. `chmod 0755` the temp and `rename(2)` it over the running binary. Linux keeps the old inode mapped until the process exits, so the replacement is safe in-flight.
+12. Rewrite the state file via `post_upgrade_state` so `maybe_print_banner_from_env` stays silent for the rest of this process. The running binary is still the pre-upgrade version at this point, so storing the true `latest_version` here would immediately trigger the "update available" banner right after the success line. Dropping `latest_version` (and the URL fields) forces the banner's None-path early return; the next background probe repopulates the fields authoritatively for the new binary.
 
 No signature verification is performed; trust anchors in HTTPS plus the hash comparison against `SHA256SUMS` from the same release. This matches the installer script at `site/static/install.sh`.
 

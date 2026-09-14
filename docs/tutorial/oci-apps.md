@@ -1,8 +1,4 @@
-+++
-title = "Intro to Running OCI Applications"
-description = "Import and run OCI application images like nginx as systemd services inside sdme containers."
-weight = 7
-+++
+# Intro to Running OCI Applications
 
 This tutorial shows how to import an OCI application image (nginx) and run it inside an sdme container.
 
@@ -17,9 +13,9 @@ This detection is automatic. Application images require a base rootfs to run ins
 
 ## How it works
 
-The container always boots from the base OS rootfs (e.g. Ubuntu). The application image (e.g. nginx, which may be Alpine-based internally) is placed under `/oci/apps/{name}/root` and runs as a chrooted systemd service inside that container. The application is isolated with its own PID and IPC namespaces, just as it would expect in a traditional container runtime. For more details, see the [OCI integration](@/docs/architecture.md#16-oci-integration) architecture and [OCI app isolation](@/docs/security.md#13-oci-app-isolation-architecture) security documentation.
+The container always boots from the base OS rootfs (e.g. Ubuntu). The application image (e.g. nginx, which may be Alpine-based internally) is placed under `/oci/apps/{name}/root` and runs as a chrooted systemd service inside that container. The application is isolated with its own PID and IPC namespaces, just as it would expect in a traditional container runtime. For more details, see the [OCI integration](../architecture.md#16-oci-integration) architecture and [OCI app isolation](../security.md#13-oci-app-isolation-architecture) security documentation.
 
-<pre class="diagram">
+```text
 +--------------------------------------------------+
 |            sdme container (nspawn)               |
 |                                                  |
@@ -38,7 +34,7 @@ The container always boots from the base OS rootfs (e.g. Ubuntu). The applicatio
 |  /oci/apps/nginx/ports    (exposed ports)        |
 |  /oci/apps/nginx/volumes  (declared volumes)     |
 +--------------------------------------------------+
-</pre>
+```
 
 The application runs as a regular systemd service. You get logs via `journalctl`, restarts via `systemctl`, and cgroup resource limits, all for free.
 
@@ -64,7 +60,7 @@ sudo sdme config set default_base_fs ubuntu
 
 ## Create and start the container
 
-We recommend using `--network-zone` and `--hardened` as described in the [services tutorial](@/tutorial/services.md):
+We recommend using `--network-zone` and `--hardened` as described in the [services tutorial](services.md):
 
 ```sh
 sudo sdme create --name mycontainer -r nginx --network-zone=services --hardened --started

@@ -81,7 +81,7 @@ These rules apply when adding or modifying code, on top of the Project Principle
 
 ## Documentation
 
-- **Architecture and design**: [`site/content/docs/architecture.md`](site/content/docs/architecture.md)
-- **Security model**: [`site/content/docs/security.md`](site/content/docs/security.md)
+- **Architecture and design**: [`docs/architecture.md`](docs/architecture.md)
+- **Security model**: [`docs/security.md`](docs/security.md)
 - **CLI reference**: `sdme --help` and subcommand `--help` (`*_HELP` constants in `src/main.rs`)
-- **Tutorials**: [`site/content/tutorial/`](site/content/tutorial/) (kept in sync with E2E tests in `test/scripts/`)
+- **Tutorials**: [`docs/tutorial/`](docs/tutorial/) (kept in sync with E2E tests in `test/scripts/`)
