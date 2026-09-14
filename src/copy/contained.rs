@@ -791,51 +791,6 @@ pub(crate) fn copy_contained(root: &Path, rel: &Path, src: &Path) -> Result<()> 
     copy_entry_at(&dir_fd, leaf, &display, src, &mut links, root, &dir_fd)
 }
 
-/// Like [`super::copy_tree`], but safe for writing into a tree that may hold
-/// untrusted pre-existing entries (an imported rootfs, a btrfs container
-/// subvolume holding the base image, an overlay upper populated by a
-/// container run or an earlier copy), including under concurrent mutation of
-/// that tree. Implemented by the fd-relative contained engine: no
-/// operation beneath `dst_dir` ever resolves a symlink present in (or swapped
-/// into) the tree. Existing real directories are merged into; a symlink leaf
-/// is unlinked and recreated. `dst_dir` itself must already exist and must not
-/// be a symlink. Special nodes require protected staging outside this root.
-// Compatibility entry point; copy_contained also walks destination ancestors.
-#[allow(dead_code)]
-pub(crate) fn copy_tree_shadowed(src_dir: &Path, dst_dir: &Path, _verbose: bool) -> Result<()> {
-    let c = path_to_cstring(dst_dir)?;
-    let fd = unsafe {
-        libc::open(
-            c.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-        )
-    };
-    if fd < 0 {
-        let e = std::io::Error::last_os_error();
-        if e.raw_os_error() == Some(libc::ELOOP) {
-            return Err(refuse_symlink(dst_dir));
-        }
-        return Err(e).with_context(|| format!("failed to open directory {}", dst_dir.display()));
-    }
-    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-    let mut links = HardLinkPlan::new(src_dir, Path::new(""), dst_dir)?;
-    copy_children_at(&fd, dst_dir, src_dir, &mut links, dst_dir, &fd)
-}
-
-/// Contained variant of [`super::copy_entry`]; see [`copy_tree_shadowed`]. `dst` is
-/// interpreted as `parent + leaf name`; the parent is resolved once (it is
-/// the caller's trusted anchor), and the leaf is handled fd-relative beneath
-/// it, safe against concurrent swaps of the leaf.
-// Compatibility entry point; copy_contained also walks destination ancestors.
-#[allow(dead_code)]
-pub(crate) fn copy_entry_shadowed(src: &Path, dst: &Path, _verbose: bool) -> Result<()> {
-    let parent = dst.parent().unwrap_or(Path::new("/"));
-    let name = dst
-        .file_name()
-        .with_context(|| format!("invalid destination {}", dst.display()))?;
-    copy_contained(parent, Path::new(name), src)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1569,12 +1524,12 @@ mod tests {
                 fs::metadata(root.join("a")).unwrap().ino(),
                 fs::metadata(root.join("nested/b")).unwrap().ino()
             );
-            let shadowed = tmp.path().join(format!("shadowed-{i}"));
-            fs::create_dir(&shadowed).unwrap();
-            copy_tree_shadowed(source, &shadowed, false).unwrap();
+            let dot_root = tmp.path().join(format!("dot-root-{i}"));
+            fs::create_dir(&dot_root).unwrap();
+            copy_contained(&dot_root, Path::new("."), source).unwrap();
             assert_eq!(
-                fs::metadata(shadowed.join("a")).unwrap().ino(),
-                fs::metadata(shadowed.join("nested/b")).unwrap().ino()
+                fs::metadata(dot_root.join("a")).unwrap().ino(),
+                fs::metadata(dot_root.join("nested/b")).unwrap().ino()
             );
         }
     }
