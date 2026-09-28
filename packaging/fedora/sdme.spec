@@ -102,6 +102,9 @@ export SDME_SKIP_PROBE=1
 %{_datadir}/zsh/site-functions/_%{crate}
 %{_datadir}/fish/vendor_completions.d/%{crate}.fish
 
+%posttrans
+%{_bindir}/%{crate} repair-units || :
+
 %changelog
 * Mon Sep 14 2026 Alexandre Fiori <fiorix@gmail.com> - 0.19.1-1
 - Build the static musl release binaries again. The contained copy engine

@@ -23,6 +23,22 @@ fn test_paths() -> UnitPaths {
     }
 }
 
+fn dropin_assignments<'a>(content: &'a str, key: &str) -> Vec<(&'a str, &'a str)> {
+    let mut section = "";
+    content
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if let Some(name) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+                section = name;
+                return None;
+            }
+            let (found_key, value) = line.split_once('=')?;
+            (found_key == key).then_some((section, value))
+        })
+        .collect()
+}
+
 #[test]
 fn test_unit_template() {
     // systemd 259: DelegateSubgroup= is supported and should be emitted.
@@ -129,6 +145,13 @@ fn test_nspawn_dropin_host_rootfs() {
     assert!(content.contains("/usr/bin/systemd-nspawn"));
     assert!(content.contains("/usr/bin/mount"));
     assert!(content.contains("/usr/bin/umount"));
+    assert!(!content.contains("[Unit]"));
+    assert!(dropin_assignments(&content, "RequiresMountsFor").is_empty());
+    for key in ["ExecStartPre", "ExecStart", "ExecStopPost"] {
+        let assignments = dropin_assignments(&content, key);
+        assert!(!assignments.is_empty(), "missing {key}");
+        assert!(assignments.iter().all(|(section, _)| *section == "Service"));
+    }
 }
 
 #[test]
@@ -286,6 +309,11 @@ fn test_nspawn_dropin_escapes_spaces() {
 fn test_nspawn_dropin_btrfs() {
     let paths = test_paths();
     let args = vec!["--resolv-conf=auto".to_string()];
+    let service_directives = vec![
+        "Restart=on-failure".to_string(),
+        "RestartSec=5s".to_string(),
+        "AppArmorProfile=sdme-default".to_string(),
+    ];
     let content = nspawn_dropin(&DropinConfig {
         backend: crate::storage::Backend::Btrfs,
         datadir: "/var/lib/sdme",
@@ -295,7 +323,7 @@ fn test_nspawn_dropin_btrfs() {
         lowerdir: "/var/lib/sdme/fs/debian",
         paths: &paths,
         nspawn_args: &args,
-        service_directives: &[],
+        service_directives: &service_directives,
         submounts: &[],
         pod_netns: None,
     });
@@ -305,7 +333,111 @@ fn test_nspawn_dropin_btrfs() {
     assert!(!content.contains("ExecStopPost="));
     // nspawn boots the subvolume directly, after the pool mount.
     assert!(content.contains("--directory=/var/lib/sdme/pool/containers/btrbox \\"));
-    assert!(content.contains("RequiresMountsFor=/var/lib/sdme/pool"));
+    assert_eq!(
+        dropin_assignments(&content, "RequiresMountsFor"),
+        vec![("Unit", "/var/lib/sdme/pool")]
+    );
+    for (key, value) in [
+        ("Restart", "on-failure"),
+        ("RestartSec", "5s"),
+        ("AppArmorProfile", "sdme-default"),
+    ] {
+        assert_eq!(dropin_assignments(&content, key), vec![("Service", value)]);
+    }
+    let exec_start = dropin_assignments(&content, "ExecStart");
+    assert_eq!(exec_start.len(), 2);
+    assert!(exec_start.iter().all(|(section, _)| *section == "Service"));
+}
+
+#[test]
+fn test_nspawn_dropin_btrfs_custom_datadir() {
+    let paths = test_paths();
+    let content = nspawn_dropin(&DropinConfig {
+        backend: crate::storage::Backend::Btrfs,
+        datadir: "/srv/sdme-test",
+        name: "btrbox",
+        root_dir: "/srv/sdme-test/pool/containers/btrbox",
+        pool_mount: Some("/srv/sdme-test/pool"),
+        lowerdir: "/srv/sdme-test/fs/debian",
+        paths: &paths,
+        nspawn_args: &[],
+        service_directives: &[],
+        submounts: &[],
+        pod_netns: None,
+    });
+    assert_eq!(
+        dropin_assignments(&content, "RequiresMountsFor"),
+        vec![("Unit", "/srv/sdme-test/pool")]
+    );
+    assert!(content.contains("--directory=/srv/sdme-test/pool/containers/btrbox \\"));
+    assert!(!content.contains("/var/lib/sdme/pool"));
+}
+
+#[test]
+fn test_nspawn_dropin_btrfs_native() {
+    let paths = test_paths();
+    let content = nspawn_dropin(&DropinConfig {
+        backend: crate::storage::Backend::Btrfs,
+        datadir: "/srv/sdme",
+        name: "btrbox",
+        root_dir: "/srv/sdme/btrfs/containers/btrbox",
+        pool_mount: None,
+        lowerdir: "/srv/sdme/fs/debian",
+        paths: &paths,
+        nspawn_args: &[],
+        service_directives: &[],
+        submounts: &[],
+        pod_netns: None,
+    });
+    assert!(!content.contains("[Unit]"));
+    assert!(dropin_assignments(&content, "RequiresMountsFor").is_empty());
+    assert!(!content.contains("ExecStartPre="));
+    assert!(!content.contains("ExecStopPost="));
+    assert_eq!(dropin_assignments(&content, "ExecStart").len(), 2);
+    assert!(dropin_assignments(&content, "ExecStart")
+        .iter()
+        .all(|(section, _)| *section == "Service"));
+    assert!(content.contains("--directory=/srv/sdme/btrfs/containers/btrbox \\"));
+}
+
+#[test]
+fn test_migrate_legacy_pool_dropin() {
+    let legacy = "[Service]\nRestart=on-failure\nExecStart=\nRequiresMountsFor=/var/lib/sdme/pool\nExecStart=/usr/bin/systemd-nspawn \\\n    --directory=/var/lib/sdme/pool/containers/demo \\\n    --machine=demo \\\n    --keep-unit \\\n    --boot\n";
+    let corrected = units::corrected_legacy_pool_dropin(legacy).unwrap();
+    assert_eq!(
+        dropin_assignments(&corrected, "RequiresMountsFor"),
+        vec![("Unit", "/var/lib/sdme/pool")]
+    );
+    assert_eq!(
+        dropin_assignments(&corrected, "Restart"),
+        vec![("Service", "on-failure")]
+    );
+    assert_eq!(dropin_assignments(&corrected, "ExecStart").len(), 2);
+    assert!(corrected.contains("--directory=/var/lib/sdme/pool/containers/demo"));
+    assert!(units::corrected_legacy_pool_dropin(&corrected).is_none());
+    assert!(units::corrected_legacy_pool_dropin("[Service]\nExecStart=/bin/true\n").is_none());
+}
+
+#[test]
+fn test_migrate_legacy_pool_dropins_scopes_files() {
+    let temp = tmp();
+    let unit_dir = temp.path().join("units");
+    let generated_dir = unit_dir.join("sdme@demo.service.d");
+    std::fs::create_dir_all(&generated_dir).unwrap();
+    let legacy = "[Service]\nExecStart=\nRequiresMountsFor=/srv/sdme/pool\nExecStart=/usr/bin/systemd-nspawn \\\n    --directory=/srv/sdme/pool/containers/demo \\\n    --keep-unit \\\n    --boot\n";
+    let generated = generated_dir.join("nspawn.conf");
+    let other = generated_dir.join("user.conf");
+    std::fs::write(&generated, legacy).unwrap();
+    std::fs::write(&other, legacy).unwrap();
+
+    assert_eq!(units::migrate_legacy_pool_dropins_in(&unit_dir).unwrap(), 1);
+    let corrected = std::fs::read_to_string(&generated).unwrap();
+    assert_eq!(
+        dropin_assignments(&corrected, "RequiresMountsFor"),
+        vec![("Unit", "/srv/sdme/pool")]
+    );
+    assert_eq!(std::fs::read_to_string(&other).unwrap(), legacy);
+    assert_eq!(units::migrate_legacy_pool_dropins_in(&unit_dir).unwrap(), 0);
 }
 
 #[test]

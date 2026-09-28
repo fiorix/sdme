@@ -18,8 +18,8 @@ use anyhow::Result;
 use crate::{ResourceLimits, State};
 
 pub use units::{
-    nspawn_dropin, remove_limits_dropin, resolve_paths, service_name, unit_template,
-    write_limits_dropin, write_nspawn_dropin, DropinConfig, UnitPaths,
+    migrate_legacy_pool_dropins, nspawn_dropin, remove_limits_dropin, resolve_paths, service_name,
+    unit_template, write_limits_dropin, write_nspawn_dropin, DropinConfig, UnitPaths,
 };
 
 /// Return the systemd version string from D-Bus.
@@ -111,6 +111,7 @@ pub fn enable(cfg: &ServiceConfig) -> Result<()> {
         verbose,
     } = *cfg;
     units::ensure_template_unit(tasks_max, boot_timeout, verbose)?;
+    write_nspawn_dropin(datadir, name, verbose)?;
     let unit = service_name(name);
     if verbose {
         eprintln!("enabling unit: {unit}");

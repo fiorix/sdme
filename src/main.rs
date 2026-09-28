@@ -1534,6 +1534,10 @@ enum Command {
         #[arg(long, value_name = "VERSION")]
         version: Option<String>,
     },
+
+    /// Refresh legacy generated systemd drop-ins after installation
+    #[command(hide = true)]
+    RepairUnits,
 }
 
 #[derive(Subcommand)]
@@ -2058,6 +2062,15 @@ fn run() -> Result<()> {
 
     if unsafe { libc::geteuid() } != 0 {
         bail!("sdme requires root privileges; run with sudo");
+    }
+
+    let repair = systemd::migrate_legacy_pool_dropins();
+    if matches!(cli.command, Command::RepairUnits) {
+        println!("repaired {} systemd drop-in(s)", repair?);
+        return Ok(());
+    }
+    if let Err(e) = repair {
+        eprintln!("warning: could not refresh legacy systemd drop-ins: {e:#}");
     }
 
     sdme::install_interrupt_handler();
@@ -3961,6 +3974,7 @@ fn run() -> Result<()> {
                 },
             )?;
         }
+        Command::RepairUnits => unreachable!(),
     }
 
     sdme::update::maybe_spawn_background_check(&cfg, skip_update_probe, cli.verbose);

@@ -44,6 +44,14 @@ Restart all running containers:
 sudo sdme restart --all
 ```
 
+### Refreshing loopback btrfs units after an upgrade
+
+Package upgrades automatically repair affected `/etc/systemd/system/sdme@NAME.service.d/nspawn.conf` files and reload systemd when it is running. The repair moves only a legacy loopback btrfs `RequiresMountsFor=` line from `[Service]` to `[Unit]`; it does not restart containers or change storage. Later `sdme` commands also check for this legacy layout, and `sdme enable NAME` regenerates its drop-in.
+
+After replacing a standalone binary without a package manager, run `sudo sdme repair-units` before rebooting. This also provides a retry if a package hook reported a warning. It changes only recognized generated drop-ins and is safe to repeat. A stopped container started with the corrected binary also gets a freshly generated drop-in.
+
+Check the loaded unit with `systemctl show sdme@NAME.service -p RequiresMountsFor -p Requires -p After`. The pool path should appear in `RequiresMountsFor`, and its `.mount` unit should appear in both `Requires` and `After`.
+
 ## Resource limits
 
 Containers can have CPU and memory limits. Set them at creation time:

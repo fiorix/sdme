@@ -171,6 +171,11 @@ pub fn nspawn_dropin(cfg: &DropinConfig<'_>) -> String {
     let lowerdir = cfg.lowerdir;
 
     let mut out = String::new();
+    if let (Backend::Btrfs, Some(pool_mount)) = (cfg.backend, cfg.pool_mount) {
+        writeln!(out, "[Unit]").unwrap();
+        writeln!(out, "RequiresMountsFor={pool_mount}").unwrap();
+        writeln!(out).unwrap();
+    }
     writeln!(out, "[Service]").unwrap();
     for directive in cfg.service_directives {
         writeln!(out, "{directive}").unwrap();
@@ -179,8 +184,7 @@ pub fn nspawn_dropin(cfg: &DropinConfig<'_>) -> String {
 
     // Backend-specific root setup. Overlay mounts an overlayfs onto `merged`
     // (plus per-submount overlays for host-rootfs containers). btrfs needs no
-    // root mount because the subvolume is a real directory, but in Mode B the
-    // pool image must be mounted before nspawn starts.
+    // root mount because the subvolume is a real directory.
     match cfg.backend {
         Backend::Overlay => {
             writeln!(out, "ExecStartPre={mount} -t overlay overlay \\").unwrap();
@@ -202,11 +206,7 @@ pub fn nspawn_dropin(cfg: &DropinConfig<'_>) -> String {
                 writeln!(out, "    {datadir}/containers/{name}/merged/{rel}").unwrap();
             }
         }
-        Backend::Btrfs => {
-            if let Some(pool_mount) = cfg.pool_mount {
-                writeln!(out, "RequiresMountsFor={pool_mount}").unwrap();
-            }
-        }
+        Backend::Btrfs => {}
     }
 
     // When a pod provides the network namespace, launch nspawn via nsenter
@@ -249,6 +249,89 @@ pub fn nspawn_dropin(cfg: &DropinConfig<'_>) -> String {
         .unwrap();
     }
     out
+}
+
+/// Move the legacy loopback pool dependency into the section systemd reads.
+/// Only the exact generated btrfs layout is recognized; other drop-ins are left alone.
+pub(super) fn corrected_legacy_pool_dropin(content: &str) -> Option<String> {
+    if !content.starts_with("[Service]\n") || content.matches("RequiresMountsFor=").count() != 1 {
+        return None;
+    }
+    let marker = "ExecStart=\nRequiresMountsFor=";
+    let start = content.find(marker)? + "ExecStart=\n".len();
+    if content[1..start].contains("\n[") {
+        return None;
+    }
+    let end = start + content[start..].find('\n')?;
+    let dependency = &content[start..end];
+    let pool = dependency.strip_prefix("RequiresMountsFor=")?;
+    if !pool.starts_with('/')
+        || !pool.ends_with("/pool")
+        || !content[end + 1..].starts_with("ExecStart=")
+        || !content.contains(&format!("    --directory={pool}/containers/"))
+        || !content.contains("    --keep-unit \\")
+    {
+        return None;
+    }
+    let mut corrected = format!("[Unit]\n{dependency}\n\n");
+    corrected.push_str(&content[..start]);
+    corrected.push_str(&content[end + 1..]);
+    Some(corrected)
+}
+
+pub(super) fn migrate_legacy_pool_dropins_in(unit_dir: &Path) -> Result<usize> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let entries = match fs::read_dir(unit_dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(e).with_context(|| format!("failed to read {}", unit_dir.display())),
+    };
+    let mut changed = 0;
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with("sdme@")
+            || !name.ends_with(".service.d")
+            || !entry.file_type()?.is_dir()
+        {
+            continue;
+        }
+        let dropin = entry.path().join("nspawn.conf");
+        let metadata = match fs::symlink_metadata(&dropin) {
+            Ok(metadata) if metadata.file_type().is_file() => metadata,
+            Ok(_) => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                return Err(e).with_context(|| format!("failed to stat {}", dropin.display()))
+            }
+        };
+        let content = fs::read_to_string(&dropin)
+            .with_context(|| format!("failed to read {}", dropin.display()))?;
+        if let Some(corrected) = corrected_legacy_pool_dropin(&content) {
+            crate::atomic_write_mode(&dropin, corrected.as_bytes(), metadata.permissions().mode())
+                .with_context(|| format!("failed to update {}", dropin.display()))?;
+            changed += 1;
+        }
+    }
+    Ok(changed)
+}
+
+/// Repair installed pool dependencies from older sdme versions without restarting containers.
+pub fn migrate_legacy_pool_dropins() -> Result<usize> {
+    let result = migrate_legacy_pool_dropins_in(Path::new("/etc/systemd/system"));
+    if Path::new("/run/systemd/system").exists() {
+        match &result {
+            Ok(changed) if *changed > 0 => super::dbus::daemon_reload()?,
+            Err(_) => {
+                // Earlier files may have changed before a later file failed.
+                let _ = super::dbus::daemon_reload();
+            }
+            _ => {}
+        }
+    }
+    result
 }
 
 fn write_unit_if_changed(unit_path: &Path, content: &str, verbose: bool) -> Result<bool> {
