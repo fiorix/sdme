@@ -196,9 +196,11 @@ Totals                       687     2    12  24 suites
   evidence than the single green run recorded for 0.19.1.
 - `verify-pods` fails `--pod + --userns should succeed` with `cannot lock
   userns allocation: cannot lock userns/shift`. The userns shift lock is taken
-  without blocking, and sdme takes the recursive pre-chown path on this host,
-  so another suite's pre-chown holds the lock for seconds. It failed in two of
-  three full runs here.
+  without blocking, and this host has no idmapped overlayfs, so every
+  `--userns` create takes it. The lock is held only while a range is picked
+  (a scan of the state files and of the running machines), not during the
+  pre-chown that follows, so the failures are plain contention between
+  concurrent creates. It failed in two of three full runs here.
 - `verify-kube-L3-volumes` fails `ronly-start-runtime`: `systemctl start`
   failed for a pod that had been created correctly, immediately after the
   start rewrote the shared `sdme@.service` template while other suites were
@@ -299,7 +301,7 @@ Product findings from these runs, not fixed in this release:
   its rootfs stay behind until a later cleanup; `vfy-kube-cmd`,
   `vfy-kube-vol`, `gitea-pod`, and `readonly-vol-pod` were left this way.
 - The userns shift lock (`src/userns.rs`) does not block, so concurrent
-  `--userns` creates fail while another one is pre-chowning.
+  `--userns` creates fail while another one is picking its range.
 - The `ronly-start-runtime` start failure under concurrent template unit
   rewrites, cause not established.
 
