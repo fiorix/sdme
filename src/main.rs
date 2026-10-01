@@ -2568,6 +2568,7 @@ fn run() -> Result<()> {
                     name: &name,
                     tasks_max: cfg.tasks_max,
                     boot_timeout: cfg.boot_timeout,
+                    default_boot_timeout: cfg.boot_timeout,
                     verbose: cli.verbose,
                 })?;
                 eprintln!("enabled '{name}' for auto-start on boot");
@@ -2580,6 +2581,7 @@ fn run() -> Result<()> {
                     name: &name,
                     tasks_max: cfg.tasks_max,
                     boot_timeout,
+                    default_boot_timeout: cfg.boot_timeout,
                     stop_timeout: cfg.stop_timeout_terminate,
                     verbose: cli.verbose,
                 })?;
@@ -2652,6 +2654,7 @@ fn run() -> Result<()> {
                     name,
                     tasks_max: cfg.tasks_max,
                     boot_timeout,
+                    default_boot_timeout: cfg.boot_timeout,
                     stop_timeout: cfg.stop_timeout_terminate,
                     verbose,
                 })
@@ -2667,6 +2670,7 @@ fn run() -> Result<()> {
                     name,
                     tasks_max: cfg.tasks_max,
                     boot_timeout: cfg.boot_timeout,
+                    default_boot_timeout: cfg.boot_timeout,
                     verbose,
                 })
             })?;
@@ -2713,6 +2717,7 @@ fn run() -> Result<()> {
                     name: &name,
                     tasks_max: cfg.tasks_max,
                     boot_timeout,
+                    default_boot_timeout: cfg.boot_timeout,
                     stop_timeout: cfg.stop_timeout_terminate,
                     verbose: cli.verbose,
                 })?;
@@ -2919,6 +2924,7 @@ fn run() -> Result<()> {
                     name: &name,
                     tasks_max: cfg.tasks_max,
                     boot_timeout: cfg.boot_timeout,
+                    default_boot_timeout: cfg.boot_timeout,
                     verbose: cli.verbose,
                 })?;
                 eprintln!("enabled '{name}' for auto-start on boot");
@@ -2936,6 +2942,7 @@ fn run() -> Result<()> {
                 name: &name,
                 tasks_max: cfg.tasks_max,
                 boot_timeout,
+                default_boot_timeout: cfg.boot_timeout,
                 stop_timeout: cfg.stop_timeout_terminate,
                 verbose: cli.verbose,
             })?;
@@ -3162,7 +3169,7 @@ fn run() -> Result<()> {
                 let name = match containers::resolve_name(datadir, input) {
                     Ok(n) => n,
                     Err(e) => {
-                        eprintln!("error: {input}: {e}");
+                        eprintln!("error: {input}: {e:#}");
                         failed = true;
                         continue;
                     }
@@ -3172,7 +3179,7 @@ fn run() -> Result<()> {
                 let stop_timeout_secs =
                     containers::stop_timeout_secs(datadir, &name, mode, stop_timeout_secs);
                 if let Err(e) = containers::stop(&name, mode, stop_timeout_secs, verbose) {
-                    eprintln!("error: {name}: stop failed: {e}");
+                    eprintln!("error: {name}: stop failed: {e:#}");
                     failed = true;
                     continue;
                 }
@@ -3181,10 +3188,11 @@ fn run() -> Result<()> {
                     name: &name,
                     tasks_max: cfg.tasks_max,
                     boot_timeout,
+                    default_boot_timeout: cfg.boot_timeout,
                     stop_timeout: cfg.stop_timeout_terminate,
                     verbose,
                 }) {
-                    eprintln!("error: {name}: start failed: {e}");
+                    eprintln!("error: {name}: start failed: {e:#}");
                     failed = true;
                 } else {
                     println!("{name}");
@@ -3405,6 +3413,7 @@ fn run() -> Result<()> {
                     name: &name,
                     tasks_max: cfg.tasks_max,
                     boot_timeout,
+                    default_boot_timeout: cfg.boot_timeout,
                     stop_timeout: cfg.stop_timeout_terminate,
                     verbose: cli.verbose,
                 })?;
@@ -3750,6 +3759,7 @@ fn run() -> Result<()> {
                         name: &name,
                         config_path: &config,
                         boot_timeout,
+                        default_boot_timeout: cfg.boot_timeout,
                         tasks_max: cfg.tasks_max,
                         stop_timeout: cfg.stop_timeout_terminate,
                         force,

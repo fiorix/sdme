@@ -447,6 +447,7 @@ struct ExecuteBuildContext<'a> {
     config: &'a BuildConfig,
     opaque_dirs: &'a [String],
     boot_timeout: u64,
+    default_boot_timeout: u64,
     tasks_max: u32,
     /// Number of ops to skip (already completed in a previous run).
     skip_ops: usize,
@@ -473,6 +474,7 @@ fn execute_build(datadir: &Path, ctx: &ExecuteBuildContext<'_>) -> Result<()> {
             name: ctx.container_name,
             tasks_max: ctx.tasks_max,
             boot_timeout: ctx.boot_timeout,
+            default_boot_timeout: ctx.default_boot_timeout,
             verbose: ctx.verbose,
         })?;
         match systemd::await_boot(ctx.container_name, timeout, ctx.verbose) {
@@ -591,6 +593,8 @@ pub struct BuildOptions<'a> {
     pub config_path: &'a Path,
     /// Timeout in seconds for container boot during RUN steps.
     pub boot_timeout: u64,
+    /// Configured boot timeout in seconds, for the shared template unit.
+    pub default_boot_timeout: u64,
     /// Maximum number of tasks for the build container.
     pub tasks_max: u32,
     /// Configured `stop_timeout_terminate` for stopping the build container.
@@ -724,6 +728,7 @@ pub fn build(datadir: &Path, opts: &BuildOptions<'_>) -> Result<()> {
             config: &config,
             opaque_dirs: &create_opts.opaque_dirs,
             boot_timeout: opts.boot_timeout,
+            default_boot_timeout: opts.default_boot_timeout,
             tasks_max: opts.tasks_max,
             skip_ops,
             stop_timeout: opts.stop_timeout,

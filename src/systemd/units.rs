@@ -48,9 +48,10 @@ pub fn resolve_paths() -> Result<UnitPaths> {
 /// ExecStartPre/ExecStart/ExecStopPost commands are written per-container
 /// in a drop-in file by [`write_nspawn_dropin`].
 ///
-/// `boot_timeout` is the Rust-side wait duration in seconds. The systemd
-/// `TimeoutStartSec` is set to `boot_timeout + 30` so that the Rust wait
-/// loop always expires before systemd kills the container.
+/// `boot_timeout` is the configured boot timeout in seconds, never a
+/// per-start value: the template is shared by every container, so a start
+/// with its own timeout overrides `TimeoutStartSec` in its drop-in instead.
+/// See [`start_timeout_secs`].
 ///
 /// `systemd_version` is the host systemd major version. `DelegateSubgroup=`
 /// (systemd 256+) is emitted only when supported; on older systemd it would be
@@ -58,7 +59,7 @@ pub fn resolve_paths() -> Result<UnitPaths> {
 /// cgroup, so `Slice=machine.slice` places it under machine.slice like the
 /// reference `systemd-nspawn@.service`.
 pub fn unit_template(tasks_max: u32, boot_timeout: u64, systemd_version: u32) -> String {
-    let systemd_timeout = boot_timeout + 30;
+    let systemd_timeout = start_timeout_secs(boot_timeout);
     // DelegateSubgroup= landed in systemd 256. It puts the container leader in
     // <unit>/payload so machined's subgroup-aware Terminate/Kill (256+) targets
     // the payload, matching upstream. nspawn creates the split itself under
@@ -92,6 +93,13 @@ TimeoutStartSec={systemd_timeout}s
 WantedBy=multi-user.target
 "#
     )
+}
+
+/// The systemd `TimeoutStartSec` for a boot that sdme waits `boot_timeout`
+/// seconds for. The margin makes the sdme wait loop expire before systemd
+/// kills the container.
+fn start_timeout_secs(boot_timeout: u64) -> u64 {
+    boot_timeout.saturating_add(30)
 }
 
 /// Escape an argument for a systemd unit file `ExecStart` line.
@@ -149,6 +157,9 @@ pub struct DropinConfig<'a> {
     pub nspawn_args: &'a [String],
     /// Service-level directives (e.g. `AppArmorProfile=...`).
     pub service_directives: &'a [String],
+    /// Boot timeout of this container when it differs from the configured one
+    /// in the template; emitted as a `TimeoutStartSec=` override.
+    pub boot_timeout: Option<u64>,
     /// Per-submount overlay relative paths (e.g. `["home", "data"]`).
     pub submounts: &'a [String],
     /// Pod network namespace path. When set, nspawn is launched via
@@ -179,6 +190,9 @@ pub fn nspawn_dropin(cfg: &DropinConfig<'_>) -> String {
     writeln!(out, "[Service]").unwrap();
     for directive in cfg.service_directives {
         writeln!(out, "{directive}").unwrap();
+    }
+    if let Some(boot_timeout) = cfg.boot_timeout {
+        writeln!(out, "TimeoutStartSec={}s", start_timeout_secs(boot_timeout)).unwrap();
     }
     writeln!(out, "ExecStart=").unwrap();
 
@@ -310,7 +324,7 @@ pub(super) fn migrate_legacy_pool_dropins_in(unit_dir: &Path) -> Result<usize> {
         let content = fs::read_to_string(&dropin)
             .with_context(|| format!("failed to read {}", dropin.display()))?;
         if let Some(corrected) = corrected_legacy_pool_dropin(&content) {
-            crate::atomic_write_mode(&dropin, corrected.as_bytes(), metadata.permissions().mode())
+            replace_unit_file(&dropin, &corrected, metadata.permissions().mode())
                 .with_context(|| format!("failed to update {}", dropin.display()))?;
             changed += 1;
         }
@@ -334,7 +348,11 @@ pub fn migrate_legacy_pool_dropins() -> Result<usize> {
     result
 }
 
-fn write_unit_if_changed(unit_path: &Path, content: &str, verbose: bool) -> Result<bool> {
+pub(super) fn write_unit_if_changed(
+    unit_path: &Path,
+    content: &str,
+    verbose: bool,
+) -> Result<bool> {
     if unit_path.exists() {
         let existing = fs::read_to_string(unit_path)
             .with_context(|| format!("failed to read {}", unit_path.display()))?;
@@ -350,11 +368,48 @@ fn write_unit_if_changed(unit_path: &Path, content: &str, verbose: bool) -> Resu
     } else if verbose {
         eprintln!("installing template unit: {}", unit_path.display());
     }
-    fs::write(unit_path, content)
+    replace_unit_file(unit_path, content, 0o644)
         .with_context(|| format!("failed to write template unit {}", unit_path.display()))?;
     Ok(true)
 }
 
+/// Replace a unit file or drop-in with `content`, never exposing a partial file.
+///
+/// systemd treats an empty unit file as masked and refuses to start it, so a
+/// file rewritten in place can fail an unrelated start that loads the unit
+/// between the truncate and the write. The content goes to a temp file that is
+/// renamed over the target. The temp name is unique per writer because the
+/// template is shared: sdme processes may install it concurrently, and with a
+/// common temp name one would truncate what another is about to rename into
+/// place. systemd ignores the temp file, which is neither a unit name nor a
+/// `.conf`.
+fn replace_unit_file(path: &Path, content: &str, mode: u32) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    let file_name = path
+        .file_name()
+        .with_context(|| format!("{} has no file name", path.display()))?
+        .to_string_lossy();
+    let tmp = path.with_file_name(format!(
+        ".{file_name}.tmp-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    let written = fs::write(&tmp, content)
+        .and_then(|()| fs::set_permissions(&tmp, fs::Permissions::from_mode(mode)))
+        .and_then(|()| fs::rename(&tmp, path));
+    if written.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    written.with_context(|| format!("failed to replace {}", path.display()))
+}
+
+/// Install or update the shared template unit.
+///
+/// `boot_timeout` is the configured boot timeout; see [`unit_template`].
 pub(super) fn ensure_template_unit(tasks_max: u32, boot_timeout: u64, verbose: bool) -> Result<()> {
     let unit_path = Path::new("/etc/systemd/system/sdme@.service");
     // Host systemd version gates version-specific directives (DelegateSubgroup=).
@@ -373,7 +428,15 @@ pub(super) fn ensure_template_unit(tasks_max: u32, boot_timeout: u64, verbose: b
 /// Reads the container's state file and generates a drop-in with the full
 /// ExecStartPre/ExecStart/ExecStopPost commands, all arguments baked in.
 /// Returns the path to the drop-in file (for cleanup on failure).
-pub fn write_nspawn_dropin(datadir: &Path, name: &str, verbose: bool) -> Result<PathBuf> {
+///
+/// `boot_timeout` is this container's boot timeout when it differs from the
+/// configured one, which the template already carries.
+pub fn write_nspawn_dropin(
+    datadir: &Path,
+    name: &str,
+    boot_timeout: Option<u64>,
+    verbose: bool,
+) -> Result<PathBuf> {
     let datadir_str = datadir
         .to_str()
         .context("datadir path is not valid UTF-8")?;
@@ -603,6 +666,7 @@ pub fn write_nspawn_dropin(datadir: &Path, name: &str, verbose: bool) -> Result<
         paths: &paths,
         nspawn_args: &nspawn_args,
         service_directives: &service_directives,
+        boot_timeout,
         submounts: &submounts,
         pod_netns: pod_netns.as_deref(),
     });

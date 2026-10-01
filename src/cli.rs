@@ -122,14 +122,14 @@ pub(crate) fn for_each_container(
         let name = match containers::resolve_name(datadir, input) {
             Ok(n) => n,
             Err(e) => {
-                eprintln!("error: {input}: {e}");
+                eprintln!("error: {input}: {e:#}");
                 failed = true;
                 continue;
             }
         };
         eprintln!("{verb} '{name}'");
         if let Err(e) = action(&name) {
-            eprintln!("error: {name}: {e}");
+            eprintln!("error: {name}: {e:#}");
             failed = true;
         } else {
             println!("{name}");
@@ -164,6 +164,8 @@ pub(crate) struct BootConfig<'a> {
     pub tasks_max: u32,
     /// Boot timeout.
     pub boot_timeout: std::time::Duration,
+    /// Configured boot timeout in seconds, for the shared template unit.
+    pub default_boot_timeout: u64,
     /// Stop timeout in seconds (used on boot failure).
     pub stop_timeout: u64,
     /// Enable verbose output.
@@ -182,6 +184,7 @@ pub(crate) fn start_and_await_boot(cfg: &BootConfig) -> Result<()> {
         name,
         tasks_max,
         boot_timeout,
+        default_boot_timeout,
         stop_timeout,
         verbose,
     } = *cfg;
@@ -216,6 +219,7 @@ pub(crate) fn start_and_await_boot(cfg: &BootConfig) -> Result<()> {
         name,
         tasks_max,
         boot_timeout: boot_timeout.as_secs(),
+        default_boot_timeout,
         verbose,
     })?;
     match systemd::await_boot(name, boot_timeout, verbose) {

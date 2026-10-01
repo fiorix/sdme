@@ -130,6 +130,7 @@ fn test_nspawn_dropin_host_rootfs() {
         paths: &paths,
         nspawn_args: &args,
         service_directives: &[],
+        boot_timeout: None,
         submounts: &[],
         pod_netns: None,
     });
@@ -172,6 +173,7 @@ fn test_nspawn_dropin_with_userns() {
         paths: &paths,
         nspawn_args: &args,
         service_directives: &[],
+        boot_timeout: None,
         submounts: &[],
         pod_netns: None,
     });
@@ -198,6 +200,7 @@ fn test_nspawn_dropin_with_pod_netns() {
         paths: &paths,
         nspawn_args: &args,
         service_directives: &[],
+        boot_timeout: None,
         submounts: &[],
         pod_netns: Some("/run/sdme/pods/mypod/ns/net"),
     });
@@ -226,6 +229,7 @@ fn test_nspawn_dropin_without_pod_netns() {
         paths: &paths,
         nspawn_args: &args,
         service_directives: &[],
+        boot_timeout: None,
         submounts: &[],
         pod_netns: None,
     });
@@ -248,6 +252,7 @@ fn test_nspawn_dropin_explicit_rootfs() {
         paths: &paths,
         nspawn_args: &args,
         service_directives: &[],
+        boot_timeout: None,
         submounts: &[],
         pod_netns: None,
     });
@@ -274,6 +279,7 @@ fn test_nspawn_dropin_with_binds_and_envs() {
         paths: &paths,
         nspawn_args: &args,
         service_directives: &[],
+        boot_timeout: None,
         submounts: &[],
         pod_netns: None,
     });
@@ -299,6 +305,7 @@ fn test_nspawn_dropin_escapes_spaces() {
         paths: &paths,
         nspawn_args: &args,
         service_directives: &[],
+        boot_timeout: None,
         submounts: &[],
         pod_netns: None,
     });
@@ -324,6 +331,7 @@ fn test_nspawn_dropin_btrfs() {
         paths: &paths,
         nspawn_args: &args,
         service_directives: &service_directives,
+        boot_timeout: None,
         submounts: &[],
         pod_netns: None,
     });
@@ -362,6 +370,7 @@ fn test_nspawn_dropin_btrfs_custom_datadir() {
         paths: &paths,
         nspawn_args: &[],
         service_directives: &[],
+        boot_timeout: None,
         submounts: &[],
         pod_netns: None,
     });
@@ -386,6 +395,7 @@ fn test_nspawn_dropin_btrfs_native() {
         paths: &paths,
         nspawn_args: &[],
         service_directives: &[],
+        boot_timeout: None,
         submounts: &[],
         pod_netns: None,
     });
@@ -438,6 +448,113 @@ fn test_migrate_legacy_pool_dropins_scopes_files() {
     );
     assert_eq!(std::fs::read_to_string(&other).unwrap(), legacy);
     assert_eq!(units::migrate_legacy_pool_dropins_in(&unit_dir).unwrap(), 0);
+}
+
+#[test]
+fn test_nspawn_dropin_boot_timeout_override() {
+    let paths = test_paths();
+    let dropin = |boot_timeout| {
+        nspawn_dropin(&DropinConfig {
+            backend: crate::storage::Backend::Overlay,
+            datadir: "/var/lib/sdme",
+            name: "mybox",
+            root_dir: "/var/lib/sdme/containers/mybox/merged",
+            pool_mount: None,
+            lowerdir: "/",
+            paths: &paths,
+            nspawn_args: &[],
+            service_directives: &[],
+            boot_timeout,
+            submounts: &[],
+            pod_netns: None,
+        })
+    };
+    // No override: the template's TimeoutStartSec applies.
+    assert!(dropin_assignments(&dropin(None), "TimeoutStartSec").is_empty());
+    // 300 + 30 = 330, in [Service] so it overrides the template.
+    assert_eq!(
+        dropin_assignments(&dropin(Some(300)), "TimeoutStartSec"),
+        vec![("Service", "330s")]
+    );
+}
+
+#[test]
+fn test_boot_timeout_override_only_when_different() {
+    assert_eq!(boot_timeout_override(60, 60), None);
+    assert_eq!(boot_timeout_override(120, 60), Some(120));
+    assert_eq!(boot_timeout_override(30, 60), Some(30));
+}
+
+#[test]
+fn test_write_unit_if_changed_replaces_the_file() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let temp = tmp();
+    let unit = temp.path().join("sdme@.service");
+
+    assert!(units::write_unit_if_changed(&unit, "one\n", false).unwrap());
+    let first = std::fs::metadata(&unit).unwrap();
+    assert_eq!(first.permissions().mode() & 0o777, 0o644);
+
+    // Same content: nothing is written.
+    assert!(!units::write_unit_if_changed(&unit, "one\n", false).unwrap());
+    assert_eq!(std::fs::metadata(&unit).unwrap().ino(), first.ino());
+
+    // New content arrives as a new file renamed into place, never as a
+    // rewrite of the file systemd may be reading.
+    assert!(units::write_unit_if_changed(&unit, "two\n", false).unwrap());
+    assert_ne!(std::fs::metadata(&unit).unwrap().ino(), first.ino());
+    assert_eq!(std::fs::read_to_string(&unit).unwrap(), "two\n");
+
+    let names: Vec<_> = std::fs::read_dir(temp.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(names, vec![std::ffi::OsString::from("sdme@.service")]);
+}
+
+#[test]
+fn test_write_unit_if_changed_never_exposes_an_empty_file() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    // systemd treats an empty unit file as masked, so concurrent writers with
+    // different content must never leave one visible, however briefly.
+    let temp = tmp();
+    let unit = temp.path().join("sdme@.service");
+    let contents = [
+        unit_template(16384, 60, 259),
+        unit_template(16384, 120, 259),
+    ];
+    units::write_unit_if_changed(&unit, &contents[0], false).unwrap();
+
+    let done = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        let reader = scope.spawn(|| {
+            let mut reads = 0u64;
+            while !done.load(Ordering::Relaxed) {
+                let seen = std::fs::read_to_string(&unit).unwrap();
+                assert!(contents.contains(&seen), "partial unit file: {seen:?}");
+                reads += 1;
+            }
+            reads
+        });
+        let writers: Vec<_> = contents
+            .iter()
+            .map(|content| {
+                let unit = &unit;
+                scope.spawn(move || {
+                    for _ in 0..2000 {
+                        units::write_unit_if_changed(unit, content, false).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        done.store(true, Ordering::Relaxed);
+        assert!(reader.join().unwrap() > 0);
+    });
 }
 
 #[test]
@@ -521,6 +638,7 @@ fn test_nspawn_dropin_with_security() {
         paths: &paths,
         nspawn_args: &args,
         service_directives: &[],
+        boot_timeout: None,
         submounts: &[],
         pod_netns: None,
     });
@@ -549,6 +667,7 @@ fn test_nspawn_dropin_with_apparmor() {
         paths: &paths,
         nspawn_args: &args,
         service_directives: &service_directives,
+        boot_timeout: None,
         submounts: &[],
         pod_netns: None,
     });
@@ -582,6 +701,7 @@ fn test_nspawn_dropin_with_submounts() {
         paths: &paths,
         nspawn_args: &args,
         service_directives: &[],
+        boot_timeout: None,
         submounts: &submounts,
         pod_netns: None,
     });

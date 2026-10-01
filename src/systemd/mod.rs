@@ -95,10 +95,19 @@ pub struct ServiceConfig<'a> {
     pub name: &'a str,
     /// Maximum number of tasks (PIDs) for the container unit.
     pub tasks_max: u32,
-    /// Boot timeout in seconds for the template unit.
+    /// Boot timeout in seconds for this container.
     pub boot_timeout: u64,
+    /// Configured boot timeout in seconds, written to the shared template
+    /// unit. A different `boot_timeout` goes into the container's drop-in.
+    pub default_boot_timeout: u64,
     /// Enable verbose output.
     pub verbose: bool,
+}
+
+/// The boot timeout to put in a container's drop-in: `None` when the template
+/// already carries it.
+fn boot_timeout_override(boot_timeout: u64, default_boot_timeout: u64) -> Option<u64> {
+    (boot_timeout != default_boot_timeout).then_some(boot_timeout)
 }
 
 /// Enable a container to auto-start on boot.
@@ -108,10 +117,16 @@ pub fn enable(cfg: &ServiceConfig) -> Result<()> {
         name,
         tasks_max,
         boot_timeout,
+        default_boot_timeout,
         verbose,
     } = *cfg;
-    units::ensure_template_unit(tasks_max, boot_timeout, verbose)?;
-    write_nspawn_dropin(datadir, name, verbose)?;
+    units::ensure_template_unit(tasks_max, default_boot_timeout, verbose)?;
+    write_nspawn_dropin(
+        datadir,
+        name,
+        boot_timeout_override(boot_timeout, default_boot_timeout),
+        verbose,
+    )?;
     let unit = service_name(name);
     if verbose {
         eprintln!("enabling unit: {unit}");
@@ -288,13 +303,19 @@ pub fn start(cfg: &ServiceConfig) -> Result<()> {
         name,
         tasks_max,
         boot_timeout,
+        default_boot_timeout,
         verbose,
     } = *cfg;
-    units::ensure_template_unit(tasks_max, boot_timeout, verbose)?;
+    units::ensure_template_unit(tasks_max, default_boot_timeout, verbose)?;
 
     crate::containers::ensure_permissions(datadir, name)?;
 
-    let nspawn_dropin_path = write_nspawn_dropin(datadir, name, verbose)?;
+    let nspawn_dropin_path = write_nspawn_dropin(
+        datadir,
+        name,
+        boot_timeout_override(boot_timeout, default_boot_timeout),
+        verbose,
+    )?;
 
     // Read limits from state and write/remove the drop-in file.
     let state_path = datadir.join("state").join(name);
