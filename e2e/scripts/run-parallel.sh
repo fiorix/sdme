@@ -467,6 +467,7 @@ main() {
         verify-cp.sh
         verify-diff.sh
         verify-storage.sh
+        verify-pool.sh
         verify-export.sh
         verify-build.sh
         verify-security.sh

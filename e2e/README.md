@@ -64,6 +64,7 @@ smoke.sh                     Container lifecycle gate test
 verify-interrupt.sh          SIGINT/SIGTERM abort handling
 verify-cp.sh                 File copy: host, containers, rootfs
 verify-storage.sh            btrfs backend: lifecycle, cp/export/diff, disk cap
+verify-pool.sh               btrfs loopback pool (Mode B) on a scratch datadir
 verify-export.sh             Export: dir, tar, raw image, xattrs
 verify-build.sh              sdme fs build, COPY, locking, resume
 verify-security.sh           Capabilities, seccomp, AppArmor, userns
