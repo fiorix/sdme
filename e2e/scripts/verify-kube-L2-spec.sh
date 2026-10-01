@@ -384,6 +384,38 @@ test_runtime_memory_limit() {
     fi
 }
 
+# The pod asks for a 45s grace period and its workload ignores SIGTERM, so the
+# delete has to wait out the grace period before the guest finishes stopping.
+test_delete_running_pod() {
+    local test_name="delete-running-pod"
+    if [[ $POD_RUNNING -eq 0 ]]; then
+        record "$test_name" SKIP "pod not running"
+        return
+    fi
+
+    local stored
+    stored=$(sed -n 's/^KUBE_GRACE_PERIOD=//p' "$DATADIR/state/$POD_NAME" 2>/dev/null)
+    if [[ "$stored" != "45" ]]; then
+        record "$test_name" FAIL "state has KUBE_GRACE_PERIOD='$stored', expected 45"
+        return
+    fi
+
+    echo "--- $test_name: deleting the running pod ---"
+    local output rc=0 started elapsed
+    started=$(date +%s)
+    output=$("$SDME" kube delete "$POD_NAME" 2>&1) || rc=$?
+    elapsed=$(( $(date +%s) - started ))
+
+    if [[ $rc -ne 0 ]]; then
+        record "$test_name" FAIL "kube delete exited $rc after ${elapsed}s: $output"
+    elif [[ -f "$DATADIR/state/$POD_NAME" || -e "$(kube_fs_dir "kube-$POD_NAME")" ]]; then
+        record "$test_name" FAIL "state file or rootfs left after delete"
+    else
+        POD_RUNNING=0
+        record "$test_name" PASS "${elapsed}s"
+    fi
+}
+
 # --- Main ---------------------------------------------------------------------
 
 main() {
@@ -423,6 +455,7 @@ main() {
     test_runtime_init_service
     test_runtime_app_service
     test_runtime_memory_limit
+    test_delete_running_pod
 
     generate_standard_report "verify-kube-L2-spec" "sdme Kube Spec Verification Report"
 

@@ -55,6 +55,9 @@ pub struct KubeCreateOptions<'a> {
     pub pod: Option<&'a str>,
     /// Pod to join (OCI app process only, via inner netns).
     pub oci_pod: Option<&'a str>,
+    /// Configured `stop_timeout_terminate`, used when an existing pod of the
+    /// same name is replaced.
+    pub stop_timeout: u64,
     /// Enable verbose output.
     pub verbose: bool,
     /// Default registry for unqualified image names in kube YAML.
@@ -109,7 +112,13 @@ pub fn kube_create(datadir: &Path, opts: &KubeCreateOptions<'_>) -> Result<Strin
         let state = State::read_from(&state_path)?;
         if state.is_yes("KUBE") {
             eprintln!("replacing existing kube pod '{}'", plan.pod_name);
-            kube_delete(datadir, &plan.pod_name, false, opts.verbose)?;
+            kube_delete(
+                datadir,
+                &plan.pod_name,
+                false,
+                opts.stop_timeout,
+                opts.verbose,
+            )?;
         } else {
             bail!(
                 "container '{}' already exists and is not a kube pod; \
@@ -583,6 +592,11 @@ WantedBy=multi-user.target
     state.set("KUBE", "yes");
     state.set("KUBE_CONTAINERS", container_names.join(","));
     state.set("KUBE_YAML_HASH", &yaml_hash);
+    // Stops and removals wait this long on top of their own timeout; see
+    // containers::stop_timeout_secs.
+    if let Some(grace) = plan.termination_grace_period {
+        state.set("KUBE_GRACE_PERIOD", grace.to_string());
+    }
     if has_probes {
         state.set("HAS_PROBES", "yes");
     }
@@ -688,7 +702,16 @@ fn discard_kube_rootfs(
 /// create was killed before the container existed). Succeeds when there is
 /// nothing to remove. The rootfs is kept, and an error returned, while any
 /// other container references it.
-pub fn kube_delete(datadir: &Path, name: &str, force: bool, verbose: bool) -> Result<()> {
+///
+/// `stop_timeout` is the configured `stop_timeout_terminate`. A running pod is
+/// given that long on top of its termination grace period to shut down.
+pub fn kube_delete(
+    datadir: &Path,
+    name: &str,
+    force: bool,
+    stop_timeout: u64,
+    verbose: bool,
+) -> Result<()> {
     validate_name(name)?;
 
     let state_path = datadir.join("state").join(name);
@@ -721,7 +744,7 @@ pub fn kube_delete(datadir: &Path, name: &str, force: bool, verbose: bool) -> Re
     };
 
     // Stop and remove the container.
-    crate::containers::remove(datadir, name, verbose)?;
+    crate::containers::remove(datadir, name, stop_timeout, verbose)?;
 
     // Remove the rootfs. For btrfs it is a subvolume under the pool; for
     // overlay it is a plain directory under {datadir}/fs.
@@ -1145,7 +1168,7 @@ mod tests {
         let unrelated = tmp.path().join("fs").join(POD);
         make_rootfs(&unrelated);
 
-        kube_delete(tmp.path(), POD, false, false).unwrap();
+        kube_delete(tmp.path(), POD, false, 30, false).unwrap();
 
         assert!(!rootfs.exists());
         assert!(unrelated.is_dir());
@@ -1155,7 +1178,7 @@ mod tests {
     #[test]
     fn test_kube_delete_without_pod_or_rootfs_succeeds() {
         let tmp = tmp();
-        kube_delete(tmp.path(), POD, false, false).unwrap();
+        kube_delete(tmp.path(), POD, false, 30, false).unwrap();
     }
 
     #[test]
@@ -1165,7 +1188,7 @@ mod tests {
         make_rootfs(&rootfs);
         claim(tmp.path(), "other", ROOTFS);
 
-        let err = kube_delete(tmp.path(), POD, false, false).unwrap_err();
+        let err = kube_delete(tmp.path(), POD, false, 30, false).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("in use by container 'other'"), "{msg}");
         assert!(rootfs.join("oci/apps/marker").is_file());

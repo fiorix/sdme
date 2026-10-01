@@ -294,7 +294,7 @@ pub(crate) fn create_and_start(cfg: &BootConfig) -> Result<()> {
     eprintln!("starting '{name}'");
     if let Err(e) = start_and_await_boot(cfg) {
         eprintln!("start failed, removing '{name}'");
-        let _ = containers::remove(datadir, name, verbose);
+        let _ = containers::remove(datadir, name, cfg.stop_timeout, verbose);
         return Err(e);
     }
     Ok(())

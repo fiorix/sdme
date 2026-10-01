@@ -450,6 +450,7 @@ struct ExecuteBuildContext<'a> {
     tasks_max: u32,
     /// Number of ops to skip (already completed in a previous run).
     skip_ops: usize,
+    stop_timeout: u64,
     verbose: bool,
 }
 
@@ -542,7 +543,7 @@ fn execute_build(datadir: &Path, ctx: &ExecuteBuildContext<'_>) -> Result<()> {
         containers::stop(
             ctx.container_name,
             containers::StopMode::Terminate,
-            30,
+            ctx.stop_timeout,
             ctx.verbose,
         )?;
     }
@@ -592,6 +593,8 @@ pub struct BuildOptions<'a> {
     pub boot_timeout: u64,
     /// Maximum number of tasks for the build container.
     pub tasks_max: u32,
+    /// Configured `stop_timeout_terminate` for stopping the build container.
+    pub stop_timeout: u64,
     /// Overwrite existing rootfs if it already exists.
     pub force: bool,
     /// Automatically clean up stale transactions before building.
@@ -655,7 +658,7 @@ pub fn build(datadir: &Path, opts: &BuildOptions<'_>) -> Result<()> {
 
         if opts.no_cache {
             eprintln!("removing build container '{staging_name}' (--no-cache)");
-            containers::remove(datadir, &staging_name, verbose)?;
+            containers::remove(datadir, &staging_name, opts.stop_timeout, verbose)?;
         } else {
             // Check if config hash matches for resume.
             let state = State::read_from(&state_path)?;
@@ -673,7 +676,7 @@ pub fn build(datadir: &Path, opts: &BuildOptions<'_>) -> Result<()> {
                 }
             } else {
                 eprintln!("config changed, removing build container '{staging_name}'");
-                containers::remove(datadir, &staging_name, verbose)?;
+                containers::remove(datadir, &staging_name, opts.stop_timeout, verbose)?;
             }
         }
     }
@@ -723,12 +726,18 @@ pub fn build(datadir: &Path, opts: &BuildOptions<'_>) -> Result<()> {
             boot_timeout: opts.boot_timeout,
             tasks_max: opts.tasks_max,
             skip_ops,
+            stop_timeout: opts.stop_timeout,
             verbose,
         },
     ) {
         let _guard = crate::InterruptGuard::save_and_reset();
         eprintln!("build failed, stopping '{staging_name}'");
-        let _ = containers::stop(&staging_name, containers::StopMode::Terminate, 30, verbose);
+        let _ = containers::stop(
+            &staging_name,
+            containers::StopMode::Terminate,
+            opts.stop_timeout,
+            verbose,
+        );
         return Err(e);
     }
 
@@ -739,7 +748,7 @@ pub fn build(datadir: &Path, opts: &BuildOptions<'_>) -> Result<()> {
     // Mount overlayfs to get the merged view (container is stopped, so we mount manually).
     if let Err(e) = containers::mount_overlay(&rootfs_dir, &container_dir) {
         eprintln!("build failed (mount), removing '{staging_name}'");
-        let _ = containers::remove(datadir, &staging_name, verbose);
+        let _ = containers::remove(datadir, &staging_name, opts.stop_timeout, verbose);
         return Err(e.context("failed to mount overlayfs for final copy"));
     }
 
@@ -786,7 +795,7 @@ pub fn build(datadir: &Path, opts: &BuildOptions<'_>) -> Result<()> {
 
     // Clean up the staging container.
     eprintln!("removing build container '{staging_name}'");
-    let _ = containers::remove(datadir, &staging_name, verbose);
+    let _ = containers::remove(datadir, &staging_name, opts.stop_timeout, verbose);
 
     Ok(())
 }

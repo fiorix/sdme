@@ -383,6 +383,7 @@ pub fn execute(
     items: &[PrunableItem],
     datadir: &Path,
     auto_gc: bool,
+    stop_timeout: u64,
     verbose: bool,
 ) -> (usize, Vec<(String, anyhow::Error)>) {
     let mut succeeded = 0usize;
@@ -415,8 +416,10 @@ pub fn execute(
                     }
                 }
                 PruneCategory::Filesystem => rootfs::remove(datadir, &item.name, auto_gc, verbose),
-                PruneCategory::Container => containers::remove(datadir, &item.name, verbose),
-                PruneCategory::Pod => pod::remove(datadir, &item.name, true, verbose),
+                PruneCategory::Container => {
+                    containers::remove(datadir, &item.name, stop_timeout, verbose)
+                }
+                PruneCategory::Pod => pod::remove(datadir, &item.name, true, stop_timeout, verbose),
                 PruneCategory::Secret => {
                     kube::secret::remove(datadir, std::slice::from_ref(&item.name))
                 }

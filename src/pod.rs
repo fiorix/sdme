@@ -598,8 +598,16 @@ fn remove_container_resolv_conf(target: &ResolvConfTarget) -> Result<()> {
 ///
 /// Unmounts the runtime netns, removes the runtime dir, and deletes the
 /// persistent state directory. Errors if any container still references
-/// this pod (via POD or OCI_POD keys) unless `force` is true.
-pub fn remove(datadir: &Path, name: &str, force: bool, verbose: bool) -> Result<()> {
+/// this pod (via POD or OCI_POD keys) unless `force` is true, in which case
+/// they are stopped, each within `stop_timeout` seconds (the configured
+/// `stop_timeout_terminate`), and removed.
+pub fn remove(
+    datadir: &Path,
+    name: &str,
+    force: bool,
+    stop_timeout: u64,
+    verbose: bool,
+) -> Result<()> {
     let pod_dir = datadir.join(STATE_SUBDIR).join(name);
     let state_path = pod_dir.join("state");
     if !state_path.exists() {
@@ -625,7 +633,7 @@ pub fn remove(datadir: &Path, name: &str, force: bool, verbose: bool) -> Result<
             if verbose {
                 eprintln!("force-removing container '{ct}' from pod '{name}'");
             }
-            if let Err(e) = crate::containers::remove(datadir, ct, verbose) {
+            if let Err(e) = crate::containers::remove(datadir, ct, stop_timeout, verbose) {
                 eprintln!("warning: failed to remove container '{ct}': {e}");
             }
         }
@@ -1238,7 +1246,7 @@ mod tests {
     #[test]
     fn test_remove_not_found() {
         let tmp = tmp();
-        let err = remove(tmp.path(), "nonexistent", false, false).unwrap_err();
+        let err = remove(tmp.path(), "nonexistent", false, 30, false).unwrap_err();
         assert!(
             err.to_string().contains("not found"),
             "unexpected error: {err}"
@@ -1262,7 +1270,7 @@ mod tests {
         )
         .unwrap();
 
-        let err = remove(tmp.path(), "mypod", false, false).unwrap_err();
+        let err = remove(tmp.path(), "mypod", false, 30, false).unwrap_err();
         assert!(
             err.to_string().contains("referenced by container"),
             "unexpected error: {err}"
@@ -1282,7 +1290,7 @@ mod tests {
         fs::create_dir_all(&ct_dir).unwrap();
         fs::write(ct_dir.join("mycontainer"), "NAME=mycontainer\nPOD=mypod\n").unwrap();
 
-        let err = remove(tmp.path(), "mypod", false, false).unwrap_err();
+        let err = remove(tmp.path(), "mypod", false, 30, false).unwrap_err();
         assert!(
             err.to_string().contains("referenced by container"),
             "unexpected error: {err}"
@@ -1307,7 +1315,7 @@ mod tests {
         .unwrap();
 
         // Force remove succeeds (no runtime file to unmount).
-        remove(tmp.path(), "mypod", true, false).unwrap();
+        remove(tmp.path(), "mypod", true, 30, false).unwrap();
         assert!(!pod_dir.exists());
     }
 

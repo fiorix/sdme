@@ -8,7 +8,8 @@ set -uo pipefail
 # 1. Single container pod (nginx)
 # 2. Two containers with shared emptyDir volume
 # 3. Command override with busybox
-# 4. Cleanup with sdme kube delete
+# 4. Cleanup with sdme kube delete, of a created pod and of running pods
+#    whose workload ignores SIGTERM
 # 5. Leftover pod rootfs: create fails fast, kube delete reclaims it
 # 6. Failed container creation removes the rootfs it built
 
@@ -238,6 +239,85 @@ YAML
     fi
 
     record "$test_name" PASS
+}
+
+# --- Test 3b: kube delete on a running pod ---
+# The workload is `sleep infinity`, which never acts on SIGTERM, so the guest
+# only finishes shutting down once the pod's grace period has run out.
+#   delete_running_pod <test-name> <pod-name> <grace-seconds|""> <max-seconds|"">
+delete_running_pod() {
+    local test_name="$1" pod_name="$2" grace="$3" max_secs="$4"
+    local yaml_file grace_line=""
+    yaml_file=$(mktemp /tmp/kube-test-XXXXXX.yaml)
+    [[ -n "$grace" ]] && grace_line="  terminationGracePeriodSeconds: $grace"
+
+    cat > "$yaml_file" <<YAML
+apiVersion: v1
+kind: Pod
+metadata:
+  name: $pod_name
+spec:
+$grace_line
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+    command: ["/bin/sh", "-c", "sleep infinity"]
+YAML
+
+    echo "--- $test_name: creating pod ---"
+    if ! "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" $KFLAG -v 2>&1; then
+        record "$test_name" FAIL "create failed"
+        rm -f "$yaml_file"
+        return
+    fi
+    rm -f "$yaml_file"
+
+    local stored
+    stored=$(sed -n 's/^KUBE_GRACE_PERIOD=//p' "$DATADIR/state/$pod_name" 2>/dev/null)
+    if [[ "$stored" != "${grace:-30}" ]]; then
+        record "$test_name" FAIL "state has KUBE_GRACE_PERIOD='$stored', expected ${grace:-30}"
+        "$SDME" kube delete "$pod_name" --force 2>/dev/null || true
+        return
+    fi
+
+    echo "--- $test_name: starting pod ---"
+    if ! timeout "$TIMEOUT_BOOT" "$SDME" start "$pod_name" -t "$TIMEOUT_BOOT" -v 2>&1; then
+        record "$test_name" FAIL "start failed"
+        "$SDME" kube delete "$pod_name" --force 2>/dev/null || true
+        return
+    fi
+    sleep 3
+
+    echo "--- $test_name: deleting the running pod ---"
+    local output rc=0 started elapsed
+    started=$(date +%s)
+    output=$("$SDME" kube delete "$pod_name" 2>&1) || rc=$?
+    elapsed=$(( $(date +%s) - started ))
+    echo "$output"
+
+    if [[ $rc -ne 0 ]]; then
+        record "$test_name" FAIL "kube delete exited $rc after ${elapsed}s"
+        "$SDME" stop --kill "$pod_name" 2>/dev/null || true
+        "$SDME" kube delete "$pod_name" --force 2>/dev/null || true
+        return
+    fi
+    if [[ -f "$DATADIR/state/$pod_name" || -e "$(kube_fs_dir "kube-$pod_name")" ]]; then
+        record "$test_name" FAIL "state file or rootfs left after delete"
+        return
+    fi
+    if [[ -n "$max_secs" && $elapsed -ge $max_secs ]]; then
+        record "$test_name" FAIL "delete took ${elapsed}s, expected under ${max_secs}s"
+        return
+    fi
+    record "$test_name" PASS "${elapsed}s"
+}
+
+test_kube_delete_running() {
+    # Default grace period (30s): the delete has to outlast it.
+    delete_running_pod "kube-delete/running" "vfy-kube-delrun" "" ""
+    # A 5s grace period ends the delete well inside the default 30s, so the
+    # wait follows the pod's own grace period.
+    delete_running_pod "kube-delete/short-grace" "vfy-kube-delgr" "5" "$(scale_timeout 25)"
 }
 
 # --- Test 4: Shared emptyDir volume between containers ---
@@ -510,6 +590,7 @@ main() {
     test_single_container
     test_command_override
     test_kube_delete
+    test_kube_delete_running
     test_shared_volume
     test_ps_kube_column
     test_orphan_rootfs

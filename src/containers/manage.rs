@@ -15,10 +15,15 @@ use super::{ensure_exists, volumes_dir};
 /// an undetermined state is not proof that the container is stopped, so
 /// no unit mutation, filesystem teardown, state file removal, or drop-in
 /// removal happens and the command stays retryable.
-pub fn remove(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
+///
+/// `stop_timeout` is the configured `stop_timeout_terminate`: the base number
+/// of seconds to wait for a running container to shut down, extended as
+/// described in [`stop_timeout_secs`].
+pub fn remove(datadir: &Path, name: &str, stop_timeout: u64, verbose: bool) -> Result<()> {
     remove_with_ops(
         datadir,
         name,
+        stop_timeout,
         verbose,
         &RemovalOps {
             unit_state: &systemd::unit_active_state,
@@ -43,26 +48,33 @@ struct RemovalOps<'a> {
 }
 
 /// Container removal with host side effects injected for testing.
-fn remove_with_ops(datadir: &Path, name: &str, verbose: bool, ops: &RemovalOps) -> Result<()> {
+fn remove_with_ops(
+    datadir: &Path,
+    name: &str,
+    stop_timeout: u64,
+    verbose: bool,
+    ops: &RemovalOps,
+) -> Result<()> {
     ensure_exists(datadir, name)?;
 
     // Acquire exclusive lock to prevent removal while a build is reading from this container.
     let _lock = crate::lock::lock_exclusive(datadir, "containers", name)
         .with_context(|| format!("cannot remove container '{name}': in use"))?;
 
-    // Read state before removal to check for OCI volumes and enabled state.
+    // Read state before removal to check for OCI volumes and enabled state,
+    // and to size the stop wait.
     let state_file = datadir.join("state").join(name);
-    let (has_oci_volumes, is_enabled) = if state_file.exists() {
+    let (has_oci_volumes, is_enabled, stop_timeout) = if state_file.exists() {
         State::read_from(&state_file)
             .ok()
             .map(|s| {
                 let oci = s.get("OCI_VOLUMES").map(|v| !v.is_empty()).unwrap_or(false);
                 let enabled = s.is_yes("ENABLED");
-                (oci, enabled)
+                (oci, enabled, guest_shutdown_timeout(&s, stop_timeout))
             })
-            .unwrap_or((false, false))
+            .unwrap_or((false, false, stop_timeout))
     } else {
-        (false, false)
+        (false, false, stop_timeout)
     };
 
     // Determine the unit state before any unit mutation or file removal.
@@ -94,14 +106,15 @@ fn remove_with_ops(datadir: &Path, name: &str, verbose: bool, ops: &RemovalOps) 
             if verbose {
                 eprintln!("stopping container '{name}'");
             }
-            stop(name, StopMode::Terminate, 30, verbose)?;
+            stop(name, StopMode::Terminate, stop_timeout, verbose)?;
         }
         Some(other) => {
             if verbose {
                 eprintln!("stopping container '{name}' (unit state: {other})");
             }
             let _ = systemd::stop_unit(name);
-            systemd::wait_for_shutdown(name, std::time::Duration::from_secs(30), verbose)?;
+            let timeout = std::time::Duration::from_secs(stop_timeout);
+            systemd::wait_for_shutdown(name, timeout, verbose)?;
             let _ = systemd::reset_failed(name);
         }
     }
@@ -365,6 +378,41 @@ pub(super) fn graceful_stop_signal() -> i32 {
     libc::SIGRTMIN() + 3
 }
 
+/// Seconds to wait for a container to stop in the given mode.
+///
+/// `base_secs` is the configured timeout for `mode`. A kube pod shuts down no
+/// faster than its `terminationGracePeriodSeconds` when a workload does not
+/// act on SIGTERM, because the guest's systemd waits that long before it
+/// kills the workload. For the modes that shut the guest down (graceful and
+/// terminate) the grace period is therefore added to the base, which is left
+/// to cover the rest of the shutdown. A kill does not wait for the guest.
+pub fn stop_timeout_secs(datadir: &Path, name: &str, mode: StopMode, base_secs: u64) -> u64 {
+    match mode {
+        StopMode::Kill => base_secs,
+        StopMode::Graceful | StopMode::Terminate => {
+            match State::read_from(&datadir.join("state").join(name)) {
+                Ok(state) => guest_shutdown_timeout(&state, base_secs),
+                Err(_) => base_secs,
+            }
+        }
+    }
+}
+
+/// `base_secs` plus the pod's termination grace period, for a kube pod.
+///
+/// A pod whose state predates the stored grace period, or whose stored value
+/// does not parse, is given the default grace period.
+fn guest_shutdown_timeout(state: &State, base_secs: u64) -> u64 {
+    if !state.is_yes("KUBE") {
+        return base_secs;
+    }
+    let grace = state
+        .get_nonempty("KUBE_GRACE_PERIOD")
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(crate::kube::DEFAULT_TERMINATION_GRACE_SECS);
+    base_secs.saturating_add(u64::from(grace))
+}
+
 /// Stop a container using the specified mode (graceful, terminate, or kill).
 ///
 /// `timeout_secs` is the number of seconds to wait for the container to
@@ -482,7 +530,59 @@ mod tests {
                 Ok(())
             },
         };
-        remove_with_ops(tmp.path(), name, false, &ops)
+        remove_with_ops(tmp.path(), name, 30, false, &ops)
+    }
+
+    #[test]
+    fn test_guest_shutdown_timeout() {
+        let state = |content: &str| State::parse(content).unwrap();
+        // Not a kube pod: the configured timeout is used as is.
+        assert_eq!(guest_shutdown_timeout(&state("NAME=web\n"), 30), 30);
+        assert_eq!(
+            guest_shutdown_timeout(&state("KUBE_GRACE_PERIOD=45\n"), 30),
+            30
+        );
+        // A kube pod adds its grace period.
+        assert_eq!(
+            guest_shutdown_timeout(&state("KUBE=yes\nKUBE_GRACE_PERIOD=45\n"), 30),
+            75
+        );
+        assert_eq!(
+            guest_shutdown_timeout(&state("KUBE=yes\nKUBE_GRACE_PERIOD=5\n"), 30),
+            35
+        );
+        // No stored value, or one that does not parse: the default grace period.
+        for content in [
+            "KUBE=yes\n",
+            "KUBE=yes\nKUBE_GRACE_PERIOD=\n",
+            "KUBE=yes\nKUBE_GRACE_PERIOD=soon\n",
+            "KUBE=yes\nKUBE_GRACE_PERIOD=-1\n",
+            "KUBE=yes\nKUBE_GRACE_PERIOD=99999999999\n",
+        ] {
+            assert_eq!(
+                guest_shutdown_timeout(&state(content), 30),
+                60,
+                "{content:?}"
+            );
+        }
+        assert_eq!(
+            guest_shutdown_timeout(&state("KUBE=yes\nKUBE_GRACE_PERIOD=45\n"), u64::MAX),
+            u64::MAX
+        );
+    }
+
+    #[test]
+    fn test_stop_timeout_secs_by_mode() {
+        let tmp = TempDataDir::new("stop-timeout");
+        fixture(&tmp, "pod", "KUBE=yes\nKUBE_GRACE_PERIOD=45\n");
+        let dir = tmp.path();
+        assert_eq!(stop_timeout_secs(dir, "pod", StopMode::Graceful, 90), 135);
+        assert_eq!(stop_timeout_secs(dir, "pod", StopMode::Terminate, 30), 75);
+        assert_eq!(stop_timeout_secs(dir, "pod", StopMode::Kill, 15), 15);
+        assert_eq!(
+            stop_timeout_secs(dir, "missing", StopMode::Terminate, 30),
+            30
+        );
     }
 
     #[test]

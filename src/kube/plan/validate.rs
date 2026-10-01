@@ -709,7 +709,10 @@ pub(crate) fn validate_and_plan(
         // the spec allows. sdme-isolate ignores SIGTERM by design and the
         // workload runs as PID 1 of a new PID namespace, where the kernel drops
         // handler-less signals, so this timeout is what actually bounds stop.
-        termination_grace_period: Some(spec.termination_grace_period_seconds.unwrap_or(30)),
+        termination_grace_period: Some(
+            spec.termination_grace_period_seconds
+                .unwrap_or(crate::kube::DEFAULT_TERMINATION_GRACE_SECS),
+        ),
         run_as_user,
         run_as_group,
         seccomp_profile_type: pod_seccomp_type,

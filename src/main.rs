@@ -247,6 +247,10 @@ Three shutdown tiers, in order of escalation:
 --term and --kill are mutually exclusive. Timeouts are configurable via
 'sdme config set'.
 
+A kube pod gets its terminationGracePeriodSeconds on top of the graceful and
+terminate timeouts, because the guest waits that long before it kills a
+workload that does not act on SIGTERM.
+
 EXAMPLES:
     sdme stop mybox
     sdme stop mybox --term
@@ -948,6 +952,11 @@ CLEANUP:
     rebuild the pod, before copying or pulling anything. Run 'sdme kube delete
     <podname>' to remove the leftover rootfs: it works without a container and
     succeeds when nothing is left to remove.
+
+    A running pod is stopped first. It is given its
+    terminationGracePeriodSeconds (default 30) plus stop_timeout_terminate to
+    shut down; a workload that does not act on SIGTERM is killed by the guest
+    once the grace period runs out.
 
     Applying a pod that already exists replaces it.
 
@@ -2944,7 +2953,12 @@ fn run() -> Result<()> {
             if !status.success() {
                 let code = status.code().unwrap_or(1);
                 eprintln!("join failed (exit code {code}), removing '{name}'");
-                let _ = containers::remove(&cfg.datadir, &name, cli.verbose);
+                let _ = containers::remove(
+                    &cfg.datadir,
+                    &name,
+                    cfg.stop_timeout_terminate,
+                    cli.verbose,
+                );
                 std::process::exit(code);
             }
         }
@@ -3070,8 +3084,9 @@ fn run() -> Result<()> {
             };
             let datadir = &cfg.datadir;
             let verbose = cli.verbose;
+            let stop_timeout = cfg.stop_timeout_terminate;
             for_each_container(datadir, &targets, "removing", "removed", |name| {
-                containers::remove(datadir, name, verbose)
+                containers::remove(datadir, name, stop_timeout, verbose)
             })?;
         }
         Command::Stop {
@@ -3104,6 +3119,7 @@ fn run() -> Result<()> {
             let verbose = cli.verbose;
             for_each_container(datadir, &targets, "stopping", "stopped", |name| {
                 containers::ensure_exists(datadir, name)?;
+                let timeout_secs = containers::stop_timeout_secs(datadir, name, mode, timeout_secs);
                 containers::stop(name, mode, timeout_secs, verbose)
             })?;
         }
@@ -3151,6 +3167,8 @@ fn run() -> Result<()> {
                 };
                 containers::ensure_exists(datadir, &name)?;
                 eprintln!("restarting '{name}'");
+                let stop_timeout_secs =
+                    containers::stop_timeout_secs(datadir, &name, mode, stop_timeout_secs);
                 if let Err(e) = containers::stop(&name, mode, stop_timeout_secs, verbose) {
                     eprintln!("error: {name}: stop failed: {e}");
                     failed = true;
@@ -3271,7 +3289,13 @@ fn run() -> Result<()> {
                 for name in &targets {
                     check_interrupted()?;
                     eprintln!("removing pod '{name}'");
-                    if let Err(e) = pod::remove(&cfg.datadir, name, force, cli.verbose) {
+                    if let Err(e) = pod::remove(
+                        &cfg.datadir,
+                        name,
+                        force,
+                        cfg.stop_timeout_terminate,
+                        cli.verbose,
+                    ) {
                         eprintln!("error: {name}: {e}");
                         failed = true;
                     } else {
@@ -3360,6 +3384,7 @@ fn run() -> Result<()> {
                         cache: &blob_cache,
                         pod: pod.as_deref(),
                         oci_pod: oci_pod.as_deref(),
+                        stop_timeout: cfg.stop_timeout_terminate,
                         verbose: cli.verbose,
                         default_kube_registry: &cfg.default_kube_registry,
                         network: kube_network,
@@ -3452,6 +3477,7 @@ fn run() -> Result<()> {
                         cache: &blob_cache,
                         pod: pod.as_deref(),
                         oci_pod: oci_pod.as_deref(),
+                        stop_timeout: cfg.stop_timeout_terminate,
                         verbose: cli.verbose,
                         default_kube_registry: &cfg.default_kube_registry,
                         network: kube_network,
@@ -3465,7 +3491,13 @@ fn run() -> Result<()> {
                 println!("{name}");
             }
             KubeCommand::Delete { name, force } => {
-                kube::kube_delete(&cfg.datadir, &name, force, cli.verbose)?;
+                kube::kube_delete(
+                    &cfg.datadir,
+                    &name,
+                    force,
+                    cfg.stop_timeout_terminate,
+                    cli.verbose,
+                )?;
                 println!("{name}");
             }
             KubeCommand::Secret(cmd) => match cmd {
@@ -3717,6 +3749,7 @@ fn run() -> Result<()> {
                         config_path: &config,
                         boot_timeout,
                         tasks_max: cfg.tasks_max,
+                        stop_timeout: cfg.stop_timeout_terminate,
                         force,
                         auto_gc: cfg.auto_fs_gc,
                         no_cache,
@@ -3951,8 +3984,13 @@ fn run() -> Result<()> {
                 }
             }
 
-            let (succeeded, errors) =
-                prune::execute(&prunable, &cfg.datadir, cfg.auto_fs_gc, cli.verbose);
+            let (succeeded, errors) = prune::execute(
+                &prunable,
+                &cfg.datadir,
+                cfg.auto_fs_gc,
+                cfg.stop_timeout_terminate,
+                cli.verbose,
+            );
 
             // Propagate signal exit code (130 for SIGINT) before error summary.
             check_interrupted()?;

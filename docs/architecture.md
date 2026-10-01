@@ -635,7 +635,7 @@ update_check.check_interval_hours 24
 - `max_download_size`: maximum download size for imports and OCI pulls (e.g. `50G`; `0` = unlimited).
 - `default_create_masked_services`: comma-separated systemd units to mask at container create time (empty string disables).
 - `stop_timeout_graceful`: seconds to wait during graceful stop.
-- `stop_timeout_terminate`: seconds to wait during terminate stop.
+- `stop_timeout_terminate`: seconds to wait during terminate stop, and for a running container to stop when it is removed.
 - `stop_timeout_kill`: seconds to wait during force-kill stop.
 - `auto_fs_gc`: automatically clean stale transaction directories before mutating operations.
 - `default_export_free_space`: extra free space for auto-calculated raw disk image size.
@@ -1346,7 +1346,7 @@ securityContext.runAsNonRoot        Validates runAsUser is non-zero
 
 Secret and configMap volumes support `items` for projected key paths and `defaultMode` for file permissions.
 
-`terminationGracePeriodSeconds` defaults to 30 seconds, as in Kubernetes, and becomes the app unit's `TimeoutStopSec`. For most workloads it is what actually bounds shutdown rather than a fallback: `sdme-isolate` ignores SIGTERM so that it can wait for its child, and the workload runs as PID 1 of a new PID namespace, where the kernel discards signals that have no installed handler. An app that installs a SIGTERM handler stops on the signal; one that does not is killed when this timeout expires.
+`terminationGracePeriodSeconds` defaults to 30 seconds, as in Kubernetes, and becomes the app unit's `TimeoutStopSec`. For most workloads it is what actually bounds shutdown rather than a fallback: `sdme-isolate` ignores SIGTERM so that it can wait for its child, and the workload runs as PID 1 of a new PID namespace, where the kernel discards signals that have no installed handler. An app that installs a SIGTERM handler stops on the signal; one that does not is killed when this timeout expires. sdme therefore gives a pod its grace period on top of the graceful and terminate stop timeouts, in `sdme stop`, `sdme restart`, `sdme rm`, and `sdme kube delete`.
 
 ### Filesystem layout
 
@@ -1485,6 +1485,7 @@ Kube pods are tracked with additional state fields:
 - `KUBE=yes`: marks this as a kube pod
 - `KUBE_CONTAINERS=nginx,redis,...`: list of container names
 - `KUBE_YAML_HASH={sha256}`: hash of the source YAML (for future update detection)
+- `KUBE_GRACE_PERIOD={seconds}`: the pod's termination grace period, added to stop timeouts; a pod without it is given the default 30
 - `HAS_PROBES=yes`: set when the pod has any probe definitions
 
 `sdme ps --json` reports a kube pod with a `kube` object (`yaml_hash`, `has_probes`), which is `null` for other containers, and lists the pod's containers under `oci_apps`. The text table has no kube column.
