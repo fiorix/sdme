@@ -11,6 +11,8 @@ set -euo pipefail
 #      via /proc/self/uid_map inside the container).
 #   3. A second container with the same flags gets a different, non-overlapping
 #      range (conflict-free allocation).
+#   4. A create whose range reservation fails removes the container it had
+#      already created, and the name stays usable.
 
 source "$(dirname "$0")/lib.sh"
 
@@ -153,6 +155,37 @@ if [[ "$shift_val" -lt "$shift2" && $((shift_val + range)) -le "$shift2" ]] || \
     ok "allocated ranges do not overlap"
 else
     fail "allocated ranges overlap (shift1=$shift_val range1=$range shift2=$shift2 range2=$range2)"
+fi
+
+# ---------------------------------------------------------------------------
+# Test 4: a create that fails after the container exists removes it again.
+# ---------------------------------------------------------------------------
+# 30000 extra 64K ranges exceed the whole container UID window, so the range
+# reservation fails once the container itself has been created.
+echo "=== Test 4: failed range reservation leaves no container ==="
+
+CTR3="${PREFIX}-toobig"
+rc=0
+output=$(timeout "$BOOT_TIMEOUT" "$SDME" create --name "$CTR3" -r "$BASEFS" --userns --userns-nested 30000 "${VFLAG[@]}" 2>&1) || rc=$?
+
+if [[ $rc -ne 0 ]] && grep -q "UIDs are required" <<<"$output"; then
+    ok "create with an unsatisfiable range fails"
+else
+    fail "create with an unsatisfiable range: rc=$rc, output: $output"
+fi
+
+if [[ ! -e "$DATADIR/state/$CTR3" && ! -e "$DATADIR/containers/$CTR3" ]] \
+    && ! "$SDME" ps 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "$CTR3"; then
+    ok "failed create left no container behind"
+else
+    fail "failed create left container $CTR3 behind"
+fi
+
+# The name is free again: the same create with a satisfiable range succeeds.
+if output=$(timeout "$BOOT_TIMEOUT" "$SDME" create --name "$CTR3" -r "$BASEFS" --userns --userns-nested 2 "${VFLAG[@]}" 2>&1); then
+    ok "name is reusable after the failed create"
+else
+    fail "create after the failed create: $output"
 fi
 
 # ---------------------------------------------------------------------------

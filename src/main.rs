@@ -2557,6 +2557,7 @@ fn run() -> Result<()> {
                 restart_sec: cfg.restart_sec,
                 userns_enabled,
                 userns_range: sec.userns_range,
+                stop_timeout: cfg.stop_timeout_terminate,
                 verbose: cli.verbose,
             })?;
 
@@ -2906,6 +2907,7 @@ fn run() -> Result<()> {
                 restart_sec: cfg.restart_sec,
                 userns_enabled,
                 userns_range: sec.userns_range,
+                stop_timeout: cfg.stop_timeout_terminate,
                 verbose: cli.verbose,
             })?;
 

@@ -320,6 +320,9 @@ pub(crate) struct PostCreateSetup<'a> {
     pub userns_enabled: bool,
     /// Pre-allocated user namespace range size, if any.
     pub userns_range: Option<u64>,
+    /// Configured `stop_timeout_terminate`, for removing the container if
+    /// the setup fails.
+    pub stop_timeout: u64,
     /// Enable verbose output.
     pub verbose: bool,
 }
@@ -330,7 +333,26 @@ pub(crate) struct PostCreateSetup<'a> {
 /// Stores OCI_APP, SYSTEMD_LOG_LEVEL, and the opt-in restart policy in the
 /// state file, then probes overlayfs idmap support and pre-chowns if the
 /// kernel lacks it.
+///
+/// On failure the container is removed again: it exists but was never set up,
+/// and left behind it would keep the name and start with the wrong settings.
 pub(crate) fn post_create_setup(opts: &PostCreateSetup) -> Result<()> {
+    let result = apply_post_create_setup(opts);
+    if result.is_err() {
+        let name = opts.name;
+        let _interrupt = sdme::InterruptGuard::save_and_reset();
+        if let Err(rollback) =
+            containers::remove(opts.datadir, name, opts.stop_timeout, opts.verbose)
+        {
+            eprintln!(
+                "warning: failed to remove container '{name}' after failed create: {rollback:#}"
+            );
+        }
+    }
+    result
+}
+
+fn apply_post_create_setup(opts: &PostCreateSetup) -> Result<()> {
     let PostCreateSetup {
         datadir,
         name,
@@ -342,6 +364,7 @@ pub(crate) fn post_create_setup(opts: &PostCreateSetup) -> Result<()> {
         userns_enabled,
         userns_range,
         verbose,
+        ..
     } = *opts;
     let state_path = datadir.join("state").join(name);
     let mut state = sdme::State::read_from(&state_path)?;
