@@ -146,17 +146,16 @@ The docker/registry tutorial test needs outbound internet inside a `--network-ve
 
 ## Results
 
-Last verified: 2026-09-14
+Last verified: 2026-10-01
 
-System: Linux 7.1.8-1-cachyos (x86_64), systemd 261, sdme 0.19.1 built from
-the working tree. Eight parallel jobs, timeout scale 1, wall clock 17m02s.
-The exact aggregate is `test-reports/summary-20260914-143109.md`, which
-records the binary as 0.18.0: the suite ran against this code before the
-version bump, and no code changed between that run and the bump. The 0.19.0
-tag was never released. Its musl release build failed to compile because the
-contained copy engine used the libc statx wrapper, which libc gates behind a
-cfg that musl targets do not get. Nothing was published, the fix is in 0.19.1,
-and CI now cross-compiles both musl targets on every push.
+System: Linux 7.0.0-34-generic (x86_64), Ubuntu 26.04, systemd 259.5, sdme
+0.20.0 built from the working tree. Eight parallel jobs, timeout scale 1, wall
+clock 25m12s. The host runs ufw with DROP input and forward policies, and the
+datadir is a dedicated btrfs mount (Mode A) with `compress=zstd:3` and
+`user_subvol_rm_allowed` set by its mount unit. The exact aggregate is
+`test-reports/summary-20261001-110235.md`, which records the binary as 0.19.1:
+the suite ran against this code before the version bump, and no code changed
+between that run and the bump.
 
 ```
 Test Suite                  Pass  Fail  Skip  Status
@@ -166,50 +165,150 @@ verify-cp                     21     0     0  PASS
 verify-diff                    9     0     0  PASS
 verify-distro-boot            63     0     0  PASS
 verify-distro-oci            175     0     0  PASS
-verify-export                 23     0     0  PASS
-verify-kube-L1-basic          14     0     0  PASS
+verify-export                 22     0     1  PASS
+verify-kube-L1-basic          19     0     0  PASS
 verify-kube-L2-probes         41     0     0  PASS
-verify-kube-L2-security       17     0     0  PASS
+verify-kube-L2-security       16     0     1  PASS
 verify-kube-L2-spec           12     0     0  PASS
 verify-kube-L3-secrets        16     0     0  PASS
-verify-kube-L3-volumes        39     0     0  PASS
+verify-kube-L3-volumes        38     1     0  FAIL
 verify-kube-L4-networking      6     0     0  PASS
 verify-kube-L5-redis-stack     6     0     0  PASS
 verify-kube-L6-gitea-stack    15     0     0  PASS
-verify-nested                 14     0     2  PASS
+verify-nested                 13     0     3  PASS
 verify-nested-userns           7     0     0  PASS
 verify-network                 9     0     0  PASS
 verify-nixos                  26     0     0  PASS
 verify-oci                    18     0     0  PASS
-verify-pods                    9     0     0  PASS
-verify-security               35     0     2  PASS
-verify-storage                 8     0     1  PASS
-verify-tutorial               83     0     8  PASS
+verify-pods                    8     1     0  FAIL
+verify-security               41     0     0  PASS
+verify-storage                11     0     0  PASS
+verify-tutorial               84     0     7  PASS
 --------------------------  ----  ----  ----  ------
-Totals                       677     0    13  24 suites
+Totals                       687     2    12  24 suites
 ```
 
-- All 24 suites pass. The 13 skips are expected on this host and are not
-  failures: eight tutorial Docker checks skip because the host veth receives
-  no default route, two `verify-security` checks skip because AppArmor is not
-  active, two `verify-nested` checks skip because `/var/lib/sdme` is a
-  directory on the btrfs root rather than its own mount (toggling
-  `user_subvol_rm_allowed` needs a superblock option that survives remount and
-  has no negative form, so it would require a reboot to clear), and one
-  `verify-storage` check skips for a missing optional tool. Preflight also
-  warns that `kubeconform` and `qemu-nbd` are absent.
-- `verify-nested` reports 16 checks here against 5 in the 0.18.0 review. The
-  earlier run exited at test 2, so tests 3 through 7 never executed. The count
-  grew because the suite now runs to completion, not because tests were added.
-- The run leaves no leaked `/run/systemd/nspawn/<name>/unix-export` mounts.
-  Before the reclaim fix, twelve accumulated over a single morning of runs.
-- Seven `sdme@*.service` units remain in failed state afterwards with
-  `Result=timeout` and `status=9/KILL`. Container shutdown reaches its stop
-  timeout because an OCI app's workload does not act on SIGTERM, so systemd
-  falls back to SIGKILL. This is cosmetic now that leaked mounts are reclaimed,
-  and is tracked as a known limitation below.
+- 22 of 24 suites pass in the parallel run. The two failures are single
+  checks that pass when their suite is rerun on its own: `verify-kube-L3-volumes`
+  39/39 and `verify-pods` 9/9. Neither is in code this release changes, and
+  neither is a clean run: a release gate that needs serial reruns is weaker
+  evidence than the single green run recorded for 0.19.1.
+- `verify-pods` fails `--pod + --userns should succeed` with `cannot lock
+  userns allocation: cannot lock userns/shift`. The userns shift lock is taken
+  without blocking, and sdme takes the recursive pre-chown path on this host,
+  so another suite's pre-chown holds the lock for seconds. It failed in two of
+  three full runs here.
+- `verify-kube-L3-volumes` fails `ronly-start-runtime`: `systemctl start`
+  failed for a pod that had been created correctly, immediately after the
+  start rewrote the shared `sdme@.service` template while other suites were
+  reloading systemd. The unit logged nothing. The cause is not established; it
+  happened once in six runs of this suite.
+- The 12 skips are expected on this host. Seven tutorial Docker checks skip
+  because ufw drops DHCP on the veth, so the container gets no default route.
+  Three `verify-nested` checks skip because the datadir's mount unit sets
+  `user_subvol_rm_allowed`, which the suite cannot clear. One `verify-export`
+  check skips because `setfattr` is not installed, and one
+  `verify-kube-L2-security` check skips because the AppArmor profile is not
+  visible inside nspawn. Preflight also warns that `kubeconform` and
+  `qemu-nbd` are absent; the L1 suite downloads `kubeconform` itself.
+- The kube suites were also run with `KUBE_STORAGE=btrfs`: 170 passed, 0
+  failed, 1 skipped across 9 suites in 6m35s
+  (`test-reports/summary-20261001-092931.md`).
 
 ## Log
+
+### 0.20.0 -- leftover kube pod rootfs (2026-10-01, x86_64)
+
+`kube apply` and `kube create` now stop before any copy or pull when a
+`kube-{pod}` rootfs exists that no container claims, `kube delete` removes
+such a rootfs without a container, and a container creation that fails after
+the rootfs is committed removes it again. The btrfs backend no longer deletes
+a leftover subvolume silently.
+
+New coverage in `verify-kube-L1-basic` (14 to 19 checks), on both backends:
+
+- `orphan/apply-fails-fast`: after `sdme rm` of a pod, a second `kube create`
+  exits non-zero with the new message and prints no `pulling`, `copying base
+  rootfs`, or `extracting layer` line.
+- `orphan/delete-reclaims` and `orphan/delete-idempotent`: `kube delete`
+  without a container removes the rootfs, and succeeds again with nothing
+  left.
+- `orphan/reapply`: a clean create then succeeds.
+- `rollback/failed-create`: a directory in `/var/lib/machines` with the pod's
+  name fails container creation after the rootfs is committed; no rootfs is
+  left behind.
+
+`verify-nested` test 6 exercises the same rollback in a nested context, where
+the mknod preflight fails the container creation.
+
+Three full `run-parallel.sh --jobs 8` runs on Linux 7.0.0-34-generic with
+systemd 259.5, plus the nine kube suites with `KUBE_STORAGE=btrfs`:
+
+```
+Run  Summary file              Pass  Fail  Skip  Failed suites
+---  ------------------------  ----  ----  ----  ---------------------------
+1    summary-20261001-091105    674     2     9  nested (setup), security,
+                                                 storage
+2    summary-20261001-095812    672     4     9  network, pods; nested skipped
+3    summary-20261001-110235    687     2    12  kube-L3-volumes, pods
+```
+
+- Every kube suite passed in runs 1 and 2. Run 3 has the one unexplained
+  `ronly-start-runtime` start failure described under Results.
+- Run 1 predates the suite fixes listed below. Run 3 uses the final scripts.
+- No run is fully green. Each failing check passes in a serial rerun of its
+  suite: `verify-security` 41/41, `verify-storage` 11/11, `verify-network`
+  9/9, `verify-pods` 9/9, `verify-kube-L3-volumes` 39/39, `verify-nested`
+  13 passed with 3 skipped.
+
+Suite fixes, all found by running on a ufw host:
+
+- `verify-tutorial` loaded `br_netfilter` for the Docker test and left it
+  loaded. Bridged container traffic then traversed the host's FORWARD chain,
+  which ufw sets to DROP, so `verify-network` lost zone and bridge HTTP and
+  LLMNR in every run after the first. The 0.18.0 entry records zone route and
+  LLMNR failures on the same distribution; that may be the same cause, which
+  was not verified. The test now unloads the module if it loaded it, and
+  `verify-network` passes 9/9 again.
+- `verify-nested` opened its bridge with an inbound ufw rule only. Routed DNS
+  and registry traffic was dropped by the forward policy, which surfaced as
+  the outer container having no DNS. It now adds a route rule and removes
+  both on teardown.
+- `verify-nested` aborted at setup when the datadir's mount unit sets
+  `user_subvol_rm_allowed`. It now skips the three checks that need the
+  option off and runs the other thirteen.
+- `verify-storage` wrote zeros to reach the 250M disk cap. On a datadir
+  mounted with `compress=` they never reach it. With random data the write
+  ends in `Disk quota exceeded` and `sdme ps` reports 249M/250M.
+- `ensure_python3_in_rootfs` edits the rootfs tree directly, which does not
+  refresh a btrfs base subvolume built earlier. The first btrfs kube run
+  failed L4, L5, and L6 readiness (157 passed, 4 failed) because their pods
+  had no `python3`. The helper now drops a base that lacks it.
+- `cleanup_prefix` removed kube pods with `sdme rm` and their rootfs through
+  `sdme fs ls`, which does not list pool subvolumes, so btrfs runs leaked
+  subvolumes that the removed silent reclaim used to hide. It now uses
+  `sdme kube delete`.
+
+Product findings from these runs, not fixed in this release:
+
+- `sdme kube delete` on a running pod whose workload ignores SIGTERM fails
+  with `timed out waiting for container ... to shut down (30s)`. The default
+  `terminationGracePeriodSeconds` of 30s equals the 30s stop wait, so the
+  stop loses the race. The kube suites call it with `|| true`, so the pod and
+  its rootfs stay behind until a later cleanup; `vfy-kube-cmd`,
+  `vfy-kube-vol`, `gitea-pod`, and `readonly-vol-pod` were left this way.
+- The userns shift lock (`src/userns.rs`) does not block, so concurrent
+  `--userns` creates fail while another one is pre-chowning.
+- The `ronly-start-runtime` start failure under concurrent template unit
+  rewrites, cause not established.
+
+After the version bump, the 0.20.0 binary passed `smoke` 12/12 and
+`verify-kube-L1-basic` 19/19 on overlay and on btrfs. Rust verification: 996
+tests passed and 3 ignored, 6 doctests passed and 1 ignored; fmt and clippy
+with warnings denied pass.
+
+Not covered: the leftover-rootfs removal on a Mode B loopback pool. This host
+has a native btrfs datadir.
 
 ### 0.19.1 -- contained copy, nspawn reclaim, kube grace period (2026-09-14, x86_64)
 

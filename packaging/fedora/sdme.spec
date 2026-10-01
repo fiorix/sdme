@@ -11,7 +11,7 @@
 %global crate sdme
 
 Name:           sdme
-Version:        0.19.1
+Version:        0.20.0
 Release:        1%{?dist}
 Summary:        The systemd machine editor
 
@@ -106,6 +106,25 @@ export SDME_SKIP_PROBE=1
 %{_bindir}/%{crate} repair-units || :
 
 %changelog
+* Thu Oct 01 2026 Alexandre Fiori <fiorix@gmail.com> - 0.20.0-1
+- Stop sdme kube apply and kube create before any copy or pull when a
+  kube-<pod> rootfs exists that no container claims, and name the command that
+  removes it. The create previously ran to the end and failed at the final
+  rename with "Directory not empty". Removing a pod with sdme rm is enough to
+  leave such a rootfs behind.
+- The btrfs backend no longer deletes a leftover pod rootfs silently; both
+  backends now refuse and report it.
+- Let sdme kube delete remove a leftover pod rootfs when no container of that
+  name exists, on either backend, and succeed when nothing is left. It
+  previously failed with "container not found". It now also refuses to remove
+  a rootfs that another container references.
+- Remove the pod rootfs again when container creation fails after the rootfs
+  was built.
+- Emit RequiresMountsFor for the btrfs loopback pool in the [Unit] section of
+  container drop-ins, so systemd pulls in the mount before nspawn starts.
+  Recognized legacy drop-ins are repaired on package upgrade and by root sdme
+  commands; the repair is idempotent and does not restart containers.
+
 * Mon Sep 14 2026 Alexandre Fiori <fiorix@gmail.com> - 0.19.1-1
 - Build the static musl release binaries again. The contained copy engine
   reached mount identity through the libc statx wrapper, which libc gates
