@@ -888,7 +888,9 @@ All operations that read or mutate containers, rootfs, pods, secrets, or configm
 - **Shared locks** (read) allow concurrent operations (build, export, cp, start, create) and coexist with each other.
 - **Exclusive locks** (write) protect destructive mutations (rm, fs rm, import, kube delete, pod rm) and block all other lock holders.
 
-Lock files live at `{datadir}/locks/{kind}/{name}.lock`. All locks are **non-blocking** (`LOCK_NB`): if a lock cannot be acquired immediately, the operation fails with an error identifying the holder PID (read from the lock file). Lock ordering to prevent deadlocks: `fs -> containers -> pods -> secrets -> configmaps`. Within the same kind, acquire shared before exclusive on different names.
+Lock files live at `{datadir}/locks/{kind}/{name}.lock`. Resource locks are **non-blocking** (`LOCK_NB`): if a lock cannot be acquired immediately, the operation fails with an error identifying the holder PID (read from the lock file). Lock ordering to prevent deadlocks: `fs -> containers -> pods -> secrets -> configmaps`. Within the same kind, acquire shared before exclusive on different names.
+
+Two internal kinds **block** instead, because a concurrent caller should queue rather than fail: `storage` (materializing the btrfs pool image or a base subvolume, so peers wait and then find the finished resource) and `userns` (reserving a UID range for a `--userns` container, which takes milliseconds). Both come after `fs` in the lock order, no other lock is acquired while one of them is held, and a SIGINT or SIGTERM while waiting ends the wait with the usual `interrupted` error.
 
 Locks are released automatically when the `ResourceLock` value is dropped (file descriptor closed). On process crash or `SIGKILL`, the kernel releases the lock. Flock semantics guarantee no stale locks.
 

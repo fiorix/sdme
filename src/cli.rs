@@ -424,8 +424,9 @@ pub(crate) fn validate_systemd_log_level(level: &str) -> Result<()> {
 /// - sdme is running inside an existing user namespace (nested container),
 /// - the user requested extra 64K ranges for nested containers.
 ///
-/// The allocated `USERNS_SHIFT` and `USERNS_RANGE` are written to the state
-/// file so `SecurityConfig::to_nspawn_args()` can emit an explicit
+/// The reserved `USERNS_SHIFT` and `USERNS_RANGE` are stored in the state file
+/// before the pre-chown, so concurrent creates cannot be given the same range,
+/// and so `SecurityConfig::to_nspawn_args()` can emit an explicit
 /// `--private-users=<base>:<range>`.
 pub(crate) fn ensure_userns_range(
     datadir: &Path,
@@ -457,7 +458,7 @@ pub(crate) fn ensure_userns_range(
         eprintln!("note: allocating user namespace range inside parent userns");
     }
 
-    let (shift, range) = userns::allocate_uid_range(datadir, name, extra_slots)?;
+    let (shift, range) = userns::reserve_uid_range(datadir, name, extra_slots)?;
     if verbose {
         eprintln!("allocated UID range: {shift}:{range}");
     }
@@ -466,14 +467,15 @@ pub(crate) fn ensure_userns_range(
     // Inside a nested container we always pre-chown because idmapped overlayfs
     // may not translate correctly across multiple user namespaces.
     if backend == sdme::storage::Backend::Overlay && (!idmap_ok || nested) {
-        userns::prechown_overlayfs(datadir, name, lowerdir, shift)?;
+        if let Err(e) = userns::prechown_overlayfs(datadir, name, lowerdir, shift) {
+            // The stored shift promises a pre-shifted rootfs, which a failed
+            // pre-chown did not deliver.
+            if let Err(release) = userns::release_uid_range(datadir, name) {
+                eprintln!("warning: failed to release UID range {shift}:{range}: {release:#}");
+            }
+            return Err(e);
+        }
     }
-
-    let state_path = datadir.join("state").join(name);
-    let mut state = sdme::State::read_from(&state_path)?;
-    state.set("USERNS_SHIFT", shift.to_string());
-    state.set("USERNS_RANGE", range.to_string());
-    state.write_to(&state_path)?;
     Ok(())
 }
 

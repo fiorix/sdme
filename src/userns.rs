@@ -79,24 +79,14 @@ pub fn current_userns_base() -> u64 {
     current_parent_range().map(|(base, _)| base).unwrap_or(0)
 }
 
-/// Allocate a UID shift for a container, matching nspawn's `pick` algorithm.
+/// Reserve a contiguous UID/GID range for a container.
 ///
-/// Uses the same SipHash-2-4 hash of the machine name with the same key
-/// as nspawn, so for a given container name the result matches what
-/// `--private-users=pick` would choose (absent conflicts).
-///
-/// Checks for conflicts against:
-/// - Other sdme containers with stored `USERNS_SHIFT` values
-/// - Currently running machines (via `/proc/{leader}/uid_map`)
-///
-/// Acquires an exclusive lock on the "userns" resource to prevent races
-/// between concurrent `sdme create` calls.
-pub fn allocate_uid_shift(datadir: &Path, name: &str) -> Result<u64> {
-    let (base, _) = allocate_uid_range(datadir, name, 0)?;
-    Ok(base)
-}
-
-/// Allocate a contiguous UID/GID range for a container.
+/// The base matches nspawn's `pick` algorithm: the same SipHash-2-4 hash of
+/// the machine name with the same key, so for a given container name the
+/// result is what `--private-users=pick` would choose (absent conflicts).
+/// Conflicts are checked against other sdme containers with a stored
+/// `USERNS_SHIFT` and against currently running machines (via
+/// `/proc/{leader}/uid_map`).
 ///
 /// `extra_64k_slots` requests additional 64K ranges beyond the container's own
 /// range. A value of `0` allocates the usual single 64K block; `N` allocates
@@ -106,20 +96,68 @@ pub fn allocate_uid_shift(datadir: &Path, name: &str) -> Result<u64> {
 /// When running inside an existing user namespace, the block is constrained to
 /// fit entirely within the parent namespace's mapped range. Inner containers
 /// can then allocate offsets inside this block.
-pub fn allocate_uid_range(datadir: &Path, name: &str, extra_64k_slots: u32) -> Result<(u64, u64)> {
-    let _lock = lock::lock_exclusive(datadir, "userns", "shift")
-        .context("cannot lock userns allocation")?;
+///
+/// The range is written to the container's state file as `USERNS_SHIFT` and
+/// `USERNS_RANGE` before the "userns" lock is released, so a concurrent
+/// `sdme create` waits and then sees it. Use [`release_uid_range`] to give it
+/// back if the caller cannot finish setting the container up.
+pub fn reserve_uid_range(datadir: &Path, name: &str, extra_64k_slots: u32) -> Result<(u64, u64)> {
+    let parent = current_parent_range().context("failed to read current user namespace range")?;
+    // Queried before taking the lock: running machines are not what the lock
+    // serializes, and each lookup is a D-Bus round trip.
+    let running = running_machine_ranges();
+    reserve_uid_range_in(datadir, name, extra_64k_slots, parent, &running)
+}
 
-    let (parent_base, parent_range) =
-        current_parent_range().context("failed to read current user namespace range")?;
-
+/// [`reserve_uid_range`] with the parent mapping and running machines supplied.
+fn reserve_uid_range_in(
+    datadir: &Path,
+    name: &str,
+    extra_64k_slots: u32,
+    parent: (u64, u64),
+    running: &[UsedRange],
+) -> Result<(u64, u64)> {
     let slots = 1u64 + u64::from(extra_64k_slots);
     let total_range = slots
         .checked_mul(UID_RANGE)
         .context("requested UID range overflow")?;
 
-    let used = collect_used_ranges(datadir, name)?;
+    let _lock = lock::lock_exclusive_blocking(datadir, "userns", "shift")
+        .context("cannot lock userns allocation")?;
 
+    let mut used = stored_ranges(datadir, name);
+    used.extend_from_slice(running);
+    let (base, range) = pick_uid_range(name, total_range, parent, &used)?;
+
+    let state_path = datadir.join("state").join(name);
+    let mut state = State::read_from(&state_path)?;
+    state.set("USERNS_SHIFT", base.to_string());
+    state.set("USERNS_RANGE", range.to_string());
+    state.write_to(&state_path)?;
+
+    Ok((base, range))
+}
+
+/// Drop a container's reserved UID/GID range from its state file.
+///
+/// Without a stored shift the container starts with `--private-users=pick`.
+pub fn release_uid_range(datadir: &Path, name: &str) -> Result<()> {
+    let _lock = lock::lock_exclusive_blocking(datadir, "userns", "shift")
+        .context("cannot lock userns allocation")?;
+    let state_path = datadir.join("state").join(name);
+    let mut state = State::read_from(&state_path)?;
+    state.remove("USERNS_SHIFT");
+    state.remove("USERNS_RANGE");
+    state.write_to(&state_path)
+}
+
+/// Pick a free block of `total_range` IDs for `name` inside the parent mapping.
+fn pick_uid_range(
+    name: &str,
+    total_range: u64,
+    (parent_base, parent_range): (u64, u64),
+    used: &[UsedRange],
+) -> Result<(u64, u64)> {
     // Determine the usable absolute host range. It must be inside both the
     // global [UID_BASE_MIN, UID_BASE_MAX] window and the current parent namespace.
     let global_min = UID_BASE_MIN;
@@ -154,7 +192,7 @@ pub fn allocate_uid_range(datadir: &Path, name: &str, extra_64k_slots: u32) -> R
     candidate &= !0xFFFF;
 
     for _ in 0..MAX_RETRIES {
-        if candidate + total_range <= usable_end && range_is_free(candidate, total_range, &used) {
+        if candidate + total_range <= usable_end && range_is_free(candidate, total_range, used) {
             return Ok((candidate, total_range));
         }
 
@@ -403,11 +441,10 @@ struct UsedRange {
     len: u64,
 }
 
-/// Collect UID ranges used by other sdme containers and running machines.
-fn collect_used_ranges(datadir: &Path, exclude_name: &str) -> Result<Vec<UsedRange>> {
+/// Collect the UID ranges other sdme containers have stored in their state.
+fn stored_ranges(datadir: &Path, exclude_name: &str) -> Vec<UsedRange> {
     let mut used = Vec::new();
 
-    // Scan sdme state files for USERNS_SHIFT and USERNS_RANGE.
     let state_dir = datadir.join("state");
     if let Ok(entries) = fs::read_dir(&state_dir) {
         for entry in entries.flatten() {
@@ -430,16 +467,20 @@ fn collect_used_ranges(datadir: &Path, exclude_name: &str) -> Result<Vec<UsedRan
         }
     }
 
-    // Collect shifts from running machines via /proc/{leader}/uid_map.
-    // We do not know their configured range, so assume the standard 64K.
-    for (_, shift) in running_machine_shifts() {
-        used.push(UsedRange {
+    used
+}
+
+/// Collect the UID ranges of running machines via `/proc/{leader}/uid_map`.
+///
+/// Their configured range is not known, so the standard 64K is assumed.
+fn running_machine_ranges() -> Vec<UsedRange> {
+    running_machine_shifts()
+        .into_iter()
+        .map(|(_, shift)| UsedRange {
             start: shift,
             len: UID_RANGE,
-        });
-    }
-
-    Ok(used)
+        })
+        .collect()
 }
 
 /// Check whether `[start, start + len)` overlaps any used range.
@@ -569,6 +610,7 @@ fn sipround(v0: &mut u64, v1: &mut u64, v2: &mut u64, v3: &mut u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::TempDataDir;
 
     #[test]
     fn test_hash_to_shift_alignment() {
@@ -635,6 +677,116 @@ mod tests {
         assert!(!range_is_free(0x7_FFFF, 0x2_0000, &used));
         assert!(!range_is_free(0x9_FFFF, 0x2_0000, &used));
         assert!(!range_is_free(0xA_0001, 0x1_0000, &used));
+    }
+
+    /// The initial namespace mapping, so reservations do not depend on the
+    /// namespace the tests happen to run in.
+    const FULL_PARENT: (u64, u64) = (0, 0xFFFF_FFFF);
+
+    fn datadir_with_containers(prefix: &str, names: &[&str]) -> TempDataDir {
+        let tmp = TempDataDir::new(prefix);
+        let state_dir = tmp.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+        for name in names {
+            State::new().write_to(&state_dir.join(name)).unwrap();
+        }
+        tmp
+    }
+
+    fn first_candidate(name: &str) -> u64 {
+        hash_to_shift(siphash24(name.as_bytes(), &SIPHASH_KEY))
+    }
+
+    /// Two container names that hash to the same first candidate.
+    fn colliding_names() -> (String, String) {
+        let mut seen = std::collections::HashMap::new();
+        for i in 0u32.. {
+            let name = format!("ct{i}");
+            if let Some(other) = seen.insert(first_candidate(&name), name.clone()) {
+                return (other, name);
+            }
+        }
+        unreachable!()
+    }
+
+    fn stored_range(datadir: &Path, name: &str) -> Option<(u64, u64)> {
+        let state = State::read_from(&datadir.join("state").join(name)).unwrap();
+        let shift = state.get_nonempty("USERNS_SHIFT")?.parse().ok()?;
+        let range = state.get_nonempty("USERNS_RANGE")?.parse().ok()?;
+        Some((shift, range))
+    }
+
+    fn overlaps(a: (u64, u64), b: (u64, u64)) -> bool {
+        a.0 < b.0 + b.1 && b.0 < a.0 + a.1
+    }
+
+    #[test]
+    fn test_reserve_stores_the_range() {
+        let tmp = datadir_with_containers("userns-store", &["web"]);
+        let got = reserve_uid_range_in(tmp.path(), "web", 1, FULL_PARENT, &[]).unwrap();
+        assert_eq!(got, (first_candidate("web"), 2 * UID_RANGE));
+        assert_eq!(stored_range(tmp.path(), "web"), Some(got));
+    }
+
+    #[test]
+    fn test_reserve_skips_a_stored_range() {
+        let (a, b) = colliding_names();
+        let tmp = datadir_with_containers("userns-skip", &[&a, &b]);
+        let first = reserve_uid_range_in(tmp.path(), &a, 0, FULL_PARENT, &[]).unwrap();
+        let second = reserve_uid_range_in(tmp.path(), &b, 0, FULL_PARENT, &[]).unwrap();
+        assert_eq!(first.0, first_candidate(&b), "names do not collide");
+        assert!(!overlaps(first, second), "{first:?} overlaps {second:?}");
+    }
+
+    #[test]
+    fn test_reserve_skips_a_running_machine() {
+        let tmp = datadir_with_containers("userns-running", &["web"]);
+        let running = [UsedRange {
+            start: first_candidate("web"),
+            len: UID_RANGE,
+        }];
+        let got = reserve_uid_range_in(tmp.path(), "web", 0, FULL_PARENT, &running).unwrap();
+        assert!(!overlaps(got, (running[0].start, running[0].len)));
+    }
+
+    #[test]
+    fn test_reserve_concurrent_ranges_are_disjoint() {
+        let (a, b) = colliding_names();
+        let mut names = vec![a, b];
+        names.extend((0..6).map(|i| format!("extra{i}")));
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let tmp = datadir_with_containers("userns-concurrent", &refs);
+
+        let ranges: Vec<(u64, u64)> = std::thread::scope(|scope| {
+            let handles: Vec<_> = names
+                .iter()
+                .map(|name| {
+                    let dir = tmp.path();
+                    scope.spawn(move || reserve_uid_range_in(dir, name, 0, FULL_PARENT, &[]))
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap().expect("a concurrent reservation failed"))
+                .collect()
+        });
+
+        for (i, x) in ranges.iter().enumerate() {
+            for y in &ranges[i + 1..] {
+                assert!(!overlaps(*x, *y), "{x:?} overlaps {y:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_release_frees_the_range() {
+        let (a, b) = colliding_names();
+        let tmp = datadir_with_containers("userns-release", &[&a, &b]);
+        let first = reserve_uid_range_in(tmp.path(), &a, 0, FULL_PARENT, &[]).unwrap();
+        release_uid_range(tmp.path(), &a).unwrap();
+        assert_eq!(stored_range(tmp.path(), &a), None);
+        let second = reserve_uid_range_in(tmp.path(), &b, 0, FULL_PARENT, &[]).unwrap();
+        assert_eq!(second, first, "released range was not reusable");
     }
 
     #[test]

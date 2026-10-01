@@ -17,6 +17,10 @@
 //!
 //! Within the same kind, acquire SHARED before EXCLUSIVE on different
 //! names.
+//!
+//! The `storage` and `userns` kinds are taken with
+//! [`lock_exclusive_blocking`], after `fs`, and nothing else is acquired
+//! while they are held.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
@@ -57,7 +61,8 @@ pub fn lock_exclusive(datadir: &Path, kind: &str, name: &str) -> Result<Resource
 /// failing immediately. Use it to serialize one-time materialization of a
 /// shared resource (e.g. the btrfs pool image or a base subvolume) so
 /// concurrent creators queue and then observe the finished resource instead of
-/// erroring. The kernel releases the lock if the holder is killed.
+/// erroring. The kernel releases the lock if the holder is killed. A SIGINT or
+/// SIGTERM while waiting returns the `interrupted` error.
 pub fn lock_exclusive_blocking(datadir: &Path, kind: &str, name: &str) -> Result<ResourceLock> {
     do_lock(datadir, kind, name, libc::LOCK_EX, true)
 }
@@ -87,9 +92,18 @@ fn do_lock(
     } else {
         operation | libc::LOCK_NB
     };
-    let ret = unsafe { libc::flock(file.as_raw_fd(), op) };
-    if ret != 0 {
+    loop {
+        if unsafe { libc::flock(file.as_raw_fd(), op) } == 0 {
+            break;
+        }
         let err = std::io::Error::last_os_error();
+        if err.kind() == std::io::ErrorKind::Interrupted {
+            // The interrupt handler runs without SA_RESTART, so a blocked
+            // flock returns EINTR on SIGINT/SIGTERM. Report that as an
+            // interrupt; any other signal just resumes the wait.
+            crate::check_interrupted()?;
+            continue;
+        }
         if err.kind() == std::io::ErrorKind::WouldBlock {
             // Read the PID from the lock file for diagnostics.
             let mut content = String::new();
@@ -180,6 +194,37 @@ mod tests {
         let _lock1 = lock_exclusive(tmp.path(), "fs", "test").unwrap();
         let _lock2 = lock_exclusive(tmp.path(), "containers", "test").unwrap();
         // Different kinds don't conflict.
+    }
+
+    #[test]
+    fn test_exclusive_blocking_waits_for_release() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let tmp = tmp();
+        let held = lock_exclusive(tmp.path(), "userns", "shift").unwrap();
+        let released = Arc::new(AtomicBool::new(false));
+
+        let waiter = {
+            let dir = tmp.path().to_path_buf();
+            let released = Arc::clone(&released);
+            std::thread::spawn(move || {
+                let _lock = lock_exclusive_blocking(&dir, "userns", "shift").unwrap();
+                released.load(Ordering::SeqCst)
+            })
+        };
+
+        // Long enough for the waiter to reach flock() and block there; a
+        // non-blocking waiter would have failed well within this window.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(!waiter.is_finished(), "waiter did not block on a held lock");
+        released.store(true, Ordering::SeqCst);
+        drop(held);
+
+        assert!(
+            waiter.join().unwrap(),
+            "waiter acquired the lock before the holder released it"
+        );
     }
 
     #[test]

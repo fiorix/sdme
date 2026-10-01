@@ -22,6 +22,7 @@ set -euo pipefail
 #  14. --userns boot: each distro boots with user namespace isolation, and a
 #      pre-installed setuid binary keeps its bit (pre-chown regression guard)
 #  15. --userns OCI app: unprivileged nginx (:8080) on ubuntu with userns
+#  16. concurrent --userns creates: all succeed and reserve disjoint UID ranges
 
 source "$(dirname "$0")/lib.sh"
 
@@ -786,6 +787,56 @@ else
         fi
     fi
 fi
+
+# ===========================================================================
+# Test 16: concurrent --userns creates
+# ===========================================================================
+# --userns-nested forces a UID range reservation on every host, including
+# those where plain --userns relies on idmapped mounts and reserves nothing.
+echo "=== Test 16: concurrent --userns creates reserve disjoint ranges ==="
+
+USERNS_PAR=6
+par_dir=$(mktemp -d)
+par_pids=()
+for i in $(seq 1 "$USERNS_PAR"); do
+    cleanup_container "usrns-par$i"
+    timeout "$TIMEOUT_BOOT" "$SDME" create --name "usrns-par$i" -r ubuntu \
+        --userns --userns-nested 1 "${VFLAG[@]}" >"$par_dir/$i.log" 2>&1 &
+    par_pids+=($!)
+done
+
+par_failed=0
+for i in $(seq 1 "$USERNS_PAR"); do
+    if ! wait "${par_pids[$((i - 1))]}"; then
+        par_failed=$((par_failed + 1))
+        echo "  usrns-par$i: $(tail -n 3 "$par_dir/$i.log" | tr '\n' ' ')"
+    fi
+done
+if [[ $par_failed -eq 0 ]]; then
+    ok "concurrent userns creates: all $USERNS_PAR succeeded"
+else
+    fail "concurrent userns creates: $par_failed of $USERNS_PAR failed"
+fi
+
+# Each line is "<start> <end>" of one reserved range; sorted by start, a range
+# overlaps its predecessor when it starts before the predecessor ends.
+par_ranges=$(for i in $(seq 1 "$USERNS_PAR"); do
+    awk -F= '$1 == "USERNS_SHIFT" {s = $2} $1 == "USERNS_RANGE" {r = $2}
+             END {if (s != "" && r != "") print s, s + r}' \
+        "$DATADIR/state/usrns-par$i" 2>/dev/null || true
+done | sort -n)
+par_count=$(grep -c . <<<"$par_ranges" || true)
+par_overlap=$(awk 'NR > 1 && $1 < prev_end {n++} {prev_end = $2} END {print n + 0}' <<<"$par_ranges")
+if [[ $par_count -eq $USERNS_PAR && $par_overlap -eq 0 ]]; then
+    ok "concurrent userns creates: $par_count disjoint ranges stored"
+else
+    fail "concurrent userns creates: $par_count ranges stored, $par_overlap overlapping: $(tr '\n' ';' <<<"$par_ranges")"
+fi
+
+for i in $(seq 1 "$USERNS_PAR"); do
+    cleanup_container "usrns-par$i"
+done
+rm -rf "$par_dir"
 
 # ===========================================================================
 # Summary
