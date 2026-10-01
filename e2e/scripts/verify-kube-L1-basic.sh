@@ -9,6 +9,8 @@ set -uo pipefail
 # 2. Two containers with shared emptyDir volume
 # 3. Command override with busybox
 # 4. Cleanup with sdme kube delete
+# 5. Leftover pod rootfs: create fails fast, kube delete reclaims it
+# 6. Failed container creation removes the rootfs it built
 
 source "$(dirname "$0")/lib.sh"
 
@@ -353,6 +355,142 @@ YAML
     "$SDME" kube delete "$pod_name" --force 2>/dev/null || true
 }
 
+# --- Test 6: a leftover pod rootfs fails fast and kube delete reclaims it ---
+test_orphan_rootfs() {
+    local pod_name="vfy-kube-orphan"
+    local rootfs_dir yaml_file output rc k
+    rootfs_dir=$(kube_fs_dir "kube-$pod_name")
+    yaml_file=$(mktemp /tmp/kube-test-XXXXXX.yaml)
+
+    cat > "$yaml_file" <<'YAML'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: vfy-kube-orphan
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+    command: ["/bin/sh", "-c", "sleep infinity"]
+YAML
+
+    echo "--- orphan: creating pod ---"
+    if ! "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" $KFLAG -v 2>&1; then
+        record "orphan/apply-fails-fast" FAIL "initial kube create failed"
+        for k in orphan/delete-reclaims orphan/delete-idempotent orphan/reapply; do
+            record "$k" SKIP "initial kube create failed"
+        done
+        rm -f "$yaml_file"
+        "$SDME" kube delete "$pod_name" --force 2>/dev/null || true
+        return
+    fi
+
+    # sdme rm removes the container and keeps its rootfs.
+    echo "--- orphan: removing the container with sdme rm ---"
+    "$SDME" rm -f "$pod_name" 2>&1
+    if [[ -f "$DATADIR/state/$pod_name" || ! -d "$rootfs_dir" ]]; then
+        echo "expected no state file and a leftover rootfs at $rootfs_dir"
+        record "orphan/apply-fails-fast" FAIL "sdme rm did not leave a leftover rootfs"
+        for k in orphan/delete-reclaims orphan/delete-idempotent orphan/reapply; do
+            record "$k" SKIP "no leftover rootfs"
+        done
+        rm -f "$yaml_file"
+        "$SDME" kube delete "$pod_name" --force 2>/dev/null || true
+        return
+    fi
+
+    # The create must stop before the base copy and before any pull.
+    echo "--- orphan: re-creating over the leftover rootfs ---"
+    output=$("$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" $KFLAG 2>&1)
+    rc=$?
+    echo "$output"
+    if [[ $rc -ne 0 ]] \
+        && grep -q "rootfs 'kube-$pod_name' already exists but no container claims it" <<<"$output" \
+        && grep -q "sdme kube delete $pod_name" <<<"$output" \
+        && ! grep -qE "pulling|copying base rootfs|extracting layer" <<<"$output" \
+        && [[ -d "$rootfs_dir" && ! -f "$DATADIR/state/$pod_name" ]]; then
+        record "orphan/apply-fails-fast" PASS
+    else
+        record "orphan/apply-fails-fast" FAIL "rc=$rc"
+    fi
+
+    echo "--- orphan: kube delete without a container ---"
+    output=$("$SDME" kube delete "$pod_name" 2>&1)
+    rc=$?
+    echo "$output"
+    if [[ $rc -eq 0 ]] \
+        && grep -q "removing orphaned rootfs: kube-$pod_name" <<<"$output" \
+        && [[ ! -e "$rootfs_dir" ]]; then
+        record "orphan/delete-reclaims" PASS
+    else
+        record "orphan/delete-reclaims" FAIL "rc=$rc"
+    fi
+
+    echo "--- orphan: kube delete with nothing left ---"
+    if output=$("$SDME" kube delete "$pod_name" 2>&1); then
+        record "orphan/delete-idempotent" PASS
+    else
+        echo "$output"
+        record "orphan/delete-idempotent" FAIL
+    fi
+
+    echo "--- orphan: re-creating after the cleanup ---"
+    if "$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" $KFLAG -v 2>&1 \
+        && [[ -f "$DATADIR/state/$pod_name" && -d "$rootfs_dir" ]]; then
+        record "orphan/reapply" PASS
+    else
+        record "orphan/reapply" FAIL
+    fi
+
+    rm -f "$yaml_file"
+    "$SDME" kube delete "$pod_name" --force 2>/dev/null || true
+}
+
+# --- Test 7: a failed container creation removes the rootfs it built ---
+test_failed_create_rollback() {
+    local test_name="rollback/failed-create"
+    local pod_name="vfy-kube-rb"
+    local machine_dir="/var/lib/machines/$pod_name"
+    local rootfs_dir yaml_file output rc
+    rootfs_dir=$(kube_fs_dir "kube-$pod_name")
+    yaml_file=$(mktemp /tmp/kube-test-XXXXXX.yaml)
+
+    cat > "$yaml_file" <<'YAML'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: vfy-kube-rb
+spec:
+  containers:
+  - name: app
+    image: docker.io/busybox:latest
+    command: ["/bin/sh", "-c", "sleep infinity"]
+YAML
+
+    # Container creation refuses a name that /var/lib/machines already holds.
+    # That check runs after the pod rootfs is committed, so it fails the create
+    # at the point where the rootfs exists and no container claims it yet.
+    mkdir -p "$machine_dir"
+
+    echo "--- $test_name: creating pod with a conflicting machine name ---"
+    output=$("$SDME" kube create -f "$yaml_file" --base-fs "$BASE_FS" $KFLAG 2>&1)
+    rc=$?
+    echo "$output"
+    rmdir "$machine_dir"
+    rm -f "$yaml_file"
+
+    if [[ $rc -ne 0 ]] \
+        && grep -q "conflicting machine found" <<<"$output" \
+        && [[ ! -e "$rootfs_dir" && ! -f "$DATADIR/state/$pod_name" ]]; then
+        record "$test_name" PASS
+    else
+        [[ -e "$rootfs_dir" ]] && echo "rootfs left behind at $rootfs_dir"
+        record "$test_name" FAIL "rc=$rc"
+    fi
+
+    "$SDME" kube delete "$pod_name" --force 2>/dev/null || true
+}
+
 # --- Main ---
 main() {
     parse_standard_args "End-to-end verification of sdme kube apply/create/delete." "$@"
@@ -374,6 +512,8 @@ main() {
     test_kube_delete
     test_shared_volume
     test_ps_kube_column
+    test_orphan_rootfs
+    test_failed_create_rollback
 
     generate_standard_report "verify-kube" "sdme Kube Basic Verification Report"
 

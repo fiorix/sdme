@@ -207,6 +207,8 @@ sudo sdme kube configmap rm db-config
 sudo sdme kube delete my-nginx
 ```
 
+Use `sdme kube delete` rather than `sdme rm` for kube pods. `sdme rm` removes only the container and leaves the generated rootfs behind, and `sdme kube apply` then refuses to rebuild the pod until that rootfs is gone. Running `sdme kube delete` with the pod name removes a leftover rootfs even when the container no longer exists.
+
 ## Setting a default base rootfs
 
 To avoid repeating `--base-fs` on every kube command:

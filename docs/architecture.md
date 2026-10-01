@@ -1299,6 +1299,16 @@ For usage examples and CLI reference, see `sdme kube --help`.
 5. **Create Container**: creates an sdme container using the combined rootfs (hostPath volumes become nspawn `--bind=` mounts; emptyDir volumes live inside the rootfs).
 6. **Start & Boot**: boots the container; the volume mount service runs first, then all app services start.
 
+### Rootfs lifecycle
+
+The combined rootfs is named `kube-{pod}`. On the overlay backend it is a directory under `{datadir}/fs`, built in a transaction staging directory and renamed into place. On the btrfs backend it is a subvolume `{pool}/fs/kube-{pod}`, snapshotted from the base under a temporary name and renamed into place.
+
+`kube apply` and `kube create` replace an existing pod of the same name: the container and its rootfs are removed, then rebuilt. Before any staging, copying, or pulling, the destination is checked on both backends. A `kube-{pod}` rootfs that exists with no pod behind it is an error that names the remedy, not something to delete: no state file attributes it to anyone. If another container references it (for example one created with `--fs kube-{pod}`), the error names that container instead.
+
+Such a rootfs is left behind when the pod's container is removed with `sdme rm`, which removes containers and never their rootfs, or when a create is killed between the rootfs rename and container creation. A container creation that fails cleanly does not leave one: the rootfs built for it is removed before the error is returned.
+
+`sdme kube delete {pod}` stops and removes the container, then the rootfs. With no container of that name it removes a leftover `kube-{pod}` rootfs from whichever backend holds it, and succeeds when nothing is left. It derives that name from the pod name alone, so it cannot reach an unrelated rootfs, and it refuses to remove a rootfs that any container still references. On btrfs this is the only command that reaches a leftover: `sdme fs rm` and `sdme prune` operate on `{datadir}/fs`.
+
 ### Supported Pod spec fields
 
 ```

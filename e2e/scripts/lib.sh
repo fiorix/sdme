@@ -616,6 +616,18 @@ cleanup_prefix() {
         cleanup_container "$name"
     done
 
+    # Remove kube rootfs left without a container. The loop above removes kube
+    # pods with `sdme rm`, which keeps their rootfs, and a btrfs kube rootfs is
+    # a pool subvolume that `sdme fs ls` does not list.
+    local dir
+    for dir in "${DATADIR:-/var/lib/sdme}/fs" "$(kube_storage_subroot)/fs"; do
+        [[ -d "$dir" ]] || continue
+        names=$(ls "$dir" 2>/dev/null | grep "^kube-${prefix}" || true)
+        for name in $names; do
+            $SDME kube delete "${name#kube-}" 2>/dev/null || true
+        done
+    done
+
     # Remove rootfs (including kube- prefixed rootfs for kube containers).
     names=$($SDME fs ls 2>/dev/null | awk 'NR>1 {print $1}' | grep -E "^(${prefix}|kube-${prefix})" || true)
     for name in $names; do

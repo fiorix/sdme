@@ -941,6 +941,16 @@ WORKFLOW:
     # Clean up
     sdme kube delete <podname>
 
+CLEANUP:
+    'sdme kube delete' stops the pod and removes its container and the rootfs
+    built for it (kube-<podname>). 'sdme rm' removes only the container and
+    leaves that rootfs behind; 'kube apply' and 'kube create' then refuse to
+    rebuild the pod, before copying or pulling anything. Run 'sdme kube delete
+    <podname>' to remove the leftover rootfs: it works without a container and
+    succeeds when nothing is left to remove.
+
+    Applying a pod that already exists replaces it.
+
 MINIMAL POD YAML:
     apiVersion: v1
     kind: Pod

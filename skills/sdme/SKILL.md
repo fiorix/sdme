@@ -147,6 +147,8 @@ Use `sdme kube apply` to run Kubernetes Pod YAML, and `sdme pod` to manage pod l
 
 `sdme kube apply` and `sdme kube create` accept `--storage overlay|btrfs` and `--disk` with the same semantics as `sdme new`. On btrfs, the combined pod rootfs is built as a copy-on-write subvolume snapshot of `--base-fs`, so multi-container pods get the same fast CoW behavior and optional disk caps as regular btrfs containers.
 
+Tear a kube pod down with `sdme kube delete NAME`, which removes the container and the `kube-NAME` rootfs built for it. `sdme rm NAME` removes only the container; the next `kube apply` then fails immediately with `rootfs 'kube-NAME' already exists but no container claims it`. `sdme kube delete NAME` clears that leftover too (it works without a container and is a no-op when nothing remains). Re-applying a pod that still exists replaces it.
+
 For Kubernetes-specific failures, check Pod YAML parsing, probe readiness (`probe-ready` files under `/oci/apps/{name}/`), and `sdme kube secret`/`sdme kube configmap` data used for env references and projected volumes.
 
 ## Repository Work

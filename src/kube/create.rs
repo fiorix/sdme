@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
@@ -78,6 +78,11 @@ pub struct KubeCreateOptions<'a> {
 /// The combined rootfs is either a plain directory (overlay backend) or a btrfs
 /// subvolume snapshot (btrfs backend), depending on `opts.backend`.
 /// Returns the container name on success.
+///
+/// An existing kube pod of the same name is replaced. A `kube-{pod}` rootfs
+/// that exists without one is an error, raised before anything is copied or
+/// pulled. If the container cannot be created, the rootfs built for it is
+/// removed again.
 pub fn kube_create(datadir: &Path, opts: &KubeCreateOptions<'_>) -> Result<String> {
     validate_name(opts.base_fs)?;
     let base_dir = datadir.join("fs").join(opts.base_fs);
@@ -123,6 +128,7 @@ pub fn kube_create(datadir: &Path, opts: &KubeCreateOptions<'_>) -> Result<Strin
     let mut txn: Option<crate::txn::Txn> = None;
     let (staging_dir, rootfs_path, btrfs_staging) = match opts.backend {
         crate::storage::Backend::Overlay => {
+            check_kube_rootfs_unclaimed(datadir, &plan.pod_name, &rootfs_name)?;
             let t = crate::txn::Txn::new(
                 &rootfs_dir,
                 &rootfs_name,
@@ -138,6 +144,9 @@ pub fn kube_create(datadir: &Path, opts: &KubeCreateOptions<'_>) -> Result<Strin
         crate::storage::Backend::Btrfs => {
             let pool_root =
                 crate::storage::pool::ensure_ready(datadir, &opts.pool_size, opts.verbose)?;
+            // Checked once the pool is mounted, so an offline pool cannot hide
+            // a leftover subvolume, and before the base is materialized.
+            check_kube_rootfs_unclaimed(datadir, &plan.pod_name, &rootfs_name)?;
             crate::storage::btrfs::ensure_base(
                 datadir,
                 &pool_root,
@@ -152,10 +161,6 @@ pub fn kube_create(datadir: &Path, opts: &KubeCreateOptions<'_>) -> Result<Strin
             let final_subvol = fs_dir.join(&rootfs_name);
             if tmp.exists() {
                 let _ = crate::storage::btrfs::delete_subvol(&tmp, opts.verbose);
-            }
-            if final_subvol.exists() {
-                // A leftover from a crashed previous create; reclaim it.
-                let _ = crate::storage::btrfs::delete_subvol(&final_subvol, opts.verbose);
             }
             crate::storage::btrfs::snapshot(&fs_dir.join(opts.base_fs), &tmp, false, opts.verbose)
                 .with_context(|| format!("failed to snapshot base rootfs for {rootfs_name}"))?;
@@ -553,7 +558,24 @@ WantedBy=multi-user.target
         masked_services: opts.masked_services.clone(),
         ..Default::default()
     };
-    let name = crate::containers::create(datadir, &create_opts, opts.verbose)?;
+    let name = match crate::containers::create(datadir, &create_opts, opts.verbose) {
+        Ok(name) => name,
+        Err(e) => {
+            // The rootfs was built for this pod alone and no container will
+            // claim it now. Left behind, it would stop the next apply at the
+            // destination check.
+            let _interrupt = crate::InterruptGuard::save_and_reset();
+            if let Err(rollback) =
+                discard_kube_rootfs(datadir, &rootfs_name, opts.backend, opts.verbose)
+            {
+                eprintln!(
+                    "warning: failed to remove rootfs '{rootfs_name}' after failed create: \
+                     {rollback:#}"
+                );
+            }
+            return Err(e);
+        }
+    };
 
     // Write kube-specific state fields.
     let state_path = datadir.join("state").join(&name);
@@ -569,13 +591,115 @@ WantedBy=multi-user.target
     Ok(name)
 }
 
+/// On-disk locations a kube rootfs can occupy: the overlay directory under
+/// `{datadir}/fs` and the btrfs subvolume under the pool. Pure path
+/// derivation; the pool is not mounted.
+fn kube_rootfs_paths(datadir: &Path, rootfs_name: &str) -> Result<(PathBuf, PathBuf)> {
+    let pool_root = crate::storage::pool::root(datadir)?;
+    Ok((
+        datadir.join("fs").join(rootfs_name),
+        pool_root
+            .join(crate::storage::btrfs::FS_SUBDIR)
+            .join(rootfs_name),
+    ))
+}
+
+/// Bail if a rootfs named `rootfs_name` is already on disk.
+///
+/// `kube_create` calls this after replacing any existing pod of the same name,
+/// so a rootfs still present has no kube pod behind it. Removing it here would
+/// destroy data that no state file attributes to anyone; the error names the
+/// command that removes it instead. Both backend locations are checked
+/// whatever backend the new pod uses, because a leftover on the other backend
+/// would otherwise sit behind the new pod, claimed by name but never removed.
+fn check_kube_rootfs_unclaimed(datadir: &Path, pod_name: &str, rootfs_name: &str) -> Result<()> {
+    let (overlay_dir, subvol) = kube_rootfs_paths(datadir, rootfs_name)?;
+    if fs::symlink_metadata(&overlay_dir).is_err() && fs::symlink_metadata(&subvol).is_err() {
+        return Ok(());
+    }
+    crate::rootfs::check_rootfs_in_use(datadir, rootfs_name)?;
+    bail!(
+        "rootfs '{rootfs_name}' already exists but no container claims it; \
+         remove it with 'sdme kube delete {pod_name}'"
+    );
+}
+
+/// Remove a kube rootfs. No-op if it is not on disk.
+///
+/// `backend` selects the location to act on; `None` means the backend is
+/// unknown (no state file) and both are tried. The caller must hold the
+/// exclusive fs lock on `rootfs_name`. Refuses while any container state
+/// references the rootfs: for overlay containers it is the lower layer.
+fn remove_kube_rootfs(
+    datadir: &Path,
+    rootfs_name: &str,
+    backend: Option<crate::storage::Backend>,
+    what: &str,
+    verbose: bool,
+) -> Result<()> {
+    use crate::storage::Backend;
+
+    crate::rootfs::check_rootfs_in_use(datadir, rootfs_name)?;
+
+    if backend != Some(Backend::Btrfs) {
+        let rootfs_path = datadir.join("fs").join(rootfs_name);
+        if fs::symlink_metadata(&rootfs_path).is_ok() {
+            eprintln!("removing {what}: {rootfs_name}");
+            let _ = make_removable(&rootfs_path);
+            fs::remove_dir_all(&rootfs_path)
+                .with_context(|| format!("failed to remove {}", rootfs_path.display()))?;
+        }
+    }
+
+    // A pool that was never created cannot hold a subvolume, and
+    // ensure_mounted() errors on one, so skip it rather than fail.
+    if backend != Some(Backend::Overlay) && crate::storage::pool::exists(datadir)? {
+        let pool_root = crate::storage::pool::ensure_mounted(datadir, verbose)?;
+        let subvol = pool_root
+            .join(crate::storage::btrfs::FS_SUBDIR)
+            .join(rootfs_name);
+        if crate::storage::btrfs::subvolume_exists(&subvol) {
+            eprintln!("removing {what}: {rootfs_name}");
+            crate::storage::btrfs::delete_subvol(&subvol, verbose)
+                .with_context(|| format!("failed to remove {}", subvol.display()))?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Remove the rootfs `kube_create` just committed, after the container that
+/// was meant to claim it could not be created.
+fn discard_kube_rootfs(
+    datadir: &Path,
+    rootfs_name: &str,
+    backend: crate::storage::Backend,
+    verbose: bool,
+) -> Result<()> {
+    let _rootfs_lock = crate::lock::lock_exclusive(datadir, "fs", rootfs_name)
+        .with_context(|| format!("cannot lock rootfs '{rootfs_name}' for removal"))?;
+    remove_kube_rootfs(datadir, rootfs_name, Some(backend), "rootfs", verbose)
+}
+
 /// Delete a kube pod: stop container, remove container, remove rootfs.
+///
+/// When no container named `name` exists, removes a leftover `kube-{name}`
+/// rootfs instead (one whose container was removed with `sdme rm`, or whose
+/// create was killed before the container existed). Succeeds when there is
+/// nothing to remove. The rootfs is kept, and an error returned, while any
+/// other container references it.
 pub fn kube_delete(datadir: &Path, name: &str, force: bool, verbose: bool) -> Result<()> {
     validate_name(name)?;
 
     let state_path = datadir.join("state").join(name);
     if !state_path.exists() {
-        bail!("container not found: {name}");
+        // With no state file the rootfs name comes from the kube naming
+        // convention alone, which keeps this path from reaching any rootfs
+        // that kube_create could not have built for this pod.
+        let rootfs_name = format!("kube-{name}");
+        let _rootfs_lock = crate::lock::lock_exclusive(datadir, "fs", &rootfs_name)
+            .with_context(|| format!("cannot lock rootfs '{rootfs_name}' for kube delete"))?;
+        return remove_kube_rootfs(datadir, &rootfs_name, None, "orphaned rootfs", verbose);
     }
 
     let state = State::read_from(&state_path)?;
@@ -603,26 +727,7 @@ pub fn kube_delete(datadir: &Path, name: &str, force: bool, verbose: bool) -> Re
     // overlay it is a plain directory under {datadir}/fs.
     if !rootfs_name.is_empty() {
         let backend = crate::storage::Backend::from_state(&state);
-        if backend == crate::storage::Backend::Btrfs {
-            if let Ok(pool_root) = crate::storage::pool::ensure_mounted(datadir, verbose) {
-                let subvol = pool_root
-                    .join(crate::storage::btrfs::FS_SUBDIR)
-                    .join(&rootfs_name);
-                if crate::storage::btrfs::is_subvolume(&subvol) {
-                    eprintln!("removing rootfs: {rootfs_name}");
-                    crate::storage::btrfs::delete_subvol(&subvol, verbose)
-                        .with_context(|| format!("failed to remove {}", subvol.display()))?;
-                }
-            }
-        } else {
-            let rootfs_path = datadir.join("fs").join(&rootfs_name);
-            if rootfs_path.exists() {
-                eprintln!("removing rootfs: {rootfs_name}");
-                let _ = make_removable(&rootfs_path);
-                fs::remove_dir_all(&rootfs_path)
-                    .with_context(|| format!("failed to remove {}", rootfs_path.display()))?;
-            }
-        }
+        remove_kube_rootfs(datadir, &rootfs_name, Some(backend), "rootfs", verbose)?;
     }
 
     Ok(())
@@ -959,4 +1064,110 @@ fn set_file_mode(path: &Path, mode: u32) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(mode))
         .with_context(|| format!("failed to set permissions on {}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testutil::TempDataDir;
+
+    const POD: &str = "web";
+    const ROOTFS: &str = "kube-web";
+
+    fn tmp() -> TempDataDir {
+        TempDataDir::new("kube-create")
+    }
+
+    /// Stand in for a built pod rootfs: a directory with content, so removal
+    /// has a tree to walk.
+    fn make_rootfs(dir: &Path) {
+        fs::create_dir_all(dir.join("oci/apps")).unwrap();
+        fs::write(dir.join("oci/apps/marker"), "x").unwrap();
+    }
+
+    /// Write a container state file that references `rootfs`.
+    fn claim(datadir: &Path, container: &str, rootfs: &str) {
+        let state_dir = datadir.join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+        let mut state = State::new();
+        state.set("NAME", container);
+        state.set("ROOTFS", rootfs);
+        state.write_to(&state_dir.join(container)).unwrap();
+    }
+
+    #[test]
+    fn test_unclaimed_check_passes_without_rootfs() {
+        let tmp = tmp();
+        check_kube_rootfs_unclaimed(tmp.path(), POD, ROOTFS).unwrap();
+    }
+
+    #[test]
+    fn test_unclaimed_check_rejects_overlay_orphan() {
+        let tmp = tmp();
+        make_rootfs(&tmp.path().join("fs").join(ROOTFS));
+
+        let err = check_kube_rootfs_unclaimed(tmp.path(), POD, ROOTFS).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("rootfs 'kube-web' already exists"), "{msg}");
+        assert!(msg.contains("'sdme kube delete web'"), "{msg}");
+    }
+
+    #[test]
+    fn test_unclaimed_check_rejects_pool_orphan() {
+        let tmp = tmp();
+        let (overlay_dir, subvol) = kube_rootfs_paths(tmp.path(), ROOTFS).unwrap();
+        make_rootfs(&subvol);
+        assert!(!overlay_dir.exists());
+
+        let err = check_kube_rootfs_unclaimed(tmp.path(), POD, ROOTFS).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("'sdme kube delete web'"), "{msg}");
+    }
+
+    #[test]
+    fn test_unclaimed_check_names_claiming_container() {
+        let tmp = tmp();
+        make_rootfs(&tmp.path().join("fs").join(ROOTFS));
+        claim(tmp.path(), "other", ROOTFS);
+
+        let err = check_kube_rootfs_unclaimed(tmp.path(), POD, ROOTFS).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("in use by container 'other'"), "{msg}");
+        assert!(!msg.contains("kube delete"), "{msg}");
+    }
+
+    #[test]
+    fn test_kube_delete_removes_orphaned_rootfs() {
+        let tmp = tmp();
+        let rootfs = tmp.path().join("fs").join(ROOTFS);
+        make_rootfs(&rootfs);
+        // A rootfs outside the kube naming convention must be left alone.
+        let unrelated = tmp.path().join("fs").join(POD);
+        make_rootfs(&unrelated);
+
+        kube_delete(tmp.path(), POD, false, false).unwrap();
+
+        assert!(!rootfs.exists());
+        assert!(unrelated.is_dir());
+        check_kube_rootfs_unclaimed(tmp.path(), POD, ROOTFS).unwrap();
+    }
+
+    #[test]
+    fn test_kube_delete_without_pod_or_rootfs_succeeds() {
+        let tmp = tmp();
+        kube_delete(tmp.path(), POD, false, false).unwrap();
+    }
+
+    #[test]
+    fn test_kube_delete_keeps_rootfs_in_use() {
+        let tmp = tmp();
+        let rootfs = tmp.path().join("fs").join(ROOTFS);
+        make_rootfs(&rootfs);
+        claim(tmp.path(), "other", ROOTFS);
+
+        let err = kube_delete(tmp.path(), POD, false, false).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("in use by container 'other'"), "{msg}");
+        assert!(rootfs.join("oci/apps/marker").is_file());
+    }
 }
