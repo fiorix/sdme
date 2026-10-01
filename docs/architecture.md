@@ -1485,11 +1485,7 @@ Kube pods are tracked with additional state fields:
 - `KUBE_YAML_HASH={sha256}`: hash of the source YAML (for future update detection)
 - `HAS_PROBES=yes`: set when the pod has any probe definitions
 
-`sdme ps` shows kube pods with a KUBE column, e.g.: `kube:nginx,redis`
-
-### Limitations
-
-- No idempotent re-apply: `kube apply` on an existing pod fails; delete first, then re-apply
+`sdme ps --json` reports a kube pod with a `kube` object (`yaml_hash`, `has_probes`), which is `null` for other containers, and lists the pod's containers under `oci_apps`. The text table has no kube column.
 
 ## 18. Container Diff
 
