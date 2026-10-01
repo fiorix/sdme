@@ -19,7 +19,9 @@ set -euo pipefail
 #      the option, destroy succeeds and nested `sdme prune` empties the trash.
 #      The second half is skipped when the datadir has no dedicated mount,
 #      since the option can then only be set on the root filesystem and btrfs
-#      offers no way to clear it short of a reboot.
+#      offers no way to clear it short of a reboot. The first half is skipped
+#      when the datadir's mount unit sets the option itself, since a restart
+#      of that unit brings it straight back.
 #   6. Nested kube create fails fast with the same mknod preflight.
 #   7. After cleanup, zero stale subvolumes remain (verified from the host).
 #
@@ -93,6 +95,15 @@ datadir_is_own_mount() {
     mountpoint -q "$DATADIR"
 }
 
+# Whether the mount unit managing the datadir sets user_subvol_rm_allowed in
+# its own Options=. Such a host wants the option on, and restarting the unit
+# restores it, so it can only be cleared by rewriting host configuration.
+rm_allowed_pinned_by_unit() {
+    datadir_is_own_mount || return 1
+    systemctl cat "$(mount_unit)" 2>/dev/null \
+        | sed -n 's/^Options=//p' | tr ',' '\n' | grep -qx user_subvol_rm_allowed
+}
+
 # btrfs mount options are sticky across remounts: an omitted option is kept,
 # so clearing user_subvol_rm_allowed needs a fresh mount. Prefer restarting
 # the systemd mount unit when one manages the datadir; fall back to a manual
@@ -101,11 +112,15 @@ datadir_is_own_mount() {
 set_rm_allowed() {
     # $1 = on|off
     if [[ "$1" == "on" ]]; then
+        mount_has_rm_allowed && return 0
         mount -o remount,rw,user_subvol_rm_allowed "$DATADIR"
         return
     fi
     if ! mount_has_rm_allowed; then
         return 0
+    fi
+    if rm_allowed_pinned_by_unit; then
+        return 1
     fi
     if ! datadir_is_own_mount; then
         # The option is set on the filesystem carrying the datadir, not on a
@@ -137,11 +152,15 @@ set_rm_allowed() {
 # container's DHCPDISCOVER as it arrives on the bridge. The container then
 # settles on a link-local 169.254.x address with no route and no nameserver,
 # and the nested registry pull fails with a name resolution error that looks
-# like a DNS misconfiguration. allow_bridge_traffic opens the bridge for the
-# duration of the run; teardown removes any rule this script added.
+# like a DNS misconfiguration. The same failure appears with a lease in hand
+# when the firewall's forward policy is DROP: the container's DNS and registry
+# traffic is routed through the host, so it needs a route rule as well.
+# allow_bridge_traffic opens the bridge both ways for the duration of the run;
+# teardown removes any rule this script added.
 BRIDGE="vz-devsrv-plat"
 FALLBACK_BRIDGE="vznested"
 FIREWALL_RULE_ADDED=0
+FIREWALL_ROUTE_RULE_ADDED=0
 
 ufw_active() {
     command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'
@@ -157,12 +176,20 @@ allow_bridge_traffic() {
     if ufw allow in on "$BRIDGE" comment "sdme ${PREFIX} test bridge" >/dev/null 2>&1; then
         FIREWALL_RULE_ADDED=1
     fi
+    if ufw route allow in on "$BRIDGE" comment "sdme ${PREFIX} test bridge" >/dev/null 2>&1; then
+        FIREWALL_ROUTE_RULE_ADDED=1
+    fi
 }
 
 revoke_bridge_traffic() {
-    [[ "$FIREWALL_RULE_ADDED" == "1" ]] || return 0
-    ufw delete allow in on "$BRIDGE" >/dev/null 2>&1 || true
-    FIREWALL_RULE_ADDED=0
+    if [[ "$FIREWALL_RULE_ADDED" == "1" ]]; then
+        ufw delete allow in on "$BRIDGE" >/dev/null 2>&1 || true
+        FIREWALL_RULE_ADDED=0
+    fi
+    if [[ "$FIREWALL_ROUTE_RULE_ADDED" == "1" ]]; then
+        ufw route delete allow in on "$BRIDGE" >/dev/null 2>&1 || true
+        FIREWALL_ROUTE_RULE_ADDED=0
+    fi
 }
 
 setup_network() {
@@ -233,7 +260,11 @@ fi
 # Phase A of the deletion test needs user_subvol_rm_allowed OFF. The option is
 # sticky across remounts, so clear it now (fresh mount via set_rm_allowed),
 # before this script has created any containers that would keep the mount busy.
-if ! set_rm_allowed off || mount_has_rm_allowed; then
+RM_ALLOWED_PINNED=0
+if rm_allowed_pinned_by_unit; then
+    RM_ALLOWED_PINNED=1
+    echo "note: $(mount_unit) sets user_subvol_rm_allowed; the denied-destroy checks are skipped"
+elif ! set_rm_allowed off || mount_has_rm_allowed; then
     echo "error: could not clear user_subvol_rm_allowed on $DATADIR (mount busy?)" >&2
     exit 1
 fi
@@ -433,24 +464,29 @@ inject_legacy() {
 }
 
 # Phase A: without the mount option, destroy EPERMs and parks in .trash.
-set_rm_allowed off
-if mount_has_rm_allowed; then
-    fail "test setup: could not clear user_subvol_rm_allowed"
-fi
+if [[ $RM_ALLOWED_PINNED -eq 1 ]]; then
+    skipped "rm without the option warns about user_subvol_rm_allowed (the mount unit sets the option)"
+    skipped "denied destroy parked the subvolume in .trash (same reason)"
+else
+    set_rm_allowed off
+    if mount_has_rm_allowed; then
+        fail "test setup: could not clear user_subvol_rm_allowed"
+    fi
 
-inject_legacy "$LEGACY_A"
-rc=0
-output=$(nsdme rm "$LEGACY_A" 2>&1) || rc=$?
-if [[ $rc -eq 0 ]] && echo "$output" | grep -q "user_subvol_rm_allowed"; then
-    ok "rm without the option warns about user_subvol_rm_allowed"
-else
-    fail "expected user_subvol_rm_allowed warning (rc=$rc): $(echo "$output" | tail -3)"
-fi
-if [[ ! -e "$(nested_datadir)/btrfs/containers/$LEGACY_A" ]] && \
-   sudo btrfs subvolume list "$DATADIR" | grep -qF ".trash/${LEGACY_A}."; then
-    ok "denied destroy parked the subvolume in .trash"
-else
-    fail "subvolume was not parked in .trash as expected"
+    inject_legacy "$LEGACY_A"
+    rc=0
+    output=$(nsdme rm "$LEGACY_A" 2>&1) || rc=$?
+    if [[ $rc -eq 0 ]] && echo "$output" | grep -q "user_subvol_rm_allowed"; then
+        ok "rm without the option warns about user_subvol_rm_allowed"
+    else
+        fail "expected user_subvol_rm_allowed warning (rc=$rc): $(echo "$output" | tail -3)"
+    fi
+    if [[ ! -e "$(nested_datadir)/btrfs/containers/$LEGACY_A" ]] && \
+       sudo btrfs subvolume list "$DATADIR" | grep -qF ".trash/${LEGACY_A}."; then
+        ok "denied destroy parked the subvolume in .trash"
+    else
+        fail "subvolume was not parked in .trash as expected"
+    fi
 fi
 
 # Phase B: with the option, destroy succeeds directly, and the nested prune
@@ -476,12 +512,16 @@ if datadir_is_own_mount; then
     # Nested prune destroys the phase A trash entry. The base rootfs is
     # excluded: with no containers yet it is an "unused filesystem" prune
     # candidate too.
-    rc=0
-    output=$(nsdme prune --force --except="$NESTED_FS" 2>&1) || rc=$?
-    if ! sudo btrfs subvolume list "$DATADIR" | grep -qF ".trash/${LEGACY_A}."; then
-        ok "nested sdme prune destroyed the parked trash entry"
+    if [[ $RM_ALLOWED_PINNED -eq 1 ]]; then
+        skipped "nested sdme prune destroyed the parked trash entry (phase A did not park one)"
     else
-        fail "trash entry survived nested prune (rc=$rc): $(echo "$output" | tail -3)"
+        rc=0
+        output=$(nsdme prune --force --except="$NESTED_FS" 2>&1) || rc=$?
+        if ! sudo btrfs subvolume list "$DATADIR" | grep -qF ".trash/${LEGACY_A}."; then
+            ok "nested sdme prune destroyed the parked trash entry"
+        else
+            fail "trash entry survived nested prune (rc=$rc): $(echo "$output" | tail -3)"
+        fi
     fi
 else
     skipped "destroy with user_subvol_rm_allowed ($DATADIR has no dedicated mount to toggle)"

@@ -139,7 +139,9 @@ if $SDME create --name "$CAP" -r "$BASEFS" --storage btrfs --disk 250M $VFLAG 2>
     if grep -q '^DISK=250M' "${DATADIR}/state/${CAP}"; then ok "state records DISK cap"; else fail "state missing DISK cap"; fi
     if timeout "$BOOT_TIMEOUT" $SDME start "$CAP" $VFLAG; then
         sleep 2
-        out=$($SDME exec "$CAP" -- sh -c 'dd if=/dev/zero of=/var/blob bs=1M count=500 2>&1; echo EXIT:$?' 2>/dev/null || true)
+        # Random data, not zeros: the quota counts on-disk bytes, and a datadir
+        # mounted with compress= stores 500M of zeros in far less than the cap.
+        out=$($SDME exec "$CAP" -- sh -c 'dd if=/dev/urandom of=/var/blob bs=1M count=500 2>&1; echo EXIT:$?' 2>/dev/null || true)
         if echo "$out" | grep -qiE "no space left|quota exceeded"; then
             ok "write hit the disk cap (ENOSPC/quota)"
         else

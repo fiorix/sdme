@@ -404,6 +404,7 @@ ensure_python3_in_rootfs() {
     local name="$1" root="/var/lib/sdme/fs/$1"
 
     if [[ -x "$root/usr/bin/python3" ]]; then
+        drop_btrfs_base_without_python3 "$name"
         return 0
     fi
     if [[ ! -x "$root/usr/bin/apt-get" ]]; then
@@ -438,6 +439,20 @@ ensure_python3_in_rootfs() {
     if [[ $ok -ne 1 ]]; then
         echo "error: failed to install python3 in rootfs '$name'" >&2
         return 1
+    fi
+    drop_btrfs_base_without_python3 "$name"
+}
+
+# Delete the btrfs base subvolume of rootfs `name` if it was materialized
+# before python3 was installed. sdme refreshes a base on fs rm and import -f,
+# not on a direct edit of the rootfs tree, so btrfs containers would keep
+# snapshotting a base without python3. The next btrfs create rebuilds it.
+drop_btrfs_base_without_python3() {
+    local base
+    base="$(kube_storage_subroot)/fs/$1"
+    if [[ -d "$base" && ! -x "$base/usr/bin/python3" ]]; then
+        echo "==> Dropping stale btrfs base for rootfs '$1'"
+        btrfs subvolume delete "$base" >/dev/null 2>&1 || true
     fi
 }
 

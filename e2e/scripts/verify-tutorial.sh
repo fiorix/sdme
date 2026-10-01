@@ -1242,12 +1242,21 @@ test_docker_in_container() {
     local dt="$TIMEOUT_IMPORT"
 
     # br_netfilter is used by Docker's bridge networking; the container cannot
-    # load kernel modules itself.
-    modprobe br_netfilter 2>/dev/null || true
+    # load kernel modules itself. It is unloaded again if this test loaded it:
+    # while present, bridged container traffic traverses the host's FORWARD
+    # chain, and a host firewall with a DROP forward policy (ufw) then breaks
+    # zone and bridge networking for every suite that runs afterwards.
+    local loaded_br_netfilter=0
+    if [[ ! -d /sys/module/br_netfilter ]] && modprobe br_netfilter 2>/dev/null; then
+        loaded_br_netfilter=1
+    fi
 
     _docker_teardown() {
         stop_container "$ct" 2>/dev/null || true
         $SDME rm -f "$ct" 2>/dev/null || true
+        if [[ $loaded_br_netfilter -eq 1 ]]; then
+            modprobe -r br_netfilter 2>/dev/null || true
+        fi
     }
 
     # sdme create --storage btrfs --network-veth --capability CAP_NET_ADMIN
