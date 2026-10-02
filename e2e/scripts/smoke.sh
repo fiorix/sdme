@@ -175,6 +175,31 @@ else
     fail "stop: $output"
 fi
 
+# -- Start that fails before the machine registers -----------------------------
+
+# With the overlay work directory gone the unit fails in its mount step, before
+# nspawn registers a machine. The start has to report that at once instead of
+# waiting out the boot timeout.
+work_dir="/var/lib/sdme/containers/$CT_NAME/work"
+if [[ -d "$work_dir" ]]; then
+    log "Starting with the overlay work directory missing"
+    mv "$work_dir" "$work_dir.away"
+    started=$(date +%s)
+    rc=0
+    output=$(timeout "$TIMEOUT_BOOT" "$SDME" start "$CT_NAME" -t "$TIMEOUT_BOOT" 2>&1) || rc=$?
+    elapsed=$(( $(date +%s) - started ))
+    mv "$work_dir.away" "$work_dir"
+    systemctl reset-failed "sdme@${CT_NAME}.service" 2>/dev/null
+    if [[ $rc -ne 0 && $elapsed -lt 30 ]] \
+        && grep -q "exited before it registered" <<<"$output"; then
+        ok "early start failure reported in ${elapsed}s"
+    else
+        fail "early start failure: rc=$rc after ${elapsed}s: $(tail -n 3 <<<"$output")"
+    fi
+else
+    skipped "early start failure (container is not on overlay)"
+fi
+
 # -- Remove --------------------------------------------------------------------
 
 log "Removing container"

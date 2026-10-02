@@ -358,6 +358,12 @@ pub(super) fn wait_for_boot(name: &str, timeout: std::time::Duration, verbose: b
                     if check_boot_state(name, &state)? {
                         return Ok(());
                     }
+                } else if unit_gave_up(&conn, &super::units::service_name(name)) {
+                    // nspawn can fail before it registers a machine (a bad
+                    // argument, a mount point it refuses). machined then
+                    // never sends a signal for it, and without this check the
+                    // wait would run to the boot timeout.
+                    bail!("container '{name}' exited before it registered with machined");
                 }
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
@@ -370,6 +376,52 @@ pub(super) fn wait_for_boot(name: &str, timeout: std::time::Duration, verbose: b
 enum BootEvent {
     MachineNew,
     MachineRemoved,
+}
+
+/// Whether a unit that was asked to start is no longer going to: it is not
+/// running or starting, and no job is queued for it. Any query error counts
+/// as "still trying", so the caller keeps waiting.
+fn unit_gave_up(conn: &Connection, unit: &str) -> bool {
+    let Ok(state) = get_unit_active_state(conn, unit) else {
+        return false;
+    };
+    let Ok(job_pending) = unit_job_pending(conn, unit) else {
+        return false;
+    };
+    start_gave_up(state.as_deref(), job_pending)
+}
+
+/// The decision behind [`unit_gave_up`]: `state` is the unit's ActiveState
+/// (`None` if the unit is not loaded).
+fn start_gave_up(state: Option<&str>, job_pending: bool) -> bool {
+    !job_pending && matches!(state, None | Some("failed") | Some("inactive"))
+}
+
+/// Whether systemd has a job queued or running for the unit. A start job that
+/// is still waiting for a dependency (a mount, for instance) leaves the unit
+/// inactive without having failed.
+fn unit_job_pending(conn: &Connection, unit: &str) -> Result<bool> {
+    let manager = systemd_manager(conn)?;
+    let reply = match manager.call_method("GetUnit", &(unit,)) {
+        Ok(r) => r,
+        Err(e) if error_name_is(&e, NO_SUCH_UNIT_ERROR) => return Ok(false),
+        Err(e) => return Err(e).with_context(|| format!("failed to query unit {unit}")),
+    };
+    let unit_path: zbus::zvariant::OwnedObjectPath = reply
+        .body()
+        .deserialize()
+        .with_context(|| format!("failed to decode GetUnit reply for {unit}"))?;
+    let unit_proxy = Proxy::new(
+        conn,
+        "org.freedesktop.systemd1",
+        unit_path,
+        "org.freedesktop.systemd1.Unit",
+    )
+    .with_context(|| format!("failed to create unit proxy for {unit}"))?;
+    let (job_id, _): (u32, zbus::zvariant::OwnedObjectPath) = unit_proxy
+        .get_property("Job")
+        .with_context(|| format!("failed to read Job of unit {unit}"))?;
+    Ok(job_id != 0)
 }
 
 /// Get the leader PID of a registered machine via org.freedesktop.machine1.
@@ -870,6 +922,20 @@ fn wait_until_unit_inactive(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_start_gave_up() {
+        // Still coming up, or up: keep waiting for the machine to register.
+        assert!(!start_gave_up(Some("activating"), false));
+        assert!(!start_gave_up(Some("active"), false));
+        // The start job has not run yet (it may be waiting for a mount).
+        assert!(!start_gave_up(Some("inactive"), true));
+        assert!(!start_gave_up(Some("failed"), true));
+        // No job left and the unit is down: nspawn exited before registering.
+        assert!(start_gave_up(Some("failed"), false));
+        assert!(start_gave_up(Some("inactive"), false));
+        assert!(start_gave_up(None, false));
+    }
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
