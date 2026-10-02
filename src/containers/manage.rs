@@ -1,7 +1,7 @@
 //! Container stop, removal, and resource limit management.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
@@ -189,9 +189,14 @@ fn remove_with_ops(
 const NSPAWN_RUNTIME_DIR: &str = "/run/systemd/nspawn";
 
 /// Entries under `NSPAWN_RUNTIME_DIR` that belong to systemd-nspawn itself
-/// rather than to one container. Both pass `validate_name`, so they are
+/// rather than to one container. They pass `validate_name`, so they are
 /// rejected by name to keep shared state out of reach.
-const NSPAWN_SHARED_ENTRIES: &[&str] = &["locks", "propagate"];
+const NSPAWN_SHARED_ENTRIES: &[&str] = &["locks", "propagate", NSPAWN_UNIX_EXPORT_DIR];
+
+/// Directory under `NSPAWN_RUNTIME_DIR` that holds one unix-export mount point
+/// per container on the systemd versions that do not give each container a
+/// directory of its own.
+const NSPAWN_UNIX_EXPORT_DIR: &str = "unix-export";
 
 /// Whether a container is running, as far as the host can prove.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -234,12 +239,14 @@ fn probe_liveness(name: &str) -> Liveness {
 
 /// Reclaim leftover systemd-nspawn runtime state for a container.
 ///
-/// systemd-nspawn bind-mounts `/run/systemd/nspawn/<name>/unix-export` for
-/// the lifetime of a container and tears it down on a clean exit. An unclean
-/// exit (SIGKILL after a stop timeout, a host crash) leaves the mount behind,
-/// and nspawn refuses to start the next container of that name with
-/// "Mount point ... exists already, refusing". sdme owns the container
-/// lifecycle, so it reclaims the leftovers on start and on removal.
+/// systemd-nspawn keeps a unix-export mount for the lifetime of a container
+/// and tears it down on a clean exit. Where it lives depends on the systemd
+/// version: `/run/systemd/nspawn/unix-export/<name>` (seen on 259) or
+/// `/run/systemd/nspawn/<name>/unix-export` (seen on 261). An unclean exit
+/// (SIGKILL after a stop timeout, a host crash) leaves the mount behind, and
+/// nspawn refuses to start the next container of that name with "Mount point
+/// ... exists already, refusing". sdme owns the container lifecycle, so it
+/// reclaims the leftovers in both places on start and on removal.
 ///
 /// Nothing is touched unless both systemd and machined confirm no container
 /// of this name is running. Tearing down live runtime state would break a
@@ -270,8 +277,14 @@ fn reclaim_nspawn_runtime_in(
         anyhow::bail!("'{name}' names shared systemd-nspawn state, not a container's");
     }
 
-    let dir = runtime_dir.join(name);
-    if !dir.exists() {
+    let leftovers: Vec<PathBuf> = [
+        runtime_dir.join(name),
+        runtime_dir.join(NSPAWN_UNIX_EXPORT_DIR).join(name),
+    ]
+    .into_iter()
+    .filter(|dir| dir.exists())
+    .collect();
+    if leftovers.is_empty() {
         return Ok(());
     }
 
@@ -281,17 +294,48 @@ fn reclaim_nspawn_runtime_in(
         Liveness::Unknown => anyhow::bail!(
             "cannot determine whether container '{name}' is running; \
              leaving {} alone",
-            dir.display()
+            leftovers[0].display()
         ),
         Liveness::Stopped => {}
     }
 
-    // safe_remove_dir unmounts what it finds underneath before deleting, and
-    // refuses to delete through a mount it could not release.
-    crate::copy::safe_remove_dir(&dir)
-        .with_context(|| format!("failed to reclaim {}", dir.display()))?;
-    if verbose {
-        eprintln!("reclaimed leftover nspawn runtime state {}", dir.display());
+    for dir in &leftovers {
+        unmount_at(dir).with_context(|| format!("failed to reclaim {}", dir.display()))?;
+        // safe_remove_dir unmounts what it finds underneath before deleting,
+        // and refuses to delete through a mount it could not release.
+        crate::copy::safe_remove_dir(dir)
+            .with_context(|| format!("failed to reclaim {}", dir.display()))?;
+        if verbose {
+            eprintln!("reclaimed leftover nspawn runtime state {}", dir.display());
+        }
+    }
+    Ok(())
+}
+
+/// Unmount `dir` if it is itself a mount point.
+///
+/// `safe_remove_dir` only releases mounts below the directory it is given.
+/// In the shared unix-export layout the container's directory is the mount
+/// point, and its parent holds the live mounts of every other container, so
+/// the parent cannot be handed to `safe_remove_dir` instead.
+fn unmount_at(dir: &Path) -> Result<()> {
+    let Some(parent) = dir.parent() else {
+        return Ok(());
+    };
+    let is_mounted = || -> Result<bool> {
+        Ok(crate::submounts::find_mounts_under(parent)?
+            .iter()
+            .any(|mount| mount == dir))
+    };
+    if !is_mounted()? {
+        return Ok(());
+    }
+    let _ = std::process::Command::new("umount")
+        .arg("-R")
+        .arg(dir)
+        .status();
+    if is_mounted()? {
+        anyhow::bail!("{} could not be unmounted", dir.display());
     }
     Ok(())
 }
@@ -724,6 +768,28 @@ mod tests {
     }
 
     #[test]
+    fn test_reclaim_removes_leftover_in_the_shared_unix_export_layout() {
+        let tmp = TempDataDir::new("reclaim-shared-layout");
+        let root = tmp.path().join("nspawn");
+        let dead = root.join("unix-export").join("deadbox");
+        let live = root.join("unix-export").join("livebox");
+        fs::create_dir_all(&dead).unwrap();
+        fs::create_dir_all(&live).unwrap();
+        let calls = RefCell::new(Vec::new());
+
+        reclaim_nspawn_runtime_in(&root, "deadbox", false, &probe(Liveness::Stopped, &calls))
+            .unwrap();
+        assert!(!dead.exists());
+        // Another container's entry in the shared directory is not touched.
+        assert!(live.exists());
+
+        // A running container keeps its entry there too.
+        reclaim_nspawn_runtime_in(&root, "livebox", false, &probe(Liveness::Running, &calls))
+            .unwrap();
+        assert!(live.exists());
+    }
+
+    #[test]
     fn test_reclaim_keeps_runtime_state_of_running_container() {
         // The whole point of the liveness check: a running container's
         // unix-export mount is live state, not a leftover.
@@ -753,8 +819,8 @@ mod tests {
 
     #[test]
     fn test_reclaim_rejects_shared_nspawn_entries() {
-        // "locks" and "propagate" are shared by every container on the host
-        // and pass validate_name, so they must be rejected by name.
+        // "locks", "propagate", and "unix-export" are shared by every container
+        // on the host and pass validate_name, so they must be rejected by name.
         let tmp = TempDataDir::new("reclaim-shared");
         let calls = RefCell::new(Vec::new());
         for shared in NSPAWN_SHARED_ENTRIES {

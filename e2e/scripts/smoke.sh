@@ -150,6 +150,22 @@ else
     fail "health did not recover after reset-failed"
 fi
 
+# -- Start after an unclean kill ------------------------------------------------
+
+# A SIGKILL leaves systemd-nspawn's unix-export mount behind, and nspawn
+# refuses to start a container onto it. sdme has to reclaim it on start.
+log "Killing the container and starting it again"
+systemctl kill --kill-whom=all -s KILL "sdme@${CT_NAME}.service" 2>/dev/null
+for _ in $(seq 1 20); do
+    [[ "$(systemctl is-active "sdme@${CT_NAME}.service")" == "active" ]] || break
+    sleep 0.5
+done
+if output=$(timeout "$TIMEOUT_BOOT" "$SDME" start "$CT_NAME" -t "$TIMEOUT_BOOT" 2>&1); then
+    ok "start after an unclean kill"
+else
+    fail "start after an unclean kill: $output"
+fi
+
 # -- Stop ----------------------------------------------------------------------
 
 log "Stopping container"
