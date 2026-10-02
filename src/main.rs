@@ -247,9 +247,10 @@ Three shutdown tiers, in order of escalation:
 --term and --kill are mutually exclusive. Timeouts are configurable via
 'sdme config set'.
 
-A kube pod gets its terminationGracePeriodSeconds on top of the graceful and
-terminate timeouts, because the guest waits that long before it kills a
-workload that does not act on SIGTERM.
+A container that runs an OCI app gets the app's stop timeout on top of the
+graceful and terminate timeouts, because the guest waits that long before it
+kills a workload that does not act on SIGTERM: the pod's
+terminationGracePeriodSeconds for a kube pod, 90 seconds otherwise.
 
 EXAMPLES:
     sdme stop mybox

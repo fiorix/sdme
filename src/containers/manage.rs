@@ -107,6 +107,9 @@ fn remove_with_ops(
                 eprintln!("stopping container '{name}'");
             }
             stop(name, StopMode::Terminate, stop_timeout, verbose)?;
+            // A unit that ended in failed state would otherwise stay listed
+            // by `systemctl --failed` under the name of a removed container.
+            let _ = systemd::reset_failed(name);
         }
         Some(other) => {
             if verbose {
@@ -380,12 +383,14 @@ pub(super) fn graceful_stop_signal() -> i32 {
 
 /// Seconds to wait for a container to stop in the given mode.
 ///
-/// `base_secs` is the configured timeout for `mode`. A kube pod shuts down no
-/// faster than its `terminationGracePeriodSeconds` when a workload does not
-/// act on SIGTERM, because the guest's systemd waits that long before it
-/// kills the workload. For the modes that shut the guest down (graceful and
-/// terminate) the grace period is therefore added to the base, which is left
-/// to cover the rest of the shutdown. A kill does not wait for the guest.
+/// `base_secs` is the configured timeout for `mode`. A container that runs an
+/// OCI app shuts down no faster than the app unit's stop timeout when the
+/// workload does not act on SIGTERM, because the guest's systemd waits that
+/// long before it kills the workload. That is the pod's
+/// `terminationGracePeriodSeconds` for a kube pod and systemd's default for an
+/// OCI app outside one. For the modes that shut the guest down (graceful and
+/// terminate) it is therefore added to the base, which is left to cover the
+/// rest of the shutdown. A kill does not wait for the guest.
 pub fn stop_timeout_secs(datadir: &Path, name: &str, mode: StopMode, base_secs: u64) -> u64 {
     match mode {
         StopMode::Kill => base_secs,
@@ -398,19 +403,31 @@ pub fn stop_timeout_secs(datadir: &Path, name: &str, mode: StopMode, base_secs: 
     }
 }
 
-/// `base_secs` plus the pod's termination grace period, for a kube pod.
-///
-/// A pod whose state predates the stored grace period, or whose stored value
-/// does not parse, is given the default grace period.
+/// `base_secs` plus the stop timeout of the container's OCI app unit, if it
+/// runs one.
 fn guest_shutdown_timeout(state: &State, base_secs: u64) -> u64 {
-    if !state.is_yes("KUBE") {
-        return base_secs;
+    base_secs.saturating_add(app_stop_timeout_secs(state))
+}
+
+/// How long the guest waits for the container's OCI app to stop before it
+/// kills the workload, in seconds; `0` for a container that runs no OCI app.
+///
+/// For a kube pod this is its termination grace period. A pod whose state
+/// predates the stored grace period, or whose stored value does not parse, is
+/// given the default one. An OCI app outside a pod sets no `TimeoutStopSec` and
+/// inherits systemd's default.
+pub(crate) fn app_stop_timeout_secs(state: &State) -> u64 {
+    if state.is_yes("KUBE") {
+        let grace = state
+            .get_nonempty("KUBE_GRACE_PERIOD")
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(crate::kube::DEFAULT_TERMINATION_GRACE_SECS);
+        u64::from(grace)
+    } else if state.get_nonempty("OCI_APP").is_some() {
+        systemd::DEFAULT_STOP_TIMEOUT_SECS
+    } else {
+        0
     }
-    let grace = state
-        .get_nonempty("KUBE_GRACE_PERIOD")
-        .and_then(|v| v.parse::<u32>().ok())
-        .unwrap_or(crate::kube::DEFAULT_TERMINATION_GRACE_SECS);
-    base_secs.saturating_add(u64::from(grace))
 }
 
 /// Stop a container using the specified mode (graceful, terminate, or kill).
@@ -536,8 +553,20 @@ mod tests {
     #[test]
     fn test_guest_shutdown_timeout() {
         let state = |content: &str| State::parse(content).unwrap();
-        // Not a kube pod: the configured timeout is used as is.
+        // No OCI app: the configured timeout is used as is.
         assert_eq!(guest_shutdown_timeout(&state("NAME=web\n"), 30), 30);
+        assert_eq!(guest_shutdown_timeout(&state("OCI_APP=\n"), 30), 30);
+        // An OCI app outside a pod adds systemd's default stop timeout.
+        assert_eq!(guest_shutdown_timeout(&state("OCI_APP=nginx\n"), 30), 120);
+        assert_eq!(guest_shutdown_timeout(&state("OCI_APP=nginx\n"), 90), 180);
+        assert_eq!(app_stop_timeout_secs(&state("NAME=web\n")), 0);
+        assert_eq!(app_stop_timeout_secs(&state("OCI_APP=nginx\n")), 90);
+        assert_eq!(app_stop_timeout_secs(&state("KUBE=yes\n")), 30);
+        // A pod's grace period wins over the OCI app default.
+        assert_eq!(
+            guest_shutdown_timeout(&state("KUBE=yes\nOCI_APP=nginx\nKUBE_GRACE_PERIOD=5\n"), 30),
+            35
+        );
         assert_eq!(
             guest_shutdown_timeout(&state("KUBE_GRACE_PERIOD=45\n"), 30),
             30

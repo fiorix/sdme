@@ -102,6 +102,19 @@ fn start_timeout_secs(boot_timeout: u64) -> u64 {
     boot_timeout.saturating_add(30)
 }
 
+/// The `TimeoutStopSec` a container unit needs, if systemd's default is too
+/// short for it.
+///
+/// A terminate stop is a stop job on the container unit. While it runs, the
+/// guest waits `app_stop_timeout` seconds for an OCI app that does not act on
+/// SIGTERM before killing it, then finishes shutting down. A unit whose own
+/// stop timeout expires first has the whole container killed and ends in
+/// failed state, so the unit is given the guest's wait plus a margin.
+pub(super) fn unit_stop_timeout_secs(app_stop_timeout: u64) -> Option<u64> {
+    let needed = app_stop_timeout.saturating_add(30);
+    (app_stop_timeout > 0 && needed > super::DEFAULT_STOP_TIMEOUT_SECS).then_some(needed)
+}
+
 /// Escape an argument for a systemd unit file `ExecStart` line.
 ///
 /// If the argument contains spaces, double quotes, or backslashes,
@@ -160,6 +173,9 @@ pub struct DropinConfig<'a> {
     /// Boot timeout of this container when it differs from the configured one
     /// in the template; emitted as a `TimeoutStartSec=` override.
     pub boot_timeout: Option<u64>,
+    /// Stop timeout for the container unit, in seconds, when systemd's default
+    /// would cut the guest's shutdown short; emitted as `TimeoutStopSec=`.
+    pub stop_timeout: Option<u64>,
     /// Per-submount overlay relative paths (e.g. `["home", "data"]`).
     pub submounts: &'a [String],
     /// Pod network namespace path. When set, nspawn is launched via
@@ -193,6 +209,9 @@ pub fn nspawn_dropin(cfg: &DropinConfig<'_>) -> String {
     }
     if let Some(boot_timeout) = cfg.boot_timeout {
         writeln!(out, "TimeoutStartSec={}s", start_timeout_secs(boot_timeout)).unwrap();
+    }
+    if let Some(stop_timeout) = cfg.stop_timeout {
+        writeln!(out, "TimeoutStopSec={stop_timeout}s").unwrap();
     }
     writeln!(out, "ExecStart=").unwrap();
 
@@ -637,6 +656,7 @@ pub fn write_nspawn_dropin(
         nspawn_args: &nspawn_args,
         service_directives: &service_directives,
         boot_timeout,
+        stop_timeout: unit_stop_timeout_secs(crate::containers::app_stop_timeout_secs(&state)),
         submounts: &submounts,
         pod_netns: pod_netns.as_deref(),
     });

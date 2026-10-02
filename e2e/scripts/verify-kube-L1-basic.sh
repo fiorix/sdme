@@ -244,9 +244,9 @@ YAML
 # --- Test 3b: kube delete on a running pod ---
 # The workload is `sleep infinity`, which never acts on SIGTERM, so the guest
 # only finishes shutting down once the pod's grace period has run out.
-#   delete_running_pod <test-name> <pod-name> <grace-seconds|""> <max-seconds|"">
+#   delete_running_pod <test-name> <pod-name> <grace-seconds|""> <max-seconds|""> [min-seconds]
 delete_running_pod() {
-    local test_name="$1" pod_name="$2" grace="$3" max_secs="$4"
+    local test_name="$1" pod_name="$2" grace="$3" max_secs="$4" min_secs="${5:-}"
     local yaml_file grace_line=""
     yaml_file=$(mktemp /tmp/kube-test-XXXXXX.yaml)
     [[ -n "$grace" ]] && grace_line="  terminationGracePeriodSeconds: $grace"
@@ -309,6 +309,10 @@ YAML
         record "$test_name" FAIL "delete took ${elapsed}s, expected under ${max_secs}s"
         return
     fi
+    if [[ -n "$min_secs" && $elapsed -lt $min_secs ]]; then
+        record "$test_name" FAIL "delete took ${elapsed}s, the workload was killed before ${min_secs}s"
+        return
+    fi
     record "$test_name" PASS "${elapsed}s"
 }
 
@@ -318,6 +322,9 @@ test_kube_delete_running() {
     # A 5s grace period ends the delete well inside the default 30s, so the
     # wait follows the pod's own grace period.
     delete_running_pod "kube-delete/short-grace" "vfy-kube-delgr" "5" "$(scale_timeout 25)"
+    # A grace period longer than systemd's default 90s stop timeout: the
+    # container unit must not be killed before the pod has had its 95s.
+    delete_running_pod "kube-delete/long-grace" "vfy-kube-dellg" "95" "" "95"
 }
 
 # --- Test 4: Shared emptyDir volume between containers ---

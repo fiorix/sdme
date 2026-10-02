@@ -87,6 +87,10 @@ pub fn machine_system_state(name: &str) -> Option<String> {
     }
 }
 
+/// systemd's default `TimeoutStopSec`, which applies to the container unit and
+/// to any guest unit that sets none.
+pub(crate) const DEFAULT_STOP_TIMEOUT_SECS: u64 = 90;
+
 /// Shared configuration for container service operations (enable, start).
 pub struct ServiceConfig<'a> {
     /// Data directory containing container state.

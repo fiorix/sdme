@@ -131,6 +131,7 @@ fn test_nspawn_dropin_host_rootfs() {
         nspawn_args: &args,
         service_directives: &[],
         boot_timeout: None,
+        stop_timeout: None,
         submounts: &[],
         pod_netns: None,
     });
@@ -174,6 +175,7 @@ fn test_nspawn_dropin_with_userns() {
         nspawn_args: &args,
         service_directives: &[],
         boot_timeout: None,
+        stop_timeout: None,
         submounts: &[],
         pod_netns: None,
     });
@@ -201,6 +203,7 @@ fn test_nspawn_dropin_with_pod_netns() {
         nspawn_args: &args,
         service_directives: &[],
         boot_timeout: None,
+        stop_timeout: None,
         submounts: &[],
         pod_netns: Some("/run/sdme/pods/mypod/ns/net"),
     });
@@ -230,6 +233,7 @@ fn test_nspawn_dropin_without_pod_netns() {
         nspawn_args: &args,
         service_directives: &[],
         boot_timeout: None,
+        stop_timeout: None,
         submounts: &[],
         pod_netns: None,
     });
@@ -253,6 +257,7 @@ fn test_nspawn_dropin_explicit_rootfs() {
         nspawn_args: &args,
         service_directives: &[],
         boot_timeout: None,
+        stop_timeout: None,
         submounts: &[],
         pod_netns: None,
     });
@@ -280,6 +285,7 @@ fn test_nspawn_dropin_with_binds_and_envs() {
         nspawn_args: &args,
         service_directives: &[],
         boot_timeout: None,
+        stop_timeout: None,
         submounts: &[],
         pod_netns: None,
     });
@@ -306,6 +312,7 @@ fn test_nspawn_dropin_escapes_spaces() {
         nspawn_args: &args,
         service_directives: &[],
         boot_timeout: None,
+        stop_timeout: None,
         submounts: &[],
         pod_netns: None,
     });
@@ -332,6 +339,7 @@ fn test_nspawn_dropin_btrfs() {
         nspawn_args: &args,
         service_directives: &service_directives,
         boot_timeout: None,
+        stop_timeout: None,
         submounts: &[],
         pod_netns: None,
     });
@@ -371,6 +379,7 @@ fn test_nspawn_dropin_btrfs_custom_datadir() {
         nspawn_args: &[],
         service_directives: &[],
         boot_timeout: None,
+        stop_timeout: None,
         submounts: &[],
         pod_netns: None,
     });
@@ -396,6 +405,7 @@ fn test_nspawn_dropin_btrfs_native() {
         nspawn_args: &[],
         service_directives: &[],
         boot_timeout: None,
+        stop_timeout: None,
         submounts: &[],
         pod_netns: None,
     });
@@ -465,6 +475,7 @@ fn test_nspawn_dropin_boot_timeout_override() {
             nspawn_args: &[],
             service_directives: &[],
             boot_timeout,
+            stop_timeout: None,
             submounts: &[],
             pod_netns: None,
         })
@@ -475,6 +486,42 @@ fn test_nspawn_dropin_boot_timeout_override() {
     assert_eq!(
         dropin_assignments(&dropin(Some(300)), "TimeoutStartSec"),
         vec![("Service", "330s")]
+    );
+}
+
+#[test]
+fn test_unit_stop_timeout() {
+    // No OCI app: systemd's default stays.
+    assert_eq!(units::unit_stop_timeout_secs(0), None);
+    // A pod's default 30s grace period fits inside the 90s default.
+    assert_eq!(units::unit_stop_timeout_secs(30), None);
+    assert_eq!(units::unit_stop_timeout_secs(60), None);
+    // The guest waits as long as the default or longer: the unit outlasts it.
+    assert_eq!(units::unit_stop_timeout_secs(90), Some(120));
+    assert_eq!(units::unit_stop_timeout_secs(100), Some(130));
+
+    let paths = test_paths();
+    let dropin = |stop_timeout| {
+        nspawn_dropin(&DropinConfig {
+            backend: crate::storage::Backend::Overlay,
+            datadir: "/var/lib/sdme",
+            name: "mybox",
+            root_dir: "/var/lib/sdme/containers/mybox/merged",
+            pool_mount: None,
+            lowerdir: "/",
+            paths: &paths,
+            nspawn_args: &[],
+            service_directives: &[],
+            boot_timeout: None,
+            stop_timeout,
+            submounts: &[],
+            pod_netns: None,
+        })
+    };
+    assert!(dropin_assignments(&dropin(None), "TimeoutStopSec").is_empty());
+    assert_eq!(
+        dropin_assignments(&dropin(Some(130)), "TimeoutStopSec"),
+        vec![("Service", "130s")]
     );
 }
 
@@ -639,6 +686,7 @@ fn test_nspawn_dropin_with_security() {
         nspawn_args: &args,
         service_directives: &[],
         boot_timeout: None,
+        stop_timeout: None,
         submounts: &[],
         pod_netns: None,
     });
@@ -668,6 +716,7 @@ fn test_nspawn_dropin_with_apparmor() {
         nspawn_args: &args,
         service_directives: &service_directives,
         boot_timeout: None,
+        stop_timeout: None,
         submounts: &[],
         pod_netns: None,
     });
@@ -702,6 +751,7 @@ fn test_nspawn_dropin_with_submounts() {
         nspawn_args: &args,
         service_directives: &[],
         boot_timeout: None,
+        stop_timeout: None,
         submounts: &submounts,
         pod_netns: None,
     });
