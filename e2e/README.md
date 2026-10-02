@@ -127,11 +127,14 @@ Redis 8+ treats locale config failure as fatal. Set `LANG=C.UTF-8` via `--oci-en
 can wait for its child, and the workload runs as PID 1 of a new PID namespace,
 where the kernel discards signals that have no installed handler. A workload
 that installs a SIGTERM handler stops on the signal; one that does not, such as
-`sleep infinity`, is killed when `TimeoutStopSec` expires. Container units
-therefore end in failed state with `Result=timeout` after such a shutdown, and
-`systemctl --failed` lists them until `systemctl reset-failed` runs. This is
-cosmetic: leaked nspawn runtime state is now reclaimed on the next start, so a
-hard kill no longer blocks a later container of the same name.
+`sleep infinity`, is killed by the guest when the app unit's `TimeoutStopSec`
+expires. That is the pod's termination grace period in a kube pod, 30s by
+default, and systemd's 90s default for an OCI app outside one, so stopping or
+removing such a container takes that long. sdme adds the app's stop timeout to
+its own stop waits and, where it reaches 90s, to the container unit's stop
+timeout, so the stop returns 0 and the unit ends inactive with
+`Result=success`. Before 0.20.1 these stops timed out in sdme or were cut
+short by the host with SIGKILL, which left units in failed state.
 
 ### Docker-in-container needs working veth DHCP
 
@@ -147,16 +150,15 @@ The docker/registry tutorial test needs outbound internet inside a `--network-ve
 
 ## Results
 
-Last verified: 2026-10-01
+Last verified: 2026-10-02
 
 System: Linux 7.0.0-34-generic (x86_64), Ubuntu 26.04, systemd 259.5, sdme
-0.20.0 built from the working tree. Eight parallel jobs, timeout scale 1, wall
-clock 25m12s. The host runs ufw with DROP input and forward policies, and the
+0.20.1 built from the working tree. Eight parallel jobs, timeout scale 1, wall
+clock 24m18s. The host runs ufw with DROP input and forward policies, and the
 datadir is a dedicated btrfs mount (Mode A) with `compress=zstd:3` and
 `user_subvol_rm_allowed` set by its mount unit. The exact aggregate is
-`test-reports/summary-20261001-110235.md`, which records the binary as 0.19.1:
-the suite ran against this code before the version bump, and no code changed
-between that run and the bump.
+`test-reports/summary-20261002-101021.md`. The run used the 0.20.1 binary, and
+no code changed between that run and the release commit.
 
 ```
 Test Suite                  Pass  Fail  Skip  Status
@@ -167,58 +169,160 @@ verify-diff                    9     0     0  PASS
 verify-distro-boot            63     0     0  PASS
 verify-distro-oci            175     0     0  PASS
 verify-export                 22     0     1  PASS
-verify-kube-L1-basic          19     0     0  PASS
+verify-kube-L1-basic          22     0     0  PASS
 verify-kube-L2-probes         41     0     0  PASS
 verify-kube-L2-security       16     0     1  PASS
-verify-kube-L2-spec           12     0     0  PASS
+verify-kube-L2-spec           13     0     0  PASS
 verify-kube-L3-secrets        16     0     0  PASS
-verify-kube-L3-volumes        38     1     0  FAIL
+verify-kube-L3-volumes        39     0     0  PASS
 verify-kube-L4-networking      6     0     0  PASS
 verify-kube-L5-redis-stack     6     0     0  PASS
 verify-kube-L6-gitea-stack    15     0     0  PASS
+verify-nested-userns          10     0     0  PASS
 verify-nested                 13     0     3  PASS
-verify-nested-userns           7     0     0  PASS
 verify-network                 9     0     0  PASS
 verify-nixos                  26     0     0  PASS
 verify-oci                    18     0     0  PASS
-verify-pods                    8     1     0  FAIL
-verify-security               41     0     0  PASS
+verify-pods                    9     0     0  PASS
+verify-pool                   14     0     0  PASS
+verify-security               43     0     0  PASS
 verify-storage                11     0     0  PASS
 verify-tutorial               84     0     7  PASS
 --------------------------  ----  ----  ----  ------
-Totals                       687     2    12  24 suites
+Totals                       712     0    12  25 suites
 ```
 
-- 22 of 24 suites pass in the parallel run. The two failures are single
-  checks that pass when their suite is rerun on its own: `verify-kube-L3-volumes`
-  39/39 and `verify-pods` 9/9. Neither is in code this release changes, and
-  neither is a clean run: a release gate that needs serial reruns is weaker
-  evidence than the single green run recorded for 0.19.1.
-- `verify-pods` fails `--pod + --userns should succeed` with `cannot lock
-  userns allocation: cannot lock userns/shift`. The userns shift lock is taken
-  without blocking, and this host has no idmapped overlayfs, so every
-  `--userns` create takes it. The lock is held only while a range is picked
-  (a scan of the state files and of the running machines), not during the
-  pre-chown that follows, so the failures are plain contention between
-  concurrent creates. It failed in two of three full runs here.
-- `verify-kube-L3-volumes` fails `ronly-start-runtime`: `systemctl start`
-  failed for a pod that had been created correctly, immediately after the
-  start rewrote the shared `sdme@.service` template while other suites were
-  reloading systemd. The unit logged nothing. The cause is not established; it
-  happened once in six runs of this suite.
-- The 12 skips are expected on this host. Seven tutorial Docker checks skip
-  because ufw drops DHCP on the veth, so the container gets no default route.
-  Three `verify-nested` checks skip because the datadir's mount unit sets
-  `user_subvol_rm_allowed`, which the suite cannot clear. One `verify-export`
-  check skips because `setfattr` is not installed, and one
-  `verify-kube-L2-security` check skips because the AppArmor profile is not
-  visible inside nspawn. Preflight also warns that `kubeconform` and
-  `qemu-nbd` are absent; the L1 suite downloads `kubeconform` itself.
-- The kube suites were also run with `KUBE_STORAGE=btrfs`: 170 passed, 0
-  failed, 1 skipped across 9 suites in 6m35s
-  (`test-reports/summary-20261001-092931.md`).
+- All 25 suites pass in the parallel run, with no serial reruns. The run
+  before it on the same binary (`test-reports/summary-20261002-094512.md`)
+  gave the same counts. That meets the bar 0.20.0 missed: its gate needed
+  serial reruns of `verify-pods` and `verify-kube-L3-volumes`, and both pass
+  here under load.
+- The pass count rose from 687 to 712: the two checks that failed in 0.20.0
+  now pass, the new `verify-pool` suite adds 14, and `verify-nested-userns`,
+  `verify-kube-L1-basic`, `verify-security`, and `verify-kube-L2-spec` gained
+  3, 3, 2, and 1 checks. The `smoke` gate, which is not in the table, went
+  from 12 to 14 checks.
+- The 12 skips are the same as for 0.20.0 and are expected on this host.
+  Seven tutorial Docker checks skip because ufw drops DHCP on the veth, so the
+  container gets no default route. Three `verify-nested` checks skip because
+  the datadir's mount unit sets `user_subvol_rm_allowed`, which the suite
+  cannot clear. One `verify-export` check skips because `setfattr` is not
+  installed, and one `verify-kube-L2-security` check skips because the
+  AppArmor profile is not visible inside nspawn.
+- The kube suites were also run with `KUBE_STORAGE=btrfs`: 174 passed, 0
+  failed, 1 skipped across 9 suites in 9m15s
+  (`test-reports/summary-20261002-101943.md`).
+- No `sdme@*.service` unit was left in failed state after the runs.
 
 ## Log
+
+### 0.20.1 -- closing the 0.20.0 gaps (2026-10-02, x86_64)
+
+This release closes the known gaps recorded for 0.20.0 and what turned up
+while closing them.
+
+- `sdme create --userns` waits for the UID range lock instead of failing, and
+  reserves the range before the lock is released.
+- Stops and removals of a kube pod wait out its termination grace period.
+  `kube delete` on a running pod whose workload ignores SIGTERM used to time
+  out at 30s; a default pod takes 30.5s to shut down.
+- Unit files are replaced by rename, and a per-start `-t` goes into the
+  container's drop-in instead of the shared template. This is the
+  `ronly-start-runtime` failure from 0.20.0: its hidden error was
+  `UnitMasked`, because systemd treats a unit file caught empty in the middle
+  of an in-place rewrite as masked.
+- A failed `sdme create` removes the container it had created.
+- An overlay `kube create` finds a leftover pod rootfs inside an unmounted
+  loopback pool.
+- The pre-chown skips files that vanish from the rootfs during its walk, and
+  every atomic write uses its own temp file.
+- Stops also wait out the 90s stop timeout of an OCI app outside a pod, and
+  the container unit gets a stop timeout longer than the guest's, so the host
+  no longer kills a pod whose grace period is 90s or more.
+- A leftover unix-export mount is reclaimed in the layout systemd 259 uses,
+  so a container that was killed starts again on the first attempt.
+- A start whose unit dies before nspawn registers a machine fails at once
+  with the unit's journal instead of waiting out the boot timeout.
+
+New coverage:
+
+- `verify-pool` (14 checks) runs on a scratch ext4 datadir selected with
+  `--config`, so the Mode B loopback pool is exercised on every host: pool
+  setup, the leftover pod rootfs lifecycle, the rollback of a failed create,
+  a leftover found and removed with the pool unmounted, and a container unit
+  that mounts the pool itself. The last one covers the `RequiresMountsFor`
+  drop-in that 0.20.0 shipped without E2E.
+- `verify-security`: six concurrent `--userns` creates all succeed and store
+  disjoint ranges. Against the 0.20.0 binary, four of six fail on the lock.
+- `verify-kube-L1-basic` and `verify-kube-L2-spec`: asserted `kube delete` of
+  running pods with the default, a 5s, a 45s, and a 95s grace period. The 5s
+  one must finish in under 25s, and the 95s one must not return before 95s:
+  the host's default 90s unit stop timeout used to kill such a pod early.
+- `smoke`: a container killed with SIGKILL starts again, and a start whose
+  unit fails in its mount step is reported within 30s.
+- `verify-nested-userns`: a create whose range reservation fails leaves no
+  container, and the name stays usable.
+
+Ten full `run-parallel.sh --jobs 8` runs on Linux 7.0.0-34-generic with
+systemd 259.5:
+
+```
+Run  Summary file              Pass  Fail  Skip  Code under test
+---  ------------------------  ----  ----  ----  ---------------------------
+1    summary-20261001-135554    710     0    12  before the pool leftover fix
+2    summary-20261001-142004    710     0    12  same
+3    summary-20261001-144516    710     0    12  same
+4    summary-20261002-062500    708     3    12  with the pool leftover fix
+5    summary-20261002-070125    711     0    12  plus two suite fixes
+6    summary-20261002-072554    711     0    12  same
+7    summary-20261002-081240    711     0    12  plus the causes of run 4
+8    summary-20261002-083713    711     0    12  same
+9    summary-20261002-094512    712     0    12  release binary
+10   summary-20261002-101021    712     0    12  release binary
+```
+
+- The nine kube suites with `KUBE_STORAGE=btrfs` ran after runs 3, 4, 6, 8,
+  and 10 and passed every time: 173 passed and 1 skipped, 174 after run 10.
+- Run 4 failed three checks in two suites, and both were races between
+  suites. `verify-security` lost four of its six concurrent creates with
+  `pre-chown failed on 2 files: .../tmp/hl-export-test: stat`, because
+  `verify-export` was adding and removing test files in the shared `ubuntu`
+  rootfs while those containers were pre-chowned from it. `verify-oci` failed
+  `ubuntu/curl-port` with an empty status: it curled the container as soon as
+  the container had its link-local address, before the host had a route to it
+  over the veth, and timed out. On an idle host that route appears 0.6s after
+  the container's address.
+- Runs 5 and 6 had the two checks moved out of the way: the concurrent
+  creates on a rootfs only `verify-security` uses, and a retry in the
+  `verify-oci` port check. Runs 7 and 8 have the cause fixed as well:
+  `verify-export` and `verify-cp` write to their own copy of the rootfs, and
+  the pre-chown skips a file that is gone. They also carry the atomic write
+  change.
+- Checking a stale note in this file against the new behavior after run 8
+  turned up four more product issues, all fixed before runs 9 and 10. A
+  sleep-infinity OCI app outside a pod takes 90.5s to stop and `sdme stop`
+  gave up at 90.0s. A pod with a 100s grace period was killed by the host
+  after 91s, because the container unit kept systemd's default 90s stop
+  timeout. After such a kill the next start of that name failed with `Mount
+  point '/run/systemd/nspawn/unix-export/NAME' exists already`, because the
+  reclaim added in 0.19.1 only looked in `/run/systemd/nspawn/NAME`. And that
+  failed start waited out its whole boot timeout before reporting anything.
+  The case of an OCI app outside a pod was measured on a sleep pod with its
+  kube state keys and its unit's `TimeoutStopSec` stripped; no image at hand
+  has a workload that ignores SIGTERM outside a pod.
+
+The `ronly-start-runtime` cause was established by a forced interleaving, not
+by hitting the natural race: two real `sdme start` runs were slowed with
+strace so that one loaded the template inside the other's rewrite. The 0.20.0
+code fails with `UnitMasked` under that interleaving, and this release starts
+the container.
+
+Rust verification: 1014 tests passed and 3 ignored, 6 doctests passed and 1
+ignored; fmt and clippy with warnings denied pass.
+
+Left as is by decision: a kube pod created before 0.19.1 has no
+`TimeoutStopSec` in its app unit and can take 90s to shut down, longer than
+the stop wait. `sdme stop --kill` stops it.
 
 ### 0.20.0 -- leftover kube pod rootfs (2026-10-01, x86_64)
 

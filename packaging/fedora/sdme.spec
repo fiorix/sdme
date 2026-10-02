@@ -11,7 +11,7 @@
 %global crate sdme
 
 Name:           sdme
-Version:        0.20.0
+Version:        0.20.1
 Release:        1%{?dist}
 Summary:        The systemd machine editor
 
@@ -106,6 +106,41 @@ export SDME_SKIP_PROBE=1
 %{_bindir}/%{crate} repair-units || :
 
 %changelog
+* Fri Oct 02 2026 Alexandre Fiori <fiorix@gmail.com> - 0.20.1-1
+- Wait out an OCI app's stop timeout when its container is stopped or removed:
+  the pod's terminationGracePeriodSeconds for a kube pod, 90 seconds for an OCI
+  app outside one. sdme kube delete on a running pod whose workload ignores
+  SIGTERM timed out after 30 seconds and left the pod and its rootfs behind,
+  and sdme stop failed the same way.
+- Give the container unit a stop timeout longer than the guest's when the app's
+  stop timeout is 90 seconds or more. The host used to kill such a container
+  after 90 seconds, which cut a longer grace period short and left the unit in
+  failed state.
+- Honor stop_timeout_terminate in sdme rm and sdme fs build, which waited a
+  fixed 30 seconds.
+- Queue concurrent sdme create --userns calls on the UID range lock instead of
+  failing with "cannot lock userns/shift", and reserve the range before the
+  lock is released, so two containers cannot be given the same one.
+- Remove the container again when sdme create or sdme new fails after creating
+  it.
+- Replace unit files by rename instead of rewriting them in place. A start that
+  loaded the shared template unit in the middle of a rewrite was refused as
+  masked. A per-start -t now goes into the container's own drop-in, and the
+  template follows the boot_timeout setting.
+- Reclaim a leftover unix-export mount under /run/systemd/nspawn/unix-export as
+  well. On systemd 259 a container that had been killed could not be started
+  again until a second attempt.
+- Fail a start at once, with the unit's journal, when the unit dies before
+  systemd-nspawn registers the machine. It used to wait for the boot timeout.
+- Show the cause of a failed operation in the batch commands (start, stop, rm,
+  enable, restart, pod rm, fs rm).
+- Find a leftover pod rootfs inside an unmounted btrfs loopback pool when sdme
+  kube create uses the overlay backend.
+- Skip files that disappear from the rootfs while sdme create --userns shifts
+  ownership, instead of failing the create.
+- Use a separate temp file for each atomic write, so concurrent writers of one
+  state file cannot publish a truncated file.
+
 * Thu Oct 01 2026 Alexandre Fiori <fiorix@gmail.com> - 0.20.0-1
 - Stop sdme kube apply and kube create before any copy or pull when a
   kube-<pod> rootfs exists that no container claims, and name the command that
