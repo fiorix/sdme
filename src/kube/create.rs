@@ -137,7 +137,7 @@ pub fn kube_create(datadir: &Path, opts: &KubeCreateOptions<'_>) -> Result<Strin
     let mut txn: Option<crate::txn::Txn> = None;
     let (staging_dir, rootfs_path, btrfs_staging) = match opts.backend {
         crate::storage::Backend::Overlay => {
-            check_kube_rootfs_unclaimed(datadir, &plan.pod_name, &rootfs_name)?;
+            check_kube_rootfs_unclaimed(datadir, &plan.pod_name, &rootfs_name, opts.verbose)?;
             let t = crate::txn::Txn::new(
                 &rootfs_dir,
                 &rootfs_name,
@@ -153,9 +153,8 @@ pub fn kube_create(datadir: &Path, opts: &KubeCreateOptions<'_>) -> Result<Strin
         crate::storage::Backend::Btrfs => {
             let pool_root =
                 crate::storage::pool::ensure_ready(datadir, &opts.pool_size, opts.verbose)?;
-            // Checked once the pool is mounted, so an offline pool cannot hide
-            // a leftover subvolume, and before the base is materialized.
-            check_kube_rootfs_unclaimed(datadir, &plan.pod_name, &rootfs_name)?;
+            // Checked before the base is materialized.
+            check_kube_rootfs_unclaimed(datadir, &plan.pod_name, &rootfs_name, opts.verbose)?;
             crate::storage::btrfs::ensure_base(
                 datadir,
                 &pool_root,
@@ -626,7 +625,24 @@ fn kube_rootfs_paths(datadir: &Path, rootfs_name: &str) -> Result<(PathBuf, Path
 /// command that removes it instead. Both backend locations are checked
 /// whatever backend the new pod uses, because a leftover on the other backend
 /// would otherwise sit behind the new pod, claimed by name but never removed.
-fn check_kube_rootfs_unclaimed(datadir: &Path, pod_name: &str, rootfs_name: &str) -> Result<()> {
+///
+/// An existing loopback pool is mounted first: a leftover subvolume is not
+/// visible under an unmounted pool, whatever backend the new pod uses.
+fn check_kube_rootfs_unclaimed(
+    datadir: &Path,
+    pod_name: &str,
+    rootfs_name: &str,
+    verbose: bool,
+) -> Result<()> {
+    use crate::storage::pool;
+
+    // A native btrfs datadir needs no mount, and a pool that was never
+    // created cannot hold a subvolume.
+    if !pool::is_btrfs(datadir)? && pool::exists(datadir)? {
+        pool::ensure_mounted(datadir, verbose)
+            .context("cannot check the btrfs pool for a leftover rootfs")?;
+    }
+
     let (overlay_dir, subvol) = kube_rootfs_paths(datadir, rootfs_name)?;
     if fs::symlink_metadata(&overlay_dir).is_err() && fs::symlink_metadata(&subvol).is_err() {
         return Ok(());
@@ -1121,7 +1137,7 @@ mod tests {
     #[test]
     fn test_unclaimed_check_passes_without_rootfs() {
         let tmp = tmp();
-        check_kube_rootfs_unclaimed(tmp.path(), POD, ROOTFS).unwrap();
+        check_kube_rootfs_unclaimed(tmp.path(), POD, ROOTFS, false).unwrap();
     }
 
     #[test]
@@ -1129,7 +1145,7 @@ mod tests {
         let tmp = tmp();
         make_rootfs(&tmp.path().join("fs").join(ROOTFS));
 
-        let err = check_kube_rootfs_unclaimed(tmp.path(), POD, ROOTFS).unwrap_err();
+        let err = check_kube_rootfs_unclaimed(tmp.path(), POD, ROOTFS, false).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("rootfs 'kube-web' already exists"), "{msg}");
         assert!(msg.contains("'sdme kube delete web'"), "{msg}");
@@ -1142,7 +1158,7 @@ mod tests {
         make_rootfs(&subvol);
         assert!(!overlay_dir.exists());
 
-        let err = check_kube_rootfs_unclaimed(tmp.path(), POD, ROOTFS).unwrap_err();
+        let err = check_kube_rootfs_unclaimed(tmp.path(), POD, ROOTFS, false).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("'sdme kube delete web'"), "{msg}");
     }
@@ -1153,7 +1169,7 @@ mod tests {
         make_rootfs(&tmp.path().join("fs").join(ROOTFS));
         claim(tmp.path(), "other", ROOTFS);
 
-        let err = check_kube_rootfs_unclaimed(tmp.path(), POD, ROOTFS).unwrap_err();
+        let err = check_kube_rootfs_unclaimed(tmp.path(), POD, ROOTFS, false).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("in use by container 'other'"), "{msg}");
         assert!(!msg.contains("kube delete"), "{msg}");
@@ -1172,7 +1188,7 @@ mod tests {
 
         assert!(!rootfs.exists());
         assert!(unrelated.is_dir());
-        check_kube_rootfs_unclaimed(tmp.path(), POD, ROOTFS).unwrap();
+        check_kube_rootfs_unclaimed(tmp.path(), POD, ROOTFS, false).unwrap();
     }
 
     #[test]

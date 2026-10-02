@@ -15,8 +15,9 @@ set -uo pipefail
 #   2. Leftover pod rootfs on the pool: create fails fast, kube delete reclaims
 #      the subvolume and is idempotent, and the pod can be created again
 #   3. Failed container creation removes the pod subvolume it built
-#   4. Cold pool, delete: with the pool unmounted, kube delete mounts it and
-#      removes a leftover subvolume
+#   4. Cold pool, leftover: with the pool unmounted, an overlay create of the
+#      same pod still fails fast on the leftover subvolume, and kube delete
+#      mounts the pool and removes it
 #   5. Cold pool, boot: the container unit requires the pool mount, so starting
 #      the unit with the pool unmounted mounts it first
 #
@@ -279,7 +280,7 @@ psdme kube delete "$POD" --force >/dev/null 2>&1 || true
 
 # -- Test 4: cold pool, delete -------------------------------------------------
 
-echo "=== Test 4: kube delete reaches a leftover subvolume in an unmounted pool ==="
+echo "=== Test 4: a leftover subvolume in an unmounted pool is found and removed ==="
 
 POD="${PREFIX}-cold"
 ROOTFS_DIR=$(kube_fs_dir "kube-$POD")
@@ -289,6 +290,25 @@ if ! output=$(psdme kube create -f "$YAML" --base-fs "$BASE_FS" $KFLAG 2>&1); th
     fail "cold delete: kube create failed: $output"
 else
     psdme rm -f "$POD" >/dev/null 2>&1
+
+    # An overlay create of the same pod never needs the pool, and still has to
+    # find the leftover subvolume inside it.
+    if ! pool_unmount; then
+        fail "cold create: could not unmount the pool"
+    else
+        rc=0
+        output=$(psdme kube create -f "$YAML" --base-fs "$BASE_FS" --storage overlay 2>&1) || rc=$?
+        if [[ $rc -ne 0 ]] \
+            && grep -q "rootfs 'kube-$POD' already exists but no container claims it" <<<"$output" \
+            && ! grep -qE "pulling|copying base rootfs|extracting layer" <<<"$output" \
+            && [[ ! -e "$DATADIR/fs/kube-$POD" && ! -f "$DATADIR/state/$POD" ]]; then
+            ok "cold create: overlay create finds the leftover in an unmounted pool"
+        else
+            fail "cold create: rc=$rc, output: $output"
+            psdme kube delete "$POD" --force >/dev/null 2>&1 || true
+        fi
+    fi
+
     if ! pool_unmount; then
         fail "cold delete: could not unmount the pool"
     else
