@@ -352,16 +352,21 @@ fn do_prechown(root: &Path, shift: u64) -> Result<()> {
 }
 
 /// Recursively collect all filesystem entries under `root`.
+///
+/// The rootfs under the overlay is not frozen while it is walked: it can be
+/// edited in place, and `sdme cp` can write to it. An entry that is gone by
+/// the time the walk reaches it has nothing left to shift and is skipped, here
+/// and in [`shift_ownership`]. Only `root` itself must exist.
 fn collect_entries(root: &Path) -> Result<Vec<PathBuf>> {
     let mut entries = Vec::new();
-    collect_entries_recursive(root, &mut entries)?;
+    let read_dir = fs::read_dir(root)
+        .with_context(|| format!("failed to read directory {}", root.display()))?;
+    collect_dir_entries(root, read_dir, &mut entries)?;
     Ok(entries)
 }
 
-fn collect_entries_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+fn collect_dir_entries(dir: &Path, read_dir: fs::ReadDir, out: &mut Vec<PathBuf>) -> Result<()> {
     crate::check_interrupted()?;
-    let read_dir =
-        fs::read_dir(dir).with_context(|| format!("failed to read directory {}", dir.display()))?;
 
     for entry in read_dir {
         let entry = entry.with_context(|| format!("failed to read entry in {}", dir.display()))?;
@@ -369,21 +374,39 @@ fn collect_entries_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
         out.push(path.clone());
 
         // Follow directory entries but not symlinks (avoid loops).
-        let ft = entry
-            .file_type()
-            .with_context(|| format!("failed to get file type for {}", path.display()))?;
+        let ft = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                return Err(e)
+                    .with_context(|| format!("failed to get file type for {}", path.display()))
+            }
+        };
         if ft.is_dir() {
-            collect_entries_recursive(&path, out)?;
+            match fs::read_dir(&path) {
+                Ok(sub) => collect_dir_entries(&path, sub, out)?,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(e)
+                        .with_context(|| format!("failed to read directory {}", path.display()))
+                }
+            }
         }
     }
     Ok(())
 }
 
 /// Shift ownership of a single file/dir/symlink.
+///
+/// A path that no longer exists is not an error; see [`collect_entries`].
 fn shift_ownership(path: &Path, shift: u32) -> Result<()> {
-    let meta = path
-        .symlink_metadata()
-        .with_context(|| format!("stat {}", path.display()))?;
+    use std::io::ErrorKind::NotFound;
+
+    let meta = match path.symlink_metadata() {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == NotFound => return Ok(()),
+        Err(e) => return Err(e).with_context(|| format!("stat {}", path.display())),
+    };
 
     let uid = meta.uid();
     let gid = meta.gid();
@@ -413,6 +436,9 @@ fn shift_ownership(path: &Path, shift: u32) -> Result<()> {
     let ret = unsafe { libc::lchown(c_path.as_ptr(), new_uid, new_gid) };
     if ret != 0 {
         let err = std::io::Error::last_os_error();
+        if err.kind() == NotFound {
+            return Ok(());
+        }
         bail!("lchown {}: {err}", path.display());
     }
 
@@ -428,6 +454,9 @@ fn shift_ownership(path: &Path, shift: u32) -> Result<()> {
         let ret = unsafe { libc::chmod(c_path.as_ptr(), (mode & 0o7777) as libc::mode_t) };
         if ret != 0 {
             let err = std::io::Error::last_os_error();
+            if err.kind() == NotFound {
+                return Ok(());
+            }
             bail!("chmod {}: {err}", path.display());
         }
     }
@@ -787,6 +816,25 @@ mod tests {
         assert_eq!(stored_range(tmp.path(), &a), None);
         let second = reserve_uid_range_in(tmp.path(), &b, 0, FULL_PARENT, &[]).unwrap();
         assert_eq!(second, first, "released range was not reusable");
+    }
+
+    #[test]
+    fn test_prechown_skips_entries_that_vanished() {
+        let tmp = TempDataDir::new("userns-vanish");
+        let root = tmp.path();
+        fs::create_dir_all(root.join("etc")).unwrap();
+        fs::write(root.join("etc/hosts"), b"x").unwrap();
+
+        // Listed by the walk, gone before it is shifted.
+        shift_ownership(&root.join("tmp/removed-file"), 0x8_0000).unwrap();
+
+        // The walk reports what is still there.
+        let mut entries = collect_entries(root).unwrap();
+        entries.sort();
+        assert_eq!(entries, vec![root.join("etc"), root.join("etc/hosts")]);
+
+        // The root of the walk itself has to exist.
+        assert!(collect_entries(&root.join("missing")).is_err());
     }
 
     #[test]
