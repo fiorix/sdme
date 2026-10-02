@@ -795,12 +795,17 @@ fi
 # those where plain --userns relies on idmapped mounts and reserves nothing.
 echo "=== Test 16: concurrent --userns creates reserve disjoint ranges ==="
 
+# The creates use this suite's own rootfs. Other suites add and remove test
+# files in the shared ubuntu rootfs, and a pre-chown that walks it at that
+# moment fails on the file that vanished.
 USERNS_PAR=6
+USERNS_PAR_FS="vfy-ubuntu"
+ensure_base_fs "$USERNS_PAR_FS" "${DISTRO_IMAGES[ubuntu]}" || true
 par_dir=$(mktemp -d)
 par_pids=()
 for i in $(seq 1 "$USERNS_PAR"); do
     cleanup_container "usrns-par$i"
-    timeout "$TIMEOUT_BOOT" "$SDME" create --name "usrns-par$i" -r ubuntu \
+    timeout "$TIMEOUT_BOOT" "$SDME" create --name "usrns-par$i" -r "$USERNS_PAR_FS" \
         --userns --userns-nested 1 "${VFLAG[@]}" >"$par_dir/$i.log" 2>&1 &
     par_pids+=($!)
 done

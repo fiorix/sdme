@@ -283,8 +283,18 @@ HTMLEOF
         fi
         log "  Using IP $curl_ip for curl"
 
+        # The container gets its link-local address before the host has one on
+        # its end of the veth. Until then the host routes that address out its
+        # default route and the connection hangs, so retry briefly.
         local http_code body
-        http_code=$(timeout 10 curl -s -o /dev/null -w '%{http_code}' "http://${curl_ip}:${APP_PORT}" 2>&1) || true
+        for _i in $(seq 1 10); do
+            http_code=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 2 -m 10 \
+                "http://${curl_ip}:${APP_PORT}" 2>/dev/null) || true
+            if [[ "$http_code" == "200" ]]; then
+                break
+            fi
+            sleep 1
+        done
         if [[ "$http_code" == "200" ]]; then
             record "$distro/curl-port" PASS "HTTP $http_code via $curl_ip"
         else
