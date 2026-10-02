@@ -51,7 +51,8 @@ pub fn resolve_paths() -> Result<UnitPaths> {
 /// `boot_timeout` is the configured boot timeout in seconds, never a
 /// per-start value: the template is shared by every container, so a start
 /// with its own timeout overrides `TimeoutStartSec` in its drop-in instead.
-/// See [`start_timeout_secs`].
+/// `TimeoutStartSec` is the boot timeout plus a margin, so the sdme wait loop
+/// expires before systemd kills the container.
 ///
 /// `systemd_version` is the host systemd major version. `DelegateSubgroup=`
 /// (systemd 256+) is emitted only when supported; on older systemd it would be
