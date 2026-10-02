@@ -627,40 +627,58 @@ fn validate_cpu_weight(s: &str) -> Result<()> {
 /// Write data to a file atomically via a temporary file and rename.
 ///
 /// Creates a sibling temp file, writes all data, flushes, then renames
-/// over the target path. This prevents partial reads on crash or power loss.
+/// over the target path. A reader sees the old content or the new, never a
+/// partial file. The temp name is unique per call, so concurrent writers of
+/// the same path cannot truncate each other's temp file before the rename.
 pub fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
-    let parent = path.parent().unwrap_or(Path::new("."));
-    let tmp_path = parent.join(format!(
-        ".{}.tmp",
-        path.file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default()
-    ));
-    let mut file = fs::File::create(&tmp_path)
-        .with_context(|| format!("failed to create temp file {}", tmp_path.display()))?;
-    file.write_all(data)
-        .with_context(|| format!("failed to write temp file {}", tmp_path.display()))?;
-    file.flush()?;
-    fs::rename(&tmp_path, path).with_context(|| {
-        let _ = fs::remove_file(&tmp_path);
-        format!(
-            "failed to rename {} to {}",
-            tmp_path.display(),
-            path.display()
-        )
-    })?;
-    Ok(())
+    atomic_write_with(path, data, None)
 }
 
 /// Write data to a file atomically with explicit permissions.
 ///
-/// Like [`atomic_write`], but sets the file permissions after rename.
+/// Like [`atomic_write`], with the permissions set on the temp file, so the
+/// target never exists with any other mode.
 pub fn atomic_write_mode(path: &Path, data: &[u8], mode: u32) -> Result<()> {
+    atomic_write_with(path, data, Some(mode))
+}
+
+fn atomic_write_with(path: &Path, data: &[u8], mode: Option<u32>) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    atomic_write(path, data)?;
-    fs::set_permissions(path, fs::Permissions::from_mode(mode))
-        .with_context(|| format!("failed to set permissions on {}", path.display()))?;
-    Ok(())
+    use std::sync::atomic::AtomicU64;
+
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    let parent = path.parent().unwrap_or(Path::new("."));
+    let tmp_path = parent.join(format!(
+        ".{}.tmp-{}-{}",
+        path.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    let written = (|| -> Result<()> {
+        let mut file = fs::File::create(&tmp_path)
+            .with_context(|| format!("failed to create temp file {}", tmp_path.display()))?;
+        file.write_all(data)
+            .with_context(|| format!("failed to write temp file {}", tmp_path.display()))?;
+        file.flush()?;
+        if let Some(mode) = mode {
+            fs::set_permissions(&tmp_path, fs::Permissions::from_mode(mode))
+                .with_context(|| format!("failed to set permissions on {}", tmp_path.display()))?;
+        }
+        fs::rename(&tmp_path, path).with_context(|| {
+            format!(
+                "failed to rename {} to {}",
+                tmp_path.display(),
+                path.display()
+            )
+        })
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&tmp_path);
+    }
+    written
 }
 
 /// Parse a human-readable size string (e.g. "10G", "512M") into bytes.
@@ -771,6 +789,64 @@ pub fn format_timestamp(secs_str: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_atomic_write_mode_sets_mode_and_leaves_no_temp() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = testutil::TempDataDir::new("atomic-mode");
+        let path = tmp.path().join("state");
+        atomic_write_mode(&path, b"one", 0o600).unwrap();
+        atomic_write_mode(&path, b"two", 0o600).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"two");
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let names: Vec<_> = fs::read_dir(tmp.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("state")]);
+    }
+
+    #[test]
+    fn test_atomic_write_concurrent_writers_never_expose_a_partial_file() {
+        let tmp = testutil::TempDataDir::new("atomic-concurrent");
+        let path = tmp.path().join("state");
+        let contents = ["A=1\n".repeat(200), "B=2\n".repeat(300)];
+        atomic_write(&path, contents[0].as_bytes()).unwrap();
+
+        let done = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            let reader = scope.spawn(|| {
+                while !done.load(Ordering::Relaxed) {
+                    let seen = fs::read_to_string(&path).unwrap();
+                    assert!(
+                        contents.contains(&seen),
+                        "partial file of {} bytes",
+                        seen.len()
+                    );
+                }
+            });
+            let writers: Vec<_> = contents
+                .iter()
+                .map(|content| {
+                    let path = &path;
+                    scope.spawn(move || {
+                        for _ in 0..500 {
+                            atomic_write(path, content.as_bytes()).unwrap();
+                        }
+                    })
+                })
+                .collect();
+            for writer in writers {
+                writer.join().unwrap();
+            }
+            done.store(true, Ordering::Relaxed);
+            reader.join().unwrap();
+        });
+    }
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());

@@ -324,7 +324,7 @@ pub(super) fn migrate_legacy_pool_dropins_in(unit_dir: &Path) -> Result<usize> {
         let content = fs::read_to_string(&dropin)
             .with_context(|| format!("failed to read {}", dropin.display()))?;
         if let Some(corrected) = corrected_legacy_pool_dropin(&content) {
-            replace_unit_file(&dropin, &corrected, metadata.permissions().mode())
+            crate::atomic_write_mode(&dropin, corrected.as_bytes(), metadata.permissions().mode())
                 .with_context(|| format!("failed to update {}", dropin.display()))?;
             changed += 1;
         }
@@ -368,43 +368,13 @@ pub(super) fn write_unit_if_changed(
     } else if verbose {
         eprintln!("installing template unit: {}", unit_path.display());
     }
-    replace_unit_file(unit_path, content, 0o644)
+    // Renamed into place, never rewritten: systemd treats an empty unit file
+    // as masked and refuses to start it, so a start that loaded the shared
+    // template between a truncate and a write would fail. systemd ignores the
+    // temp file, which is neither a unit name nor a `.conf`.
+    crate::atomic_write_mode(unit_path, content.as_bytes(), 0o644)
         .with_context(|| format!("failed to write template unit {}", unit_path.display()))?;
     Ok(true)
-}
-
-/// Replace a unit file or drop-in with `content`, never exposing a partial file.
-///
-/// systemd treats an empty unit file as masked and refuses to start it, so a
-/// file rewritten in place can fail an unrelated start that loads the unit
-/// between the truncate and the write. The content goes to a temp file that is
-/// renamed over the target. The temp name is unique per writer because the
-/// template is shared: sdme processes may install it concurrently, and with a
-/// common temp name one would truncate what another is about to rename into
-/// place. systemd ignores the temp file, which is neither a unit name nor a
-/// `.conf`.
-fn replace_unit_file(path: &Path, content: &str, mode: u32) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-
-    let file_name = path
-        .file_name()
-        .with_context(|| format!("{} has no file name", path.display()))?
-        .to_string_lossy();
-    let tmp = path.with_file_name(format!(
-        ".{file_name}.tmp-{}-{}",
-        std::process::id(),
-        SEQ.fetch_add(1, Ordering::Relaxed)
-    ));
-    let written = fs::write(&tmp, content)
-        .and_then(|()| fs::set_permissions(&tmp, fs::Permissions::from_mode(mode)))
-        .and_then(|()| fs::rename(&tmp, path));
-    if written.is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
-    written.with_context(|| format!("failed to replace {}", path.display()))
 }
 
 /// Install or update the shared template unit.
