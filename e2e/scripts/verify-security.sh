@@ -795,9 +795,7 @@ fi
 # those where plain --userns relies on idmapped mounts and reserves nothing.
 echo "=== Test 16: concurrent --userns creates reserve disjoint ranges ==="
 
-# The creates use this suite's own rootfs. Other suites add and remove test
-# files in the shared ubuntu rootfs, and a pre-chown that walks it at that
-# moment fails on the file that vanished.
+# The creates use this suite's own rootfs, which no other suite touches.
 USERNS_PAR=6
 USERNS_PAR_FS="vfy-ubuntu"
 ensure_base_fs "$USERNS_PAR_FS" "${DISTRO_IMAGES[ubuntu]}" || true

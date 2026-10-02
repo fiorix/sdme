@@ -133,10 +133,6 @@ therefore end in failed state with `Result=timeout` after such a shutdown, and
 cosmetic: leaked nspawn runtime state is now reclaimed on the next start, so a
 hard kill no longer blocks a later container of the same name.
 
-### Suites write into the shared ubuntu rootfs
-
-`verify-export` and `verify-cp` add and remove test files in the shared `ubuntu` rootfs while other suites create containers from it. On a host without idmapped overlayfs, a `--userns` or `--hardened` create walks that rootfs for the pre-chown, and fails with `pre-chown failed ... stat` when a file vanishes mid-walk. `verify-security` runs its concurrent creates on its own rootfs for that reason. `verify-pods` and the `--hardened` checks in `verify-security` still create from `ubuntu` and can hit it.
-
 ### Docker-in-container needs working veth DHCP
 
 The docker/registry tutorial test needs outbound internet inside a `--network-veth` container, which depends on the host's nspawn DHCP/NAT (systemd-networkd's `80-container-ve.network`). Hosts where the container never gets a lease (no default route on `host0`) skip the network-dependent steps (`docker/install` onward) instead of failing.

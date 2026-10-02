@@ -22,6 +22,7 @@ PREFIX="vfy-cp"
 TMPDIR=$(mktemp -d /tmp/${PREFIX}-XXXXXX)
 CTR_STOPPED="${PREFIX}-stopped"
 CTR_RUNNING="${PREFIX}-running"
+CP_FS="${PREFIX}-fs"
 BOOT_TIMEOUT=$(scale_timeout 60)
 
 cleanup() {
@@ -40,15 +41,23 @@ ensure_default_base_fs
 cleanup_prefix "${PREFIX}-"
 mkdir -p "$TMPDIR"
 
+# The rootfs tests copy into a private rootfs: other suites have containers on
+# the shared ubuntu rootfs, and a rootfs must not change under a mounted
+# overlay.
+if ! $SDME fs import /var/lib/sdme/fs/ubuntu --name "$CP_FS" -f >/dev/null 2>&1; then
+    echo "error: failed to import the private rootfs $CP_FS" >&2
+    exit 1
+fi
+
 # ---------------------------------------------------------------------------
 # Test 1: host → rootfs
 # ---------------------------------------------------------------------------
 echo "=== Test 1: host → rootfs ==="
 
 echo "cp-test-data" > "$TMPDIR/test-file"
-if $SDME cp "$TMPDIR/test-file" "fs:ubuntu:/etc/cp-test-marker" $VFLAG; then
+if $SDME cp "$TMPDIR/test-file" "fs:$CP_FS:/etc/cp-test-marker" $VFLAG; then
     # Verify file exists in the rootfs.
-    rootfs_file="/var/lib/sdme/fs/ubuntu/etc/cp-test-marker"
+    rootfs_file="/var/lib/sdme/fs/$CP_FS/etc/cp-test-marker"
     if [[ -f "$rootfs_file" ]] && grep -q "cp-test-data" "$rootfs_file"; then
         ok "host → rootfs"
     else
@@ -65,7 +74,7 @@ fi
 # ---------------------------------------------------------------------------
 echo "=== Test 2: rootfs → host ==="
 
-if $SDME cp "fs:ubuntu:/etc/hostname" "$TMPDIR/hostname-rootfs" $VFLAG; then
+if $SDME cp "fs:$CP_FS:/etc/hostname" "$TMPDIR/hostname-rootfs" $VFLAG; then
     if [[ -f "$TMPDIR/hostname-rootfs" ]] && [[ -s "$TMPDIR/hostname-rootfs" ]]; then
         ok "rootfs → host"
     else
@@ -289,8 +298,8 @@ if [[ "$src_nlink" -ne 2 ]]; then
     fail "hard link: source nlink=$src_nlink, expected 2"
 else
     # Copy into rootfs (avoid /tmp, it's a shadowed dir).
-    if $SDME cp "$hl_src/" "fs:ubuntu:/var/lib/hl-test/" $VFLAG 2>/dev/null; then
-        rootfs_dir="/var/lib/sdme/fs/ubuntu/var/lib/hl-test"
+    if $SDME cp "$hl_src/" "fs:$CP_FS:/var/lib/hl-test/" $VFLAG 2>/dev/null; then
+        rootfs_dir="/var/lib/sdme/fs/$CP_FS/var/lib/hl-test"
         if [[ -f "$rootfs_dir/original" ]] && [[ -f "$rootfs_dir/link" ]]; then
             ino_a=$(stat -c %i "$rootfs_dir/original")
             ino_b=$(stat -c %i "$rootfs_dir/link")

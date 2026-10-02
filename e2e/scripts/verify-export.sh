@@ -15,6 +15,7 @@ set -euo pipefail
 source "$(dirname "$0")/lib.sh"
 
 TMPDIR=$(mktemp -d /tmp/vfy-export-XXXXXX)
+EXPORT_FS="vfy-exp-fs"
 
 # Check if a tar archive contains a given path.
 # Runs in a subshell with pipefail disabled to avoid SIGPIPE failures.
@@ -26,6 +27,7 @@ tar_contains() {
 }
 
 cleanup() {
+    $SDME fs rm "$EXPORT_FS" 2>/dev/null || true
     # Unmount any leftover loop mounts under TMPDIR.
     mount | grep "$TMPDIR" | awk '{print $3}' | while read -r mp; do
         umount "$mp" 2>/dev/null || true
@@ -470,15 +472,23 @@ fi
 # ---------------------------------------------------------------------------
 echo "=== Test 20: tar hard links ==="
 
-# Write a file into the rootfs upper layer and hard link it.
-upper="/var/lib/sdme/fs/ubuntu"
+# Tests 20 to 22 add files to a rootfs and export it. They use a private copy:
+# other suites have containers on the shared ubuntu rootfs, and a rootfs must
+# not change under a mounted overlay.
+$SDME fs rm "$EXPORT_FS" 2>/dev/null || true
+if ! $SDME fs import /var/lib/sdme/fs/ubuntu --name "$EXPORT_FS" -f >/dev/null 2>&1; then
+    fail "could not import a private rootfs copy for the hard link and xattr tests"
+fi
+
+# Write a file into the rootfs and hard link it.
+upper="/var/lib/sdme/fs/$EXPORT_FS"
 hl_file="$upper/tmp/hl-export-test"
 hl_link="$upper/tmp/hl-export-link"
 echo "hardlink-export" > "$hl_file"
 ln "$hl_file" "$hl_link"
 
 targz="$TMPDIR/hl-out.tar.gz"
-if $SDME fs export fs:ubuntu "$targz" $VFLAG; then
+if $SDME fs export "fs:$EXPORT_FS" "$targz" $VFLAG; then
     # Check tar listing for "link to" which indicates a hard link entry.
     if ( set +o pipefail; tar tzvf "$targz" 2>/dev/null | grep "hl-export-link" | grep -q "link to" ); then
         ok "tar hard links"
@@ -506,7 +516,7 @@ if [[ "$HAS_XATTR_TOOLS" == "true" ]]; then
     echo "xattr-data" > "$xattr_file"
     if setfattr -n user.test -v hello "$xattr_file" 2>/dev/null; then
         targz="$TMPDIR/xattr-out.tar.gz"
-        if $SDME fs export fs:ubuntu "$targz" $VFLAG; then
+        if $SDME fs export "fs:$EXPORT_FS" "$targz" $VFLAG; then
             extract_dir="$TMPDIR/xattr-extract"
             mkdir -p "$extract_dir"
             tar xzf "$targz" --xattrs -C "$extract_dir"
@@ -545,7 +555,7 @@ echo "hardlink-dir" > "$hl_file"
 ln "$hl_file" "$hl_link"
 
 outdir="$TMPDIR/hl-dir-export"
-if $SDME fs export fs:ubuntu "$outdir" $VFLAG; then
+if $SDME fs export "fs:$EXPORT_FS" "$outdir" $VFLAG; then
     if [[ -f "$outdir/tmp/hl-dir-test" ]] && [[ -f "$outdir/tmp/hl-dir-link" ]]; then
         ino_a=$(stat -c %i "$outdir/tmp/hl-dir-test")
         ino_b=$(stat -c %i "$outdir/tmp/hl-dir-link")
@@ -561,6 +571,7 @@ else
     fail "dir export hard links: export failed"
 fi
 rm -rf "$outdir" "$hl_file" "$hl_link"
+$SDME fs rm "$EXPORT_FS" 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
 # Summary
