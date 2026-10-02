@@ -3306,7 +3306,7 @@ fn run() -> Result<()> {
                         cfg.stop_timeout_terminate,
                         cli.verbose,
                     ) {
-                        eprintln!("error: {name}: {e}");
+                        eprintln!("error: {name}: {e:#}");
                         failed = true;
                     } else {
                         println!("{name}");
@@ -3730,7 +3730,7 @@ fn run() -> Result<()> {
                     eprintln!("removing '{name}'");
                     if let Err(e) = rootfs::remove(&cfg.datadir, name, cfg.auto_fs_gc, cli.verbose)
                     {
-                        eprintln!("error: {name}: {e}");
+                        eprintln!("error: {name}: {e:#}");
                         failed = true;
                     } else {
                         println!("{name}");

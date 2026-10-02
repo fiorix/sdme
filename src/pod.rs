@@ -634,7 +634,7 @@ pub fn remove(
                 eprintln!("force-removing container '{ct}' from pod '{name}'");
             }
             if let Err(e) = crate::containers::remove(datadir, ct, stop_timeout, verbose) {
-                eprintln!("warning: failed to remove container '{ct}': {e}");
+                eprintln!("warning: failed to remove container '{ct}': {e:#}");
             }
         }
     }
