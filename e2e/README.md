@@ -216,6 +216,28 @@ Totals                       712     0    12  25 suites
 
 ## Log
 
+### userns idmapped lower layer (2026-10-04, aarch64)
+
+Branch `userns-idmap-lower` (unreleased, sdme 0.20.1 base). Standalone suite runs on Linux 7.0.0-34-generic (aarch64, lima-default), systemd 259, util-linux 2.41.3, ext4 datadir. Not a full `run-parallel.sh` gate: the suites that exercise the changed mount and ownership paths were run serially against the release build.
+
+```
+Suite                       Pass  Fail  Skip  Result
+--------------------------  ----  ----  ----  ------
+verify-security               51     0     0  PASS
+verify-pods                    9     0     0  PASS
+verify-nested-userns          10     0     0  PASS
+verify-cp                     21     0     0  PASS
+verify-export                 21     1     1  FAIL
+```
+
+- `verify-security` has 51 checks on aarch64, 10 of them from the new Test 17. Test 17 asserts that a `--userns` create selects the idmapped lower layer by default and leaves a 32K upper layer (no copy-up); that `sdme cp` into the stopped container stores the directory and file it creates with the shifted owner; that the container boots with lower files and the copied file owned 0:0 inside; that the bind and its mount point are gone once the overlay is mounted; that a file created inside is stored with the shifted owner; that the rootfs ownership on disk is unchanged; and that nothing is left under `/run/sdme/idmap` after `rm`. It then sets `userns_idmap_lower = false` and checks that the pre-chown method still creates and boots a container. Test 14 (six distros on aarch64: debian, ubuntu, fedora, centos, almalinux, opensuse) runs on the idmapped lower layer and passes both the boot and the setuid-bit check on each.
+- The `verify-export` failure is `tar.bz2 export: missing etc/os-release in archive`. The host has no `bzip2`, which the test's own `tar -j` listing needs; the export itself was written (57.1M). The suite has no userns case, so the failure is unrelated to this change. The skip is `tar xattrs` (no `setfattr` on the host). `verify-export` was run on the build before the review fixes and not repeated; the other four were run on the final build.
+- Measured on the ubuntu rootfs (228M): `create --userns` took 0.01s and left a 32K upper layer with the idmapped lower layer, against 1.93s and a 235M upper layer with the pre-chown. This is the expected effect: the pre-chown copies every file up, the idmapped bind copies none.
+- Interrupt handling, checked by hand: 80 `create --userns` runs were each sent one SIGINT at a random point in the first 100ms. 43 completed with `USERNS_IDMAP_LOWER=yes` and a shifted upper layer, 37 were removed again, none was left half set up, and no mount or directory remained under `/run/sdme/idmap`. A second SIGINT kills sdme outright (the handler restores the default disposition); a create killed that way can leave a state file without a container directory, which `sdme rm -f` refuses to remove. That is not specific to this change.
+- Also checked by hand, not in a suite: `--hardened`; `--userns-nested 2`; a start through `systemctl start` with `/run/sdme/idmap` absent; a start whose overlay mount fails after the bind (the bind is gone afterwards, removed by `ExecStopPost`); a read-only bind of the rootfs planted under `/run/sdme/idmap/<name>` before `sdme start` and before `sdme rm -f` (released in both cases, rootfs entry count unchanged, 8075 before and after).
+- Host-rootfs containers (`create --userns` without `-r`) boot on the idmapped lower layer; `/boot`, a per-submount overlay, appears as owned by `nobody`. With the pre-chown method the same create fails on this host with `failed to read directory .../merged/var/lib/sdme/containers/<name>/work: Too many levels of symbolic links`, and the released 0.20.1 binary fails the same way, so that is an existing defect of the pre-chown walk and not a regression.
+- Not covered: x86_64, a host with util-linux older than 2.39 or a filesystem without idmapped mount support (the automatic fallback was only exercised through the config switch), kernels older than 7.0, and `sdme fs export` of a stopped container with an idmapped lower layer.
+
 ### 0.20.1 -- closing the 0.20.0 gaps (2026-10-02, x86_64)
 
 This release closes the known gaps recorded for 0.20.0 and what turned up

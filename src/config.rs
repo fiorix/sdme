@@ -103,6 +103,11 @@ pub struct Config {
     #[serde(default = "default_userns_nested_ranges")]
     pub userns_nested_ranges: u32,
 
+    /// Give new overlay `--userns` containers an idmapped lower layer
+    /// instead of pre-shifting file ownership into the upper layer.
+    #[serde(default = "default_userns_idmap_lower")]
+    pub userns_idmap_lower: bool,
+
     /// Default base rootfs for OCI application images.
     #[serde(default)]
     pub default_base_fs: String,
@@ -254,6 +259,10 @@ fn default_userns_nested_ranges() -> u32 {
     0
 }
 
+fn default_userns_idmap_lower() -> bool {
+    true
+}
+
 fn default_kube_registry() -> String {
     "docker.io".to_string()
 }
@@ -348,6 +357,7 @@ impl Default for Config {
             host_rootfs_opaque_dirs: default_host_rootfs_opaque_dirs(),
             hardened_drop_caps: default_hardened_drop_caps(),
             userns_nested_ranges: default_userns_nested_ranges(),
+            userns_idmap_lower: default_userns_idmap_lower(),
             default_base_fs: String::new(),
             default_output_format: String::new(),
             default_kube_registry: default_kube_registry(),
@@ -411,6 +421,8 @@ impl Config {
         println!("host_rootfs_opaque_dirs = {}", self.host_rootfs_opaque_dirs);
         println!("hardened_drop_caps = {}", self.hardened_drop_caps);
         println!("userns_nested_ranges = {}", self.userns_nested_ranges);
+        let userns_idmap_lower = if self.userns_idmap_lower { "yes" } else { "no" };
+        println!("userns_idmap_lower = {userns_idmap_lower}");
         println!("default_base_fs = {}", self.default_base_fs);
         println!("default_output_format = {}", self.default_output_format);
         println!("default_kube_registry = {}", self.default_kube_registry);

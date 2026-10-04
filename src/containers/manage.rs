@@ -254,12 +254,33 @@ fn probe_liveness(name: &str) -> Liveness {
 /// licence to delete. Callers report failures as warnings: a start or a
 /// removal is still valid without this cleanup.
 pub fn reclaim_nspawn_runtime(name: &str, verbose: bool) -> Result<()> {
+    reclaim_idmap_bind_in(
+        Path::new(crate::system_check::IDMAP_RUNTIME_DIR),
+        name,
+        &probe_liveness,
+    );
     reclaim_nspawn_runtime_in(
         Path::new(NSPAWN_RUNTIME_DIR),
         name,
         verbose,
         &probe_liveness,
     )
+}
+
+/// Release a container's idmapped lower layer bind and its mount point.
+///
+/// The unit drops the bind as soon as the overlay is mounted, so one that is
+/// still there belongs to a start that was killed in between. Left alone
+/// unless the container is confirmed stopped: a unit that is starting may be
+/// about to mount its overlay on it.
+fn reclaim_idmap_bind_in(runtime_dir: &Path, name: &str, liveness: &dyn Fn(&str) -> Liveness) {
+    if crate::validate_name(name).is_err() {
+        return;
+    }
+    let dir = runtime_dir.join(name);
+    if dir.exists() && liveness(name) == Liveness::Stopped {
+        crate::system_check::release_idmap_bind(&dir);
+    }
 }
 
 /// Runtime reclamation with the runtime root and the liveness probe injected,
@@ -787,6 +808,44 @@ mod tests {
         reclaim_nspawn_runtime_in(&root, "livebox", false, &probe(Liveness::Running, &calls))
             .unwrap();
         assert!(live.exists());
+    }
+
+    #[test]
+    fn test_reclaim_idmap_bind_removes_mount_point_of_stopped_container() {
+        let tmp = TempDataDir::new("reclaim-idmap-stopped");
+        let root = tmp.path().join("idmap");
+        let dir = root.join("deadbox");
+        fs::create_dir_all(&dir).unwrap();
+        let calls = RefCell::new(Vec::new());
+        reclaim_idmap_bind_in(&root, "deadbox", &probe(Liveness::Stopped, &calls));
+        assert!(!dir.exists());
+        assert!(root.exists());
+    }
+
+    #[test]
+    fn test_reclaim_idmap_bind_is_never_recursive() {
+        // Stands in for a bind that could not be released: the mount point
+        // has content, and nothing below it may be deleted.
+        let tmp = TempDataDir::new("reclaim-idmap-nonempty");
+        let root = tmp.path().join("idmap");
+        let file = root.join("deadbox").join("etc").join("passwd");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, "root:x:0:0\n").unwrap();
+        let calls = RefCell::new(Vec::new());
+        reclaim_idmap_bind_in(&root, "deadbox", &probe(Liveness::Stopped, &calls));
+        assert!(file.exists());
+    }
+
+    #[test]
+    fn test_reclaim_idmap_bind_keeps_mount_point_unless_stopped() {
+        let tmp = TempDataDir::new("reclaim-idmap-live");
+        let root = tmp.path().join("idmap");
+        let dir = root.join("livebox");
+        fs::create_dir_all(&dir).unwrap();
+        let calls = RefCell::new(Vec::new());
+        reclaim_idmap_bind_in(&root, "livebox", &probe(Liveness::Running, &calls));
+        reclaim_idmap_bind_in(&root, "livebox", &probe(Liveness::Unknown, &calls));
+        assert!(dir.exists());
     }
 
     #[test]

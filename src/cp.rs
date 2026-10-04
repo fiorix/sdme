@@ -137,6 +137,10 @@ struct ResolvedDest {
     protect_symlinks: bool,
     /// True when the destination is a running container.
     is_running: bool,
+    /// Container name and UID shift when the destination is the upper layer
+    /// of a stopped container with an idmapped lower layer. What the copy
+    /// creates there is owned by host IDs and is shifted afterwards.
+    shift_upper: Option<(String, u64)>,
     _rootfs_lock: Option<lock::ResourceLock>,
     _lock: Option<lock::ResourceLock>,
 }
@@ -177,14 +181,24 @@ pub fn cp(datadir: &Path, src: &CpEndpoint, dst: &CpEndpoint, opts: &CpOptions) 
     }
 
     // Execute the copy.
-    execute_copy(
+    let copied = execute_copy(
         &resolved_src.path,
         &resolved_dst.write_dir,
         &resolved_dst.check_dir,
         resolved_dst.protect_symlinks,
         dst,
         opts.verbose,
-    )
+    );
+
+    // Also after a failed copy: the entries it did create would otherwise
+    // stay owned by host root, and a parent directory created in the upper
+    // layer would hide the lower layer's ownership of that directory.
+    let Some((name, shift)) = &resolved_dst.shift_upper else {
+        return copied;
+    };
+    let shifted = crate::userns::shift_upper(datadir, name, *shift)
+        .with_context(|| format!("failed to shift ownership in the upper layer of '{name}'"));
+    copied.and(shifted)
 }
 
 fn resolve_source(datadir: &Path, endpoint: &CpEndpoint, verbose: bool) -> Result<ResolvedSource> {
@@ -358,6 +372,7 @@ fn resolve_destination(
             check_dir: path.clone(),
             protect_symlinks: false,
             is_running: false,
+            shift_upper: None,
             _rootfs_lock: None,
             _lock: None,
         }),
@@ -376,6 +391,7 @@ fn resolve_destination(
                 // creation or writes onto the host, so guard the write.
                 protect_symlinks: true,
                 is_running: false,
+                shift_upper: None,
                 _rootfs_lock: None,
                 _lock: Some(lock),
             })
@@ -452,6 +468,7 @@ fn resolve_destination(
                     check_dir: base,
                     protect_symlinks: true,
                     is_running: true,
+                    shift_upper: None,
                     _rootfs_lock: None,
                     _lock: Some(lock),
                 })
@@ -496,6 +513,10 @@ fn resolve_destination(
 
                 let dest =
                     containers::open_write_dest(datadir, &name, backend, &rootfs_dir, verbose)?;
+                let security = crate::SecurityConfig::from_state(&state);
+                let idmap_shift = security
+                    .userns_shift
+                    .filter(|_| security.lower_idmap(backend));
                 if verbose {
                     eprintln!(
                         "destination: stopped container '{name}', writing to {}",
@@ -511,6 +532,7 @@ fn resolve_destination(
                     // populated (see above).
                     protect_symlinks: dest.protect_symlinks || backend == storage::Backend::Overlay,
                     is_running: false,
+                    shift_upper: idmap_shift.map(|shift| (name.clone(), shift)),
                     _rootfs_lock: rootfs_lock,
                     _lock: Some(lock),
                 })

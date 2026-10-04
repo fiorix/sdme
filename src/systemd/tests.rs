@@ -20,6 +20,8 @@ fn test_paths() -> UnitPaths {
         mount: PathBuf::from("/usr/bin/mount"),
         umount: PathBuf::from("/usr/bin/umount"),
         nsenter: PathBuf::from("/usr/bin/nsenter"),
+        install: PathBuf::from("/usr/bin/install"),
+        rmdir: PathBuf::from("/usr/bin/rmdir"),
     }
 }
 
@@ -134,6 +136,7 @@ fn test_nspawn_dropin_host_rootfs() {
         stop_timeout: None,
         submounts: &[],
         pod_netns: None,
+        lower_idmap: None,
     });
     assert!(content.contains("[Service]"));
     assert!(content.contains("ExecStart=\n"));
@@ -178,6 +181,7 @@ fn test_nspawn_dropin_with_userns() {
         stop_timeout: None,
         submounts: &[],
         pod_netns: None,
+        lower_idmap: None,
     });
     assert!(content.contains("--private-users=pick"));
     assert!(content.contains("--private-users-ownership=auto"));
@@ -206,6 +210,7 @@ fn test_nspawn_dropin_with_pod_netns() {
         stop_timeout: None,
         submounts: &[],
         pod_netns: Some("/run/sdme/pods/mypod/ns/net"),
+        lower_idmap: None,
     });
     // nsenter should prefix the nspawn command.
     assert!(content.contains(
@@ -236,10 +241,92 @@ fn test_nspawn_dropin_without_pod_netns() {
         stop_timeout: None,
         submounts: &[],
         pod_netns: None,
+        lower_idmap: None,
     });
     // Without a pod netns, nspawn is launched directly (no nsenter).
     assert!(!content.contains("nsenter"));
     assert!(content.contains("ExecStart=/usr/bin/systemd-nspawn"));
+}
+
+#[test]
+fn test_nspawn_dropin_idmapped_lower() {
+    let paths = test_paths();
+    let args = vec!["--private-users=524288:65536".to_string()];
+    let content = nspawn_dropin(&DropinConfig {
+        backend: crate::storage::Backend::Overlay,
+        datadir: "/var/lib/sdme",
+        name: "ubox",
+        root_dir: "/var/lib/sdme/containers/ubox/merged",
+        pool_mount: None,
+        lowerdir: "/var/lib/sdme/fs/ubuntu",
+        paths: &paths,
+        nspawn_args: &args,
+        service_directives: &[],
+        boot_timeout: None,
+        stop_timeout: None,
+        submounts: &[],
+        pod_netns: None,
+        lower_idmap: Some((524288, 65536)),
+    });
+
+    let pre: Vec<&str> = dropin_assignments(&content, "ExecStartPre")
+        .into_iter()
+        .map(|(_, value)| value)
+        .collect();
+    assert_eq!(pre.len(), 6, "{content}");
+    // A stale bind is cleared first; it may not exist.
+    assert_eq!(
+        pre[0],
+        "-/usr/bin/umount --recursive --quiet /run/sdme/idmap/ubox"
+    );
+    // Root-only at both levels, outside the datadir.
+    assert_eq!(
+        pre[1],
+        "/usr/bin/install -d -m 0700 /run/sdme/idmap /run/sdme/idmap/ubox"
+    );
+    // Read-only, private, and mapped in the direction of the container's
+    // uid_map: on-disk ID 0 appears as the shift.
+    assert_eq!(
+        pre[2],
+        "/usr/bin/mount --bind -o ro,private,X-mount.idmap=b:0:524288:65536 \
+         /var/lib/sdme/fs/ubuntu /run/sdme/idmap/ubox"
+    );
+    // The overlay sits on the bind, never on the rootfs directly.
+    assert!(pre[3].starts_with("/usr/bin/mount -t overlay overlay"));
+    assert!(content.contains("lowerdir=/run/sdme/idmap/ubox,upperdir="));
+    assert!(!content.contains("lowerdir=/var/lib/sdme/fs/ubuntu"));
+    // The bind is gone before nspawn runs; a failure to drop it fails the start.
+    assert_eq!(pre[4], "/usr/bin/umount --recursive /run/sdme/idmap/ubox");
+    assert_eq!(pre[5], "-/usr/bin/rmdir /run/sdme/idmap/ubox");
+
+    // ExecStopPost also runs after a failed start.
+    assert!(
+        content.contains("ExecStopPost=-/usr/bin/umount --recursive --quiet /run/sdme/idmap/ubox")
+    );
+}
+
+#[test]
+fn test_nspawn_dropin_without_idmapped_lower() {
+    let paths = test_paths();
+    let content = nspawn_dropin(&DropinConfig {
+        backend: crate::storage::Backend::Overlay,
+        datadir: "/var/lib/sdme",
+        name: "ubox",
+        root_dir: "/var/lib/sdme/containers/ubox/merged",
+        pool_mount: None,
+        lowerdir: "/var/lib/sdme/fs/ubuntu",
+        paths: &paths,
+        nspawn_args: &[],
+        service_directives: &[],
+        boot_timeout: None,
+        stop_timeout: None,
+        submounts: &[],
+        pod_netns: None,
+        lower_idmap: None,
+    });
+    assert!(content.contains("lowerdir=/var/lib/sdme/fs/ubuntu,upperdir="));
+    assert!(!content.contains("/run/sdme/idmap"));
+    assert!(!content.contains("X-mount.idmap"));
 }
 
 #[test]
@@ -260,6 +347,7 @@ fn test_nspawn_dropin_explicit_rootfs() {
         stop_timeout: None,
         submounts: &[],
         pod_netns: None,
+        lower_idmap: None,
     });
     assert!(content
         .contains("lowerdir=/var/lib/sdme/fs/ubuntu,upperdir=/var/lib/sdme/containers/ubox/upper"));
@@ -288,6 +376,7 @@ fn test_nspawn_dropin_with_binds_and_envs() {
         stop_timeout: None,
         submounts: &[],
         pod_netns: None,
+        lower_idmap: None,
     });
     assert!(content.contains("    --bind=/data:/data \\\n"));
     assert!(content.contains("    --bind-ro=/logs:/logs \\\n"));
@@ -315,6 +404,7 @@ fn test_nspawn_dropin_escapes_spaces() {
         stop_timeout: None,
         submounts: &[],
         pod_netns: None,
+        lower_idmap: None,
     });
     assert!(content.contains("\"--setenv=MSG=hello world\""));
 }
@@ -342,6 +432,7 @@ fn test_nspawn_dropin_btrfs() {
         stop_timeout: None,
         submounts: &[],
         pod_netns: None,
+        lower_idmap: None,
     });
     // btrfs uses no overlay root mount and no ExecStartPre/ExecStopPost.
     assert!(!content.contains("-t overlay"));
@@ -382,6 +473,7 @@ fn test_nspawn_dropin_btrfs_custom_datadir() {
         stop_timeout: None,
         submounts: &[],
         pod_netns: None,
+        lower_idmap: None,
     });
     assert_eq!(
         dropin_assignments(&content, "RequiresMountsFor"),
@@ -408,6 +500,7 @@ fn test_nspawn_dropin_btrfs_native() {
         stop_timeout: None,
         submounts: &[],
         pod_netns: None,
+        lower_idmap: None,
     });
     assert!(!content.contains("[Unit]"));
     assert!(dropin_assignments(&content, "RequiresMountsFor").is_empty());
@@ -478,6 +571,7 @@ fn test_nspawn_dropin_boot_timeout_override() {
             stop_timeout: None,
             submounts: &[],
             pod_netns: None,
+            lower_idmap: None,
         })
     };
     // No override: the template's TimeoutStartSec applies.
@@ -516,6 +610,7 @@ fn test_unit_stop_timeout() {
             stop_timeout,
             submounts: &[],
             pod_netns: None,
+            lower_idmap: None,
         })
     };
     assert!(dropin_assignments(&dropin(None), "TimeoutStopSec").is_empty());
@@ -689,6 +784,7 @@ fn test_nspawn_dropin_with_security() {
         stop_timeout: None,
         submounts: &[],
         pod_netns: None,
+        lower_idmap: None,
     });
     assert!(content.contains("--drop-capability=CAP_SYS_PTRACE"));
     assert!(content.contains("--drop-capability=CAP_NET_RAW"));
@@ -719,6 +815,7 @@ fn test_nspawn_dropin_with_apparmor() {
         stop_timeout: None,
         submounts: &[],
         pod_netns: None,
+        lower_idmap: None,
     });
     // AppArmor directive should appear in the [Service] section.
     assert!(content.contains("AppArmorProfile=sdme-default"));
@@ -754,6 +851,7 @@ fn test_nspawn_dropin_with_submounts() {
         stop_timeout: None,
         submounts: &submounts,
         pod_netns: None,
+        lower_idmap: None,
     });
 
     // Root overlay is still present.

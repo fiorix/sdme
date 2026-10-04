@@ -24,6 +24,10 @@ pub struct UnitPaths {
     pub umount: PathBuf,
     /// Path to `nsenter` (used when a pod provides the network namespace).
     pub nsenter: PathBuf,
+    /// Path to `install` (creates the idmapped lower layer mount point).
+    pub install: PathBuf,
+    /// Path to `rmdir` (removes the idmapped lower layer mount point).
+    pub rmdir: PathBuf,
 }
 
 /// Resolve the external program paths needed for the template unit.
@@ -34,11 +38,15 @@ pub fn resolve_paths() -> Result<UnitPaths> {
     let mount = find_program("mount").context("mount not found")?;
     let umount = find_program("umount").context("umount not found")?;
     let nsenter = find_program("nsenter").context("nsenter not found; install util-linux")?;
+    let install = find_program("install").context("install not found")?;
+    let rmdir = find_program("rmdir").context("rmdir not found")?;
     Ok(UnitPaths {
         nspawn,
         mount,
         umount,
         nsenter,
+        install,
+        rmdir,
     })
 }
 
@@ -183,6 +191,10 @@ pub struct DropinConfig<'a> {
     /// `nsenter --net={path} --` so the userns is created after
     /// entering the netns (avoids the cross-userns setns restriction).
     pub pod_netns: Option<&'a str>,
+    /// `(shift, range)` of the user namespace when the root overlay is built
+    /// on an idmapped bind of `lowerdir`. Both are relative to the user
+    /// namespace the unit runs in. `None` mounts `lowerdir` directly.
+    pub lower_idmap: Option<(u64, u64)>,
 }
 
 /// Generate the per-container nspawn drop-in content.
@@ -219,15 +231,55 @@ pub fn nspawn_dropin(cfg: &DropinConfig<'_>) -> String {
     // Backend-specific root setup. Overlay mounts an overlayfs onto `merged`
     // (plus per-submount overlays for host-rootfs containers). btrfs needs no
     // root mount because the subvolume is a real directory.
+    let idmap_root = crate::system_check::IDMAP_RUNTIME_DIR;
+    let idmap_dir = format!("{idmap_root}/{name}");
     match cfg.backend {
         Backend::Overlay => {
+            // With an idmapped lower layer the overlay sits on a read-only
+            // bind that maps the layer into the container's UID range. The
+            // overlay keeps its own reference to the bind, so the bind is
+            // dropped as soon as the overlay is mounted.
+            let root_lower = match cfg.lower_idmap {
+                Some((shift, range)) => {
+                    let install = cfg.paths.install.display();
+                    let opts = crate::system_check::idmap_bind_options(shift, range);
+                    // A bind left by a start that was killed would be
+                    // stacked upon, and the stale one would outlive this run.
+                    writeln!(
+                        out,
+                        "ExecStartPre=-{umount} --recursive --quiet {idmap_dir}"
+                    )
+                    .unwrap();
+                    // 0700 on both levels: while mounted, the bind is a path
+                    // to a rootfs that the datadir otherwise keeps root-only.
+                    writeln!(
+                        out,
+                        "ExecStartPre={install} -d -m 0700 {idmap_root} {idmap_dir}"
+                    )
+                    .unwrap();
+                    writeln!(
+                        out,
+                        "ExecStartPre={mount} --bind -o {opts} {lowerdir} {idmap_dir}"
+                    )
+                    .unwrap();
+                    idmap_dir.as_str()
+                }
+                None => lowerdir,
+            };
             writeln!(out, "ExecStartPre={mount} -t overlay overlay \\").unwrap();
             writeln!(
                 out,
-                "    -o lowerdir={lowerdir},upperdir={datadir}/containers/{name}/upper,workdir={datadir}/containers/{name}/work \\"
+                "    -o lowerdir={root_lower},upperdir={datadir}/containers/{name}/upper,workdir={datadir}/containers/{name}/work \\"
             )
             .unwrap();
             writeln!(out, "    {datadir}/containers/{name}/merged").unwrap();
+            if cfg.lower_idmap.is_some() {
+                // Recursive: a mount made elsewhere on the host in the instant
+                // before the bind became private would have propagated into it.
+                writeln!(out, "ExecStartPre={umount} --recursive {idmap_dir}").unwrap();
+                let rmdir = cfg.paths.rmdir.display();
+                writeln!(out, "ExecStartPre=-{rmdir} {idmap_dir}").unwrap();
+            }
 
             // Per-submount overlayfs layers (best-effort, =-).
             for rel in cfg.submounts {
@@ -281,6 +333,15 @@ pub fn nspawn_dropin(cfg: &DropinConfig<'_>) -> String {
             "ExecStopPost=-{umount} {datadir}/containers/{name}/merged"
         )
         .unwrap();
+        // A start that failed between the bind and its unmount leaves the
+        // bind behind; ExecStopPost also runs after a failed start.
+        if cfg.lower_idmap.is_some() {
+            writeln!(
+                out,
+                "ExecStopPost=-{umount} --recursive --quiet {idmap_dir}"
+            )
+            .unwrap();
+        }
     }
     out
 }
@@ -646,6 +707,21 @@ pub fn write_nspawn_dropin(
         }
     };
 
+    let lower_idmap = if security.lower_idmap(backend) {
+        let shift = security.userns_shift.with_context(|| {
+            format!(
+                "container '{name}' has an idmapped lower layer but no USERNS_SHIFT in its state"
+            )
+        })?;
+        let range = security.userns_range.unwrap_or(crate::userns::UID_RANGE);
+        Some((
+            shift.saturating_sub(crate::userns::current_userns_base()),
+            range,
+        ))
+    } else {
+        None
+    };
+
     let content = nspawn_dropin(&DropinConfig {
         backend,
         datadir: datadir_str,
@@ -660,6 +736,7 @@ pub fn write_nspawn_dropin(
         stop_timeout: unit_stop_timeout_secs(crate::containers::app_stop_timeout_secs(&state)),
         submounts: &submounts,
         pod_netns: pod_netns.as_deref(),
+        lower_idmap,
     });
 
     let dir = dropin_dir(name);

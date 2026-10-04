@@ -23,6 +23,9 @@ set -euo pipefail
 #      pre-installed setuid binary keeps its bit (pre-chown regression guard)
 #  15. --userns OCI app: unprivileged nginx (:8080) on ubuntu with userns
 #  16. concurrent --userns creates: all succeed and reserve disjoint UID ranges
+#  17. --userns idmapped lower layer: no copy-up at create, correct ownership
+#      inside and on disk, cp into the stopped container, nothing left under
+#      /run/sdme/idmap; and the pre-chown method with it switched off
 
 source "$(dirname "$0")/lib.sh"
 
@@ -44,6 +47,7 @@ cleanup_all() {
         cleanup_container "$name"
     done
     "$SDME" fs rm usrns-nginx-on-ubuntu 2>/dev/null || true
+    [[ -n "${IDM_CFG:-}" ]] && rm -f "$IDM_CFG"
 }
 
 trap cleanup_all EXIT INT TERM
@@ -840,6 +844,127 @@ for i in $(seq 1 "$USERNS_PAR"); do
     cleanup_container "usrns-par$i"
 done
 rm -rf "$par_dir"
+
+# ===========================================================================
+# Test 17: idmapped lower layer, and the pre-chown method behind it
+# ===========================================================================
+echo "=== Test 17: --userns idmapped lower layer and pre-chown fallback ==="
+
+IDM_FS="vfy-ubuntu"
+IDM_BIND="/run/sdme/idmap/usrns-idm"
+ensure_base_fs "$IDM_FS" "${DISTRO_IMAGES[ubuntu]}" || true
+idm_lower="$DATADIR/fs/$IDM_FS"
+
+# On-disk ownership of the rootfs, which no step below may change.
+idm_lower_owner() {
+    stat -c '%u:%g' "$idm_lower" "$idm_lower/etc/passwd" 2>&1 | tr '\n' ' ' || true
+}
+idm_lower_before=$(idm_lower_owner)
+
+# Ownership of the given paths as container root sees them.
+userns_owner_inside() {
+    local ct="$1"
+    shift
+    timeout "$TIMEOUT_TEST" "$SDME" exec "$ct" /usr/bin/stat -c %u:%g "$@" 2>&1 | tr '\n' ' ' || true
+}
+
+cleanup_container usrns-idm
+if ! output=$(timeout "$TIMEOUT_BOOT" "$SDME" create --name usrns-idm -r "$IDM_FS" --userns "${VFLAG[@]}" 2>&1); then
+    fail "idmapped lower: create failed: $output"
+elif ! grep -qx 'USERNS_IDMAP_LOWER=yes' "$DATADIR/state/usrns-idm"; then
+    # util-linux before 2.39, or a filesystem without idmapped mount support.
+    skipped "idmapped lower: host cannot idmap the lower layer, pre-chown was used"
+else
+    ok "idmapped lower: selected by default"
+    idm_shift=$(sed -n 's/^USERNS_SHIFT=//p' "$DATADIR/state/usrns-idm")
+    idm_upper="$DATADIR/containers/usrns-idm/upper"
+
+    idm_upper_kb=$(du -sk "$idm_upper" | cut -f1)
+    if [[ $idm_upper_kb -lt 1024 ]]; then
+        ok "idmapped lower: upper layer is ${idm_upper_kb}K after create (no copy-up)"
+    else
+        fail "idmapped lower: upper layer is ${idm_upper_kb}K after create"
+    fi
+
+    # A copy into the stopped container creates /opt/idm in the upper layer.
+    # Left owned by host root it would hide the lower layer's /opt as nobody.
+    idm_src=$(mktemp)
+    if "$SDME" cp "$idm_src" usrns-idm:/opt/idm/file "${VFLAG[@]}" >/dev/null 2>&1 &&
+        [[ "$(stat -c %u "$idm_upper/opt" "$idm_upper/opt/idm/file" | tr '\n' ' ')" == "$idm_shift $idm_shift " ]]; then
+        ok "idmapped lower: cp into the stopped container is shifted on disk"
+    else
+        fail "idmapped lower: cp into the stopped container left $(stat -c %u:%g "$idm_upper/opt" 2>&1)"
+    fi
+    rm -f "$idm_src"
+
+    idm_dropin="/etc/systemd/system/sdme@usrns-idm.service.d/nspawn.conf"
+    if ! output=$(timeout "$TIMEOUT_BOOT" "$SDME" start usrns-idm -t 180 "${VFLAG[@]}" 2>&1); then
+        fail "idmapped lower: start failed: $output"
+    else
+        if grep -q 'X-mount.idmap=b:0:' "$idm_dropin" &&
+            grep -q -- '--private-users-ownership=off' "$idm_dropin"; then
+            ok "idmapped lower: drop-in binds the lower layer idmapped, ownership=off"
+        else
+            fail "idmapped lower: drop-in lacks the idmapped bind or ownership=off"
+        fi
+
+        idm_inside=$(userns_owner_inside usrns-idm / /etc/passwd /opt /opt/idm/file)
+        if [[ "$idm_inside" == "0:0 0:0 0:0 0:0 " ]]; then
+            ok "idmapped lower: lower files and the copied file are 0:0 inside"
+        else
+            fail "idmapped lower: ownership inside is '$idm_inside'"
+        fi
+
+        # The bind only exists while the overlay is being mounted.
+        if findmnt -rn "$IDM_BIND" >/dev/null || [[ -e "$IDM_BIND" ]]; then
+            fail "idmapped lower: $IDM_BIND still present while the container runs"
+        else
+            ok "idmapped lower: bind and its mount point are gone once the overlay is mounted"
+        fi
+
+        timeout "$TIMEOUT_TEST" "$SDME" exec usrns-idm /usr/bin/touch /root/idm-new >/dev/null 2>&1 || true
+        if [[ "$(stat -c %u "$idm_upper/root/idm-new" 2>&1)" == "$idm_shift" ]]; then
+            ok "idmapped lower: a file created inside is stored with the shifted owner"
+        else
+            fail "idmapped lower: file created inside is $(stat -c %u:%g "$idm_upper/root/idm-new" 2>&1) on disk"
+        fi
+    fi
+
+    idm_lower_after=$(idm_lower_owner)
+    if [[ "$idm_lower_before" == "$idm_lower_after" ]]; then
+        ok "idmapped lower: rootfs ownership unchanged on disk"
+    else
+        fail "idmapped lower: rootfs ownership changed: $idm_lower_before -> $idm_lower_after"
+    fi
+fi
+cleanup_container usrns-idm
+if findmnt -rn "$IDM_BIND" >/dev/null || [[ -e "$IDM_BIND" ]]; then
+    fail "idmapped lower: $IDM_BIND left behind after rm"
+else
+    ok "idmapped lower: nothing left under /run/sdme/idmap after rm"
+fi
+
+# The pre-chown method, which is what a host that cannot idmap the lower
+# layer falls back to. The config key selects it on any host.
+IDM_CFG=$(mktemp)
+echo 'userns_idmap_lower = false' >"$IDM_CFG"
+cleanup_container usrns-chown
+if ! output=$(timeout "$TIMEOUT_BOOT" "$SDME" --config "$IDM_CFG" create --name usrns-chown -r "$IDM_FS" --userns "${VFLAG[@]}" 2>&1); then
+    fail "pre-chown method: create failed: $output"
+elif grep -q '^USERNS_IDMAP_LOWER=' "$DATADIR/state/usrns-chown"; then
+    fail "pre-chown method: userns_idmap_lower = false still produced an idmapped lower layer"
+elif ! output=$(timeout "$TIMEOUT_BOOT" "$SDME" start usrns-chown -t 180 "${VFLAG[@]}" 2>&1); then
+    fail "pre-chown method: start failed: $output"
+else
+    idm_inside=$(userns_owner_inside usrns-chown / /etc/passwd)
+    if [[ "$idm_inside" == "0:0 0:0 " ]]; then
+        ok "pre-chown method: boots with / and /etc/passwd 0:0 inside"
+    else
+        fail "pre-chown method: ownership inside is '$idm_inside'"
+    fi
+fi
+cleanup_container usrns-chown
+rm -f "$IDM_CFG"
 
 # ===========================================================================
 # Summary

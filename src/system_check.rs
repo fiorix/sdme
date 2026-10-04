@@ -323,6 +323,145 @@ fn do_idmap_probe(mount_path: &Path, userns_fd: i32) -> Result<()> {
     Ok(())
 }
 
+/// Runtime directory for the transient idmapped binds of overlay lower layers.
+///
+/// It lives under `/run`, never under the datadir: a bind left behind by a
+/// failed start is a second path to a rootfs (or to `/`), and nothing sdme
+/// removes recursively may reach it.
+pub const IDMAP_RUNTIME_DIR: &str = "/run/sdme/idmap";
+
+/// `mount(8)` options for a read-only bind whose IDs `0..range` appear as
+/// `shift..shift+range`: the mapping of the container's user namespace.
+///
+/// Read-only because an overlay never writes to its lower layer, and so that
+/// a bind left mounted cannot be used to modify the rootfs behind it.
+///
+/// Private because a bind is created as a peer of its source mount. A bind
+/// of `/` would otherwise receive every mount made on the host, starting with
+/// the container's own overlay, and could not be unmounted afterwards.
+pub fn idmap_bind_options(shift: u64, range: u64) -> String {
+    format!("ro,private,X-mount.idmap=b:0:{shift}:{range}")
+}
+
+/// Probe whether `lowerdir` can back an overlay through an idmapped bind.
+///
+/// Runs the same `mount --bind` the container unit runs at start and checks
+/// the result, because a successful mount proves nothing: util-linux before
+/// 2.39 ignores `X-mount.idmap` and produces a plain bind, and a mapping in
+/// the wrong direction mounts fine with every file owned by the overflow ID.
+///
+/// Must be called as root in the initial user namespace.
+pub fn probe_idmap_lowerdir(lowerdir: &Path, shift: u64, range: u64) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let meta = std::fs::metadata(lowerdir)
+        .with_context(|| format!("failed to stat {}", lowerdir.display()))?;
+    let (uid, gid) = (u64::from(meta.uid()), u64::from(meta.gid()));
+    if uid >= range || gid >= range {
+        bail!(
+            "{} is owned by {uid}:{gid}, outside the mapped range",
+            lowerdir.display()
+        );
+    }
+
+    let bind = ProbeBind::create()?;
+    let output = std::process::Command::new("mount")
+        .args(["--bind", "-o", &idmap_bind_options(shift, range)])
+        .arg(lowerdir)
+        .arg(&bind.0)
+        .output()
+        .context("failed to run mount")?;
+    crate::check_interrupted()?;
+    if !output.status.success() {
+        bail!(
+            "idmapped bind mount of {} failed: {}",
+            lowerdir.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    check_idmap_bind(&bind.0, shift + uid, shift + gid)
+}
+
+/// Mount point of the probe's bind, released when dropped.
+///
+/// The release runs on every exit, including a failed or interrupted
+/// `mount`: a signal sent to the foreground process group can kill mount(8)
+/// after it attached the bind. Detaching lazily cannot fail with `EBUSY`,
+/// and the directory is removed with `rmdir` semantics only.
+struct ProbeBind(PathBuf);
+
+impl ProbeBind {
+    fn create() -> Result<Self> {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+        // Root-only: while mounted, the bind is a path to a rootfs that the
+        // datadir otherwise keeps away from unprivileged users.
+        let root = Path::new(IDMAP_RUNTIME_DIR);
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(root)
+            .with_context(|| format!("failed to create {}", root.display()))?;
+        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("failed to restrict {}", root.display()))?;
+
+        let target = root.join(format!(".probe-{}", std::process::id()));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&target)
+            .with_context(|| format!("failed to create {}", target.display()))?;
+        Ok(Self(target))
+    }
+}
+
+impl Drop for ProbeBind {
+    fn drop(&mut self) {
+        release_idmap_bind(&self.0);
+    }
+}
+
+/// Detach whatever is mounted on an idmapped bind's mount point and remove
+/// the directory. Best-effort, and never recursive: a mount point that
+/// could not be released is left in place, still read-only.
+pub(crate) fn release_idmap_bind(target: &Path) {
+    if let Ok(c_target) = std::ffi::CString::new(target.as_os_str().as_encoded_bytes()) {
+        // Fails with EINVAL when nothing is mounted, which is the usual case.
+        unsafe { libc::umount2(c_target.as_ptr(), libc::MNT_DETACH) };
+    }
+    let _ = std::fs::remove_dir(target);
+}
+
+/// Check that a mounted idmapped bind is read-only and shows the expected
+/// owner on its root directory.
+fn check_idmap_bind(target: &Path, expected_uid: u64, expected_gid: u64) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let c_target = std::ffi::CString::new(target.as_os_str().as_encoded_bytes())
+        .context("target path contains null byte")?;
+    let mut vfs: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(c_target.as_ptr(), &mut vfs) } != 0 {
+        bail!(
+            "statvfs {}: {}",
+            target.display(),
+            std::io::Error::last_os_error()
+        );
+    }
+    if vfs.f_flag & libc::ST_RDONLY == 0 {
+        bail!("idmapped bind mount is not read-only");
+    }
+
+    let meta = std::fs::metadata(target)
+        .with_context(|| format!("failed to stat {}", target.display()))?;
+    let (uid, gid) = (u64::from(meta.uid()), u64::from(meta.gid()));
+    if (uid, gid) != (expected_uid, expected_gid) {
+        bail!(
+            "mount(8) did not apply the ID mapping \
+             (owner {uid}:{gid}, expected {expected_uid}:{expected_gid})"
+        );
+    }
+    Ok(())
+}
+
 /// Mount an overlayfs at the given path.
 pub(crate) fn mount_overlay(target: &Path, opts: &str) -> Result<()> {
     let c_target = std::ffi::CString::new(target.as_os_str().as_encoded_bytes())

@@ -97,6 +97,10 @@ pub struct SecurityConfig {
     /// When unset, defaults to 65536. A larger value means the container
     /// reserved extra 64K slots for nested containers.
     pub userns_range: Option<u64>,
+    /// The root overlay is mounted on an idmapped bind of its lower layer, so
+    /// lower files appear shifted without being chowned. Only the upper layer
+    /// carries shifted ownership on disk. Requires `userns_shift`.
+    pub userns_idmap_lower: bool,
 }
 
 impl SecurityConfig {
@@ -111,6 +115,7 @@ impl SecurityConfig {
             && self.apparmor_profile.is_none()
             && self.userns_shift.is_none()
             && self.userns_range.is_none()
+            && !self.userns_idmap_lower
     }
 
     /// Read security config from a container's state file.
@@ -129,6 +134,7 @@ impl SecurityConfig {
             userns_range: state
                 .get_nonempty("USERNS_RANGE")
                 .and_then(|s| s.parse().ok()),
+            userns_idmap_lower: state.is_yes("USERNS_IDMAP_LOWER"),
         }
     }
 
@@ -171,6 +177,18 @@ impl SecurityConfig {
             Some(range) => state.set("USERNS_RANGE", range.to_string()),
             None => state.remove("USERNS_RANGE"),
         }
+
+        if self.userns_idmap_lower {
+            state.set("USERNS_IDMAP_LOWER", "yes");
+        } else {
+            state.remove("USERNS_IDMAP_LOWER");
+        }
+    }
+
+    /// Whether the root overlay is built on an idmapped bind of its lower
+    /// layer. Only overlay containers have one; btrfs idmaps its subvolume.
+    pub fn lower_idmap(&self, backend: crate::storage::Backend) -> bool {
+        self.userns && self.userns_idmap_lower && backend == crate::storage::Backend::Overlay
     }
 
     /// Generate systemd-nspawn arguments for security options.
@@ -183,6 +201,10 @@ impl SecurityConfig {
     /// uses an explicit `--private-users=<shift>:65536` instead of `pick`.
     /// nspawn's `auto` ownership mode then walks the tree and finds
     /// everything already shifted, making the chown a fast no-op.
+    ///
+    /// When `userns_idmap_lower` is set, ownership is `off`: the overlay
+    /// already presents shifted ownership, and `auto` would answer a broken
+    /// idmap setup with a recursive chown that copies up the whole lower layer.
     ///
     /// Does NOT include AppArmor: that goes into the systemd unit drop-in
     /// as `AppArmorProfile=`, not as an nspawn flag.
@@ -205,12 +227,15 @@ impl SecurityConfig {
                 }
                 None => args.push("--private-users=pick".to_string()),
             }
-            // Recursive chown only supports the standard 64K range. Expanded
-            // ranges are reserved for nested containers; rely on pre-shifted
-            // overlayfs upper layers or btrfs idmapped subvolume mounts.
-            if range == crate::userns::UID_RANGE {
+            if self.lower_idmap(backend) {
+                args.push("--private-users-ownership=off".to_string());
+            } else if range == crate::userns::UID_RANGE {
                 args.push("--private-users-ownership=auto".to_string());
             } else {
+                // Recursive chown only supports the standard 64K range.
+                // Expanded ranges are reserved for nested containers; rely on
+                // pre-shifted overlayfs upper layers or btrfs idmapped
+                // subvolume mounts.
                 match backend {
                     crate::storage::Backend::Btrfs => {
                         args.push("--private-users-ownership=map".to_string());
@@ -698,6 +723,7 @@ mod tests {
             apparmor_profile: Some("sdme-container".to_string()),
             userns_shift: None,
             userns_range: None,
+            userns_idmap_lower: false,
         };
         // Always uses --private-users-ownership=auto (lets nspawn pick
         // idmapped mounts or recursive chown based on kernel support).
@@ -764,6 +790,48 @@ mod tests {
     }
 
     #[test]
+    fn test_to_nspawn_args_idmap_lower_turns_ownership_off() {
+        let sec = SecurityConfig {
+            userns: true,
+            userns_shift: Some(1678049280),
+            userns_idmap_lower: true,
+            ..Default::default()
+        };
+        let args = sec.to_nspawn_args(255, crate::storage::Backend::Overlay);
+        assert_eq!(args[0], "--private-users=1678049280:65536");
+        assert_eq!(args[1], "--private-users-ownership=off");
+    }
+
+    #[test]
+    fn test_to_nspawn_args_idmap_lower_ignored_on_btrfs() {
+        let sec = SecurityConfig {
+            userns: true,
+            userns_shift: Some(1678049280),
+            userns_idmap_lower: true,
+            ..Default::default()
+        };
+        let args = sec.to_nspawn_args(255, crate::storage::Backend::Btrfs);
+        assert_eq!(args[1], "--private-users-ownership=auto");
+    }
+
+    #[test]
+    fn test_idmap_lower_state_roundtrip() {
+        let sec = SecurityConfig {
+            userns: true,
+            userns_shift: Some(1678049280),
+            userns_idmap_lower: true,
+            ..Default::default()
+        };
+        let mut state = State::new();
+        sec.write_to_state(&mut state);
+        assert_eq!(state.get("USERNS_IDMAP_LOWER"), Some("yes"));
+        assert_eq!(SecurityConfig::from_state(&state), sec);
+
+        SecurityConfig::default().write_to_state(&mut state);
+        assert_eq!(state.get("USERNS_IDMAP_LOWER"), None);
+    }
+
+    #[test]
     fn test_state_roundtrip() {
         let sec = SecurityConfig {
             userns: true,
@@ -775,6 +843,7 @@ mod tests {
             apparmor_profile: Some("sdme-default".to_string()),
             userns_shift: Some(1678049280),
             userns_range: Some(196608),
+            userns_idmap_lower: false,
         };
 
         let mut state = State::new();

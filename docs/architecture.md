@@ -582,6 +582,7 @@ join_as_sudo_user                 true
 host_rootfs_opaque_dirs           /etc/systemd/system,/var/log
 hardened_drop_caps                CAP_SYS_PTRACE,CAP_NET_RAW,...
 userns_nested_ranges              0
+userns_idmap_lower                true
 default_base_fs                   (empty)
 default_storage_backend           (empty = overlay)
 btrfs_pool_size                   20G
@@ -618,6 +619,7 @@ update_check.check_interval_hours 24
 - `host_rootfs_opaque_dirs`: default opaque dirs for host-rootfs containers (empty string disables).
 - `hardened_drop_caps`: capabilities dropped by `--hardened`.
 - `userns_nested_ranges`: default number of extra 64K UID/GID ranges to reserve for nested containers when `--userns` is enabled. Overridable per container with `--userns-nested N`.
+- `userns_idmap_lower`: give new overlay `--userns` containers an idmapped lower layer instead of pre-shifting ownership into the upper layer (see [Security, User namespace](security.md#user-namespace)). Falls back to the pre-chown automatically where the lower layer cannot be idmapped; set to `no` to always pre-chown.
 - `default_base_fs`: default base rootfs for OCI app images.
 - `default_storage_backend`: default storage backend for new containers (`overlay` or `btrfs`; empty = overlay). A `btrfs` default applies only to imported/OCI rootfs; host-rootfs containers fall back to overlay. Overridable per container with `--storage`.
 - `btrfs_pool_size`: virtual size of the Mode B btrfs pool image (sparse; ignored on a native-btrfs datadir).
@@ -755,7 +757,7 @@ For expanded ranges sdme allocates an explicit UID/GID base and range at create 
 
 `--hardened` is sdme's one-flag defense-in-depth bundle. It enables multiple security layers at once:
 
-- **User namespace isolation** (`--private-users=pick --private-users-ownership=auto`): container root maps to a high unprivileged UID on the host.
+- **User namespace isolation** (`--private-users=<shift>:<range>`, or `pick`): container root maps to a high unprivileged UID on the host.
 - **Private network namespace** (`--private-network`): the container gets its own network namespace with loopback only.
 - **`--no-new-privileges=yes`**: blocks privilege escalation via setuid binaries and file capabilities.
 - **Drops capabilities**: `CAP_SYS_PTRACE`, `CAP_NET_RAW`, `CAP_SYS_RAWIO`, `CAP_SYS_BOOT`, dropping 4 capabilities (3 from the active set; `CAP_SYS_RAWIO` is preventive since nspawn does not grant it by default), leaving 23 retained capabilities.

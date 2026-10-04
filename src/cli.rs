@@ -201,6 +201,15 @@ pub(crate) fn start_and_await_boot(cfg: &BootConfig) -> Result<()> {
             if let Some(shift_str) = state.get_nonempty("USERNS_SHIFT") {
                 if let Ok(shift) = shift_str.parse::<u64>() {
                     if let Some(conflict) = sdme::userns::check_shift_conflict(name, shift) {
+                        // The upper layer is owned by this range on disk and
+                        // the lower layer is mapped to it; another range would
+                        // leave both unreadable.
+                        if state.is_yes("USERNS_IDMAP_LOWER") {
+                            bail!(
+                                "UID base {shift} of container '{name}' is in use by \
+                                 running machine '{conflict}'; stop it first"
+                            );
+                        }
                         eprintln!(
                             "warning: UID range {shift} conflicts with running container '{conflict}'"
                         );
@@ -324,6 +333,8 @@ pub(crate) struct PostCreateSetup<'a> {
     pub userns_enabled: bool,
     /// Pre-allocated user namespace range size, if any.
     pub userns_range: Option<u64>,
+    /// Configured `userns_idmap_lower`: prefer an idmapped lower layer.
+    pub userns_idmap_lower: bool,
     /// Configured `stop_timeout_terminate`, for removing the container if
     /// the setup fails.
     pub stop_timeout: u64,
@@ -331,12 +342,12 @@ pub(crate) struct PostCreateSetup<'a> {
     pub verbose: bool,
 }
 
-/// Post-create setup: store extra state and pre-chown if needed.
+/// Post-create setup: store extra state and prepare ownership for userns.
 ///
 /// Called after `containers::create()` for both `create` and `new`.
 /// Stores OCI_APP, SYSTEMD_LOG_LEVEL, and the opt-in restart policy in the
-/// state file, then probes overlayfs idmap support and pre-chowns if the
-/// kernel lacks it.
+/// state file, then sets a userns container up for an idmapped lower layer,
+/// or pre-chowns it where that is not possible.
 ///
 /// On failure the container is removed again: it exists but was never set up,
 /// and left behind it would keep the name and start with the wrong settings.
@@ -360,14 +371,11 @@ fn apply_post_create_setup(opts: &PostCreateSetup) -> Result<()> {
     let PostCreateSetup {
         datadir,
         name,
-        lowerdir,
         oci_app_name,
         systemd_log_level,
         restart_policy,
         restart_sec,
         userns_enabled,
-        userns_range,
-        verbose,
         ..
     } = *opts;
     let state_path = datadir.join("state").join(name);
@@ -397,7 +405,7 @@ fn apply_post_create_setup(opts: &PostCreateSetup) -> Result<()> {
 
     if userns_enabled {
         let backend = sdme::storage::Backend::from_state(&state);
-        ensure_userns_range(datadir, name, lowerdir, backend, userns_range, verbose)?;
+        ensure_userns_range(opts, backend)?;
     }
     Ok(())
 }
@@ -441,9 +449,56 @@ pub(crate) fn validate_systemd_log_level(level: &str) -> Result<()> {
     Ok(())
 }
 
+/// Give an overlay container an idmapped lower layer, when the host can.
+///
+/// Returns `Ok(false)` when the lowerdir cannot be idmapped (old util-linux,
+/// a filesystem without idmap support), leaving no reservation behind so the
+/// caller can take the pre-chown path. Once the probe has passed, a failure
+/// is an error: the files sdme already placed in the upper layer may be
+/// shifted to the reserved range by then. The lower layer is never written.
+fn setup_idmap_lower(
+    datadir: &Path,
+    name: &str,
+    lowerdir: &str,
+    extra_slots: u32,
+    verbose: bool,
+) -> Result<bool> {
+    use sdme::{system_check, userns};
+
+    let (shift, range) = userns::reserve_uid_range(datadir, name, extra_slots)?;
+    let release = || {
+        if let Err(e) = userns::release_uid_range(datadir, name) {
+            eprintln!("warning: failed to release UID range {shift}:{range}: {e:#}");
+        }
+    };
+
+    if let Err(e) = system_check::probe_idmap_lowerdir(Path::new(lowerdir), shift, range) {
+        release();
+        sdme::check_interrupted()?;
+        if verbose {
+            eprintln!("note: idmapped lower layer not available ({e:#}); pre-shifting UIDs");
+        }
+        return Ok(false);
+    }
+
+    let marked = userns::shift_upper(datadir, name, shift).and_then(|()| {
+        let state_path = datadir.join("state").join(name);
+        let mut state = sdme::State::read_from(&state_path)?;
+        state.set("USERNS_IDMAP_LOWER", "yes");
+        state.write_to(&state_path)
+    });
+    if let Err(e) = marked {
+        release();
+        return Err(e).context("failed to prepare the upper layer for an idmapped lower layer");
+    }
+    Ok(true)
+}
+
 /// Ensure a container has an allocatable UID/GID range when it needs one.
 ///
-/// Called after container creation when userns is enabled. It allocates a
+/// Called after container creation when userns is enabled. An overlay
+/// container first tries an idmapped lower layer (see [`setup_idmap_lower`]),
+/// which needs an explicit range and no pre-chown. Otherwise it allocates a
 /// range if any of the following is true:
 ///
 /// - the kernel does not support idmapped mounts on overlayfs (so we must
@@ -455,21 +510,37 @@ pub(crate) fn validate_systemd_log_level(level: &str) -> Result<()> {
 /// before the pre-chown, so concurrent creates cannot be given the same range,
 /// and so `SecurityConfig::to_nspawn_args()` can emit an explicit
 /// `--private-users=<base>:<range>`.
-pub(crate) fn ensure_userns_range(
-    datadir: &Path,
-    name: &str,
-    lowerdir: &str,
-    backend: sdme::storage::Backend,
-    userns_range: Option<u64>,
-    verbose: bool,
-) -> Result<()> {
+fn ensure_userns_range(opts: &PostCreateSetup<'_>, backend: sdme::storage::Backend) -> Result<()> {
     use sdme::{system_check, userns};
 
-    let idmap_ok = system_check::probe_idmap_on_overlayfs(datadir).is_ok();
+    let PostCreateSetup {
+        datadir,
+        name,
+        lowerdir,
+        userns_range,
+        verbose,
+        ..
+    } = *opts;
+
     let nested = !userns::is_initial_user_namespace();
     let extra_slots = userns_range
         .map(|r| (r / userns::UID_RANGE).saturating_sub(1) as u32)
         .unwrap_or(0);
+
+    // Creating an idmapped mount needs privilege over the filesystem's own
+    // user namespace, which a nested sdme does not have.
+    if opts.userns_idmap_lower
+        && !nested
+        && backend == sdme::storage::Backend::Overlay
+        && setup_idmap_lower(datadir, name, lowerdir, extra_slots, verbose)?
+    {
+        if verbose {
+            eprintln!("userns: idmapped lower layer");
+        }
+        return Ok(());
+    }
+
+    let idmap_ok = system_check::probe_idmap_on_overlayfs(datadir).is_ok();
 
     if idmap_ok && !nested && extra_slots == 0 {
         if verbose {
@@ -655,6 +726,7 @@ pub(crate) fn parse_security(
         apparmor_profile,
         userns_shift: None,
         userns_range,
+        userns_idmap_lower: false,
     };
     sec.validate()?;
     Ok((sec, hardened))

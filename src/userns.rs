@@ -7,6 +7,8 @@
 //! - Deterministic UID shift allocation matching nspawn's `--private-users=pick`
 //! - Conflict detection against other sdme containers and running machines
 //! - Parallel pre-chown at create time so boot is fast
+//! - In-place shift of the upper layer for containers whose lower layer is
+//!   idmapped at mount time and needs no pre-chown
 //! - Nested container support: sub-ranges allocated inside a parent user namespace
 //!
 //! # TODO
@@ -265,6 +267,31 @@ pub fn prechown_overlayfs(
     }
 
     result
+}
+
+/// Shift ownership of a stopped container's upper layer in place.
+///
+/// For containers whose lower layer is idmapped at mount time: the lower
+/// layer needs no chown, but whatever sdme writes into `upper/` from the host
+/// (at create, or with `sdme cp`) is owned by host IDs and must belong to the
+/// container's range. This includes `upper/` itself, the container's root
+/// directory. No overlay is mounted, so nothing is copied up.
+///
+/// Idempotent: IDs already outside `0..65536` are left alone, so a walk that
+/// was interrupted can be repeated with the same shift.
+pub fn shift_upper(datadir: &Path, name: &str, absolute_shift: u64) -> Result<()> {
+    let upper = datadir.join("containers").join(name).join("upper");
+    let local_shift = absolute_shift.saturating_sub(current_userns_base());
+    let shift = u32::try_from(local_shift)
+        .ok()
+        .with_context(|| format!("local UID shift {local_shift} exceeds u32"))?;
+
+    shift_ownership(&upper, shift)?;
+    for path in collect_entries(&upper)? {
+        crate::check_interrupted()?;
+        shift_ownership(&path, shift)?;
+    }
+    Ok(())
 }
 
 /// Walk a directory tree and shift UIDs/GIDs in parallel.

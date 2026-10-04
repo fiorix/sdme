@@ -795,6 +795,7 @@ CONFIG KEYS:
     join_as_sudo_user              bool     yes       Drop to sudo user on join
     host_rootfs_opaque_dirs        string   /etc/systemd/system,/var/log
     hardened_drop_caps             string   CAP_SYS_PTRACE,CAP_NET_RAW,CAP_SYS_RAWIO,CAP_SYS_BOOT
+    userns_idmap_lower             bool     yes       Idmap the overlay lower layer for --userns
     default_base_fs                string   (empty)   Default --base-fs for OCI app imports
     default_output_format          string   (empty)   Default output for ps/fs ls (json, json-pretty)
     default_kube_registry          string   docker.io Registry for unqualified kube image names
@@ -2166,6 +2167,16 @@ fn run() -> Result<()> {
                             ),
                         }));
                     }
+                    "userns_idmap_lower" => {
+                        toml_key = key.clone();
+                        toml_val = Some(V::Boolean(match value.as_str() {
+                            "yes" => true,
+                            "no" => false,
+                            _ => bail!(
+                                "invalid value for userns_idmap_lower: {value} (expected yes or no)"
+                            ),
+                        }));
+                    }
                     "host_rootfs_opaque_dirs" => {
                         let normalized = if value.is_empty() {
                             String::new()
@@ -2558,6 +2569,7 @@ fn run() -> Result<()> {
                 restart_sec: cfg.restart_sec,
                 userns_enabled,
                 userns_range: sec.userns_range,
+                userns_idmap_lower: cfg.userns_idmap_lower,
                 stop_timeout: cfg.stop_timeout_terminate,
                 verbose: cli.verbose,
             })?;
@@ -2913,6 +2925,7 @@ fn run() -> Result<()> {
                 restart_sec: cfg.restart_sec,
                 userns_enabled,
                 userns_range: sec.userns_range,
+                userns_idmap_lower: cfg.userns_idmap_lower,
                 stop_timeout: cfg.stop_timeout_terminate,
                 verbose: cli.verbose,
             })?;
