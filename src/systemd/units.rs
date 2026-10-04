@@ -501,6 +501,12 @@ pub fn write_nspawn_dropin(
 
     let state_path = datadir.join("state").join(name);
     let state = State::read_from(&state_path)?;
+    if state.is_incomplete() {
+        anyhow::bail!(
+            "container '{name}' was not fully created (the create was killed); \
+             remove it with 'sdme rm {name}' and create it again"
+        );
+    }
     let rootfs = state.rootfs();
     let lowerdir = if rootfs.is_empty() {
         "/".to_string()

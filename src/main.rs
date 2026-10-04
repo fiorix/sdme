@@ -348,7 +348,8 @@ HEALTH values:
     ready        kube readiness probes passing (containers with probes)
     not-ready    kube readiness probes failing
     other        broken state ('missing fs', 'missing container dir',
-                 'unreadable state file') or any other state reported
+                 'incomplete create', 'unreadable state file') or any
+                 other state reported
                  by systemctl is-system-running inside the container
 
 For running containers without kube probes, health comes from
@@ -2556,6 +2557,7 @@ fn run() -> Result<()> {
                 oci_volumes,
                 oci_envs,
                 masked_services,
+                post_setup: true,
             };
             let name = containers::create(&cfg.datadir, &opts, cli.verbose)?;
 
@@ -2911,6 +2913,7 @@ fn run() -> Result<()> {
                 oci_volumes,
                 oci_envs,
                 masked_services,
+                post_setup: true,
             };
             let is_host_rootfs = opts.rootfs.is_none();
             let name = containers::create(&cfg.datadir, &opts, cli.verbose)?;

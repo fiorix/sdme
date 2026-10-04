@@ -877,6 +877,30 @@ fn test_nspawn_dropin_with_submounts() {
 }
 
 #[test]
+fn test_state_is_incomplete() {
+    // The claimed state file of a create that was killed before writing it.
+    assert!(crate::State::new().is_incomplete());
+
+    let mut state = crate::State::new();
+    state.set("NAME", "mybox");
+    assert!(!state.is_incomplete());
+    state.set(crate::STATE_INCOMPLETE, "yes");
+    assert!(state.is_incomplete());
+}
+
+#[test]
+fn test_create_clears_incomplete_marker() {
+    let tmp = tmp();
+    let opts = CreateOptions {
+        name: Some("donebox".to_string()),
+        ..Default::default()
+    };
+    create(tmp.path(), &opts, false).unwrap();
+    let state = crate::State::read_from(&tmp.path().join("state/donebox")).unwrap();
+    assert!(!state.is_yes(crate::STATE_INCOMPLETE));
+}
+
+#[test]
 fn test_create_with_security_state() {
     let tmp = tmp();
     let security = SecurityConfig {

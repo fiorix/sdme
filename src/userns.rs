@@ -506,7 +506,8 @@ fn stored_ranges(datadir: &Path, exclude_name: &str) -> Vec<UsedRange> {
         for entry in entries.flatten() {
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if name == exclude_name {
+            // Skips the temp file of a killed atomic state write as well.
+            if name == exclude_name || crate::validate_name(&name).is_err() {
                 continue;
             }
             if let Ok(state) = State::read_from(&entry.path()) {

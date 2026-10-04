@@ -34,6 +34,21 @@ pub fn remove(datadir: &Path, name: &str, stop_timeout: u64, verbose: bool) -> R
     )
 }
 
+/// Remove the temp files that atomic writes of a container's state file left
+/// behind when sdme was killed between writing one and renaming it into place.
+/// The exclusive container lock held by removal rules out a live writer.
+fn remove_state_temp_files(state_dir: &Path, name: &str) {
+    let prefix = format!(".{name}.tmp-");
+    let Ok(entries) = fs::read_dir(state_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_name().to_string_lossy().starts_with(&prefix) {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
 /// Host side effects of container removal, injected for testing.
 struct RemovalOps<'a> {
     /// Query the unit's ActiveState; `Ok(None)` means confirmed absent,
@@ -55,7 +70,11 @@ fn remove_with_ops(
     verbose: bool,
     ops: &RemovalOps,
 ) -> Result<()> {
-    ensure_exists(datadir, name)?;
+    // Only the state file is required: a create that was killed can leave
+    // one without a container directory, and that must stay removable.
+    if !datadir.join("state").join(name).exists() {
+        anyhow::bail!("container does not exist: {name}");
+    }
 
     // Acquire exclusive lock to prevent removal while a build is reading from this container.
     let _lock = crate::lock::lock_exclusive(datadir, "containers", name)
@@ -172,6 +191,7 @@ fn remove_with_ops(
             eprintln!("removed {}", state_file.display());
         }
     }
+    remove_state_temp_files(&datadir.join("state"), name);
 
     (ops.remove_dropin)(name, verbose)?;
 
@@ -741,6 +761,38 @@ mod tests {
         // Removal reclaims the container's nspawn runtime state so a future
         // container reusing the name is not refused by a leftover mount.
         assert_eq!(log.borrow().reclaims, vec!["gonebox"]);
+    }
+
+    #[test]
+    fn test_remove_state_file_without_container_dir() {
+        // What a killed create can leave behind: the claimed state file and
+        // no container directory.
+        let tmp = TempDataDir::new("remove-no-dir");
+        let state_dir = tmp.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+        let state_file = state_dir.join("ghostbox");
+        fs::write(&state_file, "INCOMPLETE=yes\n").unwrap();
+        let log = RefCell::new(OpLog::default());
+        let temp = state_dir.join(".ghostbox.tmp-4242-0");
+        let other = state_dir.join(".ghostbox2.tmp-4242-0");
+        fs::write(&temp, "NAME=ghostbox\n").unwrap();
+        fs::write(&other, "NAME=ghostbox2\n").unwrap();
+        run_remove(&tmp, "ghostbox", &|_| Ok(None), &log).unwrap();
+        assert!(!state_file.exists());
+        // The temp file of a killed atomic state write goes with it; another
+        // container's does not.
+        assert!(!temp.exists());
+        assert!(other.exists());
+        assert_eq!(log.borrow().dropin_removals, vec!["ghostbox"]);
+    }
+
+    #[test]
+    fn test_remove_missing_container_is_an_error() {
+        let tmp = TempDataDir::new("remove-missing");
+        let log = RefCell::new(OpLog::default());
+        let err = run_remove(&tmp, "nobox", &|_| Ok(None), &log).unwrap_err();
+        assert!(format!("{err:#}").contains("container does not exist"));
+        assert!(log.borrow().dropin_removals.is_empty());
     }
 
     #[test]

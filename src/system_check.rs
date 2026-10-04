@@ -404,6 +404,7 @@ impl ProbeBind {
             .with_context(|| format!("failed to create {}", root.display()))?;
         std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))
             .with_context(|| format!("failed to restrict {}", root.display()))?;
+        release_dead_probes(root);
 
         let target = root.join(format!(".probe-{}", std::process::id()));
         std::fs::DirBuilder::new()
@@ -411,6 +412,29 @@ impl ProbeBind {
             .create(&target)
             .with_context(|| format!("failed to create {}", target.display()))?;
         Ok(Self(target))
+    }
+}
+
+/// Release the binds of probes whose process no longer exists.
+///
+/// `Drop` does not run when sdme is killed, so a probe killed while its bind
+/// was mounted leaves it behind. Each probe names its mount point after its
+/// PID; one whose PID is gone has no owner left.
+fn release_dead_probes(root: &Path) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let pid = name
+            .to_str()
+            .and_then(|n| n.strip_prefix(".probe-"))
+            .and_then(|pid| pid.parse::<u32>().ok());
+        if let Some(pid) = pid {
+            if !Path::new("/proc").join(pid.to_string()).exists() {
+                release_idmap_bind(&entry.path());
+            }
+        }
     }
 }
 
@@ -506,6 +530,23 @@ pub(crate) fn umount(target: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_release_dead_probes_spares_live_ones() {
+        let tmp = crate::testutil::TempDataDir::new("dead-probes");
+        let root = tmp.path();
+        // No process has this PID: it is above the kernel's pid_max ceiling.
+        let dead = root.join(".probe-4194305");
+        let live = root.join(format!(".probe-{}", std::process::id()));
+        let container = root.join("mybox");
+        for dir in [&dead, &live, &container] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        release_dead_probes(root);
+        assert!(!dead.exists());
+        assert!(live.exists());
+        assert!(container.exists());
+    }
 
     #[test]
     fn test_parse_systemd_version_plain() {

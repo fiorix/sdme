@@ -205,7 +205,7 @@ A common issue is trying to use `--hardened` or `--strict` with a host rootfs cl
 sudo sdme new --hardened
 ```
 
-This may fail to boot because the hardened flags enable user namespace isolation (`--userns`), which uses overlayfs idmapped mounts. If the host rootfs contains files with `security.capability` xattrs, the kernel refuses to create the idmapped mount.
+A host rootfs clone is the case most likely to misbehave under the hardened flags. They enable user namespace isolation (`--userns`) and drop capabilities, and the host's services were not installed with that in mind: a service that needs a dropped capability fails, a binary with file capabilities outside the container's bounding set (for example `ping` with `cap_net_raw`) fails to execute, and separately mounted host filesystems such as `/boot` appear as owned by `nobody`.
 
 When `sdme new` fails, break it into individual steps to isolate the problem. First create the container without starting it:
 
@@ -228,7 +228,7 @@ sudo sdme logs mycontainer
 > [!TIP]
 > **Tip**
 >
-> Use `--hardened` and `--strict` with imported rootfs (e.g. `-r ubuntu`) rather than host rootfs clones. Imported rootfs are clean and don't carry host-specific xattrs that can interfere with user namespace isolation.
+> Use `--hardened` and `--strict` with imported rootfs (e.g. `-r ubuntu`) rather than host rootfs clones. Imported rootfs are clean and don't carry the host's services, mounts, and file capabilities.
 
 ## Pruning unused resources
 

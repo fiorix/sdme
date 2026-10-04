@@ -407,7 +407,14 @@ fn apply_post_create_setup(opts: &PostCreateSetup) -> Result<()> {
         let backend = sdme::storage::Backend::from_state(&state);
         ensure_userns_range(opts, backend)?;
     }
-    Ok(())
+
+    // Everything above leaves the container unusable when cut short, for
+    // example a UID range reserved for an upper layer that is only partly
+    // shifted. An error removes the container; the marker, set by create
+    // (`CreateOptions::post_setup`), covers a kill.
+    let mut state = sdme::State::read_from(&state_path)?;
+    state.remove(sdme::STATE_INCOMPLETE);
+    state.write_to(&state_path)
 }
 
 /// Normalize a restart-policy string to a systemd `Restart=` token.

@@ -47,6 +47,10 @@ pub struct CreateOptions {
     pub oci_envs: Vec<String>,
     /// Systemd services to mask in the writable root layer at create time.
     pub masked_services: Vec<String>,
+    /// The caller completes the container with further setup. The state then
+    /// keeps the [`crate::STATE_INCOMPLETE`] marker, and the caller removes it
+    /// when its setup is done.
+    pub post_setup: bool,
     /// Storage backend for the container root (overlay or btrfs).
     pub backend: Backend,
     /// Mode B btrfs pool image size (from config). Empty falls back to the
@@ -145,7 +149,7 @@ pub fn create(datadir: &Path, opts: &CreateOptions, verbose: bool) -> Result<Str
     set_dir_permissions(&state_dir, 0o700)?;
 
     let state_path = state_dir.join(&name);
-    let _lock_file = match OpenOptions::new()
+    let mut claim = match OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
@@ -159,6 +163,17 @@ pub fn create(datadir: &Path, opts: &CreateOptions, verbose: bool) -> Result<Str
             return Err(e).with_context(|| format!("failed to create {}", state_path.display()));
         }
     };
+
+    // A create that is killed cannot clean up after itself. Until do_create
+    // replaces the claim with the real state, the marker keeps what is left
+    // from being started as if it were a container with default settings.
+    {
+        use std::io::Write;
+        claim
+            .write_all(format!("{}=yes\n", crate::STATE_INCOMPLETE).as_bytes())
+            .with_context(|| format!("failed to write {}", state_path.display()))?;
+    }
+    drop(claim);
 
     if verbose {
         eprintln!("claimed state file: {}", state_path.display());
@@ -515,6 +530,9 @@ fn do_create(
     };
 
     let mut state = State::new();
+    if opts.post_setup {
+        state.set(crate::STATE_INCOMPLETE, "yes");
+    }
     state.set("CREATED", unix_timestamp().to_string());
     state.set("NAME", name);
     state.set("ROOTFS", rootfs_value);

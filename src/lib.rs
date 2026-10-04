@@ -80,6 +80,13 @@ use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 use anyhow::{bail, Context, Result};
 
+/// State key set while a container is being created or set up.
+///
+/// It is removed when the step that set it completes, so it is only ever
+/// seen on what a killed `sdme create` left behind. Such a container cannot
+/// be started, only removed.
+pub const STATE_INCOMPLETE: &str = "INCOMPLETE";
+
 /// Global flag set by the SIGINT/SIGTERM handler; checked by [`check_interrupted`].
 pub static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
@@ -335,6 +342,15 @@ impl State {
     /// Shorthand for `self.get("ROOTFS").unwrap_or("")`.
     pub fn rootfs(&self) -> &str {
         self.get("ROOTFS").unwrap_or("")
+    }
+
+    /// Whether this is the state of a container whose create never finished.
+    ///
+    /// True for the [`STATE_INCOMPLETE`] marker, and for a state with no keys:
+    /// the name is claimed by creating the file, and a create killed right
+    /// after that leaves it empty.
+    pub fn is_incomplete(&self) -> bool {
+        self.is_yes(STATE_INCOMPLETE) || self.serialize().is_empty()
     }
 
     /// Returns true if the given key is set to `"yes"`.

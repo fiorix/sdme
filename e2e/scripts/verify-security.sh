@@ -26,6 +26,8 @@ set -euo pipefail
 #  17. --userns idmapped lower layer: no copy-up at create, correct ownership
 #      inside and on disk, cp into the stopped container, nothing left under
 #      /run/sdme/idmap; and the pre-chown method with it switched off
+#  18. killed create: an incomplete container is reported, cannot be started,
+#      and can be removed, with or without a container directory
 
 source "$(dirname "$0")/lib.sh"
 
@@ -965,6 +967,46 @@ else
 fi
 cleanup_container usrns-chown
 rm -f "$IDM_CFG"
+
+# ===========================================================================
+# Test 18: what a killed create leaves behind stays removable
+# ===========================================================================
+# A kill cannot be timed against a 10ms create, so the leftovers are written
+# by hand: the INCOMPLETE marker is what the state file holds at that point.
+echo "=== Test 18: incomplete create ==="
+
+cleanup_container sec-incomplete
+if ! output=$("$SDME" create --name sec-incomplete -r "$IDM_FS" --userns "${VFLAG[@]}" 2>&1); then
+    fail "incomplete create: create failed: $output"
+else
+    echo 'INCOMPLETE=yes' >>"$DATADIR/state/sec-incomplete"
+    if "$SDME" ps 2>/dev/null | grep -E '^sec-incomplete ' | grep -q 'incomplete create'; then
+        ok "incomplete create: reported by ps"
+    else
+        fail "incomplete create: not reported by ps"
+    fi
+    output=$(timeout "$TIMEOUT_BOOT" "$SDME" start sec-incomplete 2>&1 || true)
+    if [[ "$output" == *"was not fully created"* ]]; then
+        ok "incomplete create: start refused"
+    else
+        fail "incomplete create: start was not refused: $output"
+    fi
+    cleanup_container sec-incomplete
+    if [[ ! -e "$DATADIR/state/sec-incomplete" ]]; then
+        ok "incomplete create: removed"
+    else
+        fail "incomplete create: still present after removal"
+    fi
+fi
+
+# The claimed state file with no container directory behind it.
+echo 'INCOMPLETE=yes' >"$DATADIR/state/sec-ghost"
+cleanup_container sec-ghost
+if [[ ! -e "$DATADIR/state/sec-ghost" ]]; then
+    ok "incomplete create: state file without a container directory removed"
+else
+    fail "incomplete create: a state file without a container directory was not removed"
+fi
 
 # ===========================================================================
 # Summary

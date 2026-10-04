@@ -180,8 +180,12 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
     {
         let entry = entry?;
         if entry.file_type()?.is_file() {
+            // Only container names: the directory can also hold the temp
+            // file of an atomic state write that was killed.
             if let Some(name) = entry.file_name().to_str() {
-                entries.push(name.to_string());
+                if crate::validate_name(name).is_ok() {
+                    entries.push(name.to_string());
+                }
             }
         }
     }
@@ -205,6 +209,9 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
         }
         let state_path = state_dir.join(name);
         let state = State::read_from(&state_path);
+        if matches!(&state, Ok(s) if s.is_incomplete()) {
+            problems.push("incomplete create");
+        }
 
         // Extract all state-dependent fields at once.
         let (rootfs_name, userns, enabled, binds, network, limits, kube) = match &state {
