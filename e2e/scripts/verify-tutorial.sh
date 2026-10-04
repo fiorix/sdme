@@ -900,7 +900,7 @@ test_pod_networking() {
         for k in pod/new pod/ls pod/create-server pod/create-client \
                  pod/connectivity pod/rm \
                  pod/oci-import-redis pod/oci-new-pod pod/oci-create-server \
-                 pod/oci-boot-server pod/oci-redis-ping pod/oci-rm; do
+                 pod/oci-boot-server pod/oci-redis-ping pod/oci-netns pod/oci-rm; do
             record "$k" SKIP "base import failed"
         done
         return
@@ -1019,7 +1019,7 @@ _test_oci_pod() {
     else
         record "pod/oci-import-redis" FAIL "$output"
         for k in pod/oci-new-pod pod/oci-create-server pod/oci-boot-server \
-                 pod/oci-redis-ping pod/oci-rm; do
+                 pod/oci-redis-ping pod/oci-netns pod/oci-rm; do
             record "$k" SKIP "redis import failed"
         done
         return
@@ -1032,18 +1032,18 @@ _test_oci_pod() {
     if ! output=$(timeout 10 $SDME pod new "$pod" 2>&1); then
         record "pod/oci-new-pod" FAIL "$output"
         for k in pod/oci-create-server pod/oci-boot-server \
-                 pod/oci-redis-ping pod/oci-rm; do
+                 pod/oci-redis-ping pod/oci-netns pod/oci-rm; do
             record "$k" SKIP "pod new failed"
         done
         return
     fi
     record "pod/oci-new-pod" PASS
 
-    # sdme create --name redis-server -r redis --oci-pod dbpod --hardened
+    # sdme create --name redis-server -r redis --oci-pod dbpod --private-network
     if ! output=$(timeout "$TIMEOUT_BOOT" $SDME create --name "$ct" -r "$REDIS_FS" \
-            --oci-pod "$pod" --hardened 2>&1); then
+            --oci-pod "$pod" --private-network 2>&1); then
         record "pod/oci-create-server" FAIL "$output"
-        for k in pod/oci-boot-server pod/oci-redis-ping pod/oci-rm; do
+        for k in pod/oci-boot-server pod/oci-redis-ping pod/oci-netns pod/oci-rm; do
             record "$k" SKIP "create failed"
         done
         $SDME rm -f "$ct" 2>/dev/null || true
@@ -1059,6 +1059,7 @@ _test_oci_pod() {
     if ! output=$(timeout "$TIMEOUT_BOOT" $SDME start "$ct" -t 120 2>&1); then
         record "pod/oci-boot-server" FAIL "$output"
         record "pod/oci-redis-ping" SKIP "boot failed"
+        record "pod/oci-netns" SKIP "boot failed"
         record "pod/oci-rm" SKIP "boot failed"
         $SDME rm -f "$ct" 2>/dev/null || true
         $SDME pod rm -f "$pod" 2>/dev/null || true
@@ -1075,6 +1076,19 @@ _test_oci_pod() {
         record "pod/oci-redis-ping" PASS
     else
         record "pod/oci-redis-ping" FAIL "$reply"
+    fi
+
+    # The ping above answers from inside the same container whether or not
+    # the app joined the pod, so compare namespaces: exec --oci runs in the
+    # app's namespaces.
+    local app_netns pod_netns
+    app_netns=$(timeout "$TIMEOUT_TEST" $SDME exec --oci -- "$ct" \
+        /usr/bin/readlink /proc/self/ns/net 2>&1 | tr -d '\r') || true
+    pod_netns="net:[$(stat -L -c %i "/run/sdme/pods/$pod/netns" 2>/dev/null)]"
+    if [[ "$app_netns" == "$pod_netns" ]]; then
+        record "pod/oci-netns" PASS
+    else
+        record "pod/oci-netns" FAIL "app in '$app_netns', pod is '$pod_netns'"
     fi
 
     stop_container "$ct"
@@ -1490,7 +1504,7 @@ generate_report() {
             pod/new pod/ls pod/create-server pod/create-client \
             pod/connectivity pod/rm \
             pod/oci-import-redis pod/oci-new-pod pod/oci-create-server \
-            pod/oci-boot-server pod/oci-redis-ping pod/oci-rm \
+            pod/oci-boot-server pod/oci-redis-ping pod/oci-netns pod/oci-rm \
             kube/create kube/boot kube/ps \
             kube/secret-create kube/configmap-create \
             kube/secret-ls kube/configmap-ls \

@@ -868,8 +868,9 @@ Two ways to join a pod:
 
   --oci-pod <name>   Only the OCI app process enters the pod's network
                      namespace (via a systemd NetworkNamespacePath= drop-in).
-                     Requires --private-network (or --hardened/--strict).
-                     Works with user namespace isolation.
+                     Requires --private-network. Not available with
+                     --userns, --hardened or --strict: inside a user
+                     namespace the app cannot enter the pod's netns.
 
 Both flags can be combined on the same container.
 
@@ -904,9 +905,9 @@ EXAMPLES:
     sdme pod new mypod --attach veth
     sdme pod new mypod --attach zone --zone myzone
 
-    # OCI pod with hardened security
+    # OCI pod: only the app joins the pod's network namespace
     sdme pod new mypod
-    sdme new --name app -r nginx --oci-pod mypod --hardened
+    sdme new --name app -r nginx --oci-pod mypod --private-network
 
     # Attach external networking (veth)
     sdme pod net attach mypod veth
@@ -2498,6 +2499,7 @@ fn run() -> Result<()> {
                 oci_pod.as_deref(),
                 fs.as_deref(),
                 network.private_network,
+                sec.userns,
             )?;
             let (binds, envs) = parse_mounts(mounts)?;
             let oci_envs = validate_oci_envs(oci_env)?;
@@ -2854,6 +2856,7 @@ fn run() -> Result<()> {
                 oci_pod.as_deref(),
                 fs.as_deref(),
                 network.private_network,
+                sec.userns,
             )?;
             let (binds, envs) = parse_mounts(mounts)?;
             let oci_envs = validate_oci_envs(oci_env)?;
@@ -3367,7 +3370,7 @@ fn run() -> Result<()> {
                 system_check::check_systemd_version(255)?;
                 let (mut sec, hardened) = parse_security(security_args, &cfg)?;
                 validate_pod_args(&cfg.datadir, pod.as_deref())?;
-                validate_kube_oci_pod_args(&cfg.datadir, oci_pod.as_deref())?;
+                validate_kube_oci_pod_args(&cfg.datadir, oci_pod.as_deref(), sec.userns)?;
                 let yaml_content = std::fs::read_to_string(&file)
                     .with_context(|| format!("failed to read {file}"))?;
                 let effective_base_fs = base_fs.or_else(|| {
@@ -3461,7 +3464,7 @@ fn run() -> Result<()> {
                 system_check::check_systemd_version(255)?;
                 let (mut sec, hardened) = parse_security(security_args, &cfg)?;
                 validate_pod_args(&cfg.datadir, pod.as_deref())?;
-                validate_kube_oci_pod_args(&cfg.datadir, oci_pod.as_deref())?;
+                validate_kube_oci_pod_args(&cfg.datadir, oci_pod.as_deref(), sec.userns)?;
                 let yaml_content = std::fs::read_to_string(&file)
                     .with_context(|| format!("failed to read {file}"))?;
                 let effective_base_fs = base_fs.or_else(|| {

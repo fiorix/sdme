@@ -177,9 +177,9 @@ else
     fi
 fi
 
-# 3d: --oci-pod without OCI app rootfs → should error (needs --hardened to
-# pass the --private-network check first)
-if err=$($SDME create --name val-err1b --oci-pod=valpod --hardened 2>&1); then
+# 3d: --oci-pod without OCI app rootfs → should error (needs
+# --private-network to pass that check first)
+if err=$($SDME create --name val-err1b --oci-pod=valpod --private-network 2>&1); then
     fail "--oci-pod without OCI rootfs should error"
     cleanup_container val-err1b
 else
@@ -198,18 +198,18 @@ else
     ok "--pod=nonexistent rejected"
 fi
 
-# 3f: --oci-pod + --hardened → should succeed (--hardened implies
-# --private-network, satisfying the CAP_NET_ADMIN requirement; OCI app
-# enters pod netns via inner systemd drop-in NetworkNamespacePath=).
-# Without an OCI app rootfs the error should be about the rootfs, not
-# about network/userns conflicts.
-err_msg=$($SDME create --name val-err3 --oci-pod=valpod --hardened 2>&1 || true)
-if echo "$err_msg" | grep -q "requires an OCI app rootfs"; then
-    ok "--oci-pod + --hardened not rejected for network conflict"
-else
-    fail "--oci-pod + --hardened error unexpected: $err_msg"
-fi
-cleanup_container val-err3
+# 3f: --oci-pod with user namespace isolation → should error. The app
+# service cannot enter a netns owned by the host's user namespace from inside
+# the container's, and systemd would start it outside the pod without failing.
+for flag in --userns --hardened --strict; do
+    err_msg=$($SDME create --name val-err3 --oci-pod=valpod --private-network "$flag" 2>&1 || true)
+    if echo "$err_msg" | grep -q "cannot be combined with user namespace isolation"; then
+        ok "--oci-pod + $flag rejected"
+    else
+        fail "--oci-pod + $flag: unexpected result: $err_msg"
+    fi
+    cleanup_container val-err3
+done
 
 cleanup_pod valpod
 

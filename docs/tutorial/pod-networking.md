@@ -82,7 +82,7 @@ Without external networking, install any software you need before joining the po
 
 The `--oci-pod` flag is for OCI application containers. Only the OCI app service process enters the pod's network namespace; the container's init and other services remain in their own namespace.
 
-This works with `--hardened` and `--strict` because the network namespace join happens inside the container's own namespace.
+`--oci-pod` requires `--private-network` and cannot be combined with `--userns`, `--hardened`, or `--strict`. The pod's network namespace belongs to the host's user namespace, and an app service inside a container's own user namespace is not permitted to enter it. Use `--pod` for containers with user namespace isolation.
 
 Create a pod and import redis:
 
@@ -94,10 +94,10 @@ sudo sdme pod new dbpod
 sudo sdme fs import docker.io/redis --base-fs ubuntu
 ```
 
-Start redis in the pod with hardened security:
+Start redis in the pod:
 
 ```sh
-sudo sdme create --name redis-server -r redis --oci-pod dbpod --hardened --started
+sudo sdme create --name redis-server -r redis --oci-pod dbpod --private-network --started
 ```
 
 Verify redis is running:
@@ -106,10 +106,10 @@ Verify redis is running:
 sudo sdme logs redis-server --oci
 ```
 
-Start a client container in the same pod using the same redis rootfs, so `redis-cli` is available. Both containers use `--oci-pod` with `--hardened`:
+Start a client container in the same pod using the same redis rootfs, so `redis-cli` is available. Both containers use `--oci-pod` with `--private-network`:
 
 ```sh
-sudo sdme create --name redis-client -r redis --oci-pod dbpod --hardened --started
+sudo sdme create --name redis-client -r redis --oci-pod dbpod --private-network --started
 ```
 
 Test the connection from the client:
@@ -118,14 +118,18 @@ Test the connection from the client:
 sudo sdme exec redis-client --oci -- redis-cli ping
 ```
 
-You should see `PONG`. Both containers share the pod's network namespace and communicate over localhost, each running with hardened security.
+You should see `PONG`. The two app processes share the pod's network namespace and communicate over localhost, while each container's own services stay on its private network.
 
 ## --pod vs --oci-pod
 
 ```text
-Feature            --pod                  --oci-pod -----------------  ---------------------  ------------------------- Scope              Entire container       OCI app service only Container types    Any                    OCI app rootfs required Userns/hardened    Compatible             Compatible Requires           (nothing extra)        --private-network or
-                                          --hardened/--strict
-Use case           General-purpose pods   Security-hardened apps
+Feature          --pod                 --oci-pod
+---------------  --------------------  -------------------------
+Scope            Entire container      OCI app service only
+Container types  Any                   OCI app rootfs required
+Userns/hardened  Compatible            Not supported
+Requires         (nothing extra)       --private-network
+Use case         General-purpose pods  App-only pod networking
 ```
 
 Both flags can be used on different containers in the same pod. The pod's network namespace is shared regardless of which flag each container uses to join it.

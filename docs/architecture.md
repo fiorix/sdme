@@ -471,6 +471,7 @@ The runtime bind-mount under `/run` is volatile and disappears on reboot. When a
 **`--oci-pod=<name>`** on `sdme create` or `sdme new`:
 
 - Requires an OCI app rootfs (an `sdme-oci-{name}.service` unit must exist in the rootfs).
+- Requires `--private-network`, and is rejected with `--userns`, `--hardened`, or `--strict`. Entering a network namespace needs `CAP_SYS_ADMIN` in the user namespace that owns it; the pod's netns is owned by the host's, so the app service of a user-namespaced container cannot enter it, and systemd treats the failure as non-fatal and runs the app outside the pod.
 - Stores `OCI_POD=<name>` in the container's state file.
 - At create time, writes a systemd drop-in inside the overlayfs upper layer at `upper/etc/systemd/system/sdme-oci-{name}.service.d/oci-pod-netns.conf` with `NetworkNamespacePath=/run/sdme/oci-pod-netns`.
 - At start time, the nspawn drop-in includes `--bind-ro=/run/sdme/pods/<name>/netns:/run/sdme/oci-pod-netns`, which makes the pod's netns available inside the container. The inner drop-in makes only the OCI app service process enter the pod's netns.

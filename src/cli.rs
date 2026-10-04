@@ -1073,11 +1073,13 @@ pub(crate) fn validate_pod_args(datadir: &Path, pod_name: Option<&str>) -> Resul
 /// - Private network is enabled (required for `NetworkNamespacePath=` inside
 ///   the container; nspawn strips `CAP_NET_ADMIN` on host-network containers,
 ///   which prevents systemd from calling `setns(CLONE_NEWNET)`)
+/// - User namespace isolation is off (see [`reject_oci_pod_with_userns`])
 pub(crate) fn validate_oci_pod_args(
     datadir: &Path,
     oci_pod: Option<&str>,
     rootfs: Option<&str>,
     private_network: bool,
+    userns: bool,
 ) -> Result<()> {
     let pod_name = match oci_pod {
         Some(n) => n,
@@ -1088,9 +1090,11 @@ pub(crate) fn validate_oci_pod_args(
         bail!("pod not found: {pod_name}");
     }
 
+    reject_oci_pod_with_userns(userns)?;
+
     if !private_network {
         bail!(
-            "--oci-pod requires --private-network (or --hardened/--strict which imply it); \
+            "--oci-pod requires --private-network; \
              without a private network namespace, systemd-nspawn strips CAP_NET_ADMIN \
              and the inner NetworkNamespacePath= directive cannot work"
         );
@@ -1134,12 +1138,34 @@ pub(crate) fn validate_oci_pod_args(
     Ok(())
 }
 
+/// Refuse `--oci-pod` on a container with user namespace isolation.
+///
+/// The pod's network namespace belongs to the host's user namespace. The app
+/// service runs inside the container's, where `setns(CLONE_NEWNET)` into it
+/// is not permitted, and systemd treats that as non-fatal: the app starts in
+/// the container's own network namespace, outside the pod, without an error.
+fn reject_oci_pod_with_userns(userns: bool) -> Result<()> {
+    if userns {
+        bail!(
+            "--oci-pod cannot be combined with user namespace isolation \
+             (--userns, --hardened, --strict): the app could not enter the pod's \
+             network namespace and would run outside the pod; use --pod, which \
+             works with user namespaces, or --oci-pod with --private-network"
+        );
+    }
+    Ok(())
+}
+
 /// Validate `--oci-pod` constraints for kube commands.
 ///
 /// Simplified version of `validate_oci_pod_args` for kube: skips the rootfs
 /// OCI service check since kube always creates OCI services during build.
-/// Only checks that the pod exists.
-pub(crate) fn validate_kube_oci_pod_args(datadir: &Path, oci_pod: Option<&str>) -> Result<()> {
+/// Checks that the pod exists and that user namespace isolation is off.
+pub(crate) fn validate_kube_oci_pod_args(
+    datadir: &Path,
+    oci_pod: Option<&str>,
+    userns: bool,
+) -> Result<()> {
     let pod_name = match oci_pod {
         Some(n) => n,
         None => return Ok(()),
@@ -1149,12 +1175,19 @@ pub(crate) fn validate_kube_oci_pod_args(datadir: &Path, oci_pod: Option<&str>) 
         bail!("pod not found: {pod_name}");
     }
 
-    Ok(())
+    reject_oci_pod_with_userns(userns)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_oci_pod_rejected_with_userns() {
+        let err = reject_oci_pod_with_userns(true).unwrap_err();
+        assert!(format!("{err:#}").contains("user namespace isolation"));
+        assert!(reject_oci_pod_with_userns(false).is_ok());
+    }
 
     #[test]
     fn test_normalize_restart_policy() {
