@@ -11,7 +11,7 @@
 %global crate sdme
 
 Name:           sdme
-Version:        0.20.1
+Version:        0.21.0
 Release:        1%{?dist}
 Summary:        The systemd machine editor
 
@@ -106,6 +106,36 @@ export SDME_SKIP_PROBE=1
 %{_bindir}/%{crate} repair-units || :
 
 %changelog
+* Sun Oct 04 2026 Alexandre Fiori <fiorix@gmail.com> - 0.21.0-1
+- Give new overlay --userns containers an idmapped lower layer instead of
+  pre-chowning the rootfs into the upper layer. The unit bind-mounts the lower
+  layer read-only and idmapped under /run/sdme/idmap, mounts the overlay on it,
+  and drops the bind. On a 228M rootfs, create --userns goes from 1.9 seconds
+  and a 235M upper layer to 0.01 seconds and 32K. The pre-chown remains the
+  fallback where the lower layer cannot be idmapped (util-linux older than
+  2.39, a filesystem without idmapped mounts, sdme inside a user namespace),
+  and for existing containers.
+- Add the userns_idmap_lower config key; set it to no to always pre-chown.
+- File capabilities in the rootfs are preserved and honoured with an idmapped
+  lower layer. A binary whose effective file capabilities are outside the
+  container's bounding set, such as ping under --hardened, fails to execute.
+  The pre-chown loses them.
+- Shift what sdme cp writes into a stopped container that has an idmapped lower
+  layer, so it is owned by the container's root and not by nobody.
+- Host-rootfs containers boot with --userns. With the pre-chown, the create
+  failed in the overlay's own work directory.
+- Refuse to start a container with an idmapped lower layer whose UID base is in
+  use by another running machine.
+- Reject --oci-pod together with --userns, --hardened or --strict, in create,
+  new and the kube commands. Inside a user namespace the app could not enter
+  the pod's network namespace, and systemd started it outside the pod without
+  an error. Use --pod, or --oci-pod with --private-network.
+- Mark a create that never finished. A create that is killed leaves
+  INCOMPLETE=yes in the state file: sdme ps reports it, sdme start refuses it,
+  and sdme rm removes it, also when the container directory is missing.
+- sdme rm removes the temp files that killed state writes left behind, and sdme
+  ps no longer lists them as containers.
+
 * Fri Oct 02 2026 Alexandre Fiori <fiorix@gmail.com> - 0.20.1-1
 - Wait out an OCI app's stop timeout when its container is stopped or removed:
   the pod's terminationGracePeriodSeconds for a kube pod, 90 seconds for an OCI

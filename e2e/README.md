@@ -216,9 +216,9 @@ Totals                       712     0    12  25 suites
 
 ## Log
 
-### userns idmapped lower layer (2026-10-04, aarch64)
+### 0.21.0 -- userns idmapped lower layer (2026-10-04, aarch64)
 
-Branch `userns-idmap-lower` (unreleased, sdme 0.20.1 base). Standalone suite runs on Linux 7.0.0-34-generic (aarch64, lima-default), systemd 259, util-linux 2.41.3, ext4 datadir. Not a full `run-parallel.sh` gate: the suites that use `--userns`, `--hardened`, `--strict` or pods, or that exercise the changed mount, ownership and create paths, were run serially against the release build of the final commit.
+Standalone suite runs on Linux 7.0.0-34-generic (aarch64, lima-default), systemd 259, util-linux 2.41.3, ext4 datadir. Not a full `run-parallel.sh` gate: the suites that use `--userns`, `--hardened`, `--strict` or pods, or that exercise the changed mount, ownership and create paths, were run serially against the release build of the final commit.
 
 ```
 Suite                       Pass  Fail  Skip  Result
