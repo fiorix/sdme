@@ -218,7 +218,7 @@ Totals                       712     0    12  25 suites
 
 ### userns idmapped lower layer (2026-10-04, aarch64)
 
-Branch `userns-idmap-lower` (unreleased, sdme 0.20.1 base). Standalone suite runs on Linux 7.0.0-34-generic (aarch64, lima-default), systemd 259, util-linux 2.41.3, ext4 datadir. Not a full `run-parallel.sh` gate: the suites that exercise the changed mount, ownership and create paths were run serially against the release build.
+Branch `userns-idmap-lower` (unreleased, sdme 0.20.1 base). Standalone suite runs on Linux 7.0.0-34-generic (aarch64, lima-default), systemd 259, util-linux 2.41.3, ext4 datadir. Not a full `run-parallel.sh` gate: the suites that use `--userns`, `--hardened`, `--strict` or pods, or that exercise the changed mount, ownership and create paths, were run serially against the release build of the final commit.
 
 ```
 Suite                       Pass  Fail  Skip  Result
@@ -230,11 +230,18 @@ verify-nested-userns          10     0     0  PASS
 verify-cp                     21     0     0  PASS
 verify-interrupt               8     0     0  PASS
 smoke                         14     0     0  PASS
+verify-oci                    18     0     0  PASS
+verify-distro-boot            54     0     0  PASS
+verify-distro-oci            150     0     0  PASS
+verify-kube-L1-basic          22     0     0  PASS
+verify-nested                  0     0     0  not run
 verify-export                 21     1     1  FAIL
 ```
 
 - `verify-security` has 55 checks on aarch64: 10 from the new Test 17 and 4 from the new Test 18. Test 17 asserts that a `--userns` create selects the idmapped lower layer by default and leaves a 32K upper layer (no copy-up); that `sdme cp` into the stopped container stores the directory and file it creates with the shifted owner; that the container boots with lower files and the copied file owned 0:0 inside; that the bind and its mount point are gone once the overlay is mounted; that a file created inside is stored with the shifted owner; that the rootfs ownership on disk is unchanged; and that nothing is left under `/run/sdme/idmap` after `rm`. It then sets `userns_idmap_lower = false` and checks that the pre-chown method still creates and boots a container. Test 14 (six distros on aarch64: debian, ubuntu, fedora, centos, almalinux, opensuse) runs on the idmapped lower layer and passes both the boot and the setuid-bit check on each.
-- The `verify-export` failure is `tar.bz2 export: missing etc/os-release in archive`. The host has no `bzip2`, which the test's own `tar -j` listing needs; the export itself was written (57.1M). The suite has no userns case, so the failure is unrelated to this change. The skip is `tar xattrs` (no `setfattr` on the host). `verify-export` was run on an earlier build of the branch and not repeated; the other seven were run on the final build.
+- The `verify-export` failure is `tar.bz2 export: missing etc/os-release in archive`. The host has no `bzip2`, which the test's own `tar -j` listing needs; the export itself was written (57.1M). The suite has no userns case, so the failure is unrelated to this change. The skip is `tar xattrs` (no `setfattr` on the host). `verify-export` was run on an earlier build of the branch and not repeated; the others were run on the final commit.
+- `verify-nested` ran no checks: it needs a btrfs datadir for its outer container and this host's is ext4. The nested path of this change, a nested sdme falling back to the pre-chown, is covered by `verify-nested-userns` instead, which builds its own btrfs pool.
+- `verify-oci`, `verify-distro-boot` and `verify-distro-oci` use `--userns`, `--hardened` or `--strict` across the six distros and run on the idmapped lower layer; `verify-kube-L1-basic` covers the create path through `kube`, where the incomplete marker is cleared by `containers::create` itself.
 - Measured on the ubuntu rootfs (228M): `create --userns` took 0.01s and left a 32K upper layer with the idmapped lower layer, against 1.93s and a 235M upper layer with the pre-chown. This is the expected effect: the pre-chown copies every file up, the idmapped bind copies none.
 - Test 18 covers what a killed create leaves behind, written by hand because a kill cannot be timed against a 10ms create: a container whose state carries `INCOMPLETE=yes` is reported by `ps`, refused by `start`, and removed by `rm`, and a state file with no container directory is removed by `rm`.
 - Interrupt handling, checked by hand on the final build. 60 `create --userns` runs were each sent one SIGINT at a random point in the first 100ms: 27 completed, 33 were removed again, none was left half set up. 100 runs were each sent SIGKILL the same way: 52 completed, 37 were left marked incomplete (none of them would start), 11 left nothing, and none was left unmarked. `sdme rm -f` removed every one of them, and afterwards there were no state files, container directories or temp files, and no mount or directory under `/run/sdme/idmap`. This meets the requirement: a kill cannot be cleaned up by the killed process, so the bar is that every leftover is identifiable and removable. Before the marker, the same test left containers with a reserved range and a shifted upper layer but no `USERNS_IDMAP_LOWER`, state files that `rm` refused, 14 probe binds mounted under `/run/sdme/idmap`, and state temp files listed by `ps` as containers.
