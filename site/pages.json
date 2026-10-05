@@ -2,13 +2,19 @@
   "docs/ai-skill.md": {
     "source": "docs/ai-skill.md",
     "description": "Embedded AI agent skill for using and troubleshooting sdme.",
-    "weight": 3,
+    "weight": 4,
     "template": "doc.html"
   },
   "docs/architecture.md": {
     "source": "docs/architecture.md",
     "description": "How sdme works: overlayfs, systemd integration, OCI support, and Kubernetes pods.",
     "weight": 1,
+    "template": "doc.html"
+  },
+  "docs/nesting.md": {
+    "source": "docs/nesting.md",
+    "description": "Support matrix for nested workloads: Docker, Podman, and sdme inside privileged and user-namespaced containers.",
+    "weight": 3,
     "template": "doc.html"
   },
   "docs/security.md": {

@@ -36,7 +36,7 @@ Containers created from an imported rootfs use an overlayfs upper layer by defau
 sudo sdme new --name mybox -r ubuntu --storage btrfs
 ```
 
-The btrfs backend gives the container a real filesystem rather than an overlay mount. That lets you run nested containers inside it (Docker, podman, or another sdme), preserves setuid bits and file capabilities under `--userns`, and enables a per-container disk cap. Host clones (`sdme new` with no `-r`) always use overlay; only imported rootfs can use btrfs.
+The btrfs backend gives the container a real filesystem rather than an overlay mount. That lets you run nested containers inside it (Docker, podman, or another sdme; see [nested workloads](../nesting.md) for the supported setups), preserves setuid bits and file capabilities under `--userns`, and enables a per-container disk cap. Host clones (`sdme new` with no `-r`) always use overlay; only imported rootfs can use btrfs.
 
 Cap a btrfs container's disk usage with `--disk`:
 

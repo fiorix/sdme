@@ -11,7 +11,7 @@ Nested Docker has two requirements the defaults do not cover: a real filesystem 
 >
 > On cgroup v2 the device controller is enforced by an eBPF program. runc calls `bpf()` to install it, and systemd-nspawn's seccomp filter denies that syscall by default, so every `docker run` fails with `bpf_prog_query(BPF_CGROUP_DEVICE) failed: operation not permitted`. Allowing the `bpf` syscall unblocks it. No extra capability is needed: `CAP_SYS_ADMIN` (already in nspawn's default set) covers the operation. `keyctl` and `add_key` are added for images that use the kernel keyring.
 >
-> `--network-veth` plus `CAP_NET_ADMIN` give the container its own network namespace so Docker's bridge and iptables rules stay isolated from the host.
+> `--network-veth` gives the container its own network namespace, and with it `CAP_NET_ADMIN` over that namespace, so Docker's bridge and iptables rules stay isolated from the host. No `--capability` flag is needed.
 
 ## Host preparation
 
@@ -30,7 +30,6 @@ Create and enter a container from an imported Ubuntu rootfs (see [using a differ
 ```sh
 sudo sdme new --name dockerbox -r ubuntu --storage btrfs \
   --network-veth \
-  --capability CAP_NET_ADMIN \
   --system-call-filter bpf \
   --system-call-filter keyctl \
   --system-call-filter add_key
@@ -130,10 +129,10 @@ btrfs root           --storage btrfs plus            container root is a real
                      "storage-driver": "btrfs"       fs; no overlay-on-overlay
 device controller    --system-call-filter bpf        cgroup v2 devices use eBPF
                      (keyctl, add_key too)           (no extra capability)
-isolated networking  --network-veth plus             Docker's bridge/iptables
-                     --capability CAP_NET_ADMIN      run in the container netns
+isolated networking  --network-veth                  Docker's bridge/iptables
+                     (grants CAP_NET_ADMIN)          run in the container netns
 ```
 
 Podman rootful runs under the same requirements. Rootless container engines are a harder case inside nspawn: storage is solved the same way (a btrfs root gives the kernel's native overlay, no fuse), but nspawn's read-only `/proc/sys` and locked `/proc` submounts block a rootless engine's child user namespace from mounting a fresh `/proc`. For nested engines, prefer the rootful path shown here.
 
-See the [architecture](../architecture.md) and [security](../security.md) documentation for how sdme's storage backends, capabilities, and seccomp filtering work.
+See the [architecture](../architecture.md) and [security](../security.md) documentation for how sdme's storage backends, capabilities, and seccomp filtering work, and [nested workloads](../nesting.md) for which nested topologies are supported.

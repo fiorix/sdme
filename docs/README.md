@@ -8,6 +8,7 @@ For installation, see the [project README](../README.md#installation).
 
 - [Architecture and Design](architecture.md): How sdme works: overlayfs, systemd integration, OCI support, and Kubernetes pods.
 - [Security](security.md): Container isolation, hardening tiers, OCI workload security, and Kubernetes pod security.
+- [Nested Workloads](nesting.md): Support matrix for nested workloads: Docker, Podman, and sdme inside privileged and user-namespaced containers.
 - [AI Skill](ai-skill.md): Embedded AI agent skill for using and troubleshooting sdme.
 
 ## Tutorials
