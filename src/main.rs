@@ -796,6 +796,7 @@ CONFIG KEYS:
     join_as_sudo_user              bool     yes       Drop to sudo user on join
     host_rootfs_opaque_dirs        string   /etc/systemd/system,/var/log
     hardened_drop_caps             string   CAP_SYS_PTRACE,CAP_NET_RAW,CAP_SYS_RAWIO,CAP_SYS_BOOT
+    userns_nested_ranges           u32      0         Extra 64K UID/GID ranges for --userns
     userns_idmap_lower             bool     yes       Idmap the overlay lower layer for --userns
     default_base_fs                string   (empty)   Default --base-fs for OCI app imports
     default_output_format          string   (empty)   Default output for ps/fs ls (json, json-pretty)
@@ -812,9 +813,10 @@ CONFIG KEYS:
     stop_timeout_graceful          u64      90        Graceful stop timeout (seconds)
     stop_timeout_terminate         u64      30        Terminate stop timeout (seconds)
     stop_timeout_kill              u64      15        Force-kill stop timeout (seconds)
+    restart_sec                    u64      2         Delay before a --restart policy retries (seconds)
     auto_fs_gc                     bool     yes       Auto-clean stale transactions
     default_create_masked_services string   systemd-resolved.service
-    default_storage_backend        string   auto      Backend for new containers (overlay, btrfs, auto)
+    default_storage_backend        string   (empty)   Backend for new containers (overlay, btrfs; empty = overlay)
     btrfs_pool_size                string   20G       Mode B btrfs pool image size
     docker_user                    string   (empty)   Docker Hub username
     docker_token                   string   (empty)   Docker Hub access token
@@ -2052,6 +2054,322 @@ fn container_journalctl_path(datadir: &Path, name: &str) -> &'static str {
     "/usr/bin/journalctl"
 }
 
+/// Validate a `config set` value and produce its TOML representation.
+///
+/// Returns the dotted key to write and its value, or `None` to remove the
+/// key from the file. Kept apart from the command handler so a test can
+/// check that every key of [`config::Config`] is settable.
+fn config_set_value(key: &str, value: String) -> Result<(String, Option<toml::Value>)> {
+    use toml::Value as V;
+    let toml_key;
+    let toml_val: Option<V>;
+
+    match key {
+        "interactive" => {
+            toml_key = key.to_string();
+            toml_val = Some(V::Boolean(match value.as_str() {
+                "yes" => true,
+                "no" => false,
+                _ => {
+                    bail!("invalid value for interactive: {value} (expected yes or no)")
+                }
+            }));
+        }
+        "datadir" => {
+            let path = PathBuf::from(&value);
+            if !path.is_absolute() {
+                bail!("datadir must be an absolute path: {value}");
+            }
+            toml_key = key.to_string();
+            toml_val = Some(V::String(value));
+        }
+        "boot_timeout" => {
+            let secs: u64 = value.parse().map_err(|_| {
+                anyhow::anyhow!("boot_timeout must be a positive integer (seconds)")
+            })?;
+            if secs == 0 {
+                bail!("boot_timeout must be greater than 0");
+            }
+            toml_key = key.to_string();
+            toml_val = Some(V::Integer(secs as i64));
+        }
+        "join_as_sudo_user" => {
+            toml_key = key.to_string();
+            toml_val = Some(V::Boolean(match value.as_str() {
+                "yes" => true,
+                "no" => false,
+                _ => bail!("invalid value for join_as_sudo_user: {value} (expected yes or no)"),
+            }));
+        }
+        "userns_idmap_lower" => {
+            toml_key = key.to_string();
+            toml_val = Some(V::Boolean(match value.as_str() {
+                "yes" => true,
+                "no" => false,
+                _ => bail!("invalid value for userns_idmap_lower: {value} (expected yes or no)"),
+            }));
+        }
+        "host_rootfs_opaque_dirs" => {
+            let normalized = if value.is_empty() {
+                String::new()
+            } else {
+                let dirs = parse_opaque_dirs_config(&value);
+                containers::validate_opaque_dirs(&dirs)?.join(",")
+            };
+            toml_key = key.to_string();
+            toml_val = Some(V::String(normalized));
+        }
+        "hardened_drop_caps" => {
+            let normalized = if value.is_empty() {
+                String::new()
+            } else {
+                let caps: Vec<String> = value
+                    .split(',')
+                    .map(|c| security::normalize_cap(c.trim()))
+                    .collect();
+                for cap in &caps {
+                    security::validate_capability(cap)?;
+                }
+                caps.join(",")
+            };
+            toml_key = key.to_string();
+            toml_val = Some(V::String(normalized));
+        }
+        "default_base_fs" => {
+            if !value.is_empty() {
+                sdme::validate_name(&value)?;
+            }
+            toml_key = key.to_string();
+            toml_val = Some(V::String(value));
+        }
+        "default_output_format" => {
+            match value.as_str() {
+                "" | "json" | "json-pretty" => {}
+                other => {
+                    bail!(
+                        "invalid default_output_format '{other}': \
+                         expected json, json-pretty, or empty for table"
+                    )
+                }
+            }
+            toml_key = key.to_string();
+            toml_val = Some(V::String(value));
+        }
+        "default_kube_registry" => {
+            if value.is_empty() {
+                bail!("default_kube_registry cannot be empty");
+            }
+            toml_key = key.to_string();
+            toml_val = Some(V::String(value));
+        }
+        "default_export_fs" => {
+            match value.as_str() {
+                "ext4" | "btrfs" => {}
+                other => {
+                    bail!("invalid default_export_fs '{other}': expected ext4 or btrfs")
+                }
+            }
+            toml_key = key.to_string();
+            toml_val = Some(V::String(value));
+        }
+        "tasks_max" => {
+            let v: u32 = value
+                .parse()
+                .context("tasks_max must be a positive integer")?;
+            if v == 0 {
+                bail!("tasks_max must be greater than 0");
+            }
+            toml_key = key.to_string();
+            toml_val = Some(V::Integer(v as i64));
+        }
+        "stop_timeout_graceful" | "stop_timeout_terminate" | "stop_timeout_kill" => {
+            let secs: u64 = value
+                .parse()
+                .map_err(|_| anyhow::anyhow!("{key} must be a positive integer (seconds)"))?;
+            if secs == 0 {
+                bail!("{key} must be greater than 0");
+            }
+            toml_key = key.to_string();
+            toml_val = Some(V::Integer(secs as i64));
+        }
+        "docker_user" => {
+            toml_key = key.to_string();
+            toml_val = Some(V::String(value));
+        }
+        "docker_token" => {
+            toml_key = key.to_string();
+            toml_val = Some(V::String(value));
+        }
+        "oci_cache_dir" => {
+            if !value.is_empty() {
+                let path = PathBuf::from(&value);
+                if !path.is_absolute() {
+                    bail!("oci_cache_dir must be an absolute path: {value}");
+                }
+            }
+            toml_key = key.to_string();
+            toml_val = Some(V::String(value));
+        }
+        "oci_cache_max_size" => {
+            sdme::parse_size(&value)
+                .with_context(|| format!("invalid oci_cache_max_size: {value}"))?;
+            toml_key = key.to_string();
+            toml_val = Some(V::String(value));
+        }
+        "oci_manifest_cache_ttl" => {
+            let v: u64 = value
+                .parse()
+                .context("oci_manifest_cache_ttl must be a number of seconds")?;
+            toml_key = key.to_string();
+            toml_val = Some(V::Integer(v as i64));
+        }
+        "http_timeout" => {
+            let v: u64 = value
+                .parse()
+                .context("http_timeout must be a number of seconds")?;
+            toml_key = key.to_string();
+            toml_val = Some(V::Integer(v as i64));
+        }
+        "http_body_timeout" => {
+            let v: u64 = value
+                .parse()
+                .context("http_body_timeout must be a number of seconds")?;
+            toml_key = key.to_string();
+            toml_val = Some(V::Integer(v as i64));
+        }
+        "max_download_size" => {
+            if value != "0" {
+                sdme::parse_size(&value)
+                    .with_context(|| format!("invalid max_download_size: {value}"))?;
+            }
+            toml_key = key.to_string();
+            toml_val = Some(V::String(value));
+        }
+        key if key.starts_with("update_check.") => {
+            let subkey = &key["update_check.".len()..];
+            toml_key = key.to_string();
+            toml_val = match subkey {
+                "enabled" => Some(V::Boolean(match value.as_str() {
+                    "yes" => true,
+                    "no" => false,
+                    _ => bail!(
+                        "invalid value for update_check.enabled: {value} (expected yes or no)"
+                    ),
+                })),
+                "version_url" | "binary_url_template" | "checksums_url_template" => {
+                    if !value.starts_with("https://") {
+                        bail!("update_check.{subkey} must start with https://: {value}");
+                    }
+                    if subkey == "binary_url_template"
+                        && (!value.contains("{version}") || !value.contains("{arch}"))
+                    {
+                        bail!(
+                            "update_check.binary_url_template must contain {{version}} and {{arch}} placeholders"
+                        );
+                    }
+                    if subkey == "checksums_url_template" && !value.contains("{version}") {
+                        bail!(
+                            "update_check.checksums_url_template must contain {{version}} placeholder"
+                        );
+                    }
+                    Some(V::String(value))
+                }
+                "check_interval_hours" => {
+                    let hours: u64 = value.parse().map_err(|_| {
+                        anyhow::anyhow!(
+                            "update_check.check_interval_hours must be a non-negative integer"
+                        )
+                    })?;
+                    Some(V::Integer(hours as i64))
+                }
+                other => bail!("unknown config key: update_check.{other}"),
+            };
+        }
+        key if key.starts_with("distros.") => {
+            let parts: Vec<&str> = key.splitn(3, '.').collect();
+            if parts.len() != 3 {
+                bail!(
+                    "expected format: distros.<family>.<hook> \
+                     (e.g., distros.debian.import_prehook)"
+                );
+            }
+            let hook = parts[2];
+            if hook != "import_prehook" && hook != "export_prehook" && hook != "export_vm_prehook" {
+                bail!(
+                    "unknown hook '{hook}': expected import_prehook, export_prehook, or export_vm_prehook"
+                );
+            }
+            toml_key = key.to_string();
+            toml_val = if value.is_empty() {
+                None // remove the key
+            } else if value.starts_with('[') {
+                let cmds: Vec<String> = serde_json::from_str(&value)
+                    .context("expected JSON array of command strings")?;
+                Some(V::Array(cmds.into_iter().map(V::String).collect()))
+            } else {
+                Some(V::Array(vec![V::String(value)]))
+            };
+        }
+        "default_storage_backend" => {
+            // Validate the token; empty and "auto" both select the
+            // automatic resolution (overlay unless nested or the
+            // default says btrfs).
+            if value != "auto" {
+                storage::Backend::parse(&value)
+                    .with_context(|| format!("invalid default_storage_backend: {value}"))?;
+            }
+            toml_key = key.to_string();
+            toml_val = Some(V::String(value));
+        }
+        "btrfs_pool_size" => {
+            sdme::parse_size(&value)
+                .with_context(|| format!("invalid btrfs_pool_size: {value}"))?;
+            toml_key = key.to_string();
+            toml_val = Some(V::String(value));
+        }
+        "userns_nested_ranges" => {
+            let v: u32 = value
+                .parse()
+                .context("userns_nested_ranges must be a non-negative integer")?;
+            toml_key = key.to_string();
+            toml_val = Some(V::Integer(v as i64));
+        }
+        "restart_sec" => {
+            let v: u64 = value
+                .parse()
+                .context("restart_sec must be a number of seconds")?;
+            toml_key = key.to_string();
+            toml_val = Some(V::Integer(v as i64));
+        }
+        "auto_fs_gc" => {
+            toml_key = key.to_string();
+            toml_val = Some(V::Boolean(match value.as_str() {
+                "yes" => true,
+                "no" => false,
+                _ => bail!("invalid value for auto_fs_gc: {value} (expected yes or no)"),
+            }));
+        }
+        "default_export_free_space" => {
+            sdme::parse_size(&value)
+                .with_context(|| format!("invalid default_export_free_space: {value}"))?;
+            toml_key = key.to_string();
+            toml_val = Some(V::String(value));
+        }
+        "default_create_masked_services" => {
+            let services: Vec<String> = value
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            cli::validate_masked_services(&services)?;
+            toml_key = key.to_string();
+            toml_val = Some(V::String(services.join(",")));
+        }
+        _ => bail!("unknown config key: {key}"),
+    }
+    Ok((toml_key, toml_val))
+}
+
 fn run() -> Result<()> {
     let cli = Cli::parse();
 
@@ -2124,286 +2442,8 @@ fn run() -> Result<()> {
                 display_distro_hooks(&cfg);
             }
             ConfigCommand::Set { key, value } => {
-                // Validate the value and produce the TOML representation.
                 // The key is written surgically without touching other config keys.
-                use toml::Value as V;
-                let toml_key;
-                let toml_val: Option<V>;
-
-                match key.as_str() {
-                    "interactive" => {
-                        toml_key = key.clone();
-                        toml_val = Some(V::Boolean(match value.as_str() {
-                            "yes" => true,
-                            "no" => false,
-                            _ => {
-                                bail!("invalid value for interactive: {value} (expected yes or no)")
-                            }
-                        }));
-                    }
-                    "datadir" => {
-                        let path = PathBuf::from(&value);
-                        if !path.is_absolute() {
-                            bail!("datadir must be an absolute path: {value}");
-                        }
-                        toml_key = key.clone();
-                        toml_val = Some(V::String(value));
-                    }
-                    "boot_timeout" => {
-                        let secs: u64 = value.parse().map_err(|_| {
-                            anyhow::anyhow!("boot_timeout must be a positive integer (seconds)")
-                        })?;
-                        if secs == 0 {
-                            bail!("boot_timeout must be greater than 0");
-                        }
-                        toml_key = key.clone();
-                        toml_val = Some(V::Integer(secs as i64));
-                    }
-                    "join_as_sudo_user" => {
-                        toml_key = key.clone();
-                        toml_val = Some(V::Boolean(match value.as_str() {
-                            "yes" => true,
-                            "no" => false,
-                            _ => bail!(
-                                "invalid value for join_as_sudo_user: {value} (expected yes or no)"
-                            ),
-                        }));
-                    }
-                    "userns_idmap_lower" => {
-                        toml_key = key.clone();
-                        toml_val = Some(V::Boolean(match value.as_str() {
-                            "yes" => true,
-                            "no" => false,
-                            _ => bail!(
-                                "invalid value for userns_idmap_lower: {value} (expected yes or no)"
-                            ),
-                        }));
-                    }
-                    "host_rootfs_opaque_dirs" => {
-                        let normalized = if value.is_empty() {
-                            String::new()
-                        } else {
-                            let dirs = parse_opaque_dirs_config(&value);
-                            containers::validate_opaque_dirs(&dirs)?.join(",")
-                        };
-                        toml_key = key.clone();
-                        toml_val = Some(V::String(normalized));
-                    }
-                    "hardened_drop_caps" => {
-                        let normalized = if value.is_empty() {
-                            String::new()
-                        } else {
-                            let caps: Vec<String> = value
-                                .split(',')
-                                .map(|c| security::normalize_cap(c.trim()))
-                                .collect();
-                            for cap in &caps {
-                                security::validate_capability(cap)?;
-                            }
-                            caps.join(",")
-                        };
-                        toml_key = key.clone();
-                        toml_val = Some(V::String(normalized));
-                    }
-                    "default_base_fs" => {
-                        if !value.is_empty() {
-                            sdme::validate_name(&value)?;
-                        }
-                        toml_key = key.clone();
-                        toml_val = Some(V::String(value));
-                    }
-                    "default_output_format" => {
-                        match value.as_str() {
-                            "" | "json" | "json-pretty" => {}
-                            other => {
-                                bail!(
-                                    "invalid default_output_format '{other}': \
-                                     expected json, json-pretty, or empty for table"
-                                )
-                            }
-                        }
-                        toml_key = key.clone();
-                        toml_val = Some(V::String(value));
-                    }
-                    "default_kube_registry" => {
-                        if value.is_empty() {
-                            bail!("default_kube_registry cannot be empty");
-                        }
-                        toml_key = key.clone();
-                        toml_val = Some(V::String(value));
-                    }
-                    "default_export_fs" => {
-                        match value.as_str() {
-                            "ext4" | "btrfs" => {}
-                            other => {
-                                bail!("invalid default_export_fs '{other}': expected ext4 or btrfs")
-                            }
-                        }
-                        toml_key = key.clone();
-                        toml_val = Some(V::String(value));
-                    }
-                    "tasks_max" => {
-                        let v: u32 = value
-                            .parse()
-                            .context("tasks_max must be a positive integer")?;
-                        if v == 0 {
-                            bail!("tasks_max must be greater than 0");
-                        }
-                        toml_key = key.clone();
-                        toml_val = Some(V::Integer(v as i64));
-                    }
-                    "stop_timeout_graceful" | "stop_timeout_terminate" | "stop_timeout_kill" => {
-                        let secs: u64 = value.parse().map_err(|_| {
-                            anyhow::anyhow!("{key} must be a positive integer (seconds)")
-                        })?;
-                        if secs == 0 {
-                            bail!("{key} must be greater than 0");
-                        }
-                        toml_key = key.clone();
-                        toml_val = Some(V::Integer(secs as i64));
-                    }
-                    "docker_user" => {
-                        toml_key = key.clone();
-                        toml_val = Some(V::String(value));
-                    }
-                    "docker_token" => {
-                        toml_key = key.clone();
-                        toml_val = Some(V::String(value));
-                    }
-                    "oci_cache_dir" => {
-                        if !value.is_empty() {
-                            let path = PathBuf::from(&value);
-                            if !path.is_absolute() {
-                                bail!("oci_cache_dir must be an absolute path: {value}");
-                            }
-                        }
-                        toml_key = key.clone();
-                        toml_val = Some(V::String(value));
-                    }
-                    "oci_cache_max_size" => {
-                        sdme::parse_size(&value)
-                            .with_context(|| format!("invalid oci_cache_max_size: {value}"))?;
-                        toml_key = key.clone();
-                        toml_val = Some(V::String(value));
-                    }
-                    "oci_manifest_cache_ttl" => {
-                        let v: u64 = value
-                            .parse()
-                            .context("oci_manifest_cache_ttl must be a number of seconds")?;
-                        toml_key = key.clone();
-                        toml_val = Some(V::Integer(v as i64));
-                    }
-                    "http_timeout" => {
-                        let v: u64 = value
-                            .parse()
-                            .context("http_timeout must be a number of seconds")?;
-                        toml_key = key.clone();
-                        toml_val = Some(V::Integer(v as i64));
-                    }
-                    "http_body_timeout" => {
-                        let v: u64 = value
-                            .parse()
-                            .context("http_body_timeout must be a number of seconds")?;
-                        toml_key = key.clone();
-                        toml_val = Some(V::Integer(v as i64));
-                    }
-                    "max_download_size" => {
-                        if value != "0" {
-                            sdme::parse_size(&value)
-                                .with_context(|| format!("invalid max_download_size: {value}"))?;
-                        }
-                        toml_key = key.clone();
-                        toml_val = Some(V::String(value));
-                    }
-                    key if key.starts_with("update_check.") => {
-                        let subkey = &key["update_check.".len()..];
-                        toml_key = key.to_string();
-                        toml_val = match subkey {
-                            "enabled" => Some(V::Boolean(match value.as_str() {
-                                "yes" => true,
-                                "no" => false,
-                                _ => bail!(
-                                    "invalid value for update_check.enabled: {value} (expected yes or no)"
-                                ),
-                            })),
-                            "version_url" | "binary_url_template" | "checksums_url_template" => {
-                                if !value.starts_with("https://") {
-                                    bail!("update_check.{subkey} must start with https://: {value}");
-                                }
-                                if subkey == "binary_url_template"
-                                    && (!value.contains("{version}") || !value.contains("{arch}"))
-                                {
-                                    bail!(
-                                        "update_check.binary_url_template must contain {{version}} and {{arch}} placeholders"
-                                    );
-                                }
-                                if subkey == "checksums_url_template" && !value.contains("{version}")
-                                {
-                                    bail!(
-                                        "update_check.checksums_url_template must contain {{version}} placeholder"
-                                    );
-                                }
-                                Some(V::String(value))
-                            }
-                            "check_interval_hours" => {
-                                let hours: u64 = value.parse().map_err(|_| {
-                                    anyhow::anyhow!(
-                                        "update_check.check_interval_hours must be a non-negative integer"
-                                    )
-                                })?;
-                                Some(V::Integer(hours as i64))
-                            }
-                            other => bail!("unknown config key: update_check.{other}"),
-                        };
-                    }
-                    key if key.starts_with("distros.") => {
-                        let parts: Vec<&str> = key.splitn(3, '.').collect();
-                        if parts.len() != 3 {
-                            bail!(
-                                "expected format: distros.<family>.<hook> \
-                                 (e.g., distros.debian.import_prehook)"
-                            );
-                        }
-                        let hook = parts[2];
-                        if hook != "import_prehook"
-                            && hook != "export_prehook"
-                            && hook != "export_vm_prehook"
-                        {
-                            bail!(
-                                "unknown hook '{hook}': expected import_prehook, export_prehook, or export_vm_prehook"
-                            );
-                        }
-                        toml_key = key.to_string();
-                        toml_val = if value.is_empty() {
-                            None // remove the key
-                        } else if value.starts_with('[') {
-                            let cmds: Vec<String> = serde_json::from_str(&value)
-                                .context("expected JSON array of command strings")?;
-                            Some(V::Array(cmds.into_iter().map(V::String).collect()))
-                        } else {
-                            Some(V::Array(vec![V::String(value)]))
-                        };
-                    }
-                    "default_storage_backend" => {
-                        // Validate the token; empty and "auto" both select the
-                        // automatic resolution (overlay unless nested or the
-                        // default says btrfs).
-                        if value != "auto" {
-                            storage::Backend::parse(&value).with_context(|| {
-                                format!("invalid default_storage_backend: {value}")
-                            })?;
-                        }
-                        toml_key = key.clone();
-                        toml_val = Some(V::String(value));
-                    }
-                    "btrfs_pool_size" => {
-                        sdme::parse_size(&value)
-                            .with_context(|| format!("invalid btrfs_pool_size: {value}"))?;
-                        toml_key = key.clone();
-                        toml_val = Some(V::String(value));
-                    }
-                    _ => bail!("unknown config key: {key}"),
-                }
+                let (toml_key, toml_val) = config_set_value(&key, value)?;
 
                 if let Some(ref val) = toml_val {
                     if let Some(default_val) = config::default_value_for_key(&toml_key) {
@@ -4067,6 +4107,42 @@ mod tests {
     use super::*;
     use sdme::network::NetworkConfig;
     use std::fs;
+
+    /// `config get` prints every key of the config file, so `config set` has
+    /// to accept every one of them.
+    #[test]
+    fn config_set_accepts_every_config_key() {
+        let defaults = toml::Value::try_from(config::Config::default()).unwrap();
+        let mut keys = Vec::new();
+        for (key, val) in defaults.as_table().unwrap() {
+            match val {
+                toml::Value::Table(inner) if key == "update_check" => {
+                    keys.extend(inner.iter().map(|(sub, v)| (format!("{key}.{sub}"), v)));
+                }
+                // Distro hooks are set as distros.<family>.<hook>, not by a
+                // key of the default table.
+                toml::Value::Table(_) => {}
+                _ => keys.push((key.clone(), val)),
+            }
+        }
+        assert!(keys.len() > 20, "default config has too few keys: {keys:?}");
+
+        let mut unknown = Vec::new();
+        for (key, default) in keys {
+            let value = match default {
+                toml::Value::Boolean(true) => "yes".to_string(),
+                toml::Value::Boolean(false) => "no".to_string(),
+                toml::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            if let Err(e) = config_set_value(&key, value) {
+                if e.to_string().starts_with("unknown config key") {
+                    unknown.push(key);
+                }
+            }
+        }
+        assert!(unknown.is_empty(), "config set rejects: {unknown:?}");
+    }
 
     /// Create a temp rootfs dir with an oci/apps/app/ports file.
     fn make_rootfs_with_ports(name: &str, ports_content: &str) -> std::path::PathBuf {

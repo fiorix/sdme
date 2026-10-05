@@ -880,12 +880,19 @@ pub(crate) fn resolve_masked_services(
         }
         list
     };
-    for svc in &list {
+    validate_masked_services(&list)?;
+    Ok(list)
+}
+
+/// Reject masked service names that could escape `etc/systemd/system/`,
+/// where each one becomes the name of a `/dev/null` symlink.
+pub(crate) fn validate_masked_services(list: &[String]) -> anyhow::Result<()> {
+    for svc in list {
         if svc.contains('/') || svc.contains("..") {
             anyhow::bail!("invalid masked service name: {svc:?}");
         }
     }
-    Ok(list)
+    Ok(())
 }
 
 /// Auto-wire OCI port forwarding from the rootfs `/oci/ports` file.

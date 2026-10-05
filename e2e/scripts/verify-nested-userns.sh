@@ -13,6 +13,8 @@ set -euo pipefail
 #      range (conflict-free allocation).
 #   4. A create whose range reservation fails removes the container it had
 #      already created, and the name stays usable.
+#   5. `sdme config set userns_nested_ranges N` sets the default that a
+#      `create --userns` without `--userns-nested` uses.
 
 source "$(dirname "$0")/lib.sh"
 
@@ -187,6 +189,31 @@ if output=$(timeout "$BOOT_TIMEOUT" "$SDME" create --name "$CTR3" -r "$BASEFS" -
 else
     fail "create after the failed create: $output"
 fi
+
+# ---------------------------------------------------------------------------
+# Test 5: the userns_nested_ranges config key sets the default range.
+# ---------------------------------------------------------------------------
+# A scratch config file keeps the host's /etc/sdme.conf untouched; every key it
+# does not set keeps its default, so the container lands in the usual datadir.
+echo "=== Test 5: userns_nested_ranges config default ==="
+
+CTR4="${PREFIX}-cfgdefault"
+CFG=$(mktemp "/tmp/${PREFIX}-conf-XXXXXX")
+
+if output=$("$SDME" --config "$CFG" config set userns_nested_ranges 2 2>&1) \
+    && "$SDME" --config "$CFG" config get 2>/dev/null | grep -qx "userns_nested_ranges = 2"; then
+    ok "config set userns_nested_ranges 2 is accepted and read back"
+else
+    fail "config set userns_nested_ranges 2: $output"
+fi
+
+if output=$(timeout "$BOOT_TIMEOUT" "$SDME" --config "$CFG" create --name "$CTR4" -r "$BASEFS" --userns "${VFLAG[@]}" 2>&1) \
+    && [[ "$(state_key "$CTR4" "USERNS_RANGE")" == "196608" ]]; then
+    ok "create --userns without --userns-nested takes the configured default"
+else
+    fail "configured default not applied (USERNS_RANGE='$(state_key "$CTR4" "USERNS_RANGE")'): $output"
+fi
+rm -f "$CFG"
 
 # ---------------------------------------------------------------------------
 # Summary
