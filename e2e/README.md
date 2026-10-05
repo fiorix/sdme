@@ -44,12 +44,15 @@ Stage 1: Smoke + Interrupt (serial, gates)
     If either fails, all downstream tests are skipped.
 
 Stage 2: Parallel tests (semaphore-bounded, default 8 jobs)
-    Wave A: all core tests + kube-L1.
+    Wave A: all core tests + kube-L1. The two kube-L3 suites run as a
+    serial pair inside the wave (shared secret names).
     Wait for kube-L1 to complete.
-    Wave B: kube L2-L6 (only if L1 passed).
+    Wave B: kube L2, L4, L5 (only if L1 passed).
+    After both waves, serially: verify-nixos.sh, then kube-L6.
 
-Stage 3: Destructive (serial)
+Stage 3: Serial
     verify-tutorial.sh (batch ops: stop --all, rm --all).
+    verify-nested.sh (toggles a mount option on the shared data root).
 ```
 
 Runner options: `--jobs N`, `--timeout-scale N`, `--stagger N`, `--skip SCRIPT`, `--only SCRIPT`. See `--help`.
@@ -63,9 +66,10 @@ preflight.sh                 Environment validation (no containers)
 smoke.sh                     Container lifecycle gate test
 verify-interrupt.sh          SIGINT/SIGTERM abort handling
 verify-cp.sh                 File copy: host, containers, rootfs
+verify-diff.sh               sdme diff: added, modified, deleted, ranges
 verify-storage.sh            btrfs backend: lifecycle, cp/export/diff, disk cap
 verify-pool.sh               btrfs loopback pool (Mode B) on a scratch datadir
-verify-export.sh             Export: dir, tar, raw image, xattrs
+verify-export.sh             Export: dir, tar, raw image, xattrs, tar metadata
 verify-build.sh              sdme fs build, COPY, locking, resume
 verify-security.sh           Capabilities, seccomp, AppArmor, userns
 verify-pods.sh               Pod shared network namespace
@@ -84,7 +88,9 @@ verify-kube-L3-volumes.sh    emptyDir, hostPath, PVC, configMap, secret
 verify-kube-L4-networking.sh Inter-container localhost networking
 verify-kube-L5-redis-stack.sh Redis multi-container pod
 verify-kube-L6-gitea-stack.sh Gitea + MySQL + Nginx stack
-verify-nested-userns.sh      Nested UID/GID range reservation
+verify-nested-userns.sh      Nested UID/GID range reservation, config default
+verify-nested-privileged.sh  Privileged outer: inner sdme containers, Docker
+                             on btrfs, nested subvolume removal
 verify-nested.sh             sdme-in-sdme: nested btrfs state ops, storage
                              auto, chroot /dev import, preflight, kube pod
 ```
@@ -216,6 +222,27 @@ Totals                       712     0    12  25 suites
 
 ## Log
 
+### After 0.21.0 -- nested workload coverage, tar export metadata, config keys (2026-10-05, x86_64)
+
+Standalone suite runs on Linux 7.0.0-34-generic (x86_64), Ubuntu 26.04, systemd 259.5, btrfs datadir on its own mount, ufw active. Not a full `run-parallel.sh` gate: the suites that changed, or that cover the changed code, were run one at a time against the release build of the final code commit. `cargo test` passes (1006 library tests, 21 binary tests).
+
+```
+Suite                       Pass  Fail  Skip  Result
+--------------------------  ----  ----  ----  ------
+verify-nested-privileged      18     0     0  PASS
+verify-nested                 13     0     3  PASS
+verify-nested-userns          12     0     0  PASS
+verify-export                 23     0     1  PASS
+verify-tutorial (docker)       2     0     8  PASS
+```
+
+- `verify-nested-privileged` is new: 18 checks, no skips, about one minute. Inside a privileged btrfs outer container, inner sdme containers boot on an overlay clone of the outer root (with and without `--userns`), on overlay from a rootfs the nested sdme imported, and on btrfs from that rootfs (with and without `--userns`). Removing the outer container from the host with three inner containers still running leaves none of the 7 nested subvolumes. On an overlay outer container the inner unit fails at its overlay mount within a second. Docker starts on the btrfs storage driver in a `--network-veth` container created without `--capability CAP_NET_ADMIN`, runs a container on its default bridge from a locally imported image, and `sdme rm` leaves none of its subvolumes. No check needs network access from inside a container, so the suite runs in full on this host, where a veth container gets no DHCP lease.
+- `verify-export` gained Test 23. A tarball of a rootfs keeps a setuid bit, a `0600` mode, a sticky world-writable directory, a set mtime, and the `1,3` of a character device. The export used the tar crate's deterministic header mode, which writes every entry as `0755` or `0644` with an mtime of 2006-07-24 and leaves device numbers out; the new unit test failed with mode `0755` for a `04755` file before the change. The one skip is the xattr test, which needs `setfattr`.
+- `verify-nested-userns` gained Test 5 (10 to 12 checks): `config set userns_nested_ranges 2` in a scratch config file is accepted and read back, and a `create --userns` without `--userns-nested` then records `USERNS_RANGE=196608`. `config set` rejected this key and four others that `config get` prints (`restart_sec`, `auto_fs_gc`, `default_export_free_space`, `default_create_masked_services`) as unknown. A unit test now checks every key of the default config against `config set`; it listed exactly those five before the change.
+- `verify-nested` is unchanged at 13 passed and 3 skipped; the skips need `user_subvol_rm_allowed` off, which this host's mount unit sets. The suite now installs the binary under test in the outer container; it copied `/usr/local/bin/sdme` whatever `SDME` pointed at. Its create checks match the reworded preflight error.
+- `verify-tutorial` was run with `--only docker_in_container`, a new option, because the full suite ends with `stop --all` and `rm --all -f`. The create, now without `--capability CAP_NET_ADMIN`, and the boot pass. The 8 skips are the steps that need a default route in the container, among them the new `docker/rm` check, which has not run on any host yet; `verify-nested-privileged` asserts the same removal.
+- Checked by hand: inside a `--userns --network-veth` outer container, `systemd-nspawn` fails to mount sysfs, fails to set up idmapped mounts with `-U`, and with `--private-network` fails to remount `/run/host/incoming`. The nested preflight error no longer suggests changing the outer container's syscall filter, which cannot lift a kernel restriction.
+
 ### 0.21.0 -- userns idmapped lower layer (2026-10-04, aarch64)
 
 Standalone suite runs on Linux 7.0.0-34-generic (aarch64, lima-default), systemd 259, util-linux 2.41.3, ext4 datadir. Not a full `run-parallel.sh` gate: the suites that use `--userns`, `--hardened`, `--strict` or pods, or that exercise the changed mount, ownership and create paths, were run serially against the release build of the final commit.
@@ -240,7 +267,7 @@ verify-export                 21     1     1  FAIL
 
 - `verify-security` has 55 checks on aarch64: 10 from the new Test 17 and 4 from the new Test 18. Test 17 asserts that a `--userns` create selects the idmapped lower layer by default and leaves a 32K upper layer (no copy-up); that `sdme cp` into the stopped container stores the directory and file it creates with the shifted owner; that the container boots with lower files and the copied file owned 0:0 inside; that the bind and its mount point are gone once the overlay is mounted; that a file created inside is stored with the shifted owner; that the rootfs ownership on disk is unchanged; and that nothing is left under `/run/sdme/idmap` after `rm`. It then sets `userns_idmap_lower = false` and checks that the pre-chown method still creates and boots a container. Test 14 (six distros on aarch64: debian, ubuntu, fedora, centos, almalinux, opensuse) runs on the idmapped lower layer and passes both the boot and the setuid-bit check on each.
 - The `verify-export` failure is `tar.bz2 export: missing etc/os-release in archive`. The host has no `bzip2`, which the test's own `tar -j` listing needs; the export itself was written (57.1M). The suite has no userns case, so the failure is unrelated to this change. The skip is `tar xattrs` (no `setfattr` on the host). `verify-export` was run on an earlier build of the branch and not repeated; the others were run on the final commit.
-- `verify-nested` ran no checks: it needs a btrfs datadir for its outer container and this host's is ext4. The nested path of this change, a nested sdme falling back to the pre-chown, is covered by `verify-nested-userns` instead, which builds its own btrfs pool.
+- `verify-nested` ran no checks: it needs a btrfs datadir for its outer container and this host's is ext4. No other suite runs sdme inside a container (`verify-nested-userns` checks range reservation from the host), so nothing nested was covered in this run. The change has no nested path of its own: a nested sdme rejects every container create before an ownership method is chosen.
 - `verify-oci`, `verify-distro-boot` and `verify-distro-oci` use `--userns`, `--hardened` or `--strict` across the six distros and run on the idmapped lower layer; `verify-kube-L1-basic` covers the create path through `kube`, where the incomplete marker is cleared by `containers::create` itself.
 - Measured on the ubuntu rootfs (228M): `create --userns` took 0.01s and left a 32K upper layer with the idmapped lower layer, against 1.93s and a 235M upper layer with the pre-chown. This is the expected effect: the pre-chown copies every file up, the idmapped bind copies none.
 - Test 18 covers what a killed create leaves behind, written by hand because a kill cannot be timed against a 10ms create: a container whose state carries `INCOMPLETE=yes` is reported by `ps`, refused by `start`, and removed by `rm`, and a state file with no container directory is removed by `rm`.
