@@ -1366,3 +1366,60 @@ fn test_tar_export_hardlink_skips_xattrs() {
         }
     }
 }
+
+// --- tar metadata tests ---
+
+#[test]
+fn test_tar_export_preserves_mode_and_mtime() {
+    let _guard = lock_and_clear_interrupted();
+    let src = crate::testutil::TempDataDir::new("export-tar-meta-src");
+    // Modes a rootfs depends on: setuid binaries, private files, and a
+    // world-writable sticky directory.
+    for (name, mode) in [("suid", 0o4755), ("private", 0o600), ("plain", 0o644)] {
+        let path = src.path().join(name);
+        fs::write(&path, name).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+    }
+    let sticky = src.path().join("sticky");
+    fs::create_dir(&sticky).unwrap();
+    fs::set_permissions(&sticky, fs::Permissions::from_mode(0o1777)).unwrap();
+    let mtime_secs = 1_000_000_000;
+    File::options()
+        .write(true)
+        .open(src.path().join("plain"))
+        .unwrap()
+        .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(mtime_secs))
+        .unwrap();
+
+    let dst = crate::testutil::TempDataDir::new("export-tar-meta-dst");
+    let tarball = dst.path().join("out.tar");
+
+    let opts = ExportOptions {
+        format: &ExportFormat::Tar,
+        size: None,
+        free_space: 0,
+        vm_opts: None,
+        verbose: false,
+        force: false,
+        timezone: None,
+    };
+    tar::export_to_tar(src.path(), &tarball, &opts).unwrap();
+
+    let file = File::open(&tarball).unwrap();
+    let mut archive = ::tar::Archive::new(file);
+    let mut modes = std::collections::HashMap::new();
+    let mut plain_mtime = None;
+    for entry in archive.entries().unwrap() {
+        let entry = entry.unwrap();
+        let name = entry.path().unwrap().to_string_lossy().into_owned();
+        modes.insert(name.clone(), entry.header().mode().unwrap());
+        if name == "plain" {
+            plain_mtime = Some(entry.header().mtime().unwrap());
+        }
+    }
+    assert_eq!(modes["suid"], 0o4755);
+    assert_eq!(modes["private"], 0o600);
+    assert_eq!(modes["plain"], 0o644);
+    assert_eq!(modes["sticky"], 0o1777);
+    assert_eq!(plain_mtime, Some(mtime_secs));
+}

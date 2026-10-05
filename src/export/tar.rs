@@ -102,7 +102,8 @@ fn write_tar<W: std::io::Write>(
 }
 
 /// Recursively append directory entries to a tar builder, preserving
-/// ownership, permissions, special file types, hard links, and xattrs.
+/// ownership, permission bits, modification times, special file types and
+/// their device numbers, hard links, and xattrs.
 fn append_dir_recursive<W: std::io::Write>(
     builder: &mut tar::Builder<W>,
     root: &Path,
@@ -110,7 +111,7 @@ fn append_dir_recursive<W: std::io::Write>(
     verbose: bool,
     hardlinks: &mut copy::HardLinkMap,
 ) -> Result<()> {
-    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
 
     let entries =
         fs::read_dir(dir).with_context(|| format!("failed to read directory {}", dir.display()))?;
@@ -131,10 +132,19 @@ fn append_dir_recursive<W: std::io::Write>(
             .with_context(|| format!("failed to stat {}", path.display()))?;
 
         let mut header = tar::Header::new_gnu();
-        header.set_metadata_in_mode(&meta, tar::HeaderMode::Deterministic);
-        // Restore actual uid/gid (Deterministic mode zeros them).
-        header.set_uid(meta_uid(&meta));
-        header.set_gid(meta_gid(&meta));
+        header.set_metadata_in_mode(&meta, tar::HeaderMode::Complete);
+        // Complete mode stores the raw st_mode, file type bits included; a
+        // tar header carries the permission bits only.
+        header.set_mode(meta.mode() & 0o7777);
+        // A pre-epoch mtime would wrap in the header's unsigned field.
+        header.set_mtime(meta.mtime().max(0) as u64);
+        // The tar crate leaves device numbers at zero, which would turn every
+        // exported device node into 0:0 (an overlayfs whiteout).
+        let file_type = meta.file_type();
+        if file_type.is_char_device() || file_type.is_block_device() {
+            header.set_device_major(libc::major(meta.rdev()))?;
+            header.set_device_minor(libc::minor(meta.rdev()))?;
+        }
 
         if meta.is_dir() {
             append_pax_xattrs(builder, &path)?;
@@ -192,16 +202,4 @@ fn append_pax_xattrs<W: std::io::Write>(builder: &mut tar::Builder<W>, path: &Pa
         .append_pax_extensions(pax.iter().map(|(k, v)| (k.as_str(), *v)))
         .context("failed to write PAX xattr extensions")?;
     Ok(())
-}
-
-/// Extract uid from metadata (Unix-specific).
-fn meta_uid(meta: &fs::Metadata) -> u64 {
-    use std::os::unix::fs::MetadataExt;
-    meta.uid() as u64
-}
-
-/// Extract gid from metadata (Unix-specific).
-fn meta_gid(meta: &fs::Metadata) -> u64 {
-    use std::os::unix::fs::MetadataExt;
-    meta.gid() as u64
 }

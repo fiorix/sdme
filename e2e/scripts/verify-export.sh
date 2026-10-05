@@ -11,6 +11,7 @@ set -euo pipefail
 #   5. Format override (--fmt)
 #   6. Nonexistent rootfs (error case)
 #   7. Timezone: dir export, tar export, raw image export, invalid timezone
+#   8. Tar fidelity: hard links, xattrs, permission bits, mtime, device numbers
 
 source "$(dirname "$0")/lib.sh"
 
@@ -472,7 +473,7 @@ fi
 # ---------------------------------------------------------------------------
 echo "=== Test 20: tar hard links ==="
 
-# Tests 20 to 22 add files to a rootfs and export it. They use a private copy:
+# Tests 20 to 23 add files to a rootfs and export it. They use a private copy:
 # other suites have containers on the shared ubuntu rootfs, and a rootfs must
 # not change under a mounted overlay.
 $SDME fs rm "$EXPORT_FS" 2>/dev/null || true
@@ -571,6 +572,47 @@ else
     fail "dir export hard links: export failed"
 fi
 rm -rf "$outdir" "$hl_file" "$hl_link"
+
+# ---------------------------------------------------------------------------
+# Test 23: Tar export preserves permission bits, mtime, and device numbers
+# ---------------------------------------------------------------------------
+echo "=== Test 23: tar metadata ==="
+
+# A rootfs depends on these: setuid binaries, private files, sticky
+# world-writable directories, and device nodes.
+meta_dir="$upper/tmp/meta-export"
+mkdir -p "$meta_dir/sticky"
+chmod 1777 "$meta_dir/sticky"
+install -m 4755 /dev/null "$meta_dir/suid"
+install -m 0600 /dev/null "$meta_dir/private"
+touch -d '2001-09-09 01:46:40 UTC' "$meta_dir/private"
+mknod -m 0666 "$meta_dir/null" c 1 3
+
+tarball="$TMPDIR/meta-out.tar"
+if $SDME fs export "fs:$EXPORT_FS" "$tarball" $VFLAG; then
+    listing=$(TZ=UTC tar --numeric-owner --full-time -tvf "$tarball" 2>/dev/null \
+        | grep -E ' (tmp/meta-export/|etc/shadow$)' || true)
+    shadow_mode=$(stat -c %A "$upper/etc/shadow")
+    meta_bad=""
+    for want in \
+        '^-rwsr-xr-x .* tmp/meta-export/suid$' \
+        '^-rw------- .* 2001-09-09 01:46:40 tmp/meta-export/private$' \
+        '^drwxrwxrwt .* tmp/meta-export/sticky/?$' \
+        '^crw-rw-rw- .* 1,3 .* tmp/meta-export/null$' \
+        "^${shadow_mode} .* etc/shadow\$"; do
+        if ! grep -Eq "$want" <<<"$listing"; then
+            meta_bad+=" [$want]"
+        fi
+    done
+    if [[ -z "$meta_bad" ]]; then
+        ok "tar metadata (setuid, private mode, mtime, sticky, device numbers)"
+    else
+        fail "tar metadata: no entry matching$meta_bad in: $listing"
+    fi
+else
+    fail "tar metadata: export failed"
+fi
+rm -rf "$tarball" "$meta_dir"
 $SDME fs rm "$EXPORT_FS" 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
