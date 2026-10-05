@@ -264,9 +264,10 @@ pub fn analyze(datadir: &Path, default_base_fs: &str) -> Result<Vec<PrunableItem
     check_interrupted()?;
 
     // 8. Parked btrfs subvolumes: a nested context could not destroy these
-    // (EPERM without user_subvol_rm_allowed) and parked them in .trash. A
-    // privileged prune on the host destroys them. Read-only: when the pool is
-    // not mounted the trash directories simply do not exist.
+    // (EPERM without user_subvol_rm_allowed) and parked them in .trash. Only
+    // this data root's own pool is scanned, never one inside a container.
+    // Read-only: when the pool is not mounted the trash directories simply do
+    // not exist.
     if let Ok(pool_root) = crate::storage::pool::root(datadir) {
         for sub in [
             crate::storage::btrfs::FS_SUBDIR,
@@ -403,10 +404,10 @@ pub fn execute(
                 }
                 PruneCategory::BtrfsTrash => {
                     // item.name is the pool-relative path (e.g.
-                    // "containers/.trash/web.1721380000"). Destroying needs
-                    // privilege the nested context lacked; on the host this
-                    // succeeds. If it is somehow denied again, delete_subvol
-                    // re-parks the entry instead of failing.
+                    // "containers/.trash/web.1721380000"). The destroy
+                    // succeeds once the mount has user_subvol_rm_allowed. If
+                    // it is denied again, delete_subvol re-parks the entry
+                    // instead of failing.
                     match crate::storage::pool::root(datadir) {
                         Ok(pool_root) => crate::storage::btrfs::delete_subvol(
                             &pool_root.join(&item.name),

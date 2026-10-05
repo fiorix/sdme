@@ -240,7 +240,7 @@ pub fn snapshot(src: &Path, dst: &Path, readonly: bool, verbose: bool) -> Result
 }
 
 /// Subdirectory (inside the subvolume's parent) holding subvolumes whose
-/// destroy was denied, parked until a privileged `sdme prune` on the host.
+/// destroy was denied, parked until `sdme prune` is allowed to destroy them.
 pub(crate) const TRASH_SUBDIR: &str = ".trash";
 
 /// Delete the subvolume at `path`. No-op if the path does not exist.
@@ -248,8 +248,9 @@ pub(crate) const TRASH_SUBDIR: &str = ".trash";
 /// When the destroy ioctl is denied (EPERM: nested context on a btrfs mount
 /// without `user_subvol_rm_allowed`), the subvolume is parked in a `.trash`
 /// directory next to it and its contents removed with plain file operations.
-/// Rollback therefore never strands state on a denied destroy; a later
-/// privileged `sdme prune` on the host destroys trash entries.
+/// Rollback therefore never strands state on a denied destroy. `sdme prune`
+/// on the same data root destroys trash entries once the mount has the
+/// option; removing the enclosing container from the host destroys them too.
 pub fn delete_subvol(path: &Path, verbose: bool) -> Result<()> {
     if !subvolume_exists(path) {
         return Ok(());
@@ -314,9 +315,9 @@ fn trash_target(trash_dir: &Path, name: &OsStr, timestamp: u64) -> Result<PathBu
 ///
 /// Rename is an ordinary directory operation needing only write access on the
 /// parent directories, so it succeeds where the destroy ioctl EPERMs. The
-/// parked subvolume root itself stays behind (only a privileged destroy on the
-/// host removes it); child subvolume roots from nested btrfs engines likewise
-/// survive the emptying and go away with the host-side destroy.
+/// parked subvolume root itself stays behind until a destroy is permitted;
+/// child subvolume roots from nested btrfs engines likewise survive the
+/// emptying and go away with that destroy.
 fn trash_subvol(path: &Path, verbose: bool) -> Result<()> {
     let parent = path.parent().context("subvolume path has no parent")?;
     let name = path.file_name().context("subvolume path has no basename")?;
@@ -337,7 +338,8 @@ fn trash_subvol(path: &Path, verbose: bool) -> Result<()> {
     })?;
     eprintln!(
         "note: permission denied destroying subvolume {}; parked as {}\n\
-         (a privileged `sdme prune` on the host removes parked subvolumes)",
+         (`sdme prune` here destroys parked subvolumes once the btrfs mount has \
+         user_subvol_rm_allowed)",
         path.display(),
         target.display()
     );
