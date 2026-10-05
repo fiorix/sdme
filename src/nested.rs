@@ -4,10 +4,10 @@
 //! its data root lives on a filesystem whose superblock is owned by the initial
 //! user namespace. Some operations lose privilege there: btrfs tree-search
 //! ioctls, subvolume destroy on mounts without `user_subvol_rm_allowed`, and
-//! mknod under an outer container's syscall filter. This module detects the
-//! nested context and provides the preflight checks and warnings that keep
-//! such failures early and explicit instead of surfacing as opaque boot
-//! timeouts or corrupted state.
+//! device-node creation, which the kernel reserves for the initial user
+//! namespace. This module detects the nested context and provides the
+//! preflight checks and warnings that keep such failures early and explicit
+//! instead of surfacing as opaque boot timeouts or corrupted state.
 
 use std::fs;
 use std::path::Path;
@@ -26,37 +26,25 @@ pub fn is_nested() -> bool {
     !userns::is_initial_user_namespace()
 }
 
-/// Fail fast on nested-boot blockers that are outside sdme's control, and warn
-/// on configurations known not to boot. No-op outside nested contexts.
+/// Reject a container create in a nested context, where the container could
+/// not boot. No-op outside nested contexts.
 ///
-/// `userns_enabled` is the container's `--userns` flag. In a nested context a
-/// container created without it additionally needs the outer container's
-/// `/run` superblock to be owned by this context (it is host-mounted in
-/// practice), so we recommend `--userns`.
-pub fn preflight_create(datadir: &Path, userns_enabled: bool, verbose: bool) -> Result<()> {
+/// The kernel blocks nspawn there whatever flags the new container gets, so
+/// the create fails here with the cause named instead of after a boot timeout.
+pub fn preflight_create(datadir: &Path, verbose: bool) -> Result<()> {
     if !is_nested() {
         return Ok(());
     }
-    probe_mknod(datadir, verbose)?;
-    if !userns_enabled {
-        eprintln!(
-            "warning: creating a container without --userns inside a user-namespaced \
-             container usually fails to boot: nspawn remounts its /run/host/incoming \
-             export read-only, which requires owning the outer /run superblock. \
-             Use --userns for nested containers."
-        );
-    }
-    Ok(())
+    probe_mknod(datadir, verbose)
 }
 
 /// Probe mknod on a scratch tmpfs under `datadir`.
 ///
-/// A tmpfs mounted here is owned by the current user namespace, so mknod
-/// fails only when the outer container's syscall filter blocks device-node
-/// creation (observed with `--system-call-filter bpf`). Without the probe,
-/// that condition surfaces as nspawn's `Failed to mknod(.../dev/null)` after
-/// a full boot-timeout wait; failing fast names the actual cause. Probe setup
-/// failures are inconclusive and never block the create.
+/// Creating a device node needs CAP_MKNOD in the initial user namespace, even
+/// on a tmpfs owned by the current one, so the probe fails with EPERM in every
+/// nested context, with or without a syscall filter on the outer container.
+/// It tests the operation rather than inferring the answer from the uid_map.
+/// Probe setup failures are inconclusive and never block the create.
 fn probe_mknod(datadir: &Path, verbose: bool) -> Result<()> {
     let probe_dir = datadir.join(format!(".mknod-probe-{}", std::process::id()));
     fs::create_dir_all(&probe_dir)
@@ -104,14 +92,14 @@ fn probe_mknod_on_tmpfs(probe_dir: &Path, verbose: bool) -> Result<()> {
     let err = std::io::Error::last_os_error();
     if err.raw_os_error() == Some(libc::EPERM) {
         bail!(
-            "cannot create device nodes here: mknod is not permitted (EPERM). \
-             The kernel requires CAP_MKNOD in the initial user namespace, which a \
-             nested (user-namespaced) context does not have, and the outer \
-             container's syscall filter may block it too. Nested containers \
-             cannot set up /dev, so booting would fail after the full boot \
-             timeout. If the outer container sets a SystemCallFilter, allow \
-             mknod there (the @file-system group covers it); the kernel \
-             restriction itself cannot be lifted from inside."
+            "cannot create containers here: sdme is running inside a \
+             user-namespaced container, where mknod of device nodes is not \
+             permitted (EPERM). The kernel requires CAP_MKNOD in the initial \
+             user namespace, and nothing inside the container can grant it. \
+             systemd-nspawn cannot boot a container in this context, so the \
+             create is rejected instead of failing after the boot timeout. \
+             Create the container on the host, or in an outer container \
+             created without --userns, --hardened, or --strict."
         );
     }
     // Any other failure is not the condition this probe looks for.
