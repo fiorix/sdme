@@ -11,7 +11,7 @@
 %global crate sdme
 
 Name:           sdme
-Version:        0.21.0
+Version:        0.21.1
 Release:        1%{?dist}
 Summary:        The systemd machine editor
 
@@ -106,6 +106,28 @@ export SDME_SKIP_PROBE=1
 %{_bindir}/%{crate} repair-units || :
 
 %changelog
+* Mon Oct 05 2026 Alexandre Fiori <fiorix@gmail.com> - 0.21.1-1
+- Keep permission bits, modification times and device numbers in tar
+  exports. sdme fs export to a tarball wrote every entry as 0755 or 0644
+  with an mtime of 2006-07-24, so an exported rootfs lost its setuid,
+  setgid and sticky bits and had its 0600 and 0640 files widened to 0644.
+- sdme config set accepts userns_nested_ranges, restart_sec, auto_fs_gc,
+  default_export_free_space and default_create_masked_services. It
+  rejected them as unknown keys although config get prints them. The
+  config help lists userns_nested_ranges and restart_sec.
+- Correct the error of a create that is rejected inside a user-namespaced
+  container. mknod of a device node needs CAP_MKNOD in the initial user
+  namespace, so the syscall filter of the outer container does not matter;
+  the error names what works instead: create on the host, or in an outer
+  container without --userns, --hardened or --strict.
+- Correct the note printed when a btrfs subvolume is parked in .trash:
+  sdme prune on the same data root destroys it once the mount has
+  user_subvol_rm_allowed. Prune on the host does not scan a data root
+  inside a container.
+- The embedded AI skill no longer says that --userns-nested lets a
+  container host nested workloads, and drops --capability CAP_NET_ADMIN
+  from the container engine flags; --network-veth already grants it.
+
 * Sun Oct 04 2026 Alexandre Fiori <fiorix@gmail.com> - 0.21.0-1
 - Give new overlay --userns containers an idmapped lower layer instead of
   pre-chowning the rootfs into the upper layer. The unit bind-mounts the lower

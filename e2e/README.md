@@ -222,7 +222,7 @@ Totals                       712     0    12  25 suites
 
 ## Log
 
-### After 0.21.0 -- nested workload coverage, tar export metadata, config keys (2026-10-05, x86_64)
+### 0.21.1 -- nested workload coverage, tar export metadata, config keys (2026-10-05, x86_64)
 
 Standalone suite runs on Linux 7.0.0-34-generic (x86_64), Ubuntu 26.04, systemd 259.5, btrfs datadir on its own mount, ufw active. Not a full `run-parallel.sh` gate: the suites that changed, or that cover the changed code, were run one at a time against the release build of the final code commit. `cargo test` passes (1006 library tests, 21 binary tests).
 
