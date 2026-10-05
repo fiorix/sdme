@@ -54,6 +54,7 @@ KNOWN_PREFIXES=(
     vfy-kf-
     vfy-nested-userns-
     vfy-nested-
+    vfy-npriv-
     kube-vfy-
     kube-readonly-
     secret-test-
@@ -472,6 +473,7 @@ main() {
         verify-build.sh
         verify-security.sh
         verify-nested-userns.sh
+        verify-nested-privileged.sh
         verify-pods.sh
         verify-network.sh
         verify-oci.sh

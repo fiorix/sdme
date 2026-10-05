@@ -13,6 +13,14 @@ source "$(dirname "$0")/lib.sh"
 DATADIR="/var/lib/sdme"
 REPORT_DIR="."
 
+# Tutorial tests in run order; test_<name> is the function. batch_ops goes
+# last: it stops and removes every container on the host.
+TESTS=(first_container different_rootfs storage management services oci_apps
+       bind_mounts oci_volumes networking pod_networking kubernetes_pods
+       docker_in_container batch_ops)
+# Tests selected with --only; empty runs them all.
+ONLY=()
+
 # Base distro for most tests
 BASE_IMAGE="docker.io/ubuntu"
 BASE_FS="vfy-tut-ubuntu"
@@ -43,6 +51,7 @@ Must be run as root.
 
 Options:
   --report-dir DIR Write report to DIR (default: .)
+  --only NAME      Run only test_NAME (repeatable), e.g. docker_in_container
   --help           Show help
 EOF
 }
@@ -53,6 +62,15 @@ parse_args() {
             --report-dir)
                 shift
                 REPORT_DIR="$1"
+                ;;
+            --only)
+                shift
+                if [[ " ${TESTS[*]} " != *" ${1:-} "* ]]; then
+                    echo "error: unknown test: ${1:-}" >&2
+                    usage >&2
+                    exit 1
+                fi
+                ONLY+=("$1")
                 ;;
             --help)
                 usage
@@ -83,6 +101,11 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 need_base() {
+    # With --only, the test that imports the base may not have run.
+    if [[ -z "${RESULTS[rootfs/import]+x}" ]]; then
+        ensure_base_fs "$BASE_FS" "$BASE_IMAGE" && ensure_python3_in_rootfs "$BASE_FS"
+        return
+    fi
     if [[ "$(result_status "rootfs/import")" != "PASS" ]]; then
         return 1
     fi
@@ -1235,7 +1258,7 @@ test_docker_in_container() {
 
     local keys=(docker/create docker/boot docker/install \
                 docker/storage-btrfs docker/run-hello docker/registry \
-                docker/build docker/push docker/pull-run)
+                docker/build docker/push docker/pull-run docker/rm)
 
     if ! need_base; then
         for k in "${keys[@]}"; do record "$k" SKIP "base import failed"; done
@@ -1273,12 +1296,13 @@ test_docker_in_container() {
         fi
     }
 
-    # sdme create --storage btrfs --network-veth --capability CAP_NET_ADMIN
+    # sdme create --storage btrfs --network-veth
     #   --system-call-filter bpf --system-call-filter keyctl --system-call-filter add_key
     # No CAP_BPF: allowing the bpf syscall in seccomp is enough; CAP_SYS_ADMIN
-    # (in nspawn's default set) covers the operation.
+    # (in nspawn's default set) covers the operation. No --capability either:
+    # --network-veth grants CAP_NET_ADMIN over the container's own namespace.
     if ! output=$(timeout "$TIMEOUT_BOOT" $SDME create --name "$ct" -r "$BASE_FS" --storage btrfs \
-            --network-veth --capability CAP_NET_ADMIN \
+            --network-veth \
             --system-call-filter bpf --system-call-filter keyctl --system-call-filter add_key \
             2>&1); then
         record "docker/create" FAIL "$output"
@@ -1373,6 +1397,21 @@ test_docker_in_container() {
         record "docker/pull-run" PASS
     else
         record "docker/pull-run" FAIL "$output"
+    fi
+
+    # sdme rm -f dockerbox: the container's subvolume goes, and with it the
+    # image and layer subvolumes Docker created inside.
+    local subroot before after=""
+    subroot=$(kube_storage_subroot)
+    before=$(btrfs subvolume list "$subroot" 2>/dev/null | grep -c "containers/$ct/var/lib/docker/" || true)
+    if [[ "$before" -eq 0 ]]; then
+        record "docker/rm" SKIP "Docker created no subvolumes"
+    elif output=$($SDME rm -f "$ct" 2>&1) \
+            && after=$(btrfs subvolume list "$subroot" 2>/dev/null | grep -c "containers/$ct" || true) \
+            && [[ "$after" -eq 0 ]]; then
+        record "docker/rm" PASS
+    else
+        record "docker/rm" FAIL "subvolumes left after rm (${after:-not counted}): $output"
     fi
 
     _docker_teardown
@@ -1511,7 +1550,7 @@ generate_report() {
             kube/delete kube/secret-rm kube/configmap-rm \
             docker/create docker/boot docker/install \
             docker/storage-btrfs docker/run-hello docker/registry \
-            docker/build docker/push docker/pull-run \
+            docker/build docker/push docker/pull-run docker/rm \
             batch/stop-all batch/start-all batch/rm-all; do
             if [[ -n "${RESULTS[$key]+x}" ]]; then
                 local section st msg
@@ -1570,19 +1609,12 @@ main() {
     echo "Base image: $BASE_IMAGE"
     echo ""
 
-    test_first_container
-    test_different_rootfs
-    test_storage
-    test_management
-    test_services
-    test_oci_apps
-    test_bind_mounts
-    test_oci_volumes
-    test_networking
-    test_pod_networking
-    test_kubernetes_pods
-    test_docker_in_container
-    test_batch_ops
+    local t
+    for t in "${TESTS[@]}"; do
+        if [[ ${#ONLY[@]} -eq 0 || " ${ONLY[*]} " == *" $t "* ]]; then
+            "test_$t"
+        fi
+    done
     generate_report
 
     print_summary

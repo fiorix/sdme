@@ -251,6 +251,10 @@ ensure_root
 ensure_sdme
 require_gate smoke
 
+# The binary under test, which is also the one installed in the outer
+# container; $SDME may be a bare name or a path outside /usr/local/bin.
+SDME_BIN=$(command -v "$SDME")
+
 if [[ "$(stat -f -c %T "$DATADIR")" != "btrfs" ]]; then
     echo "SKIP: sdme datadir is not btrfs; the outer container needs a btrfs rootfs"
     print_summary
@@ -334,7 +338,7 @@ fi
 # Install the freshly built sdme inside the outer container. `sdme cp` refuses
 # writes into a running btrfs+userns container, so pipe through exec tee
 # (stdout discarded; it would contain the binary itself).
-if ! output=$("$SDME" exec "$OUTER" -- /usr/bin/tee /usr/local/bin/sdme < /usr/local/bin/sdme 2>&1 >/dev/null); then
+if ! output=$("$SDME" exec "$OUTER" -- /usr/bin/tee /usr/local/bin/sdme < "$SDME_BIN" 2>&1 >/dev/null); then
     fail "installing sdme into outer failed: $output"
     print_summary
     exit 1
