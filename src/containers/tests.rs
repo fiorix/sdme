@@ -317,6 +317,23 @@ fn test_resolve_name_empty() {
 }
 
 #[test]
+fn test_resolve_name_exact_messages() {
+    // The wording comes from the helper shared with pods; pin it so a
+    // change made for pods cannot silently alter container errors.
+    let tmp = tmp();
+    let msg = |input: &str| resolve_name(tmp.path(), input).unwrap_err().to_string();
+    assert_eq!(msg("x"), "no container found matching 'x'");
+    create_dummy_container(&tmp, "web-b");
+    create_dummy_container(&tmp, "web-a");
+    assert_eq!(
+        msg("web"),
+        "ambiguous name 'web', could match: web-a, web-b"
+    );
+    assert_eq!(msg("x"), "no container found matching 'x'");
+    assert_eq!(msg(""), "container name must not be empty");
+}
+
+#[test]
 fn test_ensure_exists_orphan_state() {
     let tmp = tmp();
     let state_dir = tmp.path().join("state");

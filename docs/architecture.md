@@ -259,6 +259,8 @@ When you don't specify a name, sdme generates one from a wordlist of 200 Tupi-Gu
 
 Name generation shuffles the wordlist (Fisher-Yates, seeded from `/dev/urandom`), checks each candidate against the three-way conflict detection (state files, `/var/lib/machines/`, registered machines), and returns the first unused name. If all 200 base words are taken, it falls back to vowel mutations: consonants stay fixed while vowels are randomly substituted, producing names that sound like plausible Tupi-Guarani words but don't appear in the original list. Up to 200 mutation attempts before giving up.
 
+Commands that take an existing container accept a unique prefix of its name: `sdme stop my` stops `mybox` when no other container name starts with `my`. An exact name always takes priority, so a container named `web` stays reachable next to `web-1`. A prefix that matches nothing fails with `no container found matching '<input>'`; one that matches several fails with `ambiguous name '<input>', could match: a, b`, listing the candidates in sorted order. Batch commands resolve each name on its own, so one bad name is reported and the others are still processed. Pods follow the same rules (see [Pods](#10-pods)). Both resolvers (`resolve_name()` in `src/containers/mod.rs` and `src/pod.rs`) list the catalogue and delegate the matching to `resolve_unique_prefix()` in `src/lib.rs`.
+
 ## 6. The fs Subsystem: Managing Root Filesystems
 
 The `fs` subsystem manages the catalogue of root filesystems that containers are built from. Each rootfs is a plain directory under `/var/lib/sdme/fs/` containing a complete Linux filesystem tree. Containers reference them by name.
@@ -508,6 +510,8 @@ The runtime bind-mount under `/run` is volatile and disappears on reboot. When a
 
 `sdme pod ls` lists all pods with their active/inactive status.
 
+Every command that takes an existing pod accepts a unique prefix of its name, with the same rules and messages as container names (see [Container Names](#5-container-names)): `sdme pod rm`, `sdme pod net attach`, `sdme pod net detach`, and the `--pod` and `--oci-pod` flags of `sdme create`, `sdme new`, `sdme kube apply` and `sdme kube create`. With pods `foo` and `bar`, `sdme pod rm f` removes `foo`. A pod is a directory under `{datadir}/pods/` with a state file; a directory without one is ignored. `sdme pod new` takes the name of a pod that does not exist yet and is not resolved.
+
 `sdme pod rm <name>` unmounts the netns, removes the runtime directory, and deletes the persistent state directory. Removal is refused if any container still references the pod via `POD` or `OCI_POD` keys (override with `--force`).
 
 ### Container integration
@@ -517,7 +521,7 @@ The runtime bind-mount under `/run` is volatile and disappears on reboot. When a
 - Works with any container type (host-rootfs or imported rootfs).
 - Compatible with `--userns` and `--hardened`. The container is launched via `nsenter --net=<netns> -- systemd-nspawn ...`, entering the pod's network namespace before nspawn creates the user namespace. This avoids the kernel's restriction on `setns(CLONE_NEWNET)` across user namespace boundaries (see [systemd/systemd#36363]).
 - Compatible with `--private-network`: the pod's netns already provides equivalent isolation (loopback only), so `--private-network` is automatically omitted from the nspawn invocation when a pod is used.
-- Stores `POD=<name>` in the container's state file.
+- Stores `POD=<name>` in the container's state file, with the full pod name when the flag was given a prefix.
 - At start time, the nspawn drop-in launches the container via nsenter to enter the pod's netns at `/run/sdme/pods/<name>/netns`. The entire container (including init and all services) runs inside the pod's network namespace.
 
 [systemd/systemd#36363]: https://github.com/systemd/systemd/issues/36363
@@ -526,7 +530,7 @@ The runtime bind-mount under `/run` is volatile and disappears on reboot. When a
 
 - Requires an OCI app rootfs (an `sdme-oci-{name}.service` unit must exist in the rootfs).
 - Requires `--private-network`, and is rejected with `--userns`, `--hardened`, or `--strict`. Entering a network namespace needs `CAP_SYS_ADMIN` in the user namespace that owns it; the pod's netns is owned by the host's, so the app service of a user-namespaced container cannot enter it, and systemd treats the failure as non-fatal and runs the app outside the pod.
-- Stores `OCI_POD=<name>` in the container's state file.
+- Stores `OCI_POD=<name>` in the container's state file, with the full pod name when the flag was given a prefix.
 - At create time, writes a systemd drop-in inside the overlayfs upper layer at `upper/etc/systemd/system/sdme-oci-{name}.service.d/oci-pod-netns.conf` with `NetworkNamespacePath=/run/sdme/oci-pod-netns`.
 - At start time, the nspawn drop-in includes `--bind-ro=/run/sdme/pods/<name>/netns:/run/sdme/oci-pod-netns`, which makes the pod's netns available inside the container. The inner drop-in makes only the OCI app service process enter the pod's netns.
 

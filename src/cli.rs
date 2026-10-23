@@ -1230,24 +1230,21 @@ pub(crate) fn resolve_oci_app_name(
 
 /// Validate `--pod` constraints before creating a container.
 ///
-/// Checks that the pod exists in the catalogue. User namespace isolation
-/// (`--userns`, `--hardened`) is supported: the container is launched via
-/// `nsenter --net=` so the netns is entered before nspawn creates the userns.
-pub(crate) fn validate_pod_args(datadir: &Path, pod_name: Option<&str>) -> Result<()> {
-    let pod_name = match pod_name {
-        Some(n) => n,
-        None => return Ok(()),
-    };
-
-    if !pod::exists(datadir, pod_name) {
-        bail!("pod not found: {pod_name}");
-    }
-
-    Ok(())
+/// Resolves the (possibly abbreviated) pod name to an existing pod and
+/// returns the full name, which callers must use from then on so the state
+/// file records the pod itself, not the prefix the user typed. User
+/// namespace isolation (`--userns`, `--hardened`) is supported: the
+/// container is launched via `nsenter --net=` so the netns is entered
+/// before nspawn creates the userns.
+pub(crate) fn validate_pod_args(datadir: &Path, pod_name: Option<&str>) -> Result<Option<String>> {
+    pod_name
+        .map(|name| pod::resolve_name(datadir, name))
+        .transpose()
 }
 
 /// Validate `--oci-pod` constraints before creating a container.
 ///
+/// Returns the full pod name, resolved as in [`validate_pod_args`].
 /// Checks that:
 /// - The pod exists in the catalogue
 /// - The rootfs is an OCI app rootfs (contains an `sdme-oci-*.service` unit)
@@ -1261,15 +1258,11 @@ pub(crate) fn validate_oci_pod_args(
     rootfs: Option<&str>,
     private_network: bool,
     userns: bool,
-) -> Result<()> {
+) -> Result<Option<String>> {
     let pod_name = match oci_pod {
-        Some(n) => n,
-        None => return Ok(()),
+        Some(n) => pod::resolve_name(datadir, n)?,
+        None => return Ok(None),
     };
-
-    if !pod::exists(datadir, pod_name) {
-        bail!("pod not found: {pod_name}");
-    }
 
     reject_oci_pod_with_userns(userns)?;
 
@@ -1316,7 +1309,7 @@ pub(crate) fn validate_oci_pod_args(
         );
     }
 
-    Ok(())
+    Ok(Some(pod_name))
 }
 
 /// Refuse `--oci-pod` on a container with user namespace isolation.
@@ -1341,22 +1334,20 @@ fn reject_oci_pod_with_userns(userns: bool) -> Result<()> {
 ///
 /// Simplified version of `validate_oci_pod_args` for kube: skips the rootfs
 /// OCI service check since kube always creates OCI services during build.
-/// Checks that the pod exists and that user namespace isolation is off.
+/// Checks that the pod exists and that user namespace isolation is off, and
+/// returns the full pod name, resolved as in [`validate_pod_args`].
 pub(crate) fn validate_kube_oci_pod_args(
     datadir: &Path,
     oci_pod: Option<&str>,
     userns: bool,
-) -> Result<()> {
+) -> Result<Option<String>> {
     let pod_name = match oci_pod {
-        Some(n) => n,
-        None => return Ok(()),
+        Some(n) => pod::resolve_name(datadir, n)?,
+        None => return Ok(None),
     };
 
-    if !pod::exists(datadir, pod_name) {
-        bail!("pod not found: {pod_name}");
-    }
-
-    reject_oci_pod_with_userns(userns)
+    reject_oci_pod_with_userns(userns)?;
+    Ok(Some(pod_name))
 }
 
 #[cfg(test)]

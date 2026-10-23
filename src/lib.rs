@@ -810,6 +810,37 @@ pub fn validate_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Resolve a (possibly abbreviated) name against the existing `names`.
+///
+/// An exact match wins; otherwise `input` must be a prefix of exactly one
+/// name. `kind` names the resource in errors ("container", "pod"). Shared so
+/// every resource that accepts abbreviations follows the same rules and
+/// produces the same messages.
+pub(crate) fn resolve_unique_prefix(kind: &str, input: &str, names: &[String]) -> Result<String> {
+    if input.is_empty() {
+        bail!("{kind} name must not be empty");
+    }
+    if names.iter().any(|n| n == input) {
+        return Ok(input.to_string());
+    }
+    let mut matches: Vec<&str> = names
+        .iter()
+        .map(String::as_str)
+        .filter(|n| n.starts_with(input))
+        .collect();
+    match matches.len() {
+        0 => bail!("no {kind} found matching '{input}'"),
+        1 => Ok(matches[0].to_string()),
+        _ => {
+            matches.sort_unstable();
+            bail!(
+                "ambiguous name '{input}', could match: {}",
+                matches.join(", ")
+            );
+        }
+    }
+}
+
 /// Format a unix timestamp (seconds since epoch) as `YYYY-MM-DD HH:MM` in
 /// local time. Returns the raw number as a string if formatting fails.
 pub fn format_timestamp(secs_str: &str) -> String {
@@ -966,6 +997,52 @@ mod tests {
         assert!(parse_size("abc").is_err());
         assert!(parse_size("10X").is_err());
         assert!(parse_size("M").is_err());
+    }
+
+    // --- resolve_unique_prefix tests ---
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn test_resolve_unique_prefix_exact_beats_prefix() {
+        let names = names(&["foo", "foobar"]);
+        assert_eq!(resolve_unique_prefix("pod", "foo", &names).unwrap(), "foo");
+    }
+
+    #[test]
+    fn test_resolve_unique_prefix_unique() {
+        let names = names(&["foo", "bar"]);
+        assert_eq!(resolve_unique_prefix("pod", "f", &names).unwrap(), "foo");
+    }
+
+    #[test]
+    fn test_resolve_unique_prefix_ambiguous_sorted() {
+        let names = names(&["zeta-b", "bar", "zeta-a"]);
+        let err = resolve_unique_prefix("pod", "ze", &names).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "ambiguous name 'ze', could match: zeta-a, zeta-b"
+        );
+    }
+
+    #[test]
+    fn test_resolve_unique_prefix_no_match_names_kind() {
+        let names = names(&["foo"]);
+        let err = resolve_unique_prefix("pod", "x", &names).unwrap_err();
+        assert_eq!(err.to_string(), "no pod found matching 'x'");
+        let err = resolve_unique_prefix("container", "x", &[]).unwrap_err();
+        assert_eq!(err.to_string(), "no container found matching 'x'");
+    }
+
+    #[test]
+    fn test_resolve_unique_prefix_empty_input() {
+        // Every name starts with "", so an empty input must not reach the
+        // prefix scan, where it would match everything.
+        let names = names(&["foo"]);
+        let err = resolve_unique_prefix("pod", "", &names).unwrap_err();
+        assert_eq!(err.to_string(), "pod name must not be empty");
     }
 
     // --- ResourceLimits tests ---

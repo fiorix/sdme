@@ -69,42 +69,21 @@ pub fn volumes_dir(datadir: &Path, name: &str) -> PathBuf {
 /// container names that start with `input` are collected. A single match
 /// is returned; zero or multiple matches produce an error.
 pub fn resolve_name(datadir: &Path, input: &str) -> Result<String> {
-    if input.is_empty() {
-        bail!("container name must not be empty");
-    }
     let state_dir = datadir.join("state");
-    if !state_dir.is_dir() {
-        bail!("no container found matching '{input}'");
-    }
     let mut names: Vec<String> = Vec::new();
-    for entry in fs::read_dir(&state_dir)
-        .with_context(|| format!("failed to read {}", state_dir.display()))?
-    {
-        let entry = entry?;
-        if entry.file_type()?.is_file() {
-            if let Some(name) = entry.file_name().to_str() {
-                names.push(name.to_string());
+    if state_dir.is_dir() {
+        for entry in fs::read_dir(&state_dir)
+            .with_context(|| format!("failed to read {}", state_dir.display()))?
+        {
+            let entry = entry?;
+            if entry.file_type()?.is_file() {
+                if let Some(name) = entry.file_name().to_str() {
+                    names.push(name.to_string());
+                }
             }
         }
     }
-    // Exact match; return immediately.
-    if names.iter().any(|n| n == input) {
-        return Ok(input.to_string());
-    }
-    let mut matches: Vec<&String> = names.iter().filter(|n| n.starts_with(input)).collect();
-    match matches.len() {
-        0 => bail!("no container found matching '{input}'"),
-        1 => Ok(matches.remove(0).clone()),
-        _ => {
-            matches.sort();
-            let list = matches
-                .iter()
-                .map(|s| s.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
-            bail!("ambiguous name '{input}', could match: {list}");
-        }
-    }
+    crate::resolve_unique_prefix("container", input, &names)
 }
 
 /// Mount overlayfs on a stopped container's `merged/` directory (read-write).

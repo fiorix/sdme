@@ -246,14 +246,17 @@ pub fn create(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
     Ok(())
 }
 
-/// List all pods.
-pub fn list(datadir: &Path) -> Result<Vec<PodInfo>> {
+/// Names of all pods in the catalogue, unsorted.
+///
+/// A pod is a directory under `{datadir}/pods/` holding a state file;
+/// [`create`] writes the file last, so a directory without one is not a pod.
+fn names(datadir: &Path) -> Result<Vec<String>> {
     let state_dir = datadir.join(STATE_SUBDIR);
     if !state_dir.is_dir() {
         return Ok(Vec::new());
     }
 
-    let mut entries = Vec::new();
+    let mut names = Vec::new();
     for entry in fs::read_dir(&state_dir)
         .with_context(|| format!("failed to read {}", state_dir.display()))?
     {
@@ -265,11 +268,29 @@ pub fn list(datadir: &Path) -> Result<Vec<PodInfo>> {
             Some(s) => s.to_string(),
             None => continue,
         };
-
-        let state_path = state_dir.join(&name).join("state");
-        if !state_path.exists() {
-            continue;
+        if state_dir.join(&name).join("state").exists() {
+            names.push(name);
         }
+    }
+    Ok(names)
+}
+
+/// Resolve a (possibly abbreviated) pod name to the full name.
+///
+/// Same rules and messages as container names: an exact match wins,
+/// otherwise `input` must be a prefix of exactly one pod name. The result
+/// is always a directory entry name from the catalogue, never a path, so
+/// callers can join it into paths without further validation.
+pub fn resolve_name(datadir: &Path, input: &str) -> Result<String> {
+    crate::resolve_unique_prefix("pod", input, &names(datadir)?)
+}
+
+/// List all pods.
+pub fn list(datadir: &Path) -> Result<Vec<PodInfo>> {
+    let state_dir = datadir.join(STATE_SUBDIR);
+    let mut entries = Vec::new();
+    for name in names(datadir)? {
+        let state_path = state_dir.join(&name).join("state");
         let (created, net_mode, net_zone, dns, search) = match State::read_from(&state_path) {
             Ok(s) => {
                 let created = s.get("CREATED").unwrap_or("").to_string();
@@ -702,11 +723,6 @@ pub fn ensure_runtime(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
     restore_networking_if_needed(datadir, name, verbose)?;
 
     Ok(())
-}
-
-/// Check that a pod exists in the catalogue (state file present).
-pub fn exists(datadir: &Path, name: &str) -> bool {
-    datadir.join(STATE_SUBDIR).join(name).join("state").exists()
 }
 
 /// Return the runtime path for a pod's netns bind-mount.
@@ -1319,16 +1335,80 @@ mod tests {
         assert!(!pod_dir.exists());
     }
 
-    #[test]
-    fn test_exists() {
-        let tmp = tmp();
-        assert!(!exists(tmp.path(), "mypod"));
-
-        let pod_dir = tmp.path().join(STATE_SUBDIR).join("mypod");
+    fn make_pod(tmp: &TempDataDir, name: &str) {
+        let pod_dir = tmp.path().join(STATE_SUBDIR).join(name);
         fs::create_dir_all(&pod_dir).unwrap();
         fs::write(pod_dir.join("state"), "CREATED=1234\n").unwrap();
+    }
 
-        assert!(exists(tmp.path(), "mypod"));
+    #[test]
+    fn test_resolve_name_exact_match() {
+        let tmp = tmp();
+        make_pod(&tmp, "foo");
+        make_pod(&tmp, "bar");
+        assert_eq!(resolve_name(tmp.path(), "foo").unwrap(), "foo");
+    }
+
+    #[test]
+    fn test_resolve_name_exact_beats_prefix() {
+        let tmp = tmp();
+        make_pod(&tmp, "foo");
+        make_pod(&tmp, "foobar");
+        assert_eq!(resolve_name(tmp.path(), "foo").unwrap(), "foo");
+    }
+
+    #[test]
+    fn test_resolve_name_unique_prefix() {
+        let tmp = tmp();
+        make_pod(&tmp, "foo");
+        make_pod(&tmp, "bar");
+        assert_eq!(resolve_name(tmp.path(), "f").unwrap(), "foo");
+    }
+
+    #[test]
+    fn test_resolve_name_ambiguous() {
+        let tmp = tmp();
+        make_pod(&tmp, "web-b");
+        make_pod(&tmp, "web-a");
+        let err = resolve_name(tmp.path(), "web").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "ambiguous name 'web', could match: web-a, web-b"
+        );
+    }
+
+    #[test]
+    fn test_resolve_name_no_match() {
+        let tmp = tmp();
+        make_pod(&tmp, "foo");
+        let err = resolve_name(tmp.path(), "xyz").unwrap_err();
+        assert_eq!(err.to_string(), "no pod found matching 'xyz'");
+    }
+
+    #[test]
+    fn test_resolve_name_no_pods_dir() {
+        let tmp = tmp();
+        let err = resolve_name(tmp.path(), "foo").unwrap_err();
+        assert_eq!(err.to_string(), "no pod found matching 'foo'");
+    }
+
+    #[test]
+    fn test_resolve_name_empty() {
+        let tmp = tmp();
+        make_pod(&tmp, "foo");
+        let err = resolve_name(tmp.path(), "").unwrap_err();
+        assert_eq!(err.to_string(), "pod name must not be empty");
+    }
+
+    #[test]
+    fn test_resolve_name_skips_dir_without_state() {
+        // A pod directory without a state file is not a pod (see `names`),
+        // so it must neither match nor make a prefix ambiguous.
+        let tmp = tmp();
+        make_pod(&tmp, "foo");
+        fs::create_dir_all(tmp.path().join(STATE_SUBDIR).join("foobar")).unwrap();
+        assert_eq!(resolve_name(tmp.path(), "fo").unwrap(), "foo");
+        assert!(resolve_name(tmp.path(), "foobar").is_err());
     }
 
     #[test]

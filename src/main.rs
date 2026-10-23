@@ -93,7 +93,9 @@ NOTES:
 
     Container names support prefix matching: 'sdme stop my' will match
     'mybox' if it is the only container whose name starts with 'my'. An
-    exact match always takes priority. Ambiguous prefixes produce an error.";
+    exact match always takes priority. Ambiguous prefixes produce an error.
+    Names of existing pods (in 'pod' subcommands, --pod and --oci-pod)
+    resolve the same way against the list of pods.";
 
 const NEW_HELP: &str = "\
 Create a new container, start it, and open a shell. Accepts the same flags as
@@ -917,6 +919,13 @@ Two ways to join a pod:
                      namespace the app cannot enter the pod's netns.
 
 Both flags can be combined on the same container.
+
+POD NAMES:
+    Commands that take an existing pod (--pod, --oci-pod, 'pod rm',
+    'pod net attach', 'pod net detach') accept a unique prefix of its name:
+    with pods 'foo' and 'bar', 'sdme pod rm f' removes 'foo'. An exact match
+    always takes priority. A prefix that matches no pod, or more than one,
+    is an error. --pod and --oci-pod store the full pod name.
 
 EXTERNAL NETWORKING:
     Pods start with loopback-only networking. Use 'pod net attach' to give
@@ -2642,8 +2651,8 @@ fn run() -> Result<()> {
                 network.private_network = true;
             }
             retain_net_raw_for_dhcp(&mut sec, &network);
-            validate_pod_args(&cfg.datadir, pod.as_deref())?;
-            validate_oci_pod_args(
+            let pod = validate_pod_args(&cfg.datadir, pod.as_deref())?;
+            let oci_pod = validate_oci_pod_args(
                 &cfg.datadir,
                 oci_pod.as_deref(),
                 fs.as_deref(),
@@ -3022,8 +3031,8 @@ fn run() -> Result<()> {
                 network.private_network = true;
             }
             retain_net_raw_for_dhcp(&mut sec, &network);
-            validate_pod_args(&cfg.datadir, pod.as_deref())?;
-            validate_oci_pod_args(
+            let pod = validate_pod_args(&cfg.datadir, pod.as_deref())?;
+            let oci_pod = validate_oci_pod_args(
                 &cfg.datadir,
                 oci_pod.as_deref(),
                 fs.as_deref(),
@@ -3536,12 +3545,20 @@ fn run() -> Result<()> {
                     names
                 };
                 let mut failed = false;
-                for name in &targets {
+                for input in &targets {
                     check_interrupted()?;
+                    let name = match pod::resolve_name(&cfg.datadir, input) {
+                        Ok(n) => n,
+                        Err(e) => {
+                            eprintln!("error: {input}: {e:#}");
+                            failed = true;
+                            continue;
+                        }
+                    };
                     eprintln!("removing pod '{name}'");
                     if let Err(e) = pod::remove(
                         &cfg.datadir,
-                        name,
+                        &name,
                         force,
                         cfg.stop_timeout_terminate,
                         cli.verbose,
@@ -3562,11 +3579,13 @@ fn run() -> Result<()> {
             }
             PodCommand::Net(cmd) => match cmd {
                 PodNetCommand::Attach { name, mode, zone } => {
+                    let name = pod::resolve_name(&cfg.datadir, &name)?;
                     pod::net_attach(&cfg.datadir, &name, mode, zone.as_deref(), cli.verbose)?;
                     eprintln!("attached {mode} networking to pod '{name}'");
                     println!("{name}");
                 }
                 PodNetCommand::Detach { name } => {
+                    let name = pod::resolve_name(&cfg.datadir, &name)?;
                     pod::net_detach(&cfg.datadir, &name, cli.verbose)?;
                     eprintln!("detached networking from pod '{name}'");
                     println!("{name}");
@@ -3589,8 +3608,9 @@ fn run() -> Result<()> {
             } => {
                 system_check::check_systemd_version(255)?;
                 let (mut sec, hardened) = parse_security(security_args, &cfg)?;
-                validate_pod_args(&cfg.datadir, pod.as_deref())?;
-                validate_kube_oci_pod_args(&cfg.datadir, oci_pod.as_deref(), sec.userns)?;
+                let pod = validate_pod_args(&cfg.datadir, pod.as_deref())?;
+                let oci_pod =
+                    validate_kube_oci_pod_args(&cfg.datadir, oci_pod.as_deref(), sec.userns)?;
                 let yaml_content = std::fs::read_to_string(&file)
                     .with_context(|| format!("failed to read {file}"))?;
                 let effective_base_fs = base_fs.or_else(|| {
@@ -3684,8 +3704,9 @@ fn run() -> Result<()> {
             } => {
                 system_check::check_systemd_version(255)?;
                 let (mut sec, hardened) = parse_security(security_args, &cfg)?;
-                validate_pod_args(&cfg.datadir, pod.as_deref())?;
-                validate_kube_oci_pod_args(&cfg.datadir, oci_pod.as_deref(), sec.userns)?;
+                let pod = validate_pod_args(&cfg.datadir, pod.as_deref())?;
+                let oci_pod =
+                    validate_kube_oci_pod_args(&cfg.datadir, oci_pod.as_deref(), sec.userns)?;
                 let yaml_content = std::fs::read_to_string(&file)
                     .with_context(|| format!("failed to read {file}"))?;
                 let effective_base_fs = base_fs.or_else(|| {
