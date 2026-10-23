@@ -20,18 +20,35 @@ use super::{ensure_exists, volumes_dir};
 /// of seconds to wait for a running container to shut down, extended as
 /// described in [`stop_timeout_secs`].
 pub fn remove(datadir: &Path, name: &str, stop_timeout: u64, verbose: bool) -> Result<()> {
-    remove_with_ops(
-        datadir,
-        name,
-        stop_timeout,
-        verbose,
-        &RemovalOps {
-            unit_state: &systemd::unit_active_state,
-            disable_unit: &systemd::disable_unit_only,
-            remove_dropin: &systemd::remove_limits_dropin,
-            reclaim_runtime: &reclaim_nspawn_runtime,
-        },
-    )
+    // A running ephemeral container is removed by its own teardown, which
+    // takes the container lock, so stop it without holding the lock here.
+    if crate::ephemeral::is_ephemeral(datadir, name) && systemd::ephemeral_unit_exists(name)? {
+        let timeout = std::time::Duration::from_secs(stop_timeout);
+        systemd::stop_ephemeral(name, timeout, verbose)?;
+        if !datadir.join("state").join(name).exists() {
+            return Ok(());
+        }
+        // Teardown did not finish; remove what is left below.
+    }
+    remove_with_ops(datadir, name, stop_timeout, verbose, &host_removal_ops())
+}
+
+/// Delete a stopped container's files and host-side state.
+///
+/// The caller holds the exclusive container lock and has confirmed the
+/// container is stopped. Used by the teardown of ephemeral containers,
+/// which runs from their unit's `ExecStopPost`.
+pub(crate) fn delete_stopped(datadir: &Path, name: &str, verbose: bool) -> Result<()> {
+    delete_files(datadir, name, verbose, &host_removal_ops())
+}
+
+fn host_removal_ops() -> RemovalOps<'static> {
+    RemovalOps {
+        unit_state: &systemd::unit_active_state,
+        disable_unit: &systemd::disable_unit_only,
+        remove_dropin: &systemd::remove_limits_dropin,
+        reclaim_runtime: &reclaim_nspawn_runtime,
+    }
 }
 
 /// Remove the temp files that atomic writes of a container's state file left
@@ -141,6 +158,23 @@ fn remove_with_ops(
         }
     }
 
+    delete_files(datadir, name, verbose, ops)?;
+
+    if has_oci_volumes {
+        let vol_dir = volumes_dir(datadir, name);
+        if vol_dir.exists() {
+            eprintln!("volume data retained at {}", vol_dir.display());
+        }
+    }
+
+    Ok(())
+}
+
+/// The file-removal half of [`remove_with_ops`], run once the container is
+/// stopped and under the exclusive container lock.
+fn delete_files(datadir: &Path, name: &str, verbose: bool, ops: &RemovalOps) -> Result<()> {
+    let state_file = datadir.join("state").join(name);
+
     // A btrfs container root is a subvolume under the pool, not a directory in
     // container_dir, and must be deleted with `btrfs subvolume delete`. Do this
     // after the container is stopped (above) and best-effort, so a pool/mount
@@ -194,14 +228,6 @@ fn remove_with_ops(
     remove_state_temp_files(&datadir.join("state"), name);
 
     (ops.remove_dropin)(name, verbose)?;
-
-    if has_oci_volumes {
-        let vol_dir = volumes_dir(datadir, name);
-        if vol_dir.exists() {
-            eprintln!("volume data retained at {}", vol_dir.display());
-        }
-    }
-
     Ok(())
 }
 

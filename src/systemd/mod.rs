@@ -5,6 +5,7 @@
 //! via the systemd D-Bus interface.
 
 pub(crate) mod dbus;
+mod transient;
 pub(crate) mod units;
 
 #[cfg(test)]
@@ -13,13 +14,15 @@ mod tests;
 use std::fs;
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use crate::{ResourceLimits, State};
 
 pub use units::{
-    migrate_legacy_pool_dropins, nspawn_dropin, remove_limits_dropin, resolve_paths, service_name,
-    unit_template, write_limits_dropin, write_nspawn_dropin, DropinConfig, UnitPaths,
+    ephemeral_service_name, health_service_name, health_timer_name, migrate_legacy_pool_dropins,
+    nspawn_dropin, nspawn_exec, plan_nspawn, remove_limits_dropin, resolve_paths, service_name,
+    session_scope_name, unit_template, write_limits_dropin, write_nspawn_dropin, DropinConfig,
+    ExecCommand, NspawnExec, NspawnPlan, UnitPaths,
 };
 
 /// Return the systemd version string from D-Bus.
@@ -27,9 +30,24 @@ pub fn systemd_version() -> Result<String> {
     dbus::get_systemd_version()
 }
 
+/// Return the unit that runs a container.
+///
+/// The transient `sdme-ephemeral@NAME.service` exists only while an
+/// ephemeral container runs, so its presence decides; otherwise the
+/// template instance `sdme@NAME.service`. Fails if systemd cannot be
+/// asked, rather than guessing.
+pub fn unit_name(name: &str) -> Result<String> {
+    let ephemeral = ephemeral_service_name(name);
+    if dbus::is_unit_loaded(&ephemeral)? {
+        Ok(ephemeral)
+    } else {
+        Ok(service_name(name))
+    }
+}
+
 /// Check whether a container's systemd unit is currently active.
 pub fn is_active(name: &str) -> Result<bool> {
-    match dbus::is_unit_active(&service_name(name)) {
+    match dbus::is_unit_active(&unit_name(name)?) {
         Ok(active) => Ok(active),
         Err(e) => {
             let msg = format!("{e:#}");
@@ -56,7 +74,7 @@ pub fn is_unit_active(unit: &str) -> bool {
 /// Possible state values include `"active"`, `"activating"`,
 /// `"deactivating"`, `"inactive"`, `"failed"`.
 pub fn unit_active_state(name: &str) -> Result<Option<String>> {
-    dbus::pub_get_unit_active_state(&service_name(name))
+    dbus::pub_get_unit_active_state(&unit_name(name)?)
 }
 
 /// Return the overall systemd state inside a running container via
@@ -262,12 +280,12 @@ pub fn kill_machine(name: &str, who: &str, signal: i32) -> Result<()> {
 /// systemd version, so force-kill and removal paths use this to stay
 /// restart-safe.
 pub fn stop_unit(name: &str) -> Result<()> {
-    dbus::stop_unit(&service_name(name))
+    dbus::stop_unit(&unit_name(name)?)
 }
 
 /// Clear a container unit's failed state (`systemctl reset-failed`).
 pub fn reset_failed(name: &str) -> Result<()> {
-    dbus::reset_failed(&service_name(name))
+    dbus::reset_failed(&unit_name(name)?)
 }
 
 /// Wait for a container's systemd unit to become inactive.
@@ -346,4 +364,136 @@ pub fn start(cfg: &ServiceConfig) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Start an ephemeral container as transient units.
+///
+/// Creates `sdme-ephemeral@NAME.service` with the same settings as the
+/// template plus drop-ins, and teardown (`sdme __ephemeral-gc`) in its
+/// `ExecStopPost`. With `session`, the calling process first moves into
+/// `sdme-session-NAME.scope` and the service is bound to it, so the
+/// container stops when the client exits for any reason. A configured
+/// health check gets a transient timer bound to the service.
+pub fn start_ephemeral(cfg: &ServiceConfig, session: bool) -> Result<()> {
+    let ServiceConfig {
+        datadir,
+        name,
+        tasks_max,
+        boot_timeout,
+        verbose,
+        ..
+    } = *cfg;
+
+    crate::containers::ensure_permissions(datadir, name)?;
+    let plan = units::plan_nspawn(datadir, name, None, verbose)?;
+    let state = State::read_from(&datadir.join("state").join(name))?;
+    let limits = ResourceLimits::from_state(&state);
+    let health = crate::ephemeral::HealthCheck::from_state(&state)?;
+    let systemd_version =
+        crate::system_check::parse_systemd_version(&systemd_version()?).unwrap_or(0);
+
+    let exe = sdme_exe()?;
+    let datadir_str = datadir
+        .to_str()
+        .context("datadir path is not valid UTF-8")?;
+    let helper = |entry_point: &str| {
+        ExecCommand::from_argv(
+            vec![
+                exe.clone(),
+                entry_point.to_string(),
+                "--datadir".to_string(),
+                datadir_str.to_string(),
+                name.to_string(),
+            ],
+            false,
+        )
+    };
+
+    // See start(): a previous unclean exit can leave a mount nspawn refuses.
+    if let Err(e) = crate::containers::reclaim_nspawn_runtime(name, verbose) {
+        eprintln!("warning: {e:#}; a leftover nspawn mount may refuse this start");
+    }
+
+    let scope = session.then(|| session_scope_name(name));
+    if let Some(scope) = &scope {
+        if verbose {
+            eprintln!("starting session scope: {scope}");
+        }
+        dbus::start_transient_unit(
+            scope,
+            transient::session_scope_properties(name, std::process::id()),
+            Vec::new(),
+        )?;
+    }
+
+    let unit = ephemeral_service_name(name);
+    if verbose {
+        eprintln!("starting transient unit: {unit}");
+    }
+    dbus::start_transient_unit(
+        &unit,
+        transient::service_properties(&transient::ServiceSpec {
+            name,
+            plan: &plan,
+            limits: &limits,
+            tasks_max,
+            boot_timeout,
+            systemd_version,
+            teardown: helper("__ephemeral-gc"),
+            session_scope: scope.as_deref(),
+        }),
+        Vec::new(),
+    )?;
+
+    if let Some(check) = &health {
+        let timer = health_timer_name(name);
+        if verbose {
+            eprintln!("starting health check timer: {timer}");
+        }
+        dbus::start_transient_unit(
+            &timer,
+            transient::health_timer_properties(name, &unit, check),
+            vec![(
+                health_service_name(name),
+                transient::health_service_properties(name, helper("__health-check")),
+            )],
+        )?;
+    }
+    Ok(())
+}
+
+/// Return true if an ephemeral container's transient unit exists.
+pub fn ephemeral_unit_exists(name: &str) -> Result<bool> {
+    dbus::is_unit_loaded(&ephemeral_service_name(name))
+}
+
+/// Enqueue a stop of an ephemeral container's transient unit. Teardown
+/// follows in its `ExecStopPost`.
+pub fn stop_ephemeral_unit(name: &str) -> Result<()> {
+    dbus::stop_unit(&ephemeral_service_name(name))
+}
+
+/// Stop an ephemeral container and wait until its teardown finished.
+///
+/// Works in any unit state (booting, running, already stopping), unlike
+/// the machined-based stop modes that need a registered machine.
+pub fn stop_ephemeral(name: &str, timeout: std::time::Duration, verbose: bool) -> Result<()> {
+    let unit = ephemeral_service_name(name);
+    if verbose {
+        eprintln!("stopping transient unit: {unit}");
+    }
+    dbus::stop_unit(&unit)?;
+    dbus::wait_for_unit_stopped(&unit, timeout, verbose)
+}
+
+/// Absolute path of the running sdme binary, for units that call back
+/// into it.
+fn sdme_exe() -> Result<String> {
+    let exe = std::env::current_exe().context("cannot determine the sdme binary path")?;
+    let exe = exe
+        .to_str()
+        .context("sdme binary path is not valid UTF-8")?;
+    // After an in-place upgrade the running image is unlinked and the
+    // kernel reports "<path> (deleted)"; the path itself has the new binary.
+    Ok(exe.strip_suffix(" (deleted)").unwrap_or(exe).to_string())
 }

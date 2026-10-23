@@ -33,8 +33,11 @@ can be imported and used instead.
 Requires root. Runs on Linux with systemd >= 255.
 
 GETTING STARTED:
-    # Clone the host as a throwaway container
+    # Clone the host and open a shell in it
     sdme new
+
+    # Same, but remove the container when the shell exits
+    sdme new --ephemeral
 
     # Import Ubuntu from Docker Hub and create a named container
     sdme fs import docker.io/ubuntu -v --install-packages=yes
@@ -85,7 +88,7 @@ NOTES:
     inside the container need to traverse the overlayfs upper layer.
 
     Ctrl+C during 'new' or 'start' stops the container but preserves it
-    on disk for debugging. Batch operations (rm -a, start --all, stop)
+    on disk for debugging (ephemeral containers are removed). Batch operations (rm -a, start --all, stop)
     abort immediately; remaining items are not processed.
 
     Container names support prefix matching: 'sdme stop my' will match
@@ -137,12 +140,38 @@ EXAMPLES:
     # Force the auto-join to run as root (even on a host-clone container)
     sdme new --user root
 
+    # Ephemeral: removed when the shell or command exits
+    sdme new --ephemeral -r ubuntu
+    sdme new --ephemeral -r ubuntu -b /src:/src -- make -C /src test
+
 USER SELECTION:
     --user picks the UNIX user for the auto-join at the end of 'new'.
     Default: root, except on host-clone containers (rootfs=/) where the
     default is $SUDO_USER when join_as_sudo_user is on. --user does not
     persist to container state; subsequent 'join'/'exec' apply the same
     defaults and accept their own --user.
+
+EPHEMERAL CONTAINERS:
+    --ephemeral runs the container as a transient systemd unit,
+    sdme-ephemeral@NAME.service. Any stop removes it: its root, state, and
+    everything nspawn set up (port forwards, bind mounts). 'new --ephemeral'
+    also stops it when the session ends: the shell or command exits, or the
+    sdme process dies. Use 'sdme create --ephemeral' for a detached one.
+
+    Exit triggers stop it earlier:
+      --main-service UNIT        when UNIT finishes (repeatable). For OCI
+                                 app rootfs the OCI app is the default;
+                                 --no-main-service disables it.
+      --health-cmd CMD           after --health-retries consecutive
+      --health-http PORT[/PATH]  failures, checked from the host every
+      --health-tcp PORT          --health-interval seconds. Defaults:
+                                 interval 30, timeout 30, retries 3,
+                                 start period 0.
+
+    Ephemeral implies --no-oci-volumes and cannot use --enable or
+    --restart. 'restart', 'enable' and 'set' are refused. After removal,
+    logs remain in the journal:
+      journalctl -u sdme-ephemeral@NAME.service
 
 PORT FORWARDING:
     --port creates nftables DNAT rules for incoming traffic from the
@@ -206,6 +235,19 @@ EXAMPLES:
 
     # Read-only rootfs with dropped capabilities
     sdme create --name mybox -r ubuntu --read-only --drop-capability CAP_NET_RAW
+
+    # Ephemeral OCI app: removed when nginx exits or stops answering HTTP
+    sdme create --ephemeral -r nginx --network-veth --health-http 80/
+
+    # Ephemeral host clone running until myjob.service finishes
+    sdme create --ephemeral --main-service myjob.service
+
+EPHEMERAL CONTAINERS:
+    --ephemeral implies --started and runs the container as a transient
+    systemd unit; any stop removes it. Unlike 'new --ephemeral' there is
+    no session: only exit triggers (--main-service, --health-*) or
+    'sdme stop' end it, and 'sdme join' sessions never do. See
+    'sdme new --help' for the trigger flags.
 
 RESTART POLICY:
     --restart controls whether systemd auto-restarts the container unit:
@@ -1032,7 +1074,9 @@ EXAMPLES:
 
 CATEGORIES:
     Filesystems          Imported rootfs with no containers using them
-    Containers           Stopped containers with non-ok health status;
+    Containers           Stopped containers with non-ok health status, and
+                         stopped ephemeral containers (orphans whose
+                         teardown did not run, e.g. after a host crash);
                          live containers are never prune candidates
     Pods                 Pod network namespaces with no containers attached
     Secrets              Kube secrets (copied at create time, not runtime-bound)
@@ -1181,6 +1225,9 @@ enum Command {
         #[command(flatten)]
         security: SecurityArgs,
 
+        #[command(flatten)]
+        ephemeral: EphemeralArgs,
+
         /// Do not auto-forward ports declared in the OCI image
         #[arg(long)]
         no_oci_ports: bool,
@@ -1213,8 +1260,8 @@ enum Command {
         #[arg(long)]
         started: bool,
 
-        /// Boot timeout in seconds (overrides config, default: 60; requires --started)
-        #[arg(short, long, requires = "started")]
+        /// Boot timeout in seconds (overrides config, default: 60; requires --started or --ephemeral)
+        #[arg(short, long)]
         timeout: Option<u64>,
     },
 
@@ -1360,6 +1407,9 @@ enum Command {
 
         #[command(flatten)]
         security: SecurityArgs,
+
+        #[command(flatten)]
+        ephemeral: EphemeralArgs,
 
         /// Do not auto-forward ports declared in the OCI image
         #[arg(long)]
@@ -1957,6 +2007,10 @@ fn main() {
         return;
     }
 
+    if let Some(code) = run_unit_helper(&raw_args) {
+        std::process::exit(code);
+    }
+
     let result = run();
     // Best-effort update banner (TTY-only, config-gated, errors swallowed).
     // Skipped on interrupt so it doesn't appear after "interrupted, exiting".
@@ -1970,6 +2024,47 @@ fn main() {
         }
         eprintln!("Error: {e:#}");
         std::process::exit(1);
+    }
+}
+
+/// Hidden entry points run by an ephemeral container's transient units,
+/// dispatched before clap like `__update-check`:
+///
+/// - `__ephemeral-gc --datadir DIR NAME`: teardown, from `ExecStopPost`.
+/// - `__health-check --datadir DIR NAME`: one health check attempt, from
+///   the health timer's service.
+///
+/// The datadir is passed explicitly so a `--config` used at start time
+/// does not need to be repeated. Returns the exit code, or `None` if the
+/// arguments are not a unit helper invocation.
+fn run_unit_helper(args: &[String]) -> Option<i32> {
+    let helper = args.get(1)?.as_str();
+    if helper != "__ephemeral-gc" && helper != "__health-check" {
+        return None;
+    }
+    let result = (|| -> Result<()> {
+        if unsafe { libc::geteuid() } != 0 {
+            bail!("sdme requires root privileges; run with sudo");
+        }
+        let [flag, datadir, name] = &args[2..] else {
+            bail!("usage: sdme {helper} --datadir DIR NAME");
+        };
+        if flag != "--datadir" {
+            bail!("usage: sdme {helper} --datadir DIR NAME");
+        }
+        let datadir = std::path::Path::new(datadir);
+        if helper == "__ephemeral-gc" {
+            sdme::ephemeral::teardown(datadir, name, false)
+        } else {
+            sdme::ephemeral::run_health_check(datadir, name, false)
+        }
+    })();
+    match result {
+        Ok(()) => Some(0),
+        Err(e) => {
+            eprintln!("Error: {e:#}");
+            Some(1)
+        }
     }
 }
 
@@ -2517,10 +2612,24 @@ fn run() -> Result<()> {
             restart,
             masked_services,
             storage,
+            ephemeral,
             started,
             timeout,
         } => {
             system_check::check_systemd_version(255)?;
+            let is_ephemeral = ephemeral.ephemeral;
+            if timeout.is_some() && !started && !is_ephemeral {
+                bail!("--timeout requires --started or --ephemeral");
+            }
+            if is_ephemeral && enable {
+                bail!("--ephemeral and --enable are mutually exclusive");
+            }
+            // Ephemeral containers are always started: their transient unit
+            // only exists while they run.
+            let started = started || is_ephemeral;
+            // Volume data of an ephemeral container lives in its writable
+            // root and goes away with it.
+            let no_oci_volumes = no_oci_volumes || is_ephemeral;
             let limits = parse_limits(memory, cpus, cpu_weight, disk)?;
             let systemd_log_level = security.systemd_log_level.clone();
             if let Some(ref level) = systemd_log_level {
@@ -2563,6 +2672,7 @@ fn run() -> Result<()> {
                 let rootfs_path = cfg.datadir.join("fs").join(rootfs_name);
                 oci::rootfs::detect_oci_app_name(&rootfs_path)
             });
+            let ephemeral = parse_ephemeral(ephemeral, oci_app_name.as_deref(), &restart_policy)?;
 
             // Compute lowerdir before fs is moved into opts.
             let lowerdir = match &fs {
@@ -2600,6 +2710,7 @@ fn run() -> Result<()> {
                 oci_envs,
                 masked_services,
                 post_setup: true,
+                ephemeral,
             };
             let name = containers::create(&cfg.datadir, &opts, cli.verbose)?;
 
@@ -2641,6 +2752,11 @@ fn run() -> Result<()> {
                     default_boot_timeout: cfg.boot_timeout,
                     stop_timeout: cfg.stop_timeout_terminate,
                     verbose: cli.verbose,
+                    mode: if is_ephemeral {
+                        StartMode::Ephemeral { session: false }
+                    } else {
+                        StartMode::Persistent
+                    },
                 })?;
             }
             println!("{name}");
@@ -2679,6 +2795,7 @@ fn run() -> Result<()> {
             disk,
         } => {
             let name = containers::resolve_name(&cfg.datadir, &name)?;
+            sdme::ephemeral::refuse_if_ephemeral(&cfg.datadir, &name, "change limits of")?;
             let limits = parse_limits(memory, cpus, cpu_weight, disk)?;
             containers::set_limits(&cfg.datadir, &name, &limits, cli.verbose)?;
         }
@@ -2714,6 +2831,7 @@ fn run() -> Result<()> {
                     default_boot_timeout: cfg.boot_timeout,
                     stop_timeout: cfg.stop_timeout_terminate,
                     verbose,
+                    mode: StartMode::Persistent,
                 })
             })?;
         }
@@ -2722,6 +2840,7 @@ fn run() -> Result<()> {
             let verbose = cli.verbose;
             for_each_container(datadir, &names, "enabling", "enabled", |name| {
                 containers::ensure_exists(datadir, name)?;
+                sdme::ephemeral::refuse_if_ephemeral(datadir, name, "enable")?;
                 systemd::enable(&systemd::ServiceConfig {
                     datadir,
                     name,
@@ -2777,6 +2896,7 @@ fn run() -> Result<()> {
                     default_boot_timeout: cfg.boot_timeout,
                     stop_timeout: cfg.stop_timeout_terminate,
                     verbose: cli.verbose,
+                    mode: StartMode::Persistent,
                 })?;
             }
 
@@ -2836,7 +2956,11 @@ fn run() -> Result<()> {
                     &[("journalctl", "apt install systemd")],
                     cli.verbose,
                 )?;
-                let unit = systemd::service_name(&name);
+                let unit = if sdme::ephemeral::is_ephemeral(&cfg.datadir, &name) {
+                    systemd::ephemeral_service_name(&name)
+                } else {
+                    systemd::service_name(&name)
+                };
                 let mut cmd = std::process::Command::new("journalctl");
                 cmd.args(["-u", &unit]);
                 cmd.args(&args);
@@ -2875,9 +2999,17 @@ fn run() -> Result<()> {
             restart,
             masked_services,
             storage,
+            ephemeral,
             command,
         } => {
             system_check::check_systemd_version(255)?;
+            let is_ephemeral = ephemeral.ephemeral;
+            if is_ephemeral && enable {
+                bail!("--ephemeral and --enable are mutually exclusive");
+            }
+            // Volume data of an ephemeral container lives in its writable
+            // root and goes away with it.
+            let no_oci_volumes = no_oci_volumes || is_ephemeral;
             let limits = parse_limits(memory, cpus, cpu_weight, disk)?;
             let systemd_log_level = security.systemd_log_level.clone();
             if let Some(ref level) = systemd_log_level {
@@ -2920,6 +3052,7 @@ fn run() -> Result<()> {
                 let rootfs_path = cfg.datadir.join("fs").join(rootfs_name);
                 oci::rootfs::detect_oci_app_name(&rootfs_path)
             });
+            let ephemeral = parse_ephemeral(ephemeral, oci_app_name.as_deref(), &restart_policy)?;
 
             // Compute lowerdir before fs is moved into opts.
             let lowerdir = match &fs {
@@ -2957,6 +3090,7 @@ fn run() -> Result<()> {
                 oci_envs,
                 masked_services,
                 post_setup: true,
+                ephemeral,
             };
             let is_host_rootfs = opts.rootfs.is_none();
             let name = containers::create(&cfg.datadir, &opts, cli.verbose)?;
@@ -3005,6 +3139,11 @@ fn run() -> Result<()> {
                 default_boot_timeout: cfg.boot_timeout,
                 stop_timeout: cfg.stop_timeout_terminate,
                 verbose: cli.verbose,
+                mode: if is_ephemeral {
+                    StartMode::Ephemeral { session: true }
+                } else {
+                    StartMode::Persistent
+                },
             })?;
 
             eprintln!("joining '{name}'");
@@ -3018,7 +3157,25 @@ fn run() -> Result<()> {
                 &command,
                 user.as_deref(),
                 cfg.join_as_sudo_user,
-            )?;
+            );
+            if is_ephemeral {
+                // The session scope would stop the container when this
+                // process exits anyway; stopping here waits for teardown so
+                // the name is free when sdme returns. A trigger may already
+                // have removed it. Ctrl+C typed in the shell also reached
+                // sdme; it must not cut the teardown wait short.
+                let _guard = sdme::InterruptGuard::save_and_reset();
+                if cfg.datadir.join("state").join(&name).exists() {
+                    let _ = containers::remove(
+                        &cfg.datadir,
+                        &name,
+                        cfg.stop_timeout_terminate,
+                        cli.verbose,
+                    );
+                }
+                std::process::exit(status?.code().unwrap_or(1));
+            }
+            let status = status?;
             if !status.success() {
                 let code = status.code().unwrap_or(1);
                 eprintln!("join failed (exit code {code}), removing '{name}'");
@@ -3094,9 +3251,26 @@ fn run() -> Result<()> {
                 } else {
                     String::new()
                 };
+                // ENABLED says what happens across stops and reboots; an
+                // ephemeral container is removed instead.
+                let enabled_display = |e: &containers::ContainerInfo| {
+                    if e.ephemeral {
+                        "ephemeral"
+                    } else if e.enabled {
+                        "yes"
+                    } else {
+                        "no"
+                    }
+                };
+                let enabled_w = entries
+                    .iter()
+                    .map(|e| enabled_display(e).len())
+                    .max()
+                    .unwrap()
+                    .max(7);
                 // Header.
                 println_stdout(&format!(
-                    "{:<name_w$}  {:<status_w$}  {:<health_w$}  {:<6}  {:<7}  {:<6}  {disk_hdr}{:<addr_w$}  OS",
+                    "{:<name_w$}  {:<status_w$}  {:<health_w$}  {:<6}  {:<enabled_w$}  {:<6}  {disk_hdr}{:<addr_w$}  OS",
                     "NAME", "STATUS", "HEALTH", "USERNS", "ENABLED", "MOUNTS", "ADDRESSES"
                 ));
                 // Rows.
@@ -3110,12 +3284,12 @@ fn run() -> Result<()> {
                         String::new()
                     };
                     println_stdout(&format!(
-                        "{:<name_w$}  {:<status_w$}  {:<health_w$}  {:<6}  {:<7}  {:<6}  {disk_cell}{:<addr_w$}  {}",
+                        "{:<name_w$}  {:<status_w$}  {:<health_w$}  {:<6}  {:<enabled_w$}  {:<6}  {disk_cell}{:<addr_w$}  {}",
                         e.name,
                         e.status,
                         e.health,
                         if e.userns { "yes" } else { "no" },
-                        if e.enabled { "yes" } else { "no" },
+                        enabled_display(e),
                         if has_mounts { "yes" } else { "no" },
                         addr_display[i],
                         e.os,
@@ -3235,6 +3409,11 @@ fn run() -> Result<()> {
                     }
                 };
                 containers::ensure_exists(datadir, &name)?;
+                if let Err(e) = sdme::ephemeral::refuse_if_ephemeral(datadir, &name, "restart") {
+                    eprintln!("error: {e}");
+                    failed = true;
+                    continue;
+                }
                 eprintln!("restarting '{name}'");
                 let stop_timeout_secs =
                     containers::stop_timeout_secs(datadir, &name, mode, stop_timeout_secs);
@@ -3251,6 +3430,7 @@ fn run() -> Result<()> {
                     default_boot_timeout: cfg.boot_timeout,
                     stop_timeout: cfg.stop_timeout_terminate,
                     verbose,
+                    mode: StartMode::Persistent,
                 }) {
                     eprintln!("error: {name}: start failed: {e:#}");
                     failed = true;
@@ -3476,6 +3656,7 @@ fn run() -> Result<()> {
                     default_boot_timeout: cfg.boot_timeout,
                     stop_timeout: cfg.stop_timeout_terminate,
                     verbose: cli.verbose,
+                    mode: StartMode::Persistent,
                 })?;
                 eprintln!("joining '{name}'");
                 let shell_opts = containers::ShellOptions {

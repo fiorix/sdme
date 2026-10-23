@@ -14,6 +14,31 @@ pub fn service_name(name: &str) -> String {
     format!("sdme@{name}.service")
 }
 
+/// Return the transient service unit name for an ephemeral container.
+///
+/// Must differ from [`service_name`]: systemd refuses to create a
+/// transient unit whose name matches an existing template.
+pub fn ephemeral_service_name(name: &str) -> String {
+    format!("sdme-ephemeral@{name}.service")
+}
+
+/// Return the transient scope holding the `sdme new` client of an
+/// ephemeral container (the session trigger). Scopes cannot be template
+/// instances, so this name has no `@`.
+pub fn session_scope_name(name: &str) -> String {
+    format!("sdme-session-{name}.scope")
+}
+
+/// Return the transient timer that runs an ephemeral container's health check.
+pub fn health_timer_name(name: &str) -> String {
+    format!("sdme-health@{name}.timer")
+}
+
+/// Return the transient oneshot service triggered by [`health_timer_name`].
+pub fn health_service_name(name: &str) -> String {
+    format!("sdme-health@{name}.service")
+}
+
 /// Resolved paths to external programs needed for the template unit.
 pub struct UnitPaths {
     /// Path to `systemd-nspawn`.
@@ -107,7 +132,7 @@ WantedBy=multi-user.target
 /// The systemd `TimeoutStartSec` for a boot that sdme waits `boot_timeout`
 /// seconds for. The margin makes the sdme wait loop expire before systemd
 /// kills the container.
-fn start_timeout_secs(boot_timeout: u64) -> u64 {
+pub(super) fn start_timeout_secs(boot_timeout: u64) -> u64 {
     boot_timeout.saturating_add(30)
 }
 
@@ -197,19 +222,217 @@ pub struct DropinConfig<'a> {
     pub lower_idmap: Option<(u64, u64)>,
 }
 
-/// Generate the per-container nspawn drop-in content.
+/// One `Exec*=` command of a container unit.
 ///
-/// Contains ExecStartPre (overlayfs mount), ExecStart (systemd-nspawn
-/// with all arguments baked in), and ExecStopPost (unmount). Every
-/// argument is explicit; no environment variable substitution needed.
-pub fn nspawn_dropin(cfg: &DropinConfig<'_>) -> String {
-    let mount = cfg.paths.mount.display();
-    let umount = cfg.paths.umount.display();
-    let nspawn = cfg.paths.nspawn.display();
+/// The argv is grouped the way the drop-in renders it: the first group on
+/// the `Exec*=` line, each further group on an indented continuation line.
+/// Transient units take the flattened argv.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecCommand {
+    /// Ignore a non-zero exit status (the `-` prefix).
+    pub ignore_failure: bool,
+    lines: Vec<Vec<String>>,
+}
+
+impl ExecCommand {
+    fn new(ignore_failure: bool, first: &[&str]) -> Self {
+        Self {
+            ignore_failure,
+            lines: vec![first.iter().map(|a| a.to_string()).collect()],
+        }
+    }
+
+    /// Add a continuation line.
+    fn line(mut self, args: &[&str]) -> Self {
+        self.lines
+            .push(args.iter().map(|a| a.to_string()).collect());
+        self
+    }
+
+    /// A command from a plain argv (argv[0] is the binary), on one line.
+    pub fn from_argv(argv: Vec<String>, ignore_failure: bool) -> Self {
+        Self {
+            ignore_failure,
+            lines: vec![argv],
+        }
+    }
+
+    /// Absolute path of the binary.
+    pub fn path(&self) -> &str {
+        &self.lines[0][0]
+    }
+
+    /// The full argv, starting with the binary.
+    pub fn argv(&self) -> Vec<String> {
+        self.lines.iter().flatten().cloned().collect()
+    }
+
+    fn render(&self, key: &str, out: &mut String) {
+        let prefix = if self.ignore_failure { "-" } else { "" };
+        let join = |args: &[String]| -> String {
+            args.iter()
+                .map(|a| escape_exec_arg(a))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        write!(out, "{key}={prefix}{}", join(&self.lines[0])).unwrap();
+        for args in &self.lines[1..] {
+            write!(out, " \\\n    {}", join(args)).unwrap();
+        }
+        writeln!(out).unwrap();
+    }
+}
+
+/// The exec commands of a container unit.
+pub struct NspawnExec {
+    /// `ExecStartPre=` commands (root setup).
+    pub start_pre: Vec<ExecCommand>,
+    /// `ExecStart=` command (systemd-nspawn).
+    pub start: ExecCommand,
+    /// `ExecStopPost=` commands (root teardown).
+    pub stop_post: Vec<ExecCommand>,
+}
+
+/// Build the exec commands of a container unit: ExecStartPre (root setup),
+/// ExecStart (systemd-nspawn with all arguments baked in), and ExecStopPost
+/// (unmount). Every argument is explicit; no environment variable
+/// substitution needed.
+pub fn nspawn_exec(cfg: &DropinConfig<'_>) -> NspawnExec {
+    let mount = cfg.paths.mount.display().to_string();
+    let umount = cfg.paths.umount.display().to_string();
+    let nspawn = cfg.paths.nspawn.display().to_string();
     let datadir = cfg.datadir;
     let name = cfg.name;
     let lowerdir = cfg.lowerdir;
+    let merged = format!("{datadir}/containers/{name}/merged");
 
+    let mut start_pre = Vec::new();
+    let mut stop_post = Vec::new();
+
+    // Backend-specific root setup. Overlay mounts an overlayfs onto `merged`
+    // (plus per-submount overlays for host-rootfs containers). btrfs needs no
+    // root mount because the subvolume is a real directory.
+    let idmap_root = crate::system_check::IDMAP_RUNTIME_DIR;
+    let idmap_dir = format!("{idmap_root}/{name}");
+    if cfg.backend == Backend::Overlay {
+        // With an idmapped lower layer the overlay sits on a read-only
+        // bind that maps the layer into the container's UID range. The
+        // overlay keeps its own reference to the bind, so the bind is
+        // dropped as soon as the overlay is mounted.
+        let root_lower = match cfg.lower_idmap {
+            Some((shift, range)) => {
+                let install = cfg.paths.install.display().to_string();
+                let opts = crate::system_check::idmap_bind_options(shift, range);
+                // A bind left by a start that was killed would be
+                // stacked upon, and the stale one would outlive this run.
+                start_pre.push(ExecCommand::new(
+                    true,
+                    &[&umount, "--recursive", "--quiet", &idmap_dir],
+                ));
+                // 0700 on both levels: while mounted, the bind is a path
+                // to a rootfs that the datadir otherwise keeps root-only.
+                start_pre.push(ExecCommand::new(
+                    false,
+                    &[&install, "-d", "-m", "0700", idmap_root, &idmap_dir],
+                ));
+                start_pre.push(ExecCommand::new(
+                    false,
+                    &[&mount, "--bind", "-o", &opts, lowerdir, &idmap_dir],
+                ));
+                idmap_dir.as_str()
+            }
+            None => lowerdir,
+        };
+        start_pre.push(
+            ExecCommand::new(false, &[&mount, "-t", "overlay", "overlay"])
+                .line(&[
+                    "-o",
+                    &format!(
+                        "lowerdir={root_lower},upperdir={datadir}/containers/{name}/upper,workdir={datadir}/containers/{name}/work"
+                    ),
+                ])
+                .line(&[&merged]),
+        );
+        if cfg.lower_idmap.is_some() {
+            // Recursive: a mount made elsewhere on the host in the instant
+            // before the bind became private would have propagated into it.
+            start_pre.push(ExecCommand::new(
+                false,
+                &[&umount, "--recursive", &idmap_dir],
+            ));
+            let rmdir = cfg.paths.rmdir.display().to_string();
+            start_pre.push(ExecCommand::new(true, &[&rmdir, &idmap_dir]));
+        }
+
+        // Per-submount overlayfs layers (best-effort, =-).
+        for rel in cfg.submounts {
+            start_pre.push(
+                ExecCommand::new(true, &[&mount, "-t", "overlay", "overlay"])
+                    .line(&[
+                        "-o",
+                        &format!(
+                            "lowerdir=/{rel},upperdir={datadir}/containers/{name}/submounts/{rel}/upper,workdir={datadir}/containers/{name}/submounts/{rel}/work"
+                        ),
+                    ])
+                    .line(&[&format!("{merged}/{rel}")]),
+            );
+        }
+
+        // Unmount overlay layers in reverse order (deepest first), then the
+        // root overlay. btrfs subvolumes need no teardown.
+        for rel in cfg.submounts.iter().rev() {
+            stop_post.push(ExecCommand::new(
+                true,
+                &[&umount, &format!("{merged}/{rel}")],
+            ));
+        }
+        stop_post.push(ExecCommand::new(true, &[&umount, &merged]));
+        // A start that failed between the bind and its unmount leaves the
+        // bind behind; ExecStopPost also runs after a failed start.
+        if cfg.lower_idmap.is_some() {
+            stop_post.push(ExecCommand::new(
+                true,
+                &[&umount, "--recursive", "--quiet", &idmap_dir],
+            ));
+        }
+    }
+
+    // When a pod provides the network namespace, launch nspawn via nsenter
+    // so the netns is entered before nspawn creates its userns. This avoids
+    // the kernel's cross-userns setns(CLONE_NEWNET) restriction.
+    let mut start = match cfg.pod_netns {
+        Some(netns) => {
+            let nsenter = cfg.paths.nsenter.display().to_string();
+            ExecCommand::new(false, &[&nsenter, &format!("--net={netns}"), "--", &nspawn])
+        }
+        None => ExecCommand::new(false, &[&nspawn]),
+    };
+    start = start
+        .line(&[&format!("--directory={}", cfg.root_dir)])
+        .line(&[&format!("--machine={name}")])
+        // Register the machine against this service unit instead of letting
+        // machined create a separate machine-<name>.scope. This drops the
+        // StartTransientUnit call to PID 1 (the boot-storm stall point) and the
+        // second unit per container, and matches systemd's own
+        // systemd-nspawn@.service. --register stays on (default), so
+        // machinectl, nss-mymachines, and the machined D-Bus APIs sdme relies
+        // on keep working; only the cgroup home changes to this unit.
+        .line(&["--keep-unit"]);
+    for arg in cfg.nspawn_args {
+        start = start.line(&[arg]);
+    }
+    start = start.line(&["--boot"]);
+
+    NspawnExec {
+        start_pre,
+        start,
+        stop_post,
+    }
+}
+
+/// Generate the per-container nspawn drop-in content: the exec commands of
+/// [`nspawn_exec`] plus the per-container service settings.
+pub fn nspawn_dropin(cfg: &DropinConfig<'_>) -> String {
     let mut out = String::new();
     if let (Backend::Btrfs, Some(pool_mount)) = (cfg.backend, cfg.pool_mount) {
         writeln!(out, "[Unit]").unwrap();
@@ -227,121 +450,13 @@ pub fn nspawn_dropin(cfg: &DropinConfig<'_>) -> String {
         writeln!(out, "TimeoutStopSec={stop_timeout}s").unwrap();
     }
     writeln!(out, "ExecStart=").unwrap();
-
-    // Backend-specific root setup. Overlay mounts an overlayfs onto `merged`
-    // (plus per-submount overlays for host-rootfs containers). btrfs needs no
-    // root mount because the subvolume is a real directory.
-    let idmap_root = crate::system_check::IDMAP_RUNTIME_DIR;
-    let idmap_dir = format!("{idmap_root}/{name}");
-    match cfg.backend {
-        Backend::Overlay => {
-            // With an idmapped lower layer the overlay sits on a read-only
-            // bind that maps the layer into the container's UID range. The
-            // overlay keeps its own reference to the bind, so the bind is
-            // dropped as soon as the overlay is mounted.
-            let root_lower = match cfg.lower_idmap {
-                Some((shift, range)) => {
-                    let install = cfg.paths.install.display();
-                    let opts = crate::system_check::idmap_bind_options(shift, range);
-                    // A bind left by a start that was killed would be
-                    // stacked upon, and the stale one would outlive this run.
-                    writeln!(
-                        out,
-                        "ExecStartPre=-{umount} --recursive --quiet {idmap_dir}"
-                    )
-                    .unwrap();
-                    // 0700 on both levels: while mounted, the bind is a path
-                    // to a rootfs that the datadir otherwise keeps root-only.
-                    writeln!(
-                        out,
-                        "ExecStartPre={install} -d -m 0700 {idmap_root} {idmap_dir}"
-                    )
-                    .unwrap();
-                    writeln!(
-                        out,
-                        "ExecStartPre={mount} --bind -o {opts} {lowerdir} {idmap_dir}"
-                    )
-                    .unwrap();
-                    idmap_dir.as_str()
-                }
-                None => lowerdir,
-            };
-            writeln!(out, "ExecStartPre={mount} -t overlay overlay \\").unwrap();
-            writeln!(
-                out,
-                "    -o lowerdir={root_lower},upperdir={datadir}/containers/{name}/upper,workdir={datadir}/containers/{name}/work \\"
-            )
-            .unwrap();
-            writeln!(out, "    {datadir}/containers/{name}/merged").unwrap();
-            if cfg.lower_idmap.is_some() {
-                // Recursive: a mount made elsewhere on the host in the instant
-                // before the bind became private would have propagated into it.
-                writeln!(out, "ExecStartPre={umount} --recursive {idmap_dir}").unwrap();
-                let rmdir = cfg.paths.rmdir.display();
-                writeln!(out, "ExecStartPre=-{rmdir} {idmap_dir}").unwrap();
-            }
-
-            // Per-submount overlayfs layers (best-effort, =-).
-            for rel in cfg.submounts {
-                writeln!(out, "ExecStartPre=-{mount} -t overlay overlay \\").unwrap();
-                writeln!(
-                    out,
-                    "    -o lowerdir=/{rel},upperdir={datadir}/containers/{name}/submounts/{rel}/upper,workdir={datadir}/containers/{name}/submounts/{rel}/work \\"
-                )
-                .unwrap();
-                writeln!(out, "    {datadir}/containers/{name}/merged/{rel}").unwrap();
-            }
-        }
-        Backend::Btrfs => {}
+    let exec = nspawn_exec(cfg);
+    for cmd in &exec.start_pre {
+        cmd.render("ExecStartPre", &mut out);
     }
-
-    // When a pod provides the network namespace, launch nspawn via nsenter
-    // so the netns is entered before nspawn creates its userns. This avoids
-    // the kernel's cross-userns setns(CLONE_NEWNET) restriction.
-    if let Some(netns) = cfg.pod_netns {
-        let nsenter = cfg.paths.nsenter.display();
-        writeln!(out, "ExecStart={nsenter} --net={netns} -- {nspawn} \\").unwrap();
-    } else {
-        writeln!(out, "ExecStart={nspawn} \\").unwrap();
-    }
-    writeln!(out, "    --directory={} \\", cfg.root_dir).unwrap();
-    writeln!(out, "    --machine={name} \\").unwrap();
-    // Register the machine against this service unit instead of letting machined
-    // create a separate machine-<name>.scope. This drops the StartTransientUnit
-    // call to PID 1 (the boot-storm stall point) and the second unit per
-    // container, and matches systemd's own systemd-nspawn@.service. --register
-    // stays on (default), so machinectl, nss-mymachines, and the machined D-Bus
-    // APIs sdme relies on keep working; only the cgroup home changes to this unit.
-    writeln!(out, "    --keep-unit \\").unwrap();
-    for arg in cfg.nspawn_args {
-        writeln!(out, "    {} \\", escape_exec_arg(arg)).unwrap();
-    }
-    writeln!(out, "    --boot").unwrap();
-
-    // Unmount overlay layers in reverse order (deepest first), then the root
-    // overlay. btrfs subvolumes need no teardown.
-    if cfg.backend == Backend::Overlay {
-        for rel in cfg.submounts.iter().rev() {
-            writeln!(
-                out,
-                "ExecStopPost=-{umount} {datadir}/containers/{name}/merged/{rel}"
-            )
-            .unwrap();
-        }
-        writeln!(
-            out,
-            "ExecStopPost=-{umount} {datadir}/containers/{name}/merged"
-        )
-        .unwrap();
-        // A start that failed between the bind and its unmount leaves the
-        // bind behind; ExecStopPost also runs after a failed start.
-        if cfg.lower_idmap.is_some() {
-            writeln!(
-                out,
-                "ExecStopPost=-{umount} --recursive --quiet {idmap_dir}"
-            )
-            .unwrap();
-        }
+    exec.start.render("ExecStart", &mut out);
+    for cmd in &exec.stop_post {
+        cmd.render("ExecStopPost", &mut out);
     }
     out
 }
@@ -474,20 +589,118 @@ pub(super) fn ensure_template_unit(tasks_max: u32, boot_timeout: u64, verbose: b
     Ok(())
 }
 
-/// Write the per-container nspawn drop-in.
+/// Everything needed to run a container's nspawn, computed from its state
+/// file. Rendered as a drop-in for persistent containers
+/// ([`write_nspawn_dropin`]) and as transient unit properties for
+/// ephemeral ones.
+pub struct NspawnPlan {
+    backend: Backend,
+    datadir: String,
+    name: String,
+    root_dir: String,
+    /// Pool mount point a Mode B btrfs container requires
+    /// (`RequiresMountsFor=`).
+    pub pool_mount: Option<String>,
+    lowerdir: String,
+    paths: UnitPaths,
+    nspawn_args: Vec<String>,
+    /// `SYSTEMD_LOG_LEVEL` for the nspawn host process.
+    pub systemd_log_level: Option<String>,
+    /// AppArmor profile for the nspawn host process.
+    pub apparmor_profile: Option<String>,
+    /// `Restart=`/`RestartSec=` directives of the opt-in restart policy.
+    restart: Vec<String>,
+    /// Boot timeout override; see [`write_nspawn_dropin`].
+    boot_timeout: Option<u64>,
+    /// Stop timeout for the container unit, when systemd's default is too short.
+    pub stop_timeout: Option<u64>,
+    submounts: Vec<String>,
+    pod_netns: Option<String>,
+    lower_idmap: Option<(u64, u64)>,
+}
+
+impl NspawnPlan {
+    /// Service-level directives for the drop-in (not nspawn flags).
+    fn service_directives(&self) -> Vec<String> {
+        let mut directives = Vec::new();
+        if let Some(level) = &self.systemd_log_level {
+            directives.push(format!("Environment=SYSTEMD_LOG_LEVEL={level}"));
+        }
+        if let Some(profile) = &self.apparmor_profile {
+            directives.push(format!("AppArmorProfile={profile}"));
+        }
+        directives.extend(self.restart.iter().cloned());
+        directives
+    }
+
+    /// Borrow the plan as a [`DropinConfig`].
+    pub fn dropin_config<'a>(&'a self, service_directives: &'a [String]) -> DropinConfig<'a> {
+        DropinConfig {
+            backend: self.backend,
+            datadir: &self.datadir,
+            name: &self.name,
+            root_dir: &self.root_dir,
+            pool_mount: self.pool_mount.as_deref(),
+            lowerdir: &self.lowerdir,
+            paths: &self.paths,
+            nspawn_args: &self.nspawn_args,
+            service_directives,
+            boot_timeout: self.boot_timeout,
+            stop_timeout: self.stop_timeout,
+            submounts: &self.submounts,
+            pod_netns: self.pod_netns.as_deref(),
+            lower_idmap: self.lower_idmap,
+        }
+    }
+
+    /// The exec commands, for transient units.
+    pub fn exec(&self) -> NspawnExec {
+        nspawn_exec(&self.dropin_config(&[]))
+    }
+}
+
+#[cfg(test)]
+impl NspawnPlan {
+    /// Build an overlay plan directly, bypassing the state file.
+    pub(super) fn for_test(
+        paths: UnitPaths,
+        nspawn_args: Vec<String>,
+        pool_mount: Option<String>,
+        stop_timeout: Option<u64>,
+    ) -> Self {
+        Self {
+            backend: Backend::Overlay,
+            datadir: "/var/lib/sdme".into(),
+            name: "mybox".into(),
+            root_dir: "/var/lib/sdme/containers/mybox/merged".into(),
+            pool_mount,
+            lowerdir: "/".into(),
+            paths,
+            nspawn_args,
+            systemd_log_level: None,
+            apparmor_profile: None,
+            restart: Vec::new(),
+            boot_timeout: None,
+            stop_timeout,
+            submounts: Vec::new(),
+            pod_netns: None,
+            lower_idmap: None,
+        }
+    }
+}
+
+/// Compute the nspawn plan for a container from its state file.
 ///
-/// Reads the container's state file and generates a drop-in with the full
-/// ExecStartPre/ExecStart/ExecStopPost commands, all arguments baked in.
-/// Returns the path to the drop-in file (for cleanup on failure).
-///
-/// `boot_timeout` is this container's boot timeout when it differs from the
-/// configured one, which the template already carries.
-pub fn write_nspawn_dropin(
+/// Has the start-time side effects the container needs (pod runtime,
+/// resolv.conf in the writable root, submount directories), so call it
+/// right before starting the container. `boot_timeout` is as for
+/// [`write_nspawn_dropin`].
+pub fn plan_nspawn(
     datadir: &Path,
     name: &str,
     boot_timeout: Option<u64>,
     verbose: bool,
-) -> Result<PathBuf> {
+) -> Result<NspawnPlan> {
     let datadir_str = datadir
         .to_str()
         .context("datadir path is not valid UTF-8")?;
@@ -629,12 +842,9 @@ pub fn write_nspawn_dropin(
         None
     };
 
-    // Service-level directives (not nspawn flags).
-    let mut service_directives = Vec::new();
-
     // Set SYSTEMD_LOG_LEVEL for the nspawn host process (not the container).
-    if let Some(level) = state.get_nonempty("SYSTEMD_LOG_LEVEL") {
-        service_directives.push(format!("Environment=SYSTEMD_LOG_LEVEL={level}"));
+    let systemd_log_level = state.get_nonempty("SYSTEMD_LOG_LEVEL").map(String::from);
+    if let Some(level) = &systemd_log_level {
         if verbose {
             eprintln!("nspawn host log level: {level}");
         }
@@ -642,7 +852,6 @@ pub fn write_nspawn_dropin(
 
     if let Some(profile) = &security.apparmor_profile {
         crate::security::check_apparmor_loaded(profile)?;
-        service_directives.push(format!("AppArmorProfile={profile}"));
         if verbose {
             eprintln!("apparmor profile: {profile}");
         }
@@ -662,7 +871,6 @@ pub fn write_nspawn_dropin(
             eprintln!("restart directive: {d}");
         }
     }
-    service_directives.extend(restart);
 
     if verbose {
         for arg in &nspawn_args {
@@ -728,22 +936,43 @@ pub fn write_nspawn_dropin(
         None
     };
 
-    let content = nspawn_dropin(&DropinConfig {
+    Ok(NspawnPlan {
         backend,
-        datadir: datadir_str,
-        name,
-        root_dir: &root_dir,
-        pool_mount: pool_mount.as_deref(),
-        lowerdir: &lowerdir,
-        paths: &paths,
-        nspawn_args: &nspawn_args,
-        service_directives: &service_directives,
+        datadir: datadir_str.to_string(),
+        name: name.to_string(),
+        root_dir,
+        pool_mount,
+        lowerdir,
+        paths,
+        nspawn_args,
+        systemd_log_level,
+        apparmor_profile: security.apparmor_profile,
+        restart,
         boot_timeout,
         stop_timeout: unit_stop_timeout_secs(crate::containers::app_stop_timeout_secs(&state)),
-        submounts: &submounts,
-        pod_netns: pod_netns.as_deref(),
+        submounts,
+        pod_netns,
         lower_idmap,
-    });
+    })
+}
+
+/// Write the per-container nspawn drop-in.
+///
+/// Reads the container's state file and generates a drop-in with the full
+/// ExecStartPre/ExecStart/ExecStopPost commands, all arguments baked in.
+/// Returns the path to the drop-in file (for cleanup on failure).
+///
+/// `boot_timeout` is this container's boot timeout when it differs from the
+/// configured one, which the template already carries.
+pub fn write_nspawn_dropin(
+    datadir: &Path,
+    name: &str,
+    boot_timeout: Option<u64>,
+    verbose: bool,
+) -> Result<PathBuf> {
+    let plan = plan_nspawn(datadir, name, boot_timeout, verbose)?;
+    let service_directives = plan.service_directives();
+    let content = nspawn_dropin(&plan.dropin_config(&service_directives));
 
     let dir = dropin_dir(name);
     fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;

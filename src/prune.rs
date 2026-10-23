@@ -127,6 +127,20 @@ pub fn is_prunable_container(status: &str, health: &str) -> bool {
     !live && health != "ok" && health != "ready"
 }
 
+/// Why a container should be pruned, or `None` to keep it.
+///
+/// Adds ephemeral orphans to [`is_prunable_container`]: any stop of an
+/// ephemeral container removes it, so one that is down was never torn down
+/// (a host crash skipped its unit's `ExecStopPost`) and is garbage whatever
+/// its health. Live containers are still never candidates.
+pub fn container_prune_reason(status: &str, health: &str, ephemeral: bool) -> Option<String> {
+    let live = matches!(status, "running" | "starting" | "stopping");
+    if ephemeral && !live {
+        return Some("ephemeral orphan (teardown did not run)".to_string());
+    }
+    is_prunable_container(status, health).then(|| health.to_string())
+}
+
 /// Scan all resource types and return items that can be pruned.
 ///
 /// The configured `default_base_fs` is always excluded from filesystem
@@ -149,14 +163,16 @@ pub fn analyze(datadir: &Path, default_base_fs: &str) -> Result<Vec<PrunableItem
 
     check_interrupted()?;
 
-    // 2. Unhealthy containers: anything not "ok" or "ready", unless live.
+    // 2. Unhealthy containers (anything not "ok" or "ready") and ephemeral
+    //    orphans, unless live.
     let ct_entries = containers::list(datadir)?;
     for entry in &ct_entries {
-        if is_prunable_container(&entry.status, &entry.health) {
+        if let Some(reason) = container_prune_reason(&entry.status, &entry.health, entry.ephemeral)
+        {
             items.push(PrunableItem {
                 category: PruneCategory::Container,
                 name: entry.name.clone(),
-                reason: entry.health.clone(),
+                reason,
             });
         }
     }
@@ -500,6 +516,24 @@ mod tests {
         assert!(!is_prunable_container("running", "not-ready"));
         assert!(!is_prunable_container("starting", "unknown"));
         assert!(!is_prunable_container("stopping", "degraded"));
+    }
+
+    #[test]
+    fn test_container_prune_reason() {
+        // Persistent containers: unchanged rules.
+        assert_eq!(
+            container_prune_reason("stopped", "failed", false).as_deref(),
+            Some("failed")
+        );
+        assert_eq!(container_prune_reason("stopped", "ok", false), None);
+        assert_eq!(container_prune_reason("running", "degraded", false), None);
+        // A stopped ephemeral container is an orphan even when healthy.
+        let orphan = container_prune_reason("stopped", "ok", true).unwrap();
+        assert!(orphan.contains("ephemeral orphan"));
+        // Live ephemeral containers, including one mid-teardown, are kept.
+        assert_eq!(container_prune_reason("running", "ok", true), None);
+        assert_eq!(container_prune_reason("starting", "unknown", true), None);
+        assert_eq!(container_prune_reason("stopping", "ok", true), None);
     }
 
     #[test]

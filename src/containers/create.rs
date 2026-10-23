@@ -56,6 +56,8 @@ pub struct CreateOptions {
     /// Mode B btrfs pool image size (from config). Empty falls back to the
     /// built-in default. Ignored for the overlay backend.
     pub pool_size: String,
+    /// Exit triggers for an ephemeral container; `None` for a persistent one.
+    pub ephemeral: Option<crate::ephemeral::EphemeralConfig>,
 }
 
 /// Create a new container with the given options, returning its name.
@@ -674,6 +676,16 @@ fn do_create(
     }
 
     opts.security.write_to_state(&mut state);
+    if let Some(eph) = &opts.ephemeral {
+        crate::ephemeral::write_service_triggers(
+            &root_dir,
+            crate::oci::app::systemd_unit_dir(rootfs),
+            opts.backend,
+            &eph.main_services,
+            verbose,
+        )?;
+        eph.write_to_state(&mut state);
+    }
     if !opts.masked_services.is_empty() {
         state.set("MASKED_SERVICES", opts.masked_services.join(","));
     }

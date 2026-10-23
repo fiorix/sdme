@@ -15,6 +15,7 @@
 //! |--------|---------|
 //! | [`containers`] | Create, remove, join, exec, stop, list |
 //! | [`diff`] | Container filesystem diff (overlayfs upper vs lower) |
+//! | [`ephemeral`] | Ephemeral container triggers, health checks, teardown |
 //! | [`systemd`] | D-Bus helpers and template unit management |
 //! | [`import`] | Rootfs import (dir, tar, URL, OCI, QCOW2) |
 //! | [`oci`] | OCI registry, layout, app setup, blob cache |
@@ -45,6 +46,7 @@ pub mod cp;
 pub(crate) mod devfd_shim;
 pub mod diff;
 pub(crate) mod elf;
+pub mod ephemeral;
 pub mod export;
 pub mod import;
 pub(crate) mod isolate;
@@ -558,6 +560,25 @@ impl ResourceLimits {
         }
     }
 
+    /// Return the limits as systemd D-Bus unit properties, for transient
+    /// units. Mirrors [`dropin_content`](Self::dropin_content); the disk cap
+    /// is a btrfs quota, not a unit property.
+    pub fn transient_properties(&self) -> Vec<(&'static str, u64)> {
+        let mut props = Vec::new();
+        if let Some(bytes) = self.memory.as_deref().and_then(memory_to_bytes) {
+            props.push(("MemoryMax", bytes));
+            props.push(("MemorySwapMax", bytes));
+        }
+        if let Some(cpus) = &self.cpus {
+            // CPUQuota=100% is one CPU second per second.
+            props.push(("CPUQuotaPerSecUSec", cpus_to_quota(cpus) * 10_000));
+        }
+        if let Some(w) = self.cpu_weight.as_deref().and_then(|w| w.parse().ok()) {
+            props.push(("CPUWeight", w));
+        }
+        props
+    }
+
     /// Validate all set fields. Returns an error describing the first invalid value.
     pub fn validate(&self) -> Result<()> {
         if let Some(mem) = &self.memory {
@@ -609,6 +630,19 @@ fn validate_memory(s: &str) -> Result<()> {
         "" | "K" | "M" | "G" | "T" => Ok(()),
         _ => bail!("invalid --memory suffix '{suffix}': expected K, M, G, or T"),
     }
+}
+
+/// Convert a validated memory value (`<number>[K|M|G|T]`) to bytes,
+/// using the same base-1024 suffixes as systemd's `MemoryMax=`.
+fn memory_to_bytes(s: &str) -> Option<u64> {
+    let (num, shift) = match s.as_bytes().last()? {
+        b'K' => (&s[..s.len() - 1], 10),
+        b'M' => (&s[..s.len() - 1], 20),
+        b'G' => (&s[..s.len() - 1], 30),
+        b'T' => (&s[..s.len() - 1], 40),
+        _ => (s, 0),
+    };
+    num.parse::<u64>().ok()?.checked_mul(1u64 << shift)
 }
 
 /// Validate a cpus value (positive number, integer or decimal).
@@ -1026,6 +1060,28 @@ mod tests {
             };
             assert!(limits.validate().is_err(), "should reject disk={v}");
         }
+    }
+
+    #[test]
+    fn test_limits_transient_properties() {
+        assert!(ResourceLimits::default().transient_properties().is_empty());
+        let limits = ResourceLimits {
+            memory: Some("512M".into()),
+            cpus: Some("1.5".into()),
+            cpu_weight: Some("200".into()),
+            disk: Some("1G".into()),
+        };
+        assert_eq!(
+            limits.transient_properties(),
+            vec![
+                ("MemoryMax", 512 << 20),
+                ("MemorySwapMax", 512 << 20),
+                ("CPUQuotaPerSecUSec", 1_500_000),
+                ("CPUWeight", 200),
+            ]
+        );
+        assert_eq!(memory_to_bytes("2G"), Some(2 << 30));
+        assert_eq!(memory_to_bytes("4096"), Some(4096));
     }
 
     #[test]

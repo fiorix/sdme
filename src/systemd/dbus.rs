@@ -99,6 +99,51 @@ pub(super) fn stop_unit(unit: &str) -> Result<()> {
     Ok(())
 }
 
+/// A unit property for `StartTransientUnit`: name and variant value.
+pub(super) type UnitProperty = (&'static str, zbus::zvariant::Value<'static>);
+
+/// Create and start a transient unit, plus auxiliary transient units
+/// created in the same transaction (e.g. a timer's service).
+///
+/// Uses job mode "fail" so an existing unit with the same name is an
+/// error instead of being replaced.
+pub(super) fn start_transient_unit(
+    unit: &str,
+    properties: Vec<UnitProperty>,
+    aux: Vec<(String, Vec<UnitProperty>)>,
+) -> Result<()> {
+    let conn = connect()?;
+    let proxy = systemd_manager(&conn)?;
+    proxy
+        .call_method("StartTransientUnit", &(unit, "fail", properties, aux))
+        .with_context(|| format!("failed to start transient unit {unit}"))?;
+    Ok(())
+}
+
+/// Whether systemd currently has the unit loaded.
+///
+/// `Ok(false)` only when systemd confirms the unit does not exist; any
+/// other failure is an error, never "absent".
+pub(super) fn is_unit_loaded(unit: &str) -> Result<bool> {
+    let conn = connect()?;
+    let manager = systemd_manager(&conn)?;
+    match manager.call_method("GetUnit", &(unit,)) {
+        Ok(_) => Ok(true),
+        Err(e) if error_name_is(&e, NO_SUCH_UNIT_ERROR) => Ok(false),
+        Err(e) => Err(e).with_context(|| format!("failed to query unit {unit}")),
+    }
+}
+
+/// Wait until a unit is inactive, failed, or gone.
+pub(super) fn wait_for_unit_stopped(
+    unit: &str,
+    timeout: std::time::Duration,
+    verbose: bool,
+) -> Result<()> {
+    let conn = connect()?;
+    wait_for_unit_inactive(&conn, unit, timeout, verbose)
+}
+
 /// Clear the failed state of a unit (equivalent to `systemctl reset-failed`).
 pub(super) fn reset_failed(unit: &str) -> Result<()> {
     let conn = connect()?;
@@ -358,7 +403,7 @@ pub(super) fn wait_for_boot(name: &str, timeout: std::time::Duration, verbose: b
                     if check_boot_state(name, &state)? {
                         return Ok(());
                     }
-                } else if unit_gave_up(&conn, &super::units::service_name(name)) {
+                } else if super::unit_name(name).is_ok_and(|unit| unit_gave_up(&conn, &unit)) {
                     // nspawn can fail before it registers a machine (a bad
                     // argument, a mount point it refuses). machined then
                     // never sends a signal for it, and without this check the
@@ -789,7 +834,7 @@ pub(super) fn wait_for_shutdown(
         if verbose {
             eprintln!("machine '{name}' already removed");
         }
-        return wait_for_unit_inactive(&conn, &super::units::service_name(name), timeout, verbose);
+        return wait_for_unit_inactive(&conn, &super::unit_name(name)?, timeout, verbose);
     }
 
     if verbose {
@@ -863,9 +908,10 @@ pub(super) fn wait_for_shutdown(
     }
 
     // Phase 2: wait for the systemd unit to become inactive.
-    // ExecStopPost (overlayfs unmount) runs after nspawn exits.
+    // ExecStopPost (overlayfs unmount, and teardown for ephemeral
+    // containers) runs after nspawn exits.
     let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-    wait_for_unit_inactive(&conn, &super::units::service_name(name), remaining, verbose)
+    wait_for_unit_inactive(&conn, &super::unit_name(name)?, remaining, verbose)
 }
 
 /// Poll a systemd unit's ActiveState until it reaches "inactive" or "failed".

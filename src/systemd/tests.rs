@@ -931,3 +931,168 @@ fn test_create_with_security_state() {
     );
     assert_eq!(restored.apparmor_profile.as_deref(), Some("sdme-default"));
 }
+
+#[test]
+fn test_ephemeral_unit_names() {
+    assert_eq!(ephemeral_service_name("box"), "sdme-ephemeral@box.service");
+    assert_eq!(session_scope_name("box"), "sdme-session-box.scope");
+    assert_eq!(health_timer_name("box"), "sdme-health@box.timer");
+    assert_eq!(health_service_name("box"), "sdme-health@box.service");
+}
+
+/// The drop-in is rendered from `nspawn_exec`; check that the argv the
+/// transient unit gets is exactly what systemd parses from the drop-in.
+#[test]
+fn test_nspawn_exec_argv_matches_dropin() {
+    let paths = test_paths();
+    let args = vec![
+        "--private-users=524288:65536".to_string(),
+        "--setenv=A=b c".to_string(),
+    ];
+    let submounts = vec!["home".to_string(), "data/deep".to_string()];
+    for pod_netns in [None, Some("/run/sdme/pods/p/netns")] {
+        let cfg = DropinConfig {
+            backend: crate::storage::Backend::Overlay,
+            datadir: "/var/lib/sdme",
+            name: "ubox",
+            root_dir: "/var/lib/sdme/containers/ubox/merged",
+            pool_mount: None,
+            lowerdir: "/var/lib/sdme/fs/ubuntu",
+            paths: &paths,
+            nspawn_args: &args,
+            service_directives: &[],
+            boot_timeout: None,
+            stop_timeout: None,
+            submounts: &submounts,
+            pod_netns,
+            lower_idmap: Some((524288, 65536)),
+        };
+        let content = nspawn_dropin(&cfg).replace(" \\\n    ", " ");
+        let values = |key: &str| -> Vec<String> {
+            dropin_assignments(&content, key)
+                .into_iter()
+                .map(|(_, v)| v.to_string())
+                .filter(|v| !v.is_empty())
+                .collect()
+        };
+        let line = |cmd: &ExecCommand| -> String {
+            let prefix = if cmd.ignore_failure { "-" } else { "" };
+            let argv: Vec<String> = cmd
+                .argv()
+                .iter()
+                .map(|a| units::escape_exec_arg(a))
+                .collect();
+            format!("{prefix}{}", argv.join(" "))
+        };
+        let exec = nspawn_exec(&cfg);
+        assert_eq!(exec.start.path(), exec.start.argv()[0]);
+        assert_eq!(
+            exec.start_pre.iter().map(line).collect::<Vec<_>>(),
+            values("ExecStartPre")
+        );
+        assert_eq!(vec![line(&exec.start)], values("ExecStart"));
+        assert_eq!(
+            exec.stop_post.iter().map(line).collect::<Vec<_>>(),
+            values("ExecStopPost")
+        );
+        // Quoting is a drop-in concern; the argv carries the raw value.
+        assert!(exec.start.argv().contains(&"--setenv=A=b c".to_string()));
+        assert!(content.contains("\"--setenv=A=b c\""));
+    }
+}
+
+#[test]
+fn test_transient_service_properties() {
+    use crate::ephemeral::{HealthCheck, HealthProbe};
+    use zbus::zvariant::Value;
+
+    let plan = NspawnPlan::for_test(
+        test_paths(),
+        vec!["--resolv-conf=auto".into()],
+        Some("/var/lib/sdme/pool".into()),
+        Some(120),
+    );
+    let teardown =
+        ExecCommand::from_argv(vec!["/usr/bin/sdme".into(), "__ephemeral-gc".into()], false);
+    let limits = ResourceLimits {
+        memory: Some("1G".into()),
+        ..Default::default()
+    };
+    let spec = |scope, systemd_version| transient::ServiceSpec {
+        name: "mybox",
+        plan: &plan,
+        limits: &limits,
+        tasks_max: 100,
+        boot_timeout: 60,
+        systemd_version,
+        teardown: teardown.clone(),
+        session_scope: scope,
+    };
+    let get = |props: &[dbus::UnitProperty], key: &str| {
+        props
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, v)| v.try_clone().unwrap())
+    };
+
+    let props = transient::service_properties(&spec(None, 255));
+    assert!(get(&props, "RestartForceExitStatus").is_none());
+    assert!(get(&props, "Restart").is_none());
+    assert!(get(&props, "BindsTo").is_none());
+    assert!(get(&props, "DelegateSubgroup").is_none());
+    assert_eq!(get(&props, "Type"), Some(Value::from("notify")));
+    assert_eq!(get(&props, "Slice"), Some(Value::from("machine.slice")));
+    assert_eq!(
+        get(&props, "TimeoutStartUSec"),
+        Some(Value::from(90_000_000u64))
+    );
+    assert_eq!(
+        get(&props, "TimeoutStopUSec"),
+        Some(Value::from(120_000_000u64))
+    );
+    assert_eq!(get(&props, "MemoryMax"), Some(Value::from(1u64 << 30)));
+    let mounts: Vec<String> = get(&props, "RequiresMountsFor")
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert_eq!(mounts, vec!["/var/lib/sdme/pool"]);
+    let start: Vec<(String, Vec<String>, bool)> =
+        get(&props, "ExecStart").unwrap().try_into().unwrap();
+    assert!(start[0].1.contains(&"--keep-unit".to_string()));
+    // Teardown runs after the overlay unmount.
+    let stop_post: Vec<(String, Vec<String>, bool)> =
+        get(&props, "ExecStopPost").unwrap().try_into().unwrap();
+    assert!(stop_post[stop_post.len() - 2]
+        .1
+        .last()
+        .unwrap()
+        .ends_with("/merged"));
+    assert_eq!(stop_post.last().unwrap().1[1], "__ephemeral-gc");
+
+    let props = transient::service_properties(&spec(Some("sdme-session-mybox.scope"), 256));
+    assert_eq!(
+        get(&props, "DelegateSubgroup"),
+        Some(Value::from("supervisor"))
+    );
+    let binds: Vec<String> = get(&props, "BindsTo").unwrap().try_into().unwrap();
+    assert_eq!(binds, vec!["sdme-session-mybox.scope"]);
+    let after: Vec<String> = get(&props, "After").unwrap().try_into().unwrap();
+    assert!(after.contains(&"sdme-session-mybox.scope".to_string()));
+
+    let check = HealthCheck {
+        probe: HealthProbe::Tcp { port: 80 },
+        interval: 10,
+        timeout: 5,
+        retries: 3,
+        start_period: 20,
+    };
+    let timer = transient::health_timer_properties("mybox", "sdme-ephemeral@mybox.service", &check);
+    let timers: Vec<(String, u64)> = get(&timer, "TimersMonotonic").unwrap().try_into().unwrap();
+    assert_eq!(
+        timers,
+        vec![
+            ("OnActiveSec".to_string(), 30_000_000),
+            ("OnUnitActiveSec".to_string(), 10_000_000),
+        ]
+    );
+}

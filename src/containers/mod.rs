@@ -19,7 +19,7 @@ mod tests;
 pub use create::{create, validate_opaque_dirs, CreateOptions};
 pub use exec::{exec, exec_oci, join, ShellOptions};
 pub use list::{list, ContainerInfo, KubeInfo};
-pub(crate) use manage::app_stop_timeout_secs;
+pub(crate) use manage::{app_stop_timeout_secs, delete_stopped};
 pub use manage::{reclaim_nspawn_runtime, remove, set_limits, stop, stop_timeout_secs, StopMode};
 
 use std::fs;

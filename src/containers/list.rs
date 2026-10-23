@@ -33,6 +33,8 @@ pub struct ContainerInfo {
     pub userns: bool,
     /// Whether auto-start on boot is enabled.
     pub enabled: bool,
+    /// Whether this is an ephemeral container (removed when it stops).
+    pub ephemeral: bool,
     /// Bind mount specs from the state file.
     pub binds: Vec<String>,
     /// OCI apps detected from `/oci/apps/` in the container's rootfs.
@@ -209,6 +211,7 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
         }
         let state_path = state_dir.join(name);
         let state = State::read_from(&state_path);
+        let ephemeral = state.as_ref().is_ok_and(|s| s.is_yes("EPHEMERAL"));
         if matches!(&state, Ok(s) if s.is_incomplete()) {
             problems.push("incomplete create");
         }
@@ -428,6 +431,7 @@ pub fn list(datadir: &Path) -> Result<Vec<ContainerInfo>> {
             rootfs: rootfs_name,
             userns,
             enabled,
+            ephemeral,
             binds,
             oci_apps,
             submounts,

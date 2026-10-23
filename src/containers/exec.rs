@@ -90,7 +90,8 @@ const CGROUP_INNER_PATHS: &[&str] = &[
 /// the container's cgroup hierarchy (cgroups v2).
 ///
 /// Tries two cgroup root patterns:
-/// - `sdme@{name}.service` (systemd < 257, template unit cgroup)
+/// - `sdme@{name}.service` (the template unit's cgroup under
+///   `--keep-unit`; `sdme-ephemeral@{name}.service` for ephemeral containers)
 /// - `machine-{escaped}.scope` (systemd >= 257, machine scope cgroup)
 fn find_oci_service_cgroup(name: &str, app_name: &str) -> Result<PathBuf> {
     let service_name = format!("sdme-oci-{app_name}.service");
@@ -102,6 +103,7 @@ fn find_oci_service_cgroup(name: &str, app_name: &str) -> Result<PathBuf> {
     let cgroup_roots = [
         machine_slice.join(format!("{name}.scope")),
         machine_slice.join(format!("sdme@{name}.service")),
+        machine_slice.join(format!("sdme-ephemeral@{name}.service")),
         machine_slice.join(format!("machine-{escaped_name}.scope")),
     ];
 

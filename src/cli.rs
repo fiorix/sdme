@@ -40,6 +40,134 @@ pub(crate) struct NetworkArgs {
     pub ports: Vec<String>,
 }
 
+/// Ephemeral container CLI arguments (shared by create/new).
+#[derive(clap::Args, Default)]
+pub(crate) struct EphemeralArgs {
+    /// Run as an ephemeral container: any stop removes it (new: also when
+    /// the session ends; create: implies --started)
+    #[arg(long)]
+    pub ephemeral: bool,
+
+    /// Stop the ephemeral container when this unit finishes (repeatable;
+    /// default for OCI app rootfs: the OCI app service)
+    #[arg(long = "main-service", value_name = "UNIT")]
+    pub main_services: Vec<String>,
+
+    /// No main service, not even the OCI app (ephemeral only)
+    #[arg(long)]
+    pub no_main_service: bool,
+
+    /// Health check command, run via /bin/sh -c in the container (ephemeral only)
+    #[arg(long, value_name = "CMD", conflicts_with_all = ["health_http", "health_tcp"])]
+    pub health_cmd: Option<String>,
+
+    /// Health check HTTP GET on 127.0.0.1 in the container (ephemeral only)
+    #[arg(long, value_name = "PORT[/PATH]", conflicts_with = "health_tcp")]
+    pub health_http: Option<String>,
+
+    /// Health check TCP connect to 127.0.0.1 in the container (ephemeral only)
+    #[arg(long, value_name = "PORT")]
+    pub health_tcp: Option<String>,
+
+    /// Seconds between health checks [default: 30]
+    #[arg(long, value_name = "SECS")]
+    pub health_interval: Option<u64>,
+
+    /// Seconds before a health check attempt fails [default: 30]
+    #[arg(long, value_name = "SECS")]
+    pub health_timeout: Option<u64>,
+
+    /// Consecutive health check failures that stop the container [default: 3]
+    #[arg(long, value_name = "N")]
+    pub health_retries: Option<u32>,
+
+    /// Seconds after boot before health checks start [default: 0]
+    #[arg(long, value_name = "SECS")]
+    pub health_start_period: Option<u64>,
+}
+
+impl EphemeralArgs {
+    fn has_health_timing(&self) -> bool {
+        self.health_interval.is_some()
+            || self.health_timeout.is_some()
+            || self.health_retries.is_some()
+            || self.health_start_period.is_some()
+    }
+
+    fn has_triggers(&self) -> bool {
+        !self.main_services.is_empty()
+            || self.no_main_service
+            || self.health_cmd.is_some()
+            || self.health_http.is_some()
+            || self.health_tcp.is_some()
+            || self.has_health_timing()
+    }
+}
+
+/// Parse and validate ephemeral arguments.
+///
+/// Returns `None` for a persistent container. `oci_app` is the rootfs's
+/// OCI app, the default main service; `restart_policy` is the normalized
+/// `--restart` value, which ephemeral containers cannot use.
+pub(crate) fn parse_ephemeral(
+    args: EphemeralArgs,
+    oci_app: Option<&str>,
+    restart_policy: &str,
+) -> Result<Option<sdme::ephemeral::EphemeralConfig>> {
+    use sdme::ephemeral::{self, HealthCheck, HealthProbe};
+
+    if !args.ephemeral {
+        if args.has_triggers() {
+            bail!("--main-service, --no-main-service and --health-* require --ephemeral");
+        }
+        return Ok(None);
+    }
+    if restart_policy != "no" {
+        bail!("--restart cannot be used with --ephemeral: a stop removes the container");
+    }
+    let main_services =
+        ephemeral::resolve_main_services(&args.main_services, args.no_main_service, oci_app)?;
+    let probe = if let Some(cmd) = &args.health_cmd {
+        Some(HealthProbe::Cmd(cmd.clone()))
+    } else if let Some(spec) = &args.health_http {
+        Some(ephemeral::parse_http_spec(spec)?)
+    } else if let Some(port) = &args.health_tcp {
+        Some(HealthProbe::Tcp {
+            port: ephemeral::parse_port(port)?,
+        })
+    } else {
+        None
+    };
+    let health = match probe {
+        Some(probe) => {
+            let check = HealthCheck {
+                probe,
+                interval: args
+                    .health_interval
+                    .unwrap_or(ephemeral::DEFAULT_HEALTH_INTERVAL),
+                timeout: args
+                    .health_timeout
+                    .unwrap_or(ephemeral::DEFAULT_HEALTH_TIMEOUT),
+                retries: args
+                    .health_retries
+                    .unwrap_or(ephemeral::DEFAULT_HEALTH_RETRIES),
+                start_period: args.health_start_period.unwrap_or(0),
+            };
+            check.validate()?;
+            Some(check)
+        }
+        None if args.has_health_timing() => bail!(
+            "--health-interval/-timeout/-retries/-start-period need \
+             --health-cmd, --health-http or --health-tcp"
+        ),
+        None => None,
+    };
+    Ok(Some(sdme::ephemeral::EphemeralConfig {
+        main_services,
+        health,
+    }))
+}
+
 /// Bind mount and environment variable CLI arguments (shared by create/new).
 #[derive(clap::Args, Default)]
 pub(crate) struct MountArgs {
@@ -155,6 +283,18 @@ pub(crate) fn println_stdout(s: &str) {
 }
 
 /// Configuration for starting a container and awaiting boot readiness.
+/// How [`start_and_await_boot`] runs a container's unit.
+#[derive(Clone, Copy)]
+pub(crate) enum StartMode {
+    /// Template instance `sdme@NAME.service`. Refuses ephemeral
+    /// containers: once stopped they are gone, and a leftover is an
+    /// orphan that can only be removed.
+    Persistent,
+    /// Transient units for a new ephemeral container. `session` binds the
+    /// container to the calling client (session trigger).
+    Ephemeral { session: bool },
+}
+
 pub(crate) struct BootConfig<'a> {
     /// Data directory containing container state.
     pub datadir: &'a Path,
@@ -170,6 +310,8 @@ pub(crate) struct BootConfig<'a> {
     pub stop_timeout: u64,
     /// Enable verbose output.
     pub verbose: bool,
+    /// Which unit runs the container.
+    pub mode: StartMode,
 }
 
 /// Start a container and wait for it to finish booting.
@@ -187,10 +329,30 @@ pub(crate) fn start_and_await_boot(cfg: &BootConfig) -> Result<()> {
         default_boot_timeout,
         stop_timeout,
         verbose,
+        mode,
     } = *cfg;
+    let ephemeral = sdme::ephemeral::is_ephemeral(datadir, name);
+    match mode {
+        StartMode::Persistent if ephemeral => bail!(
+            "'{name}' is an ephemeral container whose teardown did not complete \
+             (e.g. after a host crash); remove it with 'sdme rm {name}'"
+        ),
+        StartMode::Ephemeral { .. } if !ephemeral => {
+            bail!("'{name}' is not an ephemeral container")
+        }
+        _ => {}
+    }
+    let unit = if ephemeral {
+        systemd::ephemeral_service_name(name)
+    } else {
+        systemd::service_name(name)
+    };
+
     // Hold shared lock to prevent `sdme rm` during start+boot window.
-    let _lock = lock::lock_shared(datadir, "containers", name)
-        .with_context(|| format!("cannot lock container '{name}' for starting"))?;
+    let mut lock = Some(
+        lock::lock_shared(datadir, "containers", name)
+            .with_context(|| format!("cannot lock container '{name}' for starting"))?,
+    );
 
     // Check for UID range conflicts with running machines when using
     // a pre-allocated shift. If a conflict is detected, clear it so
@@ -223,14 +385,18 @@ pub(crate) fn start_and_await_boot(cfg: &BootConfig) -> Result<()> {
         }
     }
 
-    systemd::start(&systemd::ServiceConfig {
+    let service = systemd::ServiceConfig {
         datadir,
         name,
         tasks_max,
         boot_timeout: boot_timeout.as_secs(),
         default_boot_timeout,
         verbose,
-    })?;
+    };
+    match mode {
+        StartMode::Persistent => systemd::start(&service)?,
+        StartMode::Ephemeral { session } => systemd::start_ephemeral(&service, session)?,
+    }
     match systemd::await_boot(name, boot_timeout, verbose) {
         systemd::BootOutcome::Ready => Ok(()),
         systemd::BootOutcome::TimedOut(e) => {
@@ -248,12 +414,21 @@ pub(crate) fn start_and_await_boot(cfg: &BootConfig) -> Result<()> {
         systemd::BootOutcome::Exited(e) => {
             let _guard = sdme::InterruptGuard::save_and_reset();
             eprintln!("boot failed, stopping '{name}'");
-            let _ = containers::stop(name, containers::StopMode::Terminate, stop_timeout, verbose);
+            if ephemeral {
+                // Teardown in ExecStopPost needs the exclusive lock, and the
+                // stop below waits for teardown.
+                lock.take();
+                let timeout = std::time::Duration::from_secs(stop_timeout);
+                let _ = systemd::stop_ephemeral(name, timeout, verbose);
+            } else {
+                let _ =
+                    containers::stop(name, containers::StopMode::Terminate, stop_timeout, verbose);
+            }
             // Surface unit logs for any caller (create, start, restart, build)
             // whose boot attempt ended because the container exited.
             // Skipped on TimedOut because the container is still running and
             // `sdme logs` gives the same information without noise.
-            dump_boot_journal(name);
+            dump_boot_journal(&unit);
             Err(e)
         }
     }
@@ -266,12 +441,11 @@ pub(crate) fn start_and_await_boot(cfg: &BootConfig) -> Result<()> {
 /// starting with `-- `); if nothing remains, nothing is printed. This
 /// keeps the diagnostic quiet when the journal has no useful content
 /// (e.g. the unit failed before any exec output was produced).
-fn dump_boot_journal(name: &str) {
-    let unit = systemd::service_name(name);
+fn dump_boot_journal(unit: &str) {
     let output = std::process::Command::new("journalctl")
         .args([
             "-u",
-            &unit,
+            unit,
             "-n",
             "50",
             "--no-pager",
