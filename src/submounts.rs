@@ -155,6 +155,20 @@ fn parse_submounts(content: &str) -> Vec<String> {
 /// For each submount path (e.g. `"home"`), creates:
 ///   `container_dir/submounts/home/upper` (0o755)
 ///   `container_dir/submounts/home/work`  (0o700)
+/// Return the mount point that holds `path`: the deepest mount point in
+/// `mountinfo` (the contents of `/proc/self/mountinfo`) that is `path` or one
+/// of its ancestors. Purely lexical, so it never touches the filesystem
+/// (which would trigger an automount).
+pub(crate) fn containing_mount_point(path: &Path, mountinfo: &str) -> PathBuf {
+    mountinfo
+        .lines()
+        .filter_map(|line| line.split_whitespace().nth(4))
+        .map(|mount_point| PathBuf::from(unescape_mountinfo(mount_point)))
+        .filter(|mount_point| path.starts_with(mount_point))
+        .max_by_key(|mount_point| mount_point.components().count())
+        .unwrap_or_else(|| PathBuf::from("/"))
+}
+
 pub(crate) fn ensure_submount_dirs(container_dir: &Path, submounts: &[String]) -> Result<()> {
     for rel in submounts {
         let base = container_dir.join("submounts").join(rel);
@@ -175,6 +189,23 @@ pub(crate) fn ensure_submount_dirs(container_dir: &Path, submounts: &[String]) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_containing_mount_point() {
+        let mountinfo = "\
+22 1 0:21 / / rw - btrfs /dev/md0 rw
+30 22 0:31 / /home rw - autofs systemd-1 rw
+31 30 0:44 / /home/fiorix rw - nfs4 filer:/fiorix rw
+32 22 0:45 / /data\\040disk rw - ext4 /dev/sdb1 rw
+";
+        let at = |p: &str| containing_mount_point(Path::new(p), mountinfo);
+        assert_eq!(at("/root/.config/systemd/user"), PathBuf::from("/"));
+        assert_eq!(at("/home/alice/.config"), PathBuf::from("/home"));
+        assert_eq!(at("/home/fiorix/.config"), PathBuf::from("/home/fiorix"));
+        assert_eq!(at("/home/fiorixx"), PathBuf::from("/home"));
+        assert_eq!(at("/data disk/u"), PathBuf::from("/data disk"));
+        assert_eq!(at("/data"), PathBuf::from("/"));
+    }
 
     #[test]
     fn test_unescape_plain() {

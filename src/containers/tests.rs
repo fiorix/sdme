@@ -960,3 +960,41 @@ fn test_system_state_health_unreachable_is_unknown() {
     let h = super::list::system_state_health(None);
     assert_eq!(h, "unknown");
 }
+
+// --- dbus.service alias preservation ---
+
+#[test]
+fn test_preserve_dbus_alias_imported_rootfs() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = TempDataDir::new("dbus-alias");
+    let rootfs = tmp.path().join("rootfs");
+    let upper = tmp.path().join("upper");
+    let unit_dir = "etc/systemd/user";
+    fs::create_dir_all(rootfs.join(unit_dir)).unwrap();
+    let alias = rootfs.join(unit_dir).join("dbus.service");
+
+    // A relative target is kept, creating the unit directory if needed.
+    symlink("dbus-broker.service", &alias).unwrap();
+    super::create::preserve_dbus_alias(&rootfs, &upper.join(unit_dir), unit_dir, false).unwrap();
+    assert_eq!(
+        fs::read_link(upper.join(unit_dir).join("dbus.service")).unwrap(),
+        PathBuf::from("dbus-broker.service")
+    );
+
+    // An imported rootfs cannot plant absolute or traversing targets.
+    for target in [
+        "/usr/lib/systemd/user/dbus-broker.service",
+        "../../x.service",
+    ] {
+        let out = tmp.path().join("out");
+        let _ = fs::remove_dir_all(&out);
+        fs::remove_file(&alias).unwrap();
+        symlink(target, &alias).unwrap();
+        super::create::preserve_dbus_alias(&rootfs, &out, unit_dir, false).unwrap();
+        assert!(
+            fs::symlink_metadata(out.join("dbus.service")).is_err(),
+            "{target}"
+        );
+    }
+}

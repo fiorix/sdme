@@ -36,7 +36,7 @@ $ sudo sdme new
 creating 'araciubaia'
 starting 'araciubaia'
 joining 'araciubaia'
-host rootfs container: joining as user 'fiorix' with opaque dirs /etc/systemd/system, /var/log
+host rootfs container: joining as user 'fiorix' with opaque dirs /etc/systemd/system, /etc/systemd/user, /var/log
 Connected to machine araciubaia. Press ^] three times within 1s to exit session.
 araciubaia ~ $
 ```

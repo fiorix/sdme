@@ -836,7 +836,7 @@ CONFIG KEYS:
     datadir                        path     /var/lib/sdme
     boot_timeout                   u64      60        Seconds to wait for boot
     join_as_sudo_user              bool     yes       Drop to sudo user on join
-    host_rootfs_opaque_dirs        string   /etc/systemd/system,/var/log
+    host_rootfs_opaque_dirs        string   /etc/systemd/system,/etc/systemd/user,/var/log
     hardened_drop_caps             string   CAP_SYS_PTRACE,CAP_NET_RAW,CAP_SYS_RAWIO,CAP_SYS_BOOT
     userns_nested_ranges           u32      0         Extra 64K UID/GID ranges for --userns
     userns_idmap_lower             bool     yes       Idmap the overlay lower layer for --userns

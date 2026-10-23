@@ -304,6 +304,12 @@ fn do_create(
         }
     }
 
+    // Host-rootfs containers see the live host through their lower layer,
+    // including the units each host user runs with `systemd --user`.
+    if rootfs == Path::new("/") && opts.backend == Backend::Overlay {
+        super::user_units::hide_host_user_units(&container_dir, verbose)?;
+    }
+
     let etc_dir = root_dir.join("etc");
     fs::create_dir_all(&etc_dir)
         .with_context(|| format!("failed to create {}", etc_dir.display()))?;
@@ -369,38 +375,19 @@ fn do_create(
         eprintln!("skipping service masking for NixOS rootfs");
     }
 
-    // When /etc/systemd/system is opaque, the dbus.service alias from the
-    // lower layer is hidden. dbus.service is typically a symlink to the
-    // actual D-Bus implementation (dbus-broker.service or dbus-daemon.service).
-    // Without it, dbus.socket has no service to activate, D-Bus never starts,
-    // logind crash-loops (it needs D-Bus), and dbus.socket hits its start
-    // rate limit, leaving the container without a system bus.
-    if opaque_dirs.iter().any(|d| d == "/etc/systemd/system") {
-        let host_dbus = rootfs.join("etc/systemd/system/dbus.service");
-        if let Ok(target) = fs::read_link(&host_dbus) {
-            // Validate the symlink target from the rootfs: reject absolute
-            // paths and path traversal to prevent a malicious imported rootfs
-            // from pointing outside the systemd unit directory.
-            let target_str = target.to_string_lossy();
-            if target.is_absolute() || target_str.contains("..") {
-                if verbose {
-                    eprintln!(
-                        "skipping dbus.service symlink with unsafe target: {}",
-                        target.display()
-                    );
-                }
-            } else {
-                let upper_dbus = systemd_unit_dir.join("dbus.service");
-                symlink(&target, &upper_dbus).with_context(|| {
-                    format!(
-                        "failed to preserve dbus.service symlink at {}",
-                        upper_dbus.display()
-                    )
-                })?;
-                if verbose {
-                    eprintln!("preserved dbus.service -> {}", target.display());
-                }
-            }
+    // An opaque unit directory hides the lower layer's dbus.service alias
+    // too. dbus.service is typically a symlink to the actual D-Bus
+    // implementation (dbus-broker.service or dbus-daemon.service). Without
+    // it in /etc/systemd/system, dbus.socket has no service to activate,
+    // D-Bus never starts, logind crash-loops (it needs D-Bus), and
+    // dbus.socket hits its start rate limit, leaving the container without
+    // a system bus; in /etc/systemd/user, user sessions get no session bus.
+    for unit_dir in ["etc/systemd/system", "etc/systemd/user"] {
+        if opaque_dirs
+            .iter()
+            .any(|d| d.strip_prefix('/') == Some(unit_dir))
+        {
+            preserve_dbus_alias(rootfs, &root_dir.join(unit_dir), unit_dir, verbose)?;
         }
     }
 
@@ -777,8 +764,52 @@ pub fn validate_opaque_dirs(dirs: &[String]) -> Result<Vec<String>> {
     Ok(result)
 }
 
+/// Copy the `dbus.service` alias of the rootfs unit directory `unit_dir`
+/// (relative) into `upper_unit_dir`, the same directory in the container's
+/// writable root, which an opaque marker emptied.
+///
+/// The symlink target comes from the rootfs and is rejected if it contains
+/// `..`. An absolute target is rejected unless the rootfs is the host's own
+/// `/`: an imported rootfs is untrusted, while the host is not, and its
+/// alias (absolute on Fedora-family hosts) names a unit the container sees
+/// at the same path.
+pub(super) fn preserve_dbus_alias(
+    rootfs: &Path,
+    upper_unit_dir: &Path,
+    unit_dir: &str,
+    verbose: bool,
+) -> Result<()> {
+    let lower_dbus = rootfs.join(unit_dir).join("dbus.service");
+    let Ok(target) = fs::read_link(&lower_dbus) else {
+        return Ok(());
+    };
+    let host_rootfs = rootfs == Path::new("/");
+    if target.to_string_lossy().contains("..") || (target.is_absolute() && !host_rootfs) {
+        if verbose {
+            eprintln!(
+                "skipping {unit_dir}/dbus.service symlink with unsafe target: {}",
+                target.display()
+            );
+        }
+        return Ok(());
+    }
+    fs::create_dir_all(upper_unit_dir)
+        .with_context(|| format!("failed to create {}", upper_unit_dir.display()))?;
+    let upper_dbus = upper_unit_dir.join("dbus.service");
+    symlink(&target, &upper_dbus).with_context(|| {
+        format!(
+            "failed to preserve dbus.service symlink at {}",
+            upper_dbus.display()
+        )
+    })?;
+    if verbose {
+        eprintln!("preserved {unit_dir}/dbus.service -> {}", target.display());
+    }
+    Ok(())
+}
+
 /// Set the `trusted.overlay.opaque` extended attribute on a directory.
-fn set_opaque_xattr(path: &Path) -> Result<()> {
+pub(super) fn set_opaque_xattr(path: &Path) -> Result<()> {
     let c_path =
         CString::new(path.as_os_str().as_encoded_bytes()).context("path contains null byte")?;
     let c_name = CString::new("trusted.overlay.opaque").expect("static string literal");

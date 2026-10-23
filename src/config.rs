@@ -248,7 +248,7 @@ fn default_join_as_sudo_user() -> bool {
 }
 
 fn default_host_rootfs_opaque_dirs() -> String {
-    "/etc/systemd/system,/var/log".to_string()
+    "/etc/systemd/system,/etc/systemd/user,/var/log".to_string()
 }
 
 fn default_hardened_drop_caps() -> String {
@@ -722,7 +722,7 @@ mod tests {
         let config = Config::default();
         assert_eq!(
             config.host_rootfs_opaque_dirs,
-            "/etc/systemd/system,/var/log"
+            "/etc/systemd/system,/etc/systemd/user,/var/log"
         );
     }
 

@@ -40,9 +40,11 @@ The foundational mode of sdme is what you get when you run `sdme new` with no fl
   |  +----------------------+  +----------------------+  |
   +------------------------------------------------------+
 
-  Note: /etc/systemd/system and /var/log are opaque
-  by default: the container sees empty directories
-  there, not the host's units and logs.
+  Note: /etc/systemd/system, /etc/systemd/user and
+  /var/log are opaque by default, and so is each
+  user's ~/.config/systemd/user: the container sees
+  empty directories there, not the host's units and
+  logs.
 ```
 
 Looks like this:
@@ -52,7 +54,7 @@ $ sudo sdme new
 creating 'jerinhouma'
 starting 'jerinhouma'
 joining 'jerinhouma'
-host rootfs container: joining as user 'fiorix' with opaque dirs /etc/systemd/system, /var/log
+host rootfs container: joining as user 'fiorix' with opaque dirs /etc/systemd/system, /etc/systemd/user, /var/log
 Connected to machine jerinhouma. Press ^] three times within 1s to exit session.
 jerinhouma ~ $ systemctl status
 ● jerinhouma
@@ -74,7 +76,9 @@ Each container boots its own systemd instance inside the nspawn namespace. The h
 
 `--user root` is the explicit "force root" form and always wins, even on a host-rootfs clone with `$SUDO_USER` set. Disable the implicit fall-through globally with `sdme config set join_as_sudo_user no`. `--user` is not persisted to container state: each `join`/`exec` recomputes the default and accepts its own `--user`.
 
-**Opaque directories** are the key to making host clones usable. Without them, the container would inherit the host's systemd units and try to start all the same services. By default, sdme marks `/etc/systemd/system` and `/var/log` as overlayfs-opaque (via the `trusted.overlay.opaque` xattr), making the container see empty directories there. The host's units and logs are hidden; the container starts clean.
+**Opaque directories** are the key to making host clones usable. Without them, the container would inherit the host's systemd units and try to start all the same services. By default, sdme marks `/etc/systemd/system`, `/etc/systemd/user`, and `/var/log` as overlayfs-opaque (via the `trusted.overlay.opaque` xattr), making the container see empty directories there. The host's units, its system-wide user units, and its logs are hidden; the container starts clean. When a unit directory is made opaque, its `dbus.service` alias is copied into the upper layer, since the system bus (`/etc/systemd/system`) and the user session bus (`/etc/systemd/user`) are activated through it. Targets containing `..` are refused; an absolute target (Fedora-family hosts) is accepted only for a host clone, whose rootfs is the trusted host itself.
+
+**Users' own units.** The units a user runs with `systemd --user` would also leak in: they live in the user's home, and they start as soon as a user session begins in the container (for example `sdme join` as `$SUDO_USER`), with the host's network, ports, and paths. `host_rootfs_opaque_dirs` cannot name a directory in every home, so at create time sdme also makes `~/.config/systemd/user` and `~/.config/systemd/user.control` opaque for each home in `/etc/passwd` and for `$SUDO_USER`'s home (which may come from NSS). Each directory is resolved through symlinks and placed in the upper layer of the overlay that holds it: the root overlay, or a submount overlay such as the one for `/home`. Directories the upper layer lacks are created with the owner and mode of the host path, because overlayfs shows the upper copy's attributes for a directory present in both layers, so homes keep their ownership. A home on a mount the container does not overlay (autofs, NFS) is skipped before the filesystem is touched, so the check does not trigger an automount; the container does not see such a home anyway. Units under `~/.local/share/systemd/user` stay visible, like the vendor units under `/usr/lib/systemd`, but nothing enables them. A home created on the host after the container is not covered.
 
 **DNS** requires special treatment because containers share the host's network namespace by default. The host's `systemd-resolved` already owns `127.0.0.53`, so the container's copy would fail to bind. Service masking is handled at container create time (not import time) via the configurable `--masked-services` / `default_create_masked_services` mechanism. Import removes any pre-existing `systemd-resolved.service` masks from the rootfs so they don't leak through overlayfs.
 
@@ -632,7 +636,8 @@ interactive                       true
 datadir                           /var/lib/sdme
 boot_timeout                      60
 join_as_sudo_user                 true
-host_rootfs_opaque_dirs           /etc/systemd/system,/var/log
+host_rootfs_opaque_dirs           /etc/systemd/system,/etc/systemd/user,
+                                  /var/log
 hardened_drop_caps                CAP_SYS_PTRACE,CAP_NET_RAW,...
 userns_nested_ranges              0
 userns_idmap_lower                true

@@ -11,6 +11,7 @@ mod create;
 mod exec;
 mod list;
 mod manage;
+mod user_units;
 
 #[cfg(test)]
 mod tests;
