@@ -368,8 +368,22 @@ if timeout "$TIMEOUT_BOOT" "$SDME" create "${STORAGE_ARGS[@]}" --ephemeral -r "$
     fi
     has_nft=0
     nft list tables >/dev/null 2>&1 && has_nft=1
-    if [[ $has_nft -eq 1 ]] && ! nft list ruleset 2>/dev/null | grep -q 18089; then
-        fail "port forward rule missing while running"
+    if [[ $has_nft -eq 1 ]]; then
+        # nspawn installs the DNAT rule once the container's veth has an
+        # address, a few seconds after boot.
+        rule_seen=0
+        for ((i = 0; i < $(scale_timeout 30); i++)); do
+            if nft list ruleset 2>/dev/null | grep -q 18089; then
+                rule_seen=1
+                break
+            fi
+            sleep 1
+        done
+        if [[ $rule_seen -eq 1 ]]; then
+            ok "port forward rule present while running"
+        else
+            fail "port forward rule missing while running"
+        fi
     fi
     "$SDME" stop "$ct" $VFLAG >/dev/null 2>&1
     # stop returns after teardown: no waiting here.
