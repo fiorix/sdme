@@ -223,6 +223,51 @@ Totals                       712     0    12  25 suites
 
 ## Log
 
+### Unreleased -- ephemeral containers, host user units, pod name prefixes (2026-10-23, x86_64)
+
+Full `run-parallel.sh` gate on Linux 7.0.0-38-generic (x86_64), Ubuntu 26.04, systemd 259 (259.5-0ubuntu3.4), against the release build of a99e167, the last code commit (43a4d99 changes a test script only). Eight parallel jobs, timeout scale 1, wall clock 17m28s. The datadir is a dedicated btrfs mount (Mode A) with `user_subvol_rm_allowed`; AppArmor is active with the `sdme-default` profile loaded, and kubeconform v0.7.0 is installed. The host has no direct internet access: downloads use an HTTP proxy, and containers have no route to the internet. Checks that failed only for that reason are counted as skipped. The `smoke` and `interrupt` gates passed 14 and 8 checks. `cargo test` passes (1037 library tests, 21 binary tests).
+
+```
+Suite                       Pass  Fail  Skip  Result
+--------------------------  ----  ----  ----  ------
+verify-build                  11     0     0  PASS
+verify-cp                     21     0     0  PASS
+verify-diff                    9     0     0  PASS
+verify-distro-boot            63     0     0  PASS
+verify-distro-oci            175     0     0  PASS
+verify-ephemeral *            32     0     0  PASS
+verify-export                 24     0     0  PASS
+verify-kube-L1-basic          22     0     0  PASS
+verify-kube-L2-probes         41     0     0  PASS
+verify-kube-L2-security       16     0     1  PASS
+verify-kube-L2-spec           13     0     0  PASS
+verify-kube-L3-secrets        16     0     0  PASS
+verify-kube-L3-volumes        39     0     0  PASS
+verify-kube-L4-networking      5     0     1  PASS
+verify-kube-L5-redis-stack     6     0     0  PASS
+verify-kube-L6-gitea-stack    15     0     0  PASS
+verify-nested-privileged *    18     0     0  PASS
+verify-nested-userns          12     0     0  PASS
+verify-nested *                4     0     1  PART
+verify-network *               9     0     0  PASS
+verify-nixos                  26     0     0  PASS
+verify-oci                    18     0     0  PASS
+verify-pods                   15     0     0  PASS
+verify-pool                   14     0     0  PASS
+verify-security               57     0     0  PASS
+verify-storage                11     0     0  PASS
+verify-tutorial *             96     0     8  PASS
+--------------------------  ----  ----  ----  ------
+Totals                       788     0    11  27 suites
+```
+
+- `*` marks suites re-run on their own on the same build after the parallel run, where they recorded 31/1/0 (`verify-ephemeral`), 18/0/0 and 0/0/0 (`verify-nested-privileged`, `verify-nested`, which stopped while seeding their base rootfs), 6/3/0 (`verify-network`, whose python3 probe could not be installed), and 13/1/84 (`verify-tutorial`). The host's own network dropped partway through the parallel run (its IPv6 default route and DNS stopped working), which failed the package installs; the re-runs followed its repair. `verify-ephemeral` was re-run after fixing its port forward check (43a4d99), which looked for the rule before nspawn installs it, about 3.6s after boot. `verify-tutorial` was re-run with its base rootfs imported from a local copy of the same Ubuntu image, because the registry refused the pull with a rate limit.
+- Skipped for lack of internet access. `verify-kube-L4-networking`: `networking/localhost-http`, whose busybox client inherits the proxy variables (`sdme exec --oci` passes the caller's environment to the app) and sends its request for 127.0.0.1 to the proxy. `verify-nested`: the outer container's DNS check, which resolves `registry-1.docker.io` through `8.8.8.8`, the server its DHCP lease names. The suite stops at that check, so its other 11 checks did not run (0.21.1 recorded 13 passed and 3 skipped); `PART` marks it. `verify-tutorial`: the 8 Docker steps, which need a default route to the internet inside the container. The `verify-kube-L2-security` skip is the usual one: the AppArmor profile is not visible inside nspawn.
+- New coverage: `verify-ephemeral` is new, with 32 checks across the session, service and health triggers, teardown on stop, rm and reboot, the refusals, orphans and prune, port forwards and bind mounts, ephemeral containers sharing a pod, and the distro matrix. `verify-pods` gains test 4, pod name prefixes (4 checks). `verify-tutorial` gains `ephemeral_containers` (11 checks); its 96 passes include `first_container` and `pod_networking`, which boot host clones.
+- `smoke`'s "start after an unclean kill" failed intermittently under load, with the 0.21.1 release as well: a start issued while the killed unit was still deactivating left its nspawn runtime unreclaimed. a99e167 makes the start wait for the stop; the check then passed in every run.
+- Checked by hand in a host clone: a per-user unit in `~/.config/systemd/user` and a global one in `/etc/systemd/user`, both enabled and active on the host, stayed inactive inside the container while its user manager ran, and `/home/ubuntu` kept `ubuntu:ubuntu` and mode 0750.
+- No `sdme@*.service` unit was left in failed state after the runs.
+
 ### 0.21.1 -- nested workload coverage, tar export metadata, config keys (2026-10-05, x86_64)
 
 Standalone suite runs on Linux 7.0.0-34-generic (x86_64), Ubuntu 26.04, systemd 259.5, btrfs datadir on its own mount, ufw active. Not a full `run-parallel.sh` gate: the suites that changed, or that cover the changed code, were run one at a time against the release build of the final code commit. `cargo test` passes (1006 library tests, 21 binary tests).
