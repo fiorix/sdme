@@ -345,6 +345,18 @@ pub fn start(cfg: &ServiceConfig) -> Result<()> {
     let limits = ResourceLimits::from_state(&state);
     write_limits_dropin(name, &limits, verbose)?;
 
+    // A start right after an unclean exit can find the previous instance still
+    // deactivating (its ExecStopPost running). The reclaim below leaves the
+    // runtime of a unit that is not down alone, and the start job would wait
+    // for the stop anyway, so wait for it here and reclaim after.
+    if unit_active_state(name)?.as_deref() == Some("deactivating") {
+        if verbose {
+            eprintln!("waiting for the previous instance of '{name}' to stop");
+        }
+        let timeout = std::time::Duration::from_secs(DEFAULT_STOP_TIMEOUT_SECS);
+        dbus::wait_for_unit_stopped(&service_name(name), timeout, verbose)?;
+    }
+
     // An unclean exit of a previous container with this name (SIGKILL after a
     // stop timeout, a host crash) leaves /run/systemd/nspawn/<name>/unix-export
     // mounted, and nspawn refuses to start onto an existing mount point. Reclaim
