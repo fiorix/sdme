@@ -223,23 +223,6 @@ Totals                       712     0    12  25 suites
 
 ## Log
 
-### Unreleased -- ephemeral containers prototype (2026-10-23, x86_64)
-
-Standalone `verify-ephemeral` and `verify-tutorial --only ephemeral_containers` runs on Linux 6.13 (x86_64), CentOS Stream 9 based host, systemd 261, debug build of the working tree on 0.21.1. Not a full `run-parallel.sh` gate. Each run used an isolated `--config`/`DATADIR` because the host has its own sdme install. `cargo test` passes (1019 library tests, 21 binary tests).
-
-```
-Suite                                  Pass  Fail  Skip  Result
--------------------------------------  ----  ----  ----  ------
-verify-ephemeral (overlay)               28     0     1  PASS
-verify-ephemeral (btrfs Mode A)          28     0     1  PASS
-verify-ephemeral (btrfs Mode B)          28     0     1  PASS
-verify-tutorial (ephemeral_containers)   11     0     0  PASS
-```
-
-- Storage is selected with `EPH_STORAGE`. Mode A ran on a datadir on the host's btrfs. Mode B ran on a datadir on a loop-mounted ext4 image, where sdme created its sparse pool image and pool `.mount` unit; the transient unit carried `RequiresMountsFor=` on the pool, and teardown deleted each container subvolume.
-- The skip in each run is the port-forward rule check: nftables is unusable on this kernel (`nft list tables` fails), so nspawn cannot install DNAT rules. The unit's `ExecStart` carries `--port=`; the rule itself is unverified.
-- The ubuntu base rootfs has no python3, so the HTTP health check runs against the nginx-unprivileged OCI rootfs.
-
 ### 0.21.1 -- nested workload coverage, tar export metadata, config keys (2026-10-05, x86_64)
 
 Standalone suite runs on Linux 7.0.0-34-generic (x86_64), Ubuntu 26.04, systemd 259.5, btrfs datadir on its own mount, ufw active. Not a full `run-parallel.sh` gate: the suites that changed, or that cover the changed code, were run one at a time against the release build of the final code commit. `cargo test` passes (1006 library tests, 21 binary tests).
