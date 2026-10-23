@@ -249,7 +249,7 @@ impl ExecCommand {
         self
     }
 
-    /// A command from a plain argv (argv[0] is the binary), on one line.
+    /// A command from a plain argv (`argv[0]` is the binary), on one line.
     pub fn from_argv(argv: Vec<String>, ignore_failure: bool) -> Self {
         Self {
             ignore_failure,
