@@ -9,7 +9,8 @@ set -uo pipefail
 #      returns CMD's exit status
 #   2. Session trigger: killing the client's process group tears down
 #   3. Service trigger: a main service finishing (success and failure)
-#   4. OCI default main service, and --no-main-service
+#   4. OCI default main service, and --no-main-service; ephemeral containers
+#      sharing a pod
 #   5. Health trigger: --health-cmd, --health-tcp, --health-http
 #   6. Port forward and bind mount gone after `sdme stop`; stop waits
 #   7. Refusals: --enable, restart, enable, set, trigger flags without
@@ -235,6 +236,37 @@ if fs_exists "$APP_FS" || timeout "$TIMEOUT_IMPORT" "$SDME" fs import "$APP_IMAG
     fi
 else
     skipped "OCI app tests: import of $APP_IMAGE failed"
+fi
+
+# An ephemeral server and an ephemeral client share a pod's network
+# namespace; the client reaches the server on 127.0.0.1.
+if fs_exists "$APP_FS"; then
+    pod="${PREFIX}-pod"
+    "$SDME" pod rm -f "$pod" >/dev/null 2>&1
+    "$SDME" pod new "$pod" $VFLAG >/dev/null
+    ct="${PREFIX}-pod-srv"
+    if timeout "$TIMEOUT_BOOT" "$SDME" create "${STORAGE_ARGS[@]}" --ephemeral -r "$APP_FS" \
+            -t "$TIMEOUT_BOOT" --pod "$pod" --name "$ct" $VFLAG >/dev/null; then
+        sleep 2
+        reply=$(timeout "$TIMEOUT_BOOT" "$SDME" new "${STORAGE_ARGS[@]}" --ephemeral -r "$BASE_FS" \
+            -t "$TIMEOUT_BOOT" --pod "$pod" --name "${PREFIX}-pod-cli" -- /bin/bash -c \
+            'exec 3<>/dev/tcp/127.0.0.1/8080; printf "GET / HTTP/1.0\r\n\r\n" >&3; head -1 <&3' \
+            </dev/null 2>/dev/null)
+        if [[ "$reply" == "HTTP/1.1 200"* ]] && is_gone "${PREFIX}-pod-cli"; then
+            ok "ephemeral containers share a pod: client reached the server"
+        else
+            fail "ephemeral containers in a pod: got '$reply'"
+        fi
+        "$SDME" stop "$ct" $VFLAG >/dev/null 2>&1
+        if is_gone "$ct"; then
+            ok "ephemeral pod member removed on stop"
+        else
+            fail "ephemeral pod member left behind"
+        fi
+    else
+        fail "ephemeral pod member: create failed"
+    fi
+    "$SDME" pod rm -f "$pod" >/dev/null 2>&1
 fi
 
 # ---------------------------------------------------------------------------

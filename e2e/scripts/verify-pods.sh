@@ -7,6 +7,8 @@ set -euo pipefail
 #   1. nspawn pods (--pod): two host-rootfs containers share localhost via pod netns
 #   2. --pod + --private-network: private-network silently dropped, loopback works
 #   3. Validation: error cases (--oci-pod w/o --private-network, --pod + userns, etc.)
+#   4. Pod name prefixes: --pod and pod rm accept a unique prefix, the state
+#      file records the full name, an ambiguous prefix is refused
 
 source "$(dirname "$0")/lib.sh"
 
@@ -26,6 +28,8 @@ cleanup_all() {
     cleanup_pod testpod
     cleanup_pod pnpod
     cleanup_pod valpod
+    cleanup_pod pfxpod-alpha
+    cleanup_pod pfxpod-beta
 }
 
 trap cleanup_all EXIT INT TERM
@@ -212,6 +216,55 @@ for flag in --userns --hardened --strict; do
 done
 
 cleanup_pod valpod
+
+# ---------------------------------------------------------------------------
+# Test 4: Pod name prefixes
+# ---------------------------------------------------------------------------
+echo "=== Test 4: Pod name prefixes ==="
+
+cleanup_container pod-pfx1
+cleanup_pod pfxpod-alpha
+cleanup_pod pfxpod-beta
+$SDME pod new pfxpod-alpha $VFLAG >/dev/null
+$SDME pod new pfxpod-beta $VFLAG >/dev/null
+
+# --pod with a unique prefix joins the pod and records its full name.
+if $SDME create --name pod-pfx1 -r ubuntu --pod pfxpod-a $VFLAG >/dev/null 2>&1 \
+        && grep -qx "POD=pfxpod-alpha" "${DATADIR:-/var/lib/sdme}/state/pod-pfx1"; then
+    ok "--pod prefix resolves and stores the full pod name"
+else
+    fail "--pod prefix did not resolve to pfxpod-alpha"
+fi
+cleanup_container pod-pfx1
+
+# An ambiguous prefix is refused and removes nothing.
+if err=$($SDME pod rm pfxpod 2>&1); then
+    fail "pod rm with an ambiguous prefix succeeded"
+elif echo "$err" | grep -q "ambiguous name 'pfxpod', could match: pfxpod-alpha, pfxpod-beta" \
+        && $SDME pod ls 2>/dev/null | grep -q pfxpod-alpha \
+        && $SDME pod ls 2>/dev/null | grep -q pfxpod-beta; then
+    ok "pod rm with an ambiguous prefix refused"
+else
+    fail "pod rm with an ambiguous prefix: unexpected result: $err"
+fi
+
+# pod rm with a unique prefix removes that pod only.
+if $SDME pod rm pfxpod-b >/dev/null 2>&1 \
+        && ! $SDME pod ls 2>/dev/null | grep -q pfxpod-beta \
+        && $SDME pod ls 2>/dev/null | grep -q pfxpod-alpha; then
+    ok "pod rm with a unique prefix removes that pod"
+else
+    fail "pod rm pfxpod-b did not remove pfxpod-beta alone"
+fi
+
+if err=$($SDME pod rm pfxpod-zzz 2>&1); then
+    fail "pod rm of an unknown prefix succeeded"
+elif echo "$err" | grep -q "no pod found matching 'pfxpod-zzz'"; then
+    ok "pod rm of an unknown prefix refused"
+else
+    fail "pod rm of an unknown prefix: unexpected error: $err"
+fi
+cleanup_pod pfxpod-alpha
 
 # ---------------------------------------------------------------------------
 # Summary
