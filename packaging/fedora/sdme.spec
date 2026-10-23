@@ -11,7 +11,7 @@
 %global crate sdme
 
 Name:           sdme
-Version:        0.21.1
+Version:        0.22.0
 Release:        1%{?dist}
 Summary:        The systemd machine editor
 
@@ -106,6 +106,34 @@ export SDME_SKIP_PROBE=1
 %{_bindir}/%{crate} repair-units || :
 
 %changelog
+* Fri Oct 23 2026 Alexandre Fiori <fiorix@gmail.com> - 0.22.0-1
+- Add ephemeral containers. --ephemeral on sdme new and sdme create runs the
+  container as a transient systemd unit, sdme-ephemeral@NAME.service, and
+  any stop removes it with its root, its state and everything nspawn set up.
+  sdme new ends it when its session ends: the shell exits, the command
+  finishes, or the client dies. sdme create starts it detached.
+  --main-service UNIT, the OCI app by default, ends it when that unit
+  finishes, and --health-cmd, --health-http and --health-tcp end it after
+  --health-retries failed checks run from the host. restart, enable and set
+  refuse ephemeral containers, and sdme prune lists one left behind by a
+  host crash.
+- Hide host users' systemd user units from host-rootfs containers.
+  /etc/systemd/user joins the default host_rootfs_opaque_dirs, and each
+  home's ~/.config/systemd/user and ~/.config/systemd/user.control are made
+  opaque at create time, keeping the home's owner and mode, so the host's
+  user units no longer start in the container when a user session begins
+  there. The dbus.service alias is kept in both unit directories, and a host
+  clone now accepts an absolute alias target, which gives host clones on
+  Fedora-family hosts their system bus.
+- Accept a unique prefix of a pod name, as for container names, in pod rm,
+  pod net attach and detach, and --pod and --oci-pod, which store the full
+  name. A missing pod is reported as "no pod found matching".
+- Let a start right after an unclean exit wait for the previous instance to
+  stop. nspawn refused it when the old unit was still deactivating, because
+  the leftover unix-export mount was not reclaimed yet.
+- Document ephemeral containers in the architecture guide and a new
+  tutorial, and mention pod name prefixes in the pod networking tutorial.
+
 * Mon Oct 05 2026 Alexandre Fiori <fiorix@gmail.com> - 0.21.1-1
 - Keep permission bits, modification times and device numbers in tar
   exports. sdme fs export to a tarball wrote every entry as 0755 or 0644

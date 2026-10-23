@@ -223,7 +223,7 @@ Totals                       712     0    12  25 suites
 
 ## Log
 
-### Unreleased -- ephemeral containers, host user units, pod name prefixes (2026-10-23, x86_64)
+### 0.22.0 -- ephemeral containers, host user units, pod name prefixes (2026-10-23, x86_64)
 
 Full `run-parallel.sh` gate on Linux 7.0.0-38-generic (x86_64), Ubuntu 26.04, systemd 259 (259.5-0ubuntu3.4), against the release build of a99e167, the last code commit (43a4d99 changes a test script only). Eight parallel jobs, timeout scale 1, wall clock 17m28s. The datadir is a dedicated btrfs mount (Mode A) with `user_subvol_rm_allowed`; AppArmor is active with the `sdme-default` profile loaded, and kubeconform v0.7.0 is installed. The host has no direct internet access: downloads use an HTTP proxy, and containers have no route to the internet. Checks that failed only for that reason are counted as skipped. The `smoke` and `interrupt` gates passed 14 and 8 checks. `cargo test` passes (1037 library tests, 21 binary tests).
 
