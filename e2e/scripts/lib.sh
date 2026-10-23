@@ -49,6 +49,9 @@
 # free on the host are: 5432, 8080.
 
 SDME="${SDME:-sdme}"
+# Config file the suite runs against. Scripts that build a scratch config
+# start from it, so its datadir and settings carry over.
+SDME_CONF="${SDME_CONF:-/etc/sdme.conf}"
 VERBOSE="${VERBOSE:-}"
 VFLAG=""
 if [[ -n "$VERBOSE" ]]; then
@@ -355,7 +358,7 @@ check_os() {
 #   fix_redis_oci <container_name> [distro]
 fix_redis_oci() {
     local ct_name="$1" distro="${2:-}"
-    local datadir="/var/lib/sdme"
+    local datadir="${DATADIR:-/var/lib/sdme}"
     # NixOS replaces /etc/systemd/system with an immutable symlink;
     # drop-ins must go to system.control instead.
     local unit_dir="etc/systemd/system"

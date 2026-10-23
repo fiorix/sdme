@@ -180,7 +180,7 @@ fi
 # With the overlay work directory gone the unit fails in its mount step, before
 # nspawn registers a machine. The start has to report that at once instead of
 # waiting out the boot timeout.
-work_dir="/var/lib/sdme/containers/$CT_NAME/work"
+work_dir="${DATADIR:-/var/lib/sdme}/containers/$CT_NAME/work"
 if [[ -d "$work_dir" ]]; then
     log "Starting with the overlay work directory missing"
     mv "$work_dir" "$work_dir.away"

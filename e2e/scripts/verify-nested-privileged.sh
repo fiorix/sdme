@@ -116,7 +116,7 @@ fi
 
 DATADIR=$("$SDME" config get | awk -F' = ' '/^datadir/{print $2}')
 # The binary under test, which is also the one installed in the containers.
-SDME_BIN=$(command -v "$SDME")
+SDME_BIN="${SDME_BIN:-$(command -v "$SDME")}"
 
 # Clean up leftovers first so the base rootfs imported below is not removed
 # by cleanup_prefix.

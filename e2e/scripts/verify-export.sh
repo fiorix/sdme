@@ -477,12 +477,12 @@ echo "=== Test 20: tar hard links ==="
 # other suites have containers on the shared ubuntu rootfs, and a rootfs must
 # not change under a mounted overlay.
 $SDME fs rm "$EXPORT_FS" 2>/dev/null || true
-if ! $SDME fs import /var/lib/sdme/fs/ubuntu --name "$EXPORT_FS" -f >/dev/null 2>&1; then
+if ! $SDME fs import "${DATADIR:-/var/lib/sdme}/fs/ubuntu" --name "$EXPORT_FS" -f >/dev/null 2>&1; then
     fail "could not import a private rootfs copy for the hard link and xattr tests"
 fi
 
 # Write a file into the rootfs and hard link it.
-upper="/var/lib/sdme/fs/$EXPORT_FS"
+upper="${DATADIR:-/var/lib/sdme}/fs/$EXPORT_FS"
 hl_file="$upper/tmp/hl-export-test"
 hl_link="$upper/tmp/hl-export-link"
 echo "hardlink-export" > "$hl_file"

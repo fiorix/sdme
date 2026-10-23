@@ -44,7 +44,7 @@ mkdir -p "$TMPDIR"
 # The rootfs tests copy into a private rootfs: other suites have containers on
 # the shared ubuntu rootfs, and a rootfs must not change under a mounted
 # overlay.
-if ! $SDME fs import /var/lib/sdme/fs/ubuntu --name "$CP_FS" -f >/dev/null 2>&1; then
+if ! $SDME fs import "${DATADIR:-/var/lib/sdme}/fs/ubuntu" --name "$CP_FS" -f >/dev/null 2>&1; then
     echo "error: failed to import the private rootfs $CP_FS" >&2
     exit 1
 fi
@@ -57,7 +57,7 @@ echo "=== Test 1: host → rootfs ==="
 echo "cp-test-data" > "$TMPDIR/test-file"
 if $SDME cp "$TMPDIR/test-file" "fs:$CP_FS:/etc/cp-test-marker" $VFLAG; then
     # Verify file exists in the rootfs.
-    rootfs_file="/var/lib/sdme/fs/$CP_FS/etc/cp-test-marker"
+    rootfs_file="${DATADIR:-/var/lib/sdme}/fs/$CP_FS/etc/cp-test-marker"
     if [[ -f "$rootfs_file" ]] && grep -q "cp-test-data" "$rootfs_file"; then
         ok "host → rootfs"
     else
@@ -256,7 +256,7 @@ stop_container "$CTR_RUNNING"
 echo "=== Test 11: --force device node ==="
 
 # Create a char device node inside a stopped container's upper layer.
-dev_dir="/var/lib/sdme/containers/$CTR_STOPPED/upper/dev"
+dev_dir="${DATADIR:-/var/lib/sdme}/containers/$CTR_STOPPED/upper/dev"
 mkdir -p "$dev_dir"
 mknod "$dev_dir/testdev" c 1 5 2>/dev/null || {
     skipped "device node test (mknod failed)"
@@ -299,7 +299,7 @@ if [[ "$src_nlink" -ne 2 ]]; then
 else
     # Copy into rootfs (avoid /tmp, it's a shadowed dir).
     if $SDME cp "$hl_src/" "fs:$CP_FS:/var/lib/hl-test/" $VFLAG 2>/dev/null; then
-        rootfs_dir="/var/lib/sdme/fs/$CP_FS/var/lib/hl-test"
+        rootfs_dir="${DATADIR:-/var/lib/sdme}/fs/$CP_FS/var/lib/hl-test"
         if [[ -f "$rootfs_dir/original" ]] && [[ -f "$rootfs_dir/link" ]]; then
             ino_a=$(stat -c %i "$rootfs_dir/original")
             ino_b=$(stat -c %i "$rootfs_dir/link")

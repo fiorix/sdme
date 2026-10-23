@@ -39,7 +39,7 @@ fi
 
 TIMEOUT_BOOT=$(scale_timeout 200)
 TIMEOUT_TEST=$(scale_timeout 60)
-DATADIR="/var/lib/sdme"
+DATADIR="${DATADIR:-/var/lib/sdme}"
 
 cleanup_all() {
     echo "Cleaning up sec-/usrns- artifacts..."
@@ -949,7 +949,11 @@ fi
 # The pre-chown method, which is what a host that cannot idmap the lower
 # layer falls back to. The config key selects it on any host.
 IDM_CFG=$(mktemp)
-echo 'userns_idmap_lower = false' >"$IDM_CFG"
+# Seeded from the suite's config, so the container lands in the same datadir.
+if [[ -f "$SDME_CONF" ]]; then
+    cp "$SDME_CONF" "$IDM_CFG"
+fi
+"$SDME" --config "$IDM_CFG" config set userns_idmap_lower no >/dev/null
 cleanup_container usrns-chown
 if ! output=$(timeout "$TIMEOUT_BOOT" "$SDME" --config "$IDM_CFG" create --name usrns-chown -r "$IDM_FS" --userns "${VFLAG[@]}" 2>&1); then
     fail "pre-chown method: create failed: $output"

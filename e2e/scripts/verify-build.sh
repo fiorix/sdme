@@ -10,7 +10,7 @@ set -uo pipefail
 
 source "$(dirname "$0")/lib.sh"
 
-DATADIR="/var/lib/sdme"
+DATADIR="${DATADIR:-/var/lib/sdme}"
 REPORT_DIR="."
 BASE_FS="ubuntu"
 

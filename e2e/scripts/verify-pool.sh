@@ -147,8 +147,8 @@ fi
 # Start from the host's settings so both datadirs agree on the shared template
 # unit, then point this config at the scratch datadir. The image cache stays
 # the host's, so the pods here pull nothing the other suites already have.
-if [[ -f /etc/sdme.conf ]]; then
-    cp /etc/sdme.conf "$POOL_CONF"
+if [[ -f "$SDME_CONF" ]]; then
+    cp "$SDME_CONF" "$POOL_CONF"
 fi
 psdme config set datadir "$DATADIR" >/dev/null
 psdme config set btrfs_pool_size 6G >/dev/null

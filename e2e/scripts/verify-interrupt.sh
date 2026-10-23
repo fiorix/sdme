@@ -188,7 +188,7 @@ test_fs_rm_interrupt() {
     local count=10
     for i in $(seq 1 "$count"); do
         local name="${PREFIX}fs${i}"
-        if ! $SDME fs import /var/lib/sdme/fs/"$BASE_FS" --name "$name" -f >/dev/null 2>&1; then
+        if ! $SDME fs import "${DATADIR:-/var/lib/sdme}/fs/$BASE_FS" --name "$name" -f >/dev/null 2>&1; then
             record "fs-rm/interrupt" FAIL "failed to import $name"
             return
         fi

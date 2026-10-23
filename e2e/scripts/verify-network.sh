@@ -16,7 +16,7 @@ APP_IMAGE="quay.io/nginx/nginx-unprivileged"
 APP_PORT=8080
 ZONE_NAME="sdmezone"
 BRIDGE_NAME="sdmebr0"
-DATADIR="/var/lib/sdme"
+DATADIR="${DATADIR:-/var/lib/sdme}"
 REPORT_DIR="."
 BASE_FS="ubuntu"
 

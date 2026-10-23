@@ -57,7 +57,7 @@ source "$(dirname "$0")/lib.sh"
 KFLAG=$(kube_storage_args)
 
 BASE_FS="${BASE_FS:-ubuntu}"
-DATADIR="/var/lib/sdme"
+DATADIR="${DATADIR:-/var/lib/sdme}"
 REPORT_DIR="."
 
 POD_NAME="vfy-kf-all"

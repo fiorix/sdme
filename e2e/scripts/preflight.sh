@@ -94,8 +94,8 @@ else
     req_fail "kernel overlayfs module not available"
 fi
 
-# Disk space (>= 10 GB free on /var/lib/sdme filesystem)
-sdme_dir="/var/lib/sdme"
+# Disk space (>= 10 GB free on the datadir filesystem)
+sdme_dir="${DATADIR:-/var/lib/sdme}"
 if [[ -d "$sdme_dir" ]]; then
     fs_mount="$sdme_dir"
 else

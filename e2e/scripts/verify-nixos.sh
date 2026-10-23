@@ -34,7 +34,7 @@ APP_PORT=8080
 VOLUME_PATH="/usr/share/nginx/html"
 TEST_MARKER="sdme-nixos-test"
 
-DATADIR="/var/lib/sdme"
+DATADIR="${DATADIR:-/var/lib/sdme}"
 REPORT_DIR="."
 
 # NixOS binaries are under /run/current-system/sw/bin.

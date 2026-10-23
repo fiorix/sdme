@@ -41,7 +41,7 @@ BADCTR="${PREFIX}-bad"
 LEGACY_A="${PREFIX}-legacy-a"
 LEGACY_B="${PREFIX}-legacy-b"
 KUBE_POD="vfy-kube-redis"
-DATADIR="/var/lib/sdme"
+DATADIR="${DATADIR:-/var/lib/sdme}"
 BOOT_TIMEOUT=$(scale_timeout 180)
 IMPORT_TIMEOUT=$(scale_timeout 900)
 EXEC_TIMEOUT=$(scale_timeout 30)
@@ -253,7 +253,7 @@ require_gate smoke
 
 # The binary under test, which is also the one installed in the outer
 # container; $SDME may be a bare name or a path outside /usr/local/bin.
-SDME_BIN=$(command -v "$SDME")
+SDME_BIN="${SDME_BIN:-$(command -v "$SDME")}"
 
 if [[ "$(stat -f -c %T "$DATADIR")" != "btrfs" ]]; then
     echo "SKIP: sdme datadir is not btrfs; the outer container needs a btrfs rootfs"

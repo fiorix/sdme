@@ -30,7 +30,7 @@ CTR1="${PREFIX}-outer1"
 CTR2="${PREFIX}-outer2"
 BOOT_TIMEOUT=$(scale_timeout 120)
 TEST_TIMEOUT=$(scale_timeout 30)
-DATADIR="/var/lib/sdme"
+DATADIR="${DATADIR:-/var/lib/sdme}"
 
 cleanup() {
     cleanup_prefix "${PREFIX}-"
@@ -193,12 +193,15 @@ fi
 # ---------------------------------------------------------------------------
 # Test 5: the userns_nested_ranges config key sets the default range.
 # ---------------------------------------------------------------------------
-# A scratch config file keeps the host's /etc/sdme.conf untouched; every key it
-# does not set keeps its default, so the container lands in the usual datadir.
+# A scratch config file, seeded from the suite's config, keeps that config
+# untouched and the container in the usual datadir.
 echo "=== Test 5: userns_nested_ranges config default ==="
 
 CTR4="${PREFIX}-cfgdefault"
 CFG=$(mktemp "/tmp/${PREFIX}-conf-XXXXXX")
+if [[ -f "$SDME_CONF" ]]; then
+    cp "$SDME_CONF" "$CFG"
+fi
 
 if output=$("$SDME" --config "$CFG" config set userns_nested_ranges 2 2>&1) \
     && "$SDME" --config "$CFG" config get 2>/dev/null | grep -qx "userns_nested_ranges = 2"; then

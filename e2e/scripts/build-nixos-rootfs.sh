@@ -81,7 +81,7 @@ fi
 
 log() { echo "==> $*"; }
 
-DATADIR="/var/lib/sdme"
+DATADIR="${DATADIR:-/var/lib/sdme}"
 TMP_FS="tmp-build-nix-$$"
 
 cleanup() {

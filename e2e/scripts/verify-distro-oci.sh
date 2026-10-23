@@ -32,7 +32,7 @@ declare -A APP_READY_WAIT=(
 )
 
 NGINX_MARKER="sdme-distro-oci-test-$$"
-DATADIR="/var/lib/sdme"
+DATADIR="${DATADIR:-/var/lib/sdme}"
 REPORT_DIR="."
 FILTER_DISTROS=()
 FILTER_APPS=()
