@@ -197,7 +197,57 @@ The balance struck is: use D-Bus where it gives us programmatic control (start, 
 
 Removal also reclaims the container's systemd-nspawn runtime state. systemd-nspawn keeps a unix-export mount for the lifetime of a container and tears it down on a clean exit. It is `/run/systemd/nspawn/unix-export/<name>` on some systemd versions (seen on 259) and `/run/systemd/nspawn/<name>/unix-export` on others (seen on 261). An unclean exit (SIGKILL after a stop timeout, a host crash) leaves that mount behind, and nspawn then refuses to start the next container of the same name with `Mount point ... exists already, refusing`. Both `rm` and `start` remove the container's entry in either place, unmounting it and anything mounted underneath first. Nothing is touched unless the unit's `ActiveState` is confirmed absent, `inactive`, or `failed` and machined reports no machine registered under that name. An undetermined state (bus, permission, or decoding failure) leaves the directory alone, since tearing down live runtime state would break a running container. The `locks/` and `propagate/` entries under `/run/systemd/nspawn`, and the `unix-export/` directory itself, are shared by every container and are never reclaimed. A reclamation failure is reported as a warning and does not fail the removal or the start.
 
-**Boot failure cleanup.** If `sdme new`, `sdme kube apply`, or `sdme start` fails to boot (or is interrupted), the container is stopped but preserved on disk for debugging. See [Reliability](#15-reliability) for the interrupt handling details.
+**Boot failure cleanup.** If `sdme new`, `sdme kube apply`, or `sdme start` fails to boot (or is interrupted), the container is stopped but preserved on disk for debugging. An ephemeral container is torn down instead (see below). See [Reliability](#15-reliability) for the interrupt handling details.
+
+### Ephemeral containers
+
+`--ephemeral` on `new` and `create` makes a container whose lifetime is a single run: any stop removes it, whatever the cause. It is meant for throwaway shells, one-off commands, CI jobs, and short-lived services. The [ephemeral containers tutorial](tutorial/ephemeral-containers.md) walks through the variations.
+
+```
+  new --ephemeral                create --ephemeral (implies --started)
+    |                              |
+    +-- create: EPHEMERAL=yes, trigger config, service-trigger drop-ins
+    +-- StartTransientUnit sdme-session-NAME.scope     (new only, PIDs=[sdme])
+    +-- StartTransientUnit sdme-ephemeral@NAME.service
+    |     settings of sdme@.service plus drop-in, minus restart
+    |     BindsTo=, After= sdme-session-NAME.scope       (new only)
+    |     ExecStopPost= root unmounts, then sdme __ephemeral-gc
+    +-- StartTransientUnit sdme-health@NAME.timer      (--health-* only)
+    +-- wait for boot
+    +-- join                                           (new only)
+
+  any stop --> nspawn exits --> ExecStopPost --> container removed
+```
+
+**Transient units.** A persistent container is an instance of the `sdme@.service` template plus drop-ins under `/etc/systemd/system`. An ephemeral container runs as a transient unit created with `StartTransientUnit`: it exists only while it runs, writes nothing under `/etc`, needs no `daemon-reload`, and cannot be enabled, which is exactly the container's lifetime. It is named `sdme-ephemeral@NAME.service` because systemd refuses a transient unit whose name matches an existing template, and `sdme@NAME.service` always resolves to `sdme@.service`. Its properties come from the same computation as the drop-in: `plan_nspawn` reads the state file into an `NspawnPlan`, and `nspawn_exec` builds the exec commands as argv lists, which the drop-in renders as text and the transient unit passes over D-Bus, so the two cannot drift apart. Two settings differ on purpose. `ExecStopPost` also runs between automatic restarts, so the transient unit drops `RestartForceExitStatus=133` and the restart policy: a reboot inside an ephemeral container ends it. `CollectMode=inactive-or-failed` makes systemd forget a failed unit at once, so it cannot block a new container of the same name.
+
+**Teardown.** The unit's last `ExecStopPost` runs `sdme __ephemeral-gc --datadir DIR NAME`, with the absolute path of the sdme binary that started the container. Like `__update-check`, the `__` entry points are dispatched before argument parsing and stay out of `--help`. Teardown refuses a state file without `EPHEMERAL=yes`, so a stray unit cannot delete a persistent container. It takes the exclusive container lock (waiting up to 30 seconds), runs the file-removal half of `rm` (`containers::delete_stopped`: btrfs subvolume, container directory through `safe_remove_dir()`, state file, drop-ins), and logs `$SERVICE_RESULT` and `$EXIT_STATUS`, so the reason for the stop stays in the journal after the unit is gone. Running sdme rather than `rm -rf` from the unit keeps locking and the mount checks in one place; the cost is that a binary deleted while containers run makes their teardown fail and leaves orphans. Because teardown needs the lock, `sdme rm` of a running ephemeral container issues `StopUnit` and waits for the unit to disappear without holding it, and a boot failure releases the client's shared lock before stopping. `stop` and `rm` return only after teardown, so their timeouts cover deleting the container's root. Teardown runs while the unit is still deactivating, so its nspawn runtime reclaim (see **rm** above) treats the container as running and skips; the next start of the name reclaims any leftover.
+
+**Exit triggers.** Besides `sdme stop` and `sdme rm`, three conditions stop an ephemeral container:
+
+```
+Trigger  Commands     Fires when                      Mechanism
+-------  -----------  ------------------------------  -----------------------
+session  new          the sdme process tree is gone   BindsTo= session scope
+service  new, create  the first main service ends     SuccessAction=exit,
+                                                      FailureAction=exit
+health   new, create  --health-retries failures in a  host timer, StopUnit
+                      row
+```
+
+The session trigger binds the container to the client, not to a shell. Before starting the container, `sdme new` moves itself into the transient scope `sdme-session-NAME.scope`, and the service gets `BindsTo=` and `After=` on it. When the client's process tree is gone (normal exit, SIGHUP from a lost terminal, SIGKILL), the scope stops and systemd stops the container. The scope also holds the join child, so killing only the sdme process while its shell lives keeps the container until the shell exits. The alternative, calling `StopUnit` once the join returns, leaves the container running whenever the client dies without cleaning up; sdme still does it on a normal exit, so the name is free when `sdme new` returns. Like `systemd-run --scope`, the client leaves the caller's cgroup, so a supervising unit (a CI job) no longer contains it; the container still stops when the client exits. Scope units cannot be template instances, hence the name without `@`. `create --ephemeral` has no session, and a later `sdme join` never binds a container's lifetime.
+
+The service trigger writes a drop-in, `sdme-ephemeral.conf`, into the container's writable root for each main service (on btrfs after checking the path for symlinks, like the OCI drop-ins), setting `SuccessAction=exit` and `FailureAction=exit`. When the first main service reaches inactive or failed, the container's systemd exits through the normal shutdown path with that service's exit status, nspawn exits, and teardown runs. A main service's own `Restart=` policy is honored: the trigger fires once systemd stops restarting it. For an OCI app rootfs the OCI app service is the default main service; `--main-service` replaces the default and `--no-main-service` removes it.
+
+The health trigger runs from the host. Neither nspawn nor machined has a health check, and systemd's watchdog needs the workload to send `WATCHDOG=1` itself. Kube probes run inside the container (see [Probes](#probes)); ephemeral containers instead get a transient timer, `sdme-health@NAME.timer`, bound to the container unit, whose oneshot service runs `sdme __health-check`. It reads the check from the state file and runs it with `--health-timeout`: `--health-cmd` through `/bin/sh -c` in the container's namespaces (nsenter, adding the user and cgroup namespaces for userns containers), and `--health-tcp` and `--health-http` by connecting to 127.0.0.1 from a thread that entered the container's network namespace, so images without curl or a shell can be checked. A failure counter under `/run/sdme/health/` is reset by every success; at `--health-retries` consecutive failures the container unit is stopped. The first check runs one interval after the start period, then every interval. Nothing is written into the container for health checks, and the timer goes away with the container.
+
+**Unit name resolution.** Code that addresses a container's unit (`is_active`, `unit_active_state`, `stop_unit`, `reset_failed`, the boot and shutdown waits) calls `unit_name()`, which returns `sdme-ephemeral@NAME.service` when systemd has that unit loaded and `sdme@NAME.service` otherwise. A transient unit exists only while its container runs, so its presence is authoritative; a failed query is an error, never a fallback. `sdme logs` reads `EPHEMERAL` from the state file instead and asks the journal for the transient unit.
+
+**Other commands.** `ps` shows a running ephemeral container with `ephemeral` in the ENABLED column (`"ephemeral": true` in JSON). `join`, `exec`, `cp`, and `logs` work unchanged. `restart`, `enable`, and `set` are refused: a stop would remove the container, a transient unit cannot be enabled, and new limits would need a restart. `--ephemeral` cannot be combined with `--enable` or `--restart on-failure`, and implies `--no-oci-volumes`, so data an image declares as a volume stays in the container's root and goes away with it. Ctrl+C during boot tears the container down; the boot journal is printed first.
+
+**Orphans.** A host crash skips `ExecStopPost`, leaving a state file with `EPHEMERAL=yes` and the container's root with no unit. `sdme ps` shows it as stopped, `sdme start` refuses it, `sdme prune` lists it as an ephemeral orphan whatever its health, and `sdme rm` removes it.
+
+Implementation: `src/ephemeral.rs`, `src/systemd/transient.rs`.
 
 ## 5. Container Names
 
@@ -923,7 +973,7 @@ A global `INTERRUPTED` `AtomicBool` flag is set by a POSIX signal handler for bo
 The HEALTH column in `sdme ps` layers three signals, checked from the host inward; the first one that reports a problem wins:
 
   1. State integrity. A missing container directory, missing rootfs, or unreadable state file is reported directly (`missing fs`, `missing container dir`, `unreadable state file`) rather than crashing or silently hiding the container.
-  2. Host unit state. If the container's `sdme@NAME.service` is in failed state, health is `failed`.
+  2. Host unit state. If the container's `sdme@NAME.service` (`sdme-ephemeral@NAME.service` for an ephemeral container) is in failed state, health is `failed`.
   3. In-container systemd state. For running containers, sdme runs `systemctl --machine=NAME is-system-running`. `running` maps to `ok`; any other state (`degraded`, `starting`, `maintenance`) is shown as-is. If the query fails (D-Bus not up yet, wedged init), health is `unknown` rather than `ok`: an unreachable container is never reported healthy.
 
 A failed unit inside a running container (a web server that crashed at boot, for example) therefore surfaces as `degraded` in `sdme ps` without any per-container probe configuration. The query shells out to systemctl rather than using zbus because reaching a userns container's bus from the host requires a forked-helper connection that systemctl (like busctl) already implements; the full rationale is documented at `wait_for_dbus` in `src/systemd/dbus.rs`.
@@ -942,6 +992,7 @@ The analysis phase is read-only. It scans every resource type and collects items
 
   - Filesystems with no containers using them (except the configured `default_base_fs`)
   - Stopped containers with non-ok health status (missing dirs, broken state, failed, not-ready). Live containers are never candidates: a running container can report transient health (`degraded`, `starting`, `unknown`) that signals an operational problem, not garbage to collect
+  - Stopped ephemeral containers, whatever their health: any stop removes an ephemeral container, so one that is down is an orphan whose teardown never ran (see [Ephemeral containers](#ephemeral-containers))
   - Pods with no containers attached
   - Kube secrets and configmaps (all are candidates because they are copied into the container rootfs at `kube create` time, not referenced at runtime)
   - Orphaned volume directories under `{datadir}/volumes/` that no container binds reference
@@ -1279,7 +1330,7 @@ The `--oci-env` flag appends to the existing env file from the OCI image, so ima
 Three cgroup root patterns are tried, because systemd versions lay out the container's cgroup differently:
 
 1. **`{name}.scope`**: systemd 259+ registers the machine scope directly under the container name.
-2. **`sdme@{name}.service`**: older systemd versions (< 257) use the template unit name as the cgroup path.
+2. **`sdme@{name}.service`**, or **`sdme-ephemeral@{name}.service`** for an ephemeral container: the container unit itself. nspawn runs with `--keep-unit`, so the container lives in its unit's cgroup under `machine.slice`.
 3. **`machine-{escaped}.scope`**: systemd 257-258 use a `machine-` prefix with hyphens escaped as `\x2d`.
 
 Within each root, three inner path candidates are searched: `init.scope/system.slice`, `payload/system.slice`, and `system.slice`. The function retries for up to 3 seconds (30 * 100 ms) because the cgroup directory may not appear on the filesystem immediately after systemd reports the unit as active.

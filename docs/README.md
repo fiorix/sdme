@@ -27,3 +27,4 @@ For installation, see the [project README](../README.md#installation).
 - [Running Kubernetes Pods](tutorial/kubernetes-pods.md): Deploy OCI applications from Kubernetes Pod YAML manifests.
 - [Building Root Filesystems](tutorial/building-rootfs.md): Build custom root filesystems with sdme fs build using Dockerfile-like configs.
 - [Running Docker and a Registry Inside a Container](tutorial/docker-in-container.md): Run a full Docker engine and a private registry inside an sdme container, backed by btrfs storage.
+- [Ephemeral Containers](tutorial/ephemeral-containers.md): Run throwaway shells, one-off commands, and services that are removed when they stop, with session, service, and health check triggers.

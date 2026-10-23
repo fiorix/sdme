@@ -43,6 +43,11 @@
     "description": "Run a full Docker engine and a private registry inside an sdme container, backed by btrfs storage.",
     "weight": 14
   },
+  "tutorial/ephemeral-containers.md": {
+    "source": "docs/tutorial/ephemeral-containers.md",
+    "description": "Run throwaway shells, one-off commands, and services that are removed when they stop, with session, service, and health check triggers.",
+    "weight": 15
+  },
   "tutorial/first-container.md": {
     "source": "docs/tutorial/first-container.md",
     "description": "Create a container, manage it, and learn how to run background processes like tmux.",
