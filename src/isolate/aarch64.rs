@@ -830,8 +830,10 @@ mod tests {
     fn code_contains_svc_instructions() {
         let code = generate();
         let count = code
-            .chunks_exact(4)
-            .filter(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]) == 0xD4000001)
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|&&w| u32::from_le_bytes(w) == 0xD4000001)
             .count();
         // unshare, clone, mount, prctl (best-effort), setgroups, setgid, setuid, chdir, execve,
         // 4x rt_sigaction, wait4, write, exit (error_exit),
@@ -862,8 +864,10 @@ mod tests {
     fn atoi_has_overflow_guard() {
         let code = generate();
         let insns: Vec<u32> = code
-            .chunks_exact(4)
-            .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|&w| u32::from_le_bytes(w))
             .collect();
         // lsr x11, x0, #32 = UBFM x11, x0, #32, #63 = 0xD360FC0B
         let expected_lsr = 0xD360FC0B;

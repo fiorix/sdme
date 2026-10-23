@@ -759,8 +759,10 @@ mod tests {
     fn code_contains_three_svc_instructions() {
         let (code, _, _) = generate();
         let count = code
-            .chunks_exact(4)
-            .filter(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]) == 0xD4000001)
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|&&w| u32::from_le_bytes(w) == 0xD4000001)
             .count();
         // SYS_dup + SYS_openat + SYS_readlinkat = 3
         assert_eq!(count, 3, "expected 3 svc instructions, got {count}");
