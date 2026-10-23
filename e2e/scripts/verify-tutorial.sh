@@ -10,14 +10,14 @@ set -uo pipefail
 
 source "$(dirname "$0")/lib.sh"
 
-DATADIR="/var/lib/sdme"
+DATADIR="${DATADIR:-/var/lib/sdme}"
 REPORT_DIR="."
 
 # Tutorial tests in run order; test_<name> is the function. batch_ops goes
 # last: it stops and removes every container on the host.
 TESTS=(first_container different_rootfs storage management services oci_apps
        bind_mounts oci_volumes networking pod_networking kubernetes_pods
-       docker_in_container batch_ops)
+       docker_in_container ephemeral_containers batch_ops)
 # Tests selected with --only; empty runs them all.
 ONLY=()
 
@@ -1415,6 +1415,169 @@ test_docker_in_container() {
     fi
 
     _docker_teardown
+}
+
+# =============================================================================
+# Tutorial: Ephemeral Containers (ephemeral-containers.md)
+# =============================================================================
+
+# True when sdme no longer knows the container and its transient unit is gone.
+eph_gone() {
+    [[ ! -e "$DATADIR/state/$1" ]] &&
+        [[ -z "$(systemctl list-units --all --no-legend "sdme-ephemeral@$1.service" 2>/dev/null)" ]]
+}
+
+# Wait up to $2 seconds for eph_gone.
+eph_wait_gone() {
+    local i
+    for ((i = 0; i < $2; i++)); do
+        eph_gone "$1" && return 0
+        sleep 1
+    done
+    eph_gone "$1"
+}
+
+eph_running() {
+    systemctl is-active --quiet "sdme-ephemeral@$1.service"
+}
+
+test_ephemeral_containers() {
+    log "Tutorial: Ephemeral Containers"
+
+    local keys=(eph/command eph/exit-status eph/create eph/join-keeps eph/stop
+                eph/main-service eph/nginx-import eph/oci-default eph/health-ok
+                eph/health-fail eph/journal)
+    local k
+    if ! need_base; then
+        for k in "${keys[@]}"; do
+            record "$k" SKIP "base import failed"
+        done
+        return
+    fi
+
+    local output ct rc
+
+    # sdme new --ephemeral -r ubuntu -- cat /etc/os-release
+    ct="vfy-tut-eph-cmd"
+    if output=$(timeout "$TIMEOUT_BOOT" $SDME new --ephemeral -r "$BASE_FS" --name "$ct" \
+            -- cat /etc/os-release </dev/null 2>&1) &&
+            echo "$output" | grep -q Ubuntu && eph_gone "$ct"; then
+        record "eph/command" PASS
+    else
+        record "eph/command" FAIL "$output"
+    fi
+
+    # sdme new --ephemeral -r ubuntu -- sh -c 'exit 3' > /dev/null; echo $?
+    ct="vfy-tut-eph-rc"
+    timeout "$TIMEOUT_BOOT" $SDME new --ephemeral -r "$BASE_FS" --name "$ct" \
+        -- sh -c 'exit 3' </dev/null >/dev/null 2>&1
+    rc=$?
+    if [[ $rc -eq 3 ]] && eph_gone "$ct"; then
+        record "eph/exit-status" PASS
+    else
+        record "eph/exit-status" FAIL "rc=$rc"
+    fi
+
+    # sdme create --ephemeral -r ubuntu --name worker
+    ct="vfy-tut-eph-worker"
+    if output=$(timeout "$TIMEOUT_BOOT" $SDME create --ephemeral -r "$BASE_FS" --name "$ct" 2>&1); then
+        record "eph/create" PASS
+        # sdme join worker; exit: the join session does not own the container.
+        timeout "$TIMEOUT_TEST" $SDME join "$ct" -- /bin/true </dev/null >/dev/null 2>&1
+        if eph_running "$ct"; then
+            record "eph/join-keeps" PASS
+        else
+            record "eph/join-keeps" FAIL "container stopped after join"
+        fi
+        # sdme stop worker
+        if output=$(timeout "$TIMEOUT_TEST" $SDME stop "$ct" 2>&1) && eph_gone "$ct"; then
+            record "eph/stop" PASS
+        else
+            record "eph/stop" FAIL "$output"
+        fi
+    else
+        record "eph/create" FAIL "$output"
+        record "eph/join-keeps" SKIP "create failed"
+        record "eph/stop" SKIP "create failed"
+    fi
+
+    # sdme create --ephemeral -r ubuntu --name job --main-service backup.service
+    # sdme exec job systemd-run --unit=backup sh -c 'echo backing up; sleep 10'
+    ct="vfy-tut-eph-job"
+    if output=$(timeout "$TIMEOUT_BOOT" $SDME create --ephemeral -r "$BASE_FS" --name "$ct" \
+            --main-service backup.service 2>&1) &&
+            output=$(timeout "$TIMEOUT_TEST" $SDME exec "$ct" systemd-run --unit=backup \
+                sh -c 'echo backing up; sleep 10' 2>&1) &&
+            eph_wait_gone "$ct" "$TIMEOUT_TEST"; then
+        record "eph/main-service" PASS
+    else
+        record "eph/main-service" FAIL "$output"
+    fi
+
+    # sdme fs import docker.io/nginx --base-fs ubuntu
+    if fs_exists "$NGINX_FS"; then
+        record "eph/nginx-import" PASS "exists"
+    elif output=$(timeout "$TIMEOUT_IMPORT" $SDME fs import "$NGINX_IMAGE" --name "$NGINX_FS" \
+            --base-fs="$BASE_FS" -v 2>&1); then
+        record "eph/nginx-import" PASS
+    else
+        record "eph/nginx-import" FAIL "$output"
+        for k in eph/oci-default eph/health-ok eph/health-fail eph/journal; do
+            record "$k" SKIP "import failed"
+        done
+        return
+    fi
+
+    # sdme create --ephemeral -r nginx --name web --network-veth
+    # sdme exec web systemctl kill --signal=KILL sdme-oci-nginx.service
+    ct="vfy-tut-eph-web"
+    if output=$(timeout "$TIMEOUT_BOOT" $SDME create --ephemeral -r "$NGINX_FS" --name "$ct" \
+            --network-veth 2>&1); then
+        sleep 2
+        $SDME exec "$ct" systemctl kill --signal=KILL sdme-oci-nginx.service >/dev/null 2>&1
+        if eph_wait_gone "$ct" "$TIMEOUT_TEST"; then
+            record "eph/oci-default" PASS
+        else
+            record "eph/oci-default" FAIL "container still present after the app was killed"
+        fi
+    else
+        record "eph/oci-default" FAIL "$output"
+    fi
+
+    # sdme create --ephemeral -r nginx --name web --network-veth \
+    #     --no-main-service --health-http 80/ \
+    #     --health-interval 5 --health-retries 2 --health-start-period 10
+    # sdme exec web systemctl stop sdme-oci-nginx.service
+    ct="vfy-tut-eph-health"
+    if output=$(timeout "$TIMEOUT_BOOT" $SDME create --ephemeral -r "$NGINX_FS" --name "$ct" \
+            --network-veth --no-main-service --health-http 80/ \
+            --health-interval 5 --health-retries 2 --health-start-period 10 2>&1); then
+        # First check at 15s, second at 20s: both must pass.
+        sleep 25
+        if eph_running "$ct"; then
+            record "eph/health-ok" PASS
+            $SDME exec "$ct" systemctl stop sdme-oci-nginx.service >/dev/null 2>&1
+            if eph_wait_gone "$ct" "$TIMEOUT_TEST"; then
+                record "eph/health-fail" PASS
+            else
+                record "eph/health-fail" FAIL "container still present after nginx stopped"
+            fi
+        else
+            record "eph/health-ok" FAIL "container stopped while nginx was serving"
+            record "eph/health-fail" SKIP "health-ok failed"
+        fi
+    else
+        record "eph/health-ok" FAIL "$output"
+        record "eph/health-fail" SKIP "create failed"
+    fi
+
+    # journalctl -u sdme-ephemeral@web.service | grep 'tore down'
+    if journalctl -u "sdme-ephemeral@$ct.service" --no-pager 2>/dev/null |
+            grep -q "tore down ephemeral container '$ct'"; then
+        record "eph/journal" PASS
+    else
+        record "eph/journal" FAIL "no teardown line in the journal"
+    fi
 }
 
 # =============================================================================

@@ -64,6 +64,7 @@ KNOWN_PREFIXES=(
     readonly-vol-
     vfy-mx-
     vfy-cp-
+    vfy-eph-
 )
 
 # -- Usage --------------------------------------------------------------------
@@ -475,6 +476,7 @@ main() {
         verify-nested-userns.sh
         verify-nested-privileged.sh
         verify-pods.sh
+        verify-ephemeral.sh
         verify-network.sh
         verify-oci.sh
         verify-distro-boot.sh

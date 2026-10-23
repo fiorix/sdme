@@ -38,8 +38,10 @@
 #                              verify-nixos.sh (private net),
 #                              verify-kube-L4-networking.sh (private net),
 #                              verify-kube-L6-gitea-stack.sh (private net),
-#                              verify-kube-L2-probes.sh (private net)
+#                              verify-kube-L2-probes.sh (private net),
+#                              verify-ephemeral.sh (private net)
 #   9090  TCP probe target     verify-kube-L2-probes.sh (private net)
+#  18089  port-forward rule    verify-ephemeral.sh (DNAT rule only, no bind)
 #   9999  pod comm test        verify-pods.sh (private net)
 #
 # Ports marked "(private net)" are inside containers with their own network
@@ -401,7 +403,7 @@ ensure_base_fs() {
 # Several E2E checks use Python for TCP listeners and protocol probes, but
 # current minimal Ubuntu OCI images do not include it by default.
 ensure_python3_in_rootfs() {
-    local name="$1" root="/var/lib/sdme/fs/$1"
+    local name="$1" root="${DATADIR:-/var/lib/sdme}/fs/$1"
 
     if [[ -x "$root/usr/bin/python3" ]]; then
         drop_btrfs_base_without_python3 "$name"
