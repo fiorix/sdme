@@ -109,6 +109,57 @@ else
     fail "ps does not show $CT_NAME"
 fi
 
+# -- Name resolution -----------------------------------------------------------
+
+# A missing exact name must not select this running container as a prefix
+# match. Check both the diagnostic and its leader PID after every command.
+log "Checking exact names for state-changing commands"
+name_prefix="smoke-t"
+leader_before=$(machinectl show "$CT_NAME" -p Leader --value)
+expect_missing_container() {
+    local output leader_after
+    if output=$(timeout "$TIMEOUT_TEST" "$SDME" "$@" 2>&1); then
+        fail "abbreviated $*: unexpectedly succeeded"
+    elif [[ "$output" == *"no container found matching '$name_prefix'"* ]]; then
+        ok "abbreviated $*: exact name required"
+    else
+        fail "abbreviated $*: unexpected error: $output"
+    fi
+    leader_after=$(machinectl show "$CT_NAME" -p Leader --value 2>/dev/null)
+    if [[ -n "$leader_before" && "$leader_after" == "$leader_before" ]]; then
+        ok "$*: container still running with the same leader"
+    else
+        fail "$*: changed the neighbouring container"
+    fi
+}
+
+for verb in start stop restart rm enable disable; do
+    expect_missing_container "$verb" "$name_prefix"
+done
+expect_missing_container rm -f "$name_prefix"
+expect_missing_container set "$name_prefix" --memory 64M
+expect_missing_container exec "$name_prefix" -- /usr/bin/true
+
+# Prefixes remain available for inspection and interactive joining.
+if output=$("$SDME" -v logs "$name_prefix" --no-pager -n 1 2>&1) \
+        && [[ "$output" == *"sdme@${CT_NAME}.service"* ]]; then
+    ok "logs resolves a unique prefix"
+else
+    fail "logs prefix: $output"
+fi
+if output=$("$SDME" diff "$name_prefix" --name-only 2>&1) \
+        && [[ "$output" == "$("$SDME" diff "$CT_NAME" --name-only 2>&1)" ]]; then
+    ok "diff resolves a unique prefix"
+else
+    fail "diff prefix: $output"
+fi
+if output=$(timeout "$TIMEOUT_TEST" "$SDME" join "$name_prefix" -- /usr/bin/echo prefix-ok 2>&1) \
+        && [[ "$output" == *"prefix-ok"* ]]; then
+    ok "join resolves a unique prefix"
+else
+    fail "join prefix: $output"
+fi
+
 # -- Health --------------------------------------------------------------------
 
 # poll_health NAME EXPECTED TIMEOUT: wait until the ps HEALTH column for

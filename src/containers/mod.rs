@@ -68,7 +68,19 @@ pub fn volumes_dir(datadir: &Path, name: &str) -> PathBuf {
 /// Exact matches take priority. If `input` is not an exact match, all
 /// container names that start with `input` are collected. A single match
 /// is returned; zero or multiple matches produce an error.
+/// Use [`resolve_exact_name`] for lifecycle commands, exec, resource limits,
+/// and copy destinations. Join retains prefix matching as a convenience.
 pub fn resolve_name(datadir: &Path, input: &str) -> Result<String> {
+    crate::resolve_unique_prefix("container", input, &names(datadir)?)
+}
+
+/// Resolve an existing container by its exact name, without prefix matching.
+pub fn resolve_exact_name(datadir: &Path, input: &str) -> Result<String> {
+    crate::resolve_exact_name("container", input, &names(datadir)?)
+}
+
+/// Names of all containers in the state catalogue.
+fn names(datadir: &Path) -> Result<Vec<String>> {
     let state_dir = datadir.join("state");
     let mut names: Vec<String> = Vec::new();
     if state_dir.is_dir() {
@@ -83,7 +95,7 @@ pub fn resolve_name(datadir: &Path, input: &str) -> Result<String> {
             }
         }
     }
-    crate::resolve_unique_prefix("container", input, &names)
+    Ok(names)
 }
 
 /// Mount overlayfs on a stopped container's `merged/` directory (read-write).

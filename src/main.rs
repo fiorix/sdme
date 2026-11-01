@@ -91,11 +91,13 @@ NOTES:
     on disk for debugging (ephemeral containers are removed). Batch operations (rm -a, start --all, stop)
     abort immediately; remaining items are not processed.
 
-    Container names support prefix matching: 'sdme stop my' will match
-    'mybox' if it is the only container whose name starts with 'my'. An
-    exact match always takes priority. Ambiguous prefixes produce an error.
-    Names of existing pods (in 'pod' subcommands, --pod and --oci-pod)
-    resolve the same way against the list of pods.";
+    start, stop, restart, rm, enable, disable, set, exec, and cp destinations
+    require exact container names. A missing name never selects a neighbour.
+    join, logs, diff, and cp sources accept unique prefixes: 'sdme logs my'
+    matches 'mybox' if it is the only name starting with 'my'. Exact matches
+    take priority; ambiguous prefixes produce an error.
+    pod rm and pod net require exact pod names. --pod and --oci-pod accept
+    unique pod name prefixes and store the full name.";
 
 const NEW_HELP: &str = "\
 Create a new container, start it, and open a shell. Accepts the same flags as
@@ -438,7 +440,7 @@ relative or absolute. Copies are always recursive (no -r flag needed).
 
 PATH FORMATS:
     /path or ./path         Host filesystem path
-    NAME:/path              Container path (abbreviations supported)
+    NAME:/path              Container path (source names may be abbreviated)
     fs:NAME:/path           Root filesystem path
 
 When the destination is an existing directory, the source is copied into
@@ -447,6 +449,8 @@ recursively with ownership, permissions, timestamps, and extended
 attributes preserved.
 
 CONTAINER AND ROOTFS DESTINATIONS:
+    Container destinations require an exact name, including with --force.
+
     Regular files require O_TMPFILE support on the destination filesystem
     and the host's /proc/self/fd. Each file is completed on a new inode
     before publication; existing open readers retain the old inode.
@@ -921,11 +925,11 @@ Two ways to join a pod:
 Both flags can be combined on the same container.
 
 POD NAMES:
-    Commands that take an existing pod (--pod, --oci-pod, 'pod rm',
-    'pod net attach', 'pod net detach') accept a unique prefix of its name:
-    with pods 'foo' and 'bar', 'sdme pod rm f' removes 'foo'. An exact match
-    always takes priority. A prefix that matches no pod, or more than one,
-    is an error. --pod and --oci-pod store the full pod name.
+    'pod rm', 'pod net attach', and 'pod net detach' require exact pod names.
+    --pod and --oci-pod accept unique prefixes: with pods 'foo' and 'bar',
+    --pod f selects 'foo'. An exact match always takes priority. A prefix
+    that matches no pod, or more than one, is an error. Both flags store
+    the full pod name.
 
 EXTERNAL NETWORKING:
     Pods start with loopback-only networking. Use 'pod net attach' to give
@@ -2776,7 +2780,7 @@ fn run() -> Result<()> {
             oci,
             command,
         } => {
-            let name = containers::resolve_name(&cfg.datadir, &name)?;
+            let name = containers::resolve_exact_name(&cfg.datadir, &name)?;
             let shell_opts = containers::ShellOptions {
                 datadir: &cfg.datadir,
                 name: &name,
@@ -2803,7 +2807,7 @@ fn run() -> Result<()> {
             cpu_weight,
             disk,
         } => {
-            let name = containers::resolve_name(&cfg.datadir, &name)?;
+            let name = containers::resolve_exact_name(&cfg.datadir, &name)?;
             sdme::ephemeral::refuse_if_ephemeral(&cfg.datadir, &name, "change limits of")?;
             let limits = parse_limits(memory, cpus, cpu_weight, disk)?;
             containers::set_limits(&cfg.datadir, &name, &limits, cli.verbose)?;
@@ -3409,7 +3413,7 @@ fn run() -> Result<()> {
             let mut failed = false;
             for input in &targets {
                 check_interrupted()?;
-                let name = match containers::resolve_name(datadir, input) {
+                let name = match containers::resolve_exact_name(datadir, input) {
                     Ok(n) => n,
                     Err(e) => {
                         eprintln!("error: {input}: {e:#}");
@@ -3547,7 +3551,7 @@ fn run() -> Result<()> {
                 let mut failed = false;
                 for input in &targets {
                     check_interrupted()?;
-                    let name = match pod::resolve_name(&cfg.datadir, input) {
+                    let name = match pod::resolve_exact_name(&cfg.datadir, input) {
                         Ok(n) => n,
                         Err(e) => {
                             eprintln!("error: {input}: {e:#}");
@@ -3579,13 +3583,13 @@ fn run() -> Result<()> {
             }
             PodCommand::Net(cmd) => match cmd {
                 PodNetCommand::Attach { name, mode, zone } => {
-                    let name = pod::resolve_name(&cfg.datadir, &name)?;
+                    let name = pod::resolve_exact_name(&cfg.datadir, &name)?;
                     pod::net_attach(&cfg.datadir, &name, mode, zone.as_deref(), cli.verbose)?;
                     eprintln!("attached {mode} networking to pod '{name}'");
                     println!("{name}");
                 }
                 PodNetCommand::Detach { name } => {
-                    let name = pod::resolve_name(&cfg.datadir, &name)?;
+                    let name = pod::resolve_exact_name(&cfg.datadir, &name)?;
                     pod::net_detach(&cfg.datadir, &name, cli.verbose)?;
                     eprintln!("detached networking from pod '{name}'");
                     println!("{name}");

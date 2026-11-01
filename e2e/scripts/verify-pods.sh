@@ -7,8 +7,8 @@ set -euo pipefail
 #   1. nspawn pods (--pod): two host-rootfs containers share localhost via pod netns
 #   2. --pod + --private-network: private-network silently dropped, loopback works
 #   3. Validation: error cases (--oci-pod w/o --private-network, --pod + userns, etc.)
-#   4. Pod name prefixes: --pod and pod rm accept a unique prefix, the state
-#      file records the full name, an ambiguous prefix is refused
+#   4. Pod names: --pod accepts a unique prefix and records the full name;
+#      pod rm and pod net require exact names
 
 source "$(dirname "$0")/lib.sh"
 
@@ -237,24 +237,40 @@ else
 fi
 cleanup_container pod-pfx1
 
-# An ambiguous prefix is refused and removes nothing.
-if err=$($SDME pod rm pfxpod 2>&1); then
-    fail "pod rm with an ambiguous prefix succeeded"
-elif echo "$err" | grep -q "ambiguous name 'pfxpod', could match: pfxpod-alpha, pfxpod-beta" \
-        && $SDME pod ls 2>/dev/null | grep -q pfxpod-alpha \
-        && $SDME pod ls 2>/dev/null | grep -q pfxpod-beta; then
-    ok "pod rm with an ambiguous prefix refused"
-else
-    fail "pod rm with an ambiguous prefix: unexpected result: $err"
-fi
+# Both ambiguous and unique prefixes are refused and remove nothing.
+for input in pfxpod pfxpod-b; do
+    if err=$($SDME pod rm "$input" 2>&1); then
+        fail "pod rm $input succeeded"
+    elif echo "$err" | grep -q "no pod found matching '$input'" \
+            && $SDME pod ls 2>/dev/null | grep -q pfxpod-alpha \
+            && $SDME pod ls 2>/dev/null | grep -q pfxpod-beta; then
+        ok "pod rm $input refused and both pods preserved"
+    else
+        fail "pod rm $input: unexpected result: $err"
+    fi
+done
 
-# pod rm with a unique prefix removes that pod only.
-if $SDME pod rm pfxpod-b >/dev/null 2>&1 \
+for action in attach detach; do
+    net_args=("$action" pfxpod-b)
+    if [[ "$action" == attach ]]; then
+        net_args+=(veth)
+    fi
+    if err=$($SDME pod net "${net_args[@]}" 2>&1); then
+        fail "pod net $action with a prefix succeeded"
+    elif [[ "$err" == *"no pod found matching 'pfxpod-b'"* ]]; then
+        ok "pod net $action requires an exact name"
+    else
+        fail "pod net $action: unexpected result: $err"
+    fi
+done
+
+# The exact name still removes that pod only.
+if $SDME pod rm pfxpod-beta >/dev/null 2>&1 \
         && ! $SDME pod ls 2>/dev/null | grep -q pfxpod-beta \
         && $SDME pod ls 2>/dev/null | grep -q pfxpod-alpha; then
-    ok "pod rm with a unique prefix removes that pod"
+    ok "pod rm with an exact name removes that pod"
 else
-    fail "pod rm pfxpod-b did not remove pfxpod-beta alone"
+    fail "pod rm pfxpod-beta did not remove pfxpod-beta alone"
 fi
 
 if err=$($SDME pod rm pfxpod-zzz 2>&1); then

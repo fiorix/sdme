@@ -269,6 +269,49 @@ fn write_os_release(rootfs: &Path, content: &str) {
 }
 
 #[test]
+fn test_resolve_exact_name_rejects_prefixes() {
+    let tmp = tmp();
+    create_dummy_container(&tmp, "godiam-unit");
+    for input in ["godiam", "missing", "../state/godiam-unit"] {
+        let err = resolve_exact_name(tmp.path(), input).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!("no container found matching '{input}'")
+        );
+    }
+    create_dummy_container(&tmp, "godiam-other");
+    assert_eq!(
+        resolve_exact_name(tmp.path(), "godiam")
+            .unwrap_err()
+            .to_string(),
+        "no container found matching 'godiam'"
+    );
+    create_dummy_container(&tmp, "godiam");
+    assert_eq!(resolve_exact_name(tmp.path(), "godiam").unwrap(), "godiam");
+    assert_eq!(resolve_name(tmp.path(), "godiam-u").unwrap(), "godiam-unit");
+}
+
+#[test]
+fn test_resolve_exact_name_catalogue_entries() {
+    let tmp = tmp();
+    assert_eq!(
+        resolve_exact_name(tmp.path(), "foo")
+            .unwrap_err()
+            .to_string(),
+        "no container found matching 'foo'"
+    );
+    assert_eq!(
+        resolve_exact_name(tmp.path(), "").unwrap_err().to_string(),
+        "container name must not be empty"
+    );
+    fs::create_dir_all(tmp.path().join("state/foo")).unwrap();
+    assert!(resolve_exact_name(tmp.path(), "foo").is_err());
+    create_dummy_container(&tmp, "foobar");
+    std::os::unix::fs::symlink("foobar", tmp.path().join("state/link")).unwrap();
+    assert!(resolve_exact_name(tmp.path(), "link").is_err());
+}
+
+#[test]
 fn test_resolve_name_exact_match() {
     let tmp = tmp();
     create_dummy_container(&tmp, "foo");

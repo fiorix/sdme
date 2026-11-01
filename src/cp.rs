@@ -25,7 +25,7 @@ pub enum CpEndpoint {
     Host(PathBuf),
     /// A path inside a container (`NAME:/path`).
     Container {
-        /// Container name (may be abbreviated).
+        /// Container name (may be abbreviated only for sources).
         name: String,
         /// Absolute path inside the container.
         path: PathBuf,
@@ -397,7 +397,7 @@ fn resolve_destination(
             })
         }
         CpEndpoint::Container { name, path } => {
-            let name = containers::resolve_name(datadir, name)?;
+            let name = containers::resolve_exact_name(datadir, name)?;
             containers::ensure_exists(datadir, &name)?;
             let container_dir = datadir.join("containers").join(&name);
             let state = State::read_from(&datadir.join("state").join(&name))?;
@@ -1211,6 +1211,34 @@ mod tests {
             force: false,
             verbose: false,
             interactive: false,
+        }
+    }
+
+    #[test]
+    fn test_cp_container_destination_requires_exact_name() {
+        let tmp = TempDataDir::new("cp-exact-name");
+        fs::create_dir_all(tmp.path().join("state")).unwrap();
+        fs::write(tmp.path().join("state/godiam-unit"), "NAME=godiam-unit\n").unwrap();
+        let upper = tmp.path().join("containers/godiam-unit/upper");
+        fs::create_dir_all(&upper).unwrap();
+        fs::write(upper.join("keep"), "untouched").unwrap();
+        let source = tmp.path().join("source");
+        fs::write(&source, "replacement").unwrap();
+        let destination = parse_endpoint("godiam:/keep").unwrap();
+        for force in [false, true] {
+            let opts = CpOptions {
+                force,
+                ..test_opts()
+            };
+            let err = cp(
+                tmp.path(),
+                &CpEndpoint::Host(source.clone()),
+                &destination,
+                &opts,
+            )
+            .unwrap_err();
+            assert_eq!(err.to_string(), "no container found matching 'godiam'");
+            assert_eq!(fs::read_to_string(upper.join("keep")).unwrap(), "untouched");
         }
     }
 

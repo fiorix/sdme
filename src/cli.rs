@@ -247,7 +247,7 @@ pub(crate) fn for_each_container(
     let mut failed = false;
     for input in targets {
         check_interrupted()?;
-        let name = match containers::resolve_name(datadir, input) {
+        let name = match containers::resolve_exact_name(datadir, input) {
             Ok(n) => n,
             Err(e) => {
                 eprintln!("error: {input}: {e:#}");
@@ -1353,6 +1353,33 @@ pub(crate) fn validate_kube_oci_pod_args(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_for_each_container_requires_exact_names_and_continues() {
+        let datadir = std::env::temp_dir().join(format!(
+            "sdme-test-batch-names-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let state_dir = datadir.join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        for name in ["godiam-unit", "other"] {
+            std::fs::write(state_dir.join(name), "untouched").unwrap();
+        }
+        let targets = vec!["godiam".to_string(), "other".to_string()];
+        let err = for_each_container(&datadir, &targets, "removing", "removed", |name| {
+            std::fs::remove_file(state_dir.join(name))?;
+            Ok(())
+        })
+        .unwrap_err();
+        assert_eq!(err.to_string(), "some containers could not be removed");
+        assert_eq!(
+            std::fs::read_to_string(state_dir.join("godiam-unit")).unwrap(),
+            "untouched"
+        );
+        assert!(!state_dir.join("other").exists());
+        std::fs::remove_dir_all(datadir).unwrap();
+    }
 
     #[test]
     fn test_oci_pod_rejected_with_userns() {

@@ -50,7 +50,7 @@ Type `exit` or press `Ctrl+]` three times quickly. This detaches from the contai
 > [!TIP]
 > **Tip**
 >
-> All sdme commands support name prefix matching. If your container is called `araciubaia`, typing `sudo sdme join ara` is enough, as long as no other container name starts with `ara`.
+> `join`, `logs`, `diff`, and copy sources support name prefix matching. If your container is called `araciubaia`, typing `sudo sdme join ara` is enough, as long as no other container name starts with `ara`. Commands such as `stop`, `rm`, and `exec`, and copy destinations, require the exact name.
 
 ## Naming your containers
 

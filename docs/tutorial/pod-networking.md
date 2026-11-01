@@ -24,7 +24,7 @@ sudo sdme pod rm -a       # remove all pods
 sudo sdme pod rm -a -f    # force: also stop and remove attached containers
 ```
 
-> Pod names support prefix matching, like container names. With pods `webpod` and `dbpod`, `sudo sdme pod rm w` removes `webpod`, and `--pod w` joins it. An exact name always wins, and a prefix that matches more than one pod is an error. `--pod` and `--oci-pod` record the full pod name in the container's state.
+> `pod rm`, `pod net attach`, and `pod net detach` require exact pod names. `--pod` and `--oci-pod` accept unique prefixes: with pods `webpod` and `dbpod`, `--pod w` joins `webpod`. An exact name always wins, and a prefix that matches more than one pod is an error. Both flags record the full pod name in the container's state.
 
 ## Example: nginx and curl via --pod
 

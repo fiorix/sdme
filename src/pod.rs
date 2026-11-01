@@ -281,8 +281,14 @@ fn names(datadir: &Path) -> Result<Vec<String>> {
 /// otherwise `input` must be a prefix of exactly one pod name. The result
 /// is always a directory entry name from the catalogue, never a path, so
 /// callers can join it into paths without further validation.
+/// Commands that remove or change a pod must use [`resolve_exact_name`].
 pub fn resolve_name(datadir: &Path, input: &str) -> Result<String> {
     crate::resolve_unique_prefix("pod", input, &names(datadir)?)
+}
+
+/// Resolve an existing pod by its exact name, without prefix matching.
+pub fn resolve_exact_name(datadir: &Path, input: &str) -> Result<String> {
+    crate::resolve_exact_name("pod", input, &names(datadir)?)
 }
 
 /// List all pods.
@@ -1339,6 +1345,46 @@ mod tests {
         let pod_dir = tmp.path().join(STATE_SUBDIR).join(name);
         fs::create_dir_all(&pod_dir).unwrap();
         fs::write(pod_dir.join("state"), "CREATED=1234\n").unwrap();
+    }
+
+    #[test]
+    fn test_resolve_exact_name_rejects_prefixes() {
+        let tmp = tmp();
+        make_pod(&tmp, "godiam-unit");
+        for input in ["godiam", "missing", "../pods/godiam-unit"] {
+            let err = resolve_exact_name(tmp.path(), input).unwrap_err();
+            assert_eq!(err.to_string(), format!("no pod found matching '{input}'"));
+        }
+        make_pod(&tmp, "godiam-other");
+        assert_eq!(
+            resolve_exact_name(tmp.path(), "godiam")
+                .unwrap_err()
+                .to_string(),
+            "no pod found matching 'godiam'"
+        );
+        make_pod(&tmp, "godiam");
+        assert_eq!(resolve_exact_name(tmp.path(), "godiam").unwrap(), "godiam");
+        assert_eq!(resolve_name(tmp.path(), "godiam-u").unwrap(), "godiam-unit");
+    }
+
+    #[test]
+    fn test_resolve_exact_name_catalogue_entries() {
+        let tmp = tmp();
+        assert_eq!(
+            resolve_exact_name(tmp.path(), "foo")
+                .unwrap_err()
+                .to_string(),
+            "no pod found matching 'foo'"
+        );
+        assert_eq!(
+            resolve_exact_name(tmp.path(), "").unwrap_err().to_string(),
+            "pod name must not be empty"
+        );
+        fs::create_dir_all(tmp.path().join(STATE_SUBDIR).join("foo")).unwrap();
+        assert!(resolve_exact_name(tmp.path(), "foo").is_err());
+        make_pod(&tmp, "foobar");
+        std::os::unix::fs::symlink("foobar", tmp.path().join(STATE_SUBDIR).join("link")).unwrap();
+        assert!(resolve_exact_name(tmp.path(), "link").is_err());
     }
 
     #[test]

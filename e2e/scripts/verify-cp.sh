@@ -6,8 +6,8 @@ set -euo pipefail
 # Tests:
 #   1. host → rootfs
 #   2. rootfs → host
-#   3. host → stopped container
-#   4. stopped container → host
+#   3. host → stopped container (exact destination names required)
+#   4. stopped container → host (unique source prefixes accepted)
 #   5. host → running container
 #   6. running container → host
 #   7. shadowed dir rejection (stopped container)
@@ -91,6 +91,16 @@ echo "=== Test 3: host → stopped container ==="
 
 $SDME create --name "$CTR_STOPPED" -r ubuntu $VFLAG 2>/dev/null
 echo "stopped-marker" > "$TMPDIR/marker"
+for force in "" --force; do
+    if output=$($SDME cp "$TMPDIR/marker" "${PREFIX}-s:/etc/prefix-marker" $force 2>&1); then
+        fail "cp to a prefix destination succeeded ($force)"
+    elif [[ "$output" == *"no container found matching '${PREFIX}-s'"* ]] \
+            && [[ ! -e "${DATADIR:-/var/lib/sdme}/containers/$CTR_STOPPED/upper/etc/prefix-marker" ]]; then
+        ok "cp destination requires an exact name ($force)"
+    else
+        fail "cp prefix destination: $output"
+    fi
+done
 if $SDME cp "$TMPDIR/marker" "$CTR_STOPPED:/etc/marker" $VFLAG; then
     # Start and verify content.
     if $SDME start "$CTR_STOPPED" --timeout "$BOOT_TIMEOUT" $VFLAG; then
@@ -114,9 +124,9 @@ fi
 # ---------------------------------------------------------------------------
 echo "=== Test 4: stopped container → host ==="
 
-if $SDME cp "$CTR_STOPPED:/etc/hostname" "$TMPDIR/hostname-out" $VFLAG; then
+if $SDME cp "${PREFIX}-s:/etc/hostname" "$TMPDIR/hostname-out" $VFLAG; then
     if [[ -f "$TMPDIR/hostname-out" ]]; then
-        ok "stopped container → host"
+        ok "stopped container → host with a unique prefix"
     else
         fail "stopped container → host: output file not found"
     fi

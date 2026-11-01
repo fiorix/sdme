@@ -810,6 +810,17 @@ pub fn validate_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Require an exact name from the catalogue before changing a resource.
+pub(crate) fn resolve_exact_name(kind: &str, input: &str, names: &[String]) -> Result<String> {
+    if input.is_empty() {
+        bail!("{kind} name must not be empty");
+    }
+    if names.iter().any(|n| n == input) {
+        return Ok(input.to_string());
+    }
+    bail!("no {kind} found matching '{input}'")
+}
+
 /// Resolve a (possibly abbreviated) name against the existing `names`.
 ///
 /// An exact match wins; otherwise `input` must be a prefix of exactly one
