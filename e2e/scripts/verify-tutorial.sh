@@ -862,7 +862,7 @@ test_networking() {
     log "Tutorial: Network Configuration"
 
     if ! need_base; then
-        for k in net/private net/veth-port net/zone; do
+        for k in net/private net/veth-port net/veth-port-udp net/zone; do
             record "$k" SKIP "base import failed"
         done
         return
@@ -890,6 +890,18 @@ test_networking() {
         stop_container "$ct"
     else
         record "net/veth-port" FAIL "$output"
+    fi
+    $SDME rm -f "$ct" 2>/dev/null || true
+
+    # --port udp:H:C and --port H:C/udp (nspawn only accepts the former)
+    ct="vfy-tut-net-udp"
+    if output=$(timeout "$TIMEOUT_BOOT" $SDME create --name "$ct" -r "$BASE_FS" \
+            --network-veth --port udp:5353:5353 --port 51820:51820/udp 2>&1) && \
+       output=$(timeout "$TIMEOUT_BOOT" $SDME start "$ct" -t 120 2>&1); then
+        record "net/veth-port-udp" PASS
+        stop_container "$ct"
+    else
+        record "net/veth-port-udp" FAIL "$output"
     fi
     $SDME rm -f "$ct" 2>/dev/null || true
 
@@ -1702,7 +1714,7 @@ generate_report() {
             vol/pg-import vol/pg-create vol/pg-boot vol/pg-volume-dir \
             vol/pg-logs vol/pg-exec vol/pg-insert vol/pg-stop-rm \
             vol/pg-persist-dir vol/pg-recreate vol/pg-persist-data \
-            net/private net/veth-port net/zone \
+            net/private net/veth-port net/veth-port-udp net/zone \
             pod/new pod/ls pod/create-server pod/create-client \
             pod/connectivity pod/rm \
             pod/oci-import-redis pod/oci-new-pod pod/oci-create-server \

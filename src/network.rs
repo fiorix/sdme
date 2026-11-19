@@ -23,7 +23,8 @@ pub struct NetworkConfig {
     pub network_bridge: Option<String>,
     /// Join named network zone (`--network-zone=NAME`)
     pub network_zone: Option<String>,
-    /// Port forwarding rules (`--port=\[proto:\]host\[:container\]`)
+    /// Port forwarding rules, normalized to `PROTO:HOST:CONTAINER`
+    /// (`--port=` syntax) by [`NetworkConfig::normalize_ports`].
     pub ports: Vec<String>,
     /// Pod name (nspawn-level), if any.
     pub pod: String,
@@ -170,9 +171,17 @@ impl NetworkConfig {
 
         // Validate port forwarding rules
         for port in &self.ports {
-            validate_port(port)?;
+            normalize_port(port)?;
         }
 
+        Ok(())
+    }
+
+    /// Rewrite every port rule into nspawn's `PROTO:HOST:CONTAINER` form.
+    pub fn normalize_ports(&mut self) -> Result<()> {
+        for port in &mut self.ports {
+            *port = normalize_port(port)?;
+        }
         Ok(())
     }
 }
@@ -196,49 +205,50 @@ fn validate_network_name(name: &str, kind: &str) -> Result<()> {
     Ok(())
 }
 
-/// Validate a port forwarding rule.
+/// Parse a port forwarding rule into nspawn's `PROTO:HOST:CONTAINER` form.
 ///
-/// Format: `<host>:<container>` or `<host>:<container>/<proto>`
-/// where proto is `tcp` or `udp`.
-fn validate_port(port: &str) -> Result<()> {
-    // Split off protocol if present
-    let (port_part, proto) = if let Some((p, proto)) = port.rsplit_once('/') {
-        (p, Some(proto))
-    } else {
-        (port, None)
+/// Accepts nspawn's `[PROTO:]HOST[:CONTAINER]` and the Docker-style
+/// `HOST[:CONTAINER]/PROTO`. nspawn rejects the Docker form, so it must
+/// be translated before it reaches `--port=`. PROTO is `tcp` (default) or
+/// `udp`; CONTAINER defaults to HOST.
+pub fn normalize_port(port: &str) -> Result<String> {
+    let (rest, suffix) = match port.rsplit_once('/') {
+        Some((rest, proto)) => (rest, Some(proto)),
+        None => (port, None),
     };
-
-    // Validate protocol
-    if let Some(proto) = proto {
-        if proto != "tcp" && proto != "udp" {
-            bail!(
-                "invalid port protocol '{proto}' in '{port}': \
-                 expected 'tcp' or 'udp'"
-            );
+    let (rest, prefix) = match rest.split_once(':') {
+        Some((proto, tail)) if proto == "tcp" || proto == "udp" => (tail, Some(proto)),
+        _ => (rest, None),
+    };
+    let proto = match (prefix, suffix) {
+        (Some(_), Some(_)) => {
+            bail!("invalid port format '{port}': protocol given twice")
         }
+        (Some(p), None) | (None, Some(p)) => p,
+        (None, None) => "tcp",
+    };
+    if proto != "tcp" && proto != "udp" {
+        bail!(
+            "invalid port protocol '{proto}' in '{port}': \
+             expected 'tcp' or 'udp'"
+        );
     }
 
-    // Split host:container
-    let (host, container) = port_part.split_once(':').ok_or_else(|| {
-        anyhow::anyhow!("invalid port format '{port}': expected <host>:<container>[/<proto>]")
-    })?;
-
-    // Validate port numbers
-    validate_port_number(host, port, "host")?;
-    validate_port_number(container, port, "container")?;
-
-    Ok(())
+    let (host, container) = rest.split_once(':').unwrap_or((rest, rest));
+    let host = parse_port_number(host, port, "host")?;
+    let container = parse_port_number(container, port, "container")?;
+    Ok(format!("{proto}:{host}:{container}"))
 }
 
-/// Validate a port number string.
-fn validate_port_number(s: &str, full: &str, which: &str) -> Result<()> {
+/// Parse a port number string (1-65535).
+fn parse_port_number(s: &str, full: &str, which: &str) -> Result<u16> {
     let n: u16 = s
         .parse()
         .map_err(|_| anyhow::anyhow!("invalid {which} port '{s}' in '{full}': expected 1-65535"))?;
     if n == 0 {
         bail!("invalid {which} port '{s}' in '{full}': port 0 is not allowed");
     }
-    Ok(())
+    Ok(n)
 }
 
 #[cfg(test)]
@@ -417,21 +427,59 @@ mod tests {
         };
 
         // Valid formats
+        assert!(make_network("8080").validate().is_ok());
         assert!(make_network("8080:80").validate().is_ok());
         assert!(make_network("8080:80/tcp").validate().is_ok());
         assert!(make_network("8080:80/udp").validate().is_ok());
+        assert!(make_network("tcp:8080:80").validate().is_ok());
+        assert!(make_network("udp:51820:51820").validate().is_ok());
+        assert!(make_network("udp:53").validate().is_ok());
         assert!(make_network("1:1").validate().is_ok());
         assert!(make_network("65535:65535").validate().is_ok());
 
         // Invalid formats
-        assert!(make_network("8080").validate().is_err()); // missing container port
         assert!(make_network("8080:").validate().is_err()); // empty container port
         assert!(make_network(":80").validate().is_err()); // empty host port
         assert!(make_network("8080:80/http").validate().is_err()); // invalid protocol
+        assert!(make_network("sctp:8080:80").validate().is_err()); // invalid protocol
+        assert!(make_network("udp:8080:80/udp").validate().is_err()); // protocol twice
+        assert!(make_network("tcp:1:2:3").validate().is_err()); // extra segment
+        assert!(make_network("/udp").validate().is_err()); // no ports
         assert!(make_network("0:80").validate().is_err()); // port 0
         assert!(make_network("8080:0").validate().is_err()); // port 0
         assert!(make_network("65536:80").validate().is_err()); // port > 65535
         assert!(make_network("abc:80").validate().is_err()); // non-numeric
+    }
+
+    #[test]
+    fn test_normalize_port() {
+        let cases = [
+            ("8080", "tcp:8080:8080"),
+            ("8080:80", "tcp:8080:80"),
+            ("8080:80/tcp", "tcp:8080:80"),
+            ("51820:51820/udp", "udp:51820:51820"),
+            ("53/udp", "udp:53:53"),
+            ("tcp:443:443", "tcp:443:443"),
+            ("udp:51820:51820", "udp:51820:51820"),
+            ("udp:53", "udp:53:53"),
+        ];
+        for (input, want) in cases {
+            assert_eq!(normalize_port(input).unwrap(), want, "input {input}");
+        }
+    }
+
+    #[test]
+    fn test_normalize_ports_rewrites_nspawn_args() {
+        let mut network = NetworkConfig {
+            private_network: true,
+            network_veth: true,
+            ports: vec!["51820:51820/udp".to_string(), "8080:80".to_string()],
+            ..Default::default()
+        };
+        network.normalize_ports().unwrap();
+        let args = network.to_nspawn_args();
+        assert!(args.contains(&"--port=udp:51820:51820".to_string()));
+        assert!(args.contains(&"--port=tcp:8080:80".to_string()));
     }
 
     #[test]

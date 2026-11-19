@@ -34,7 +34,8 @@ pub(crate) struct NetworkArgs {
     #[arg(long)]
     pub network_zone: Option<String>,
 
-    /// Forward port [PROTO:]HOST[:CONTAINER] (implies --private-network, repeatable).
+    /// Forward port [PROTO:]HOST[:CONTAINER] or HOST[:CONTAINER]/PROTO, PROTO tcp|udp
+    /// (implies --private-network, repeatable).
     /// Works for external traffic; from the host use the container IP (sdme ps)
     #[arg(long = "port", short = 'p')]
     pub ports: Vec<String>,
@@ -788,7 +789,7 @@ pub(crate) fn parse_network(args: NetworkArgs) -> Result<NetworkConfig> {
         || args.network_zone.is_some()
         || !args.ports.is_empty();
 
-    let network = NetworkConfig {
+    let mut network = NetworkConfig {
         private_network,
         network_veth: args.network_veth,
         network_bridge: args.network_bridge,
@@ -797,6 +798,9 @@ pub(crate) fn parse_network(args: NetworkArgs) -> Result<NetworkConfig> {
         ..Default::default()
     };
     network.validate()?;
+    // Canonical form keeps nspawn happy and lets OCI/kube auto-wiring
+    // dedupe against user rules by container port.
+    network.normalize_ports()?;
     Ok(network)
 }
 

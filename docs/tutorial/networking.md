@@ -41,10 +41,11 @@ sudo sdme new --name myweb -r nginx --network-veth --port 8080:80
 This forwards host port 8080 to container port 80. Format:
 
 ```text
---port HOST:CONTAINER --port HOST:CONTAINER/tcp --port HOST:CONTAINER/udp
+--port [PROTO:]HOST[:CONTAINER]
+--port HOST[:CONTAINER]/PROTO
 ```
 
-Multiple `--port` flags can be used. TCP is the default protocol.
+`PROTO` is `tcp` or `udp`, so `--port udp:51820:51820` and `--port 51820:51820/udp` are equivalent. Multiple `--port` flags can be used. TCP is the default protocol, and `CONTAINER` defaults to `HOST`.
 
 Port forwarding creates nftables DNAT rules for incoming traffic. It works for connections from other machines on the network and from the host via its external IP, but **not via localhost** (127.0.0.1). To reach a container from the host, use the container's IP directly; find it with `sdme ps`.
 
