@@ -1,3 +1,21 @@
+sdme (0.22.1-1~resolute1) resolute; urgency=medium
+
+  * Translate --port rules to the form nspawn parses. --port
+    udp:51820:51820 was rejected, and --port 51820:51820/udp was accepted
+    but handed to nspawn as is, which then refused to start the container,
+    so no UDP port could be forwarded. [PROTO:]HOST[:CONTAINER] and
+    HOST[:CONTAINER]/PROTO are both accepted and stored as
+    PROTO:HOST:CONTAINER. A container created with a /PROTO rule keeps it
+    and must be recreated.
+  * Require exact container names for start, stop, restart, rm, enable,
+    disable, set, exec and cp destinations, and exact pod names for pod rm
+    and pod net attach and detach, also with --force. A unique prefix used
+    to select the container, so a mistyped name could stop or remove a
+    neighbour. join, logs, diff, cp sources, --pod and --oci-pod still
+    accept unique prefixes.
+
+ -- Alexandre Fiori <fiorix@gmail.com>  Thu, 19 Nov 2026 08:35:45 +0000
+
 sdme (0.22.0-1~resolute1) resolute; urgency=medium
 
   * Add ephemeral containers. --ephemeral on sdme new and sdme create runs

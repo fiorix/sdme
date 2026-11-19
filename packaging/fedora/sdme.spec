@@ -11,7 +11,7 @@
 %global crate sdme
 
 Name:           sdme
-Version:        0.22.0
+Version:        0.22.1
 Release:        1%{?dist}
 Summary:        The systemd machine editor
 
@@ -106,6 +106,20 @@ export SDME_SKIP_PROBE=1
 %{_bindir}/%{crate} repair-units || :
 
 %changelog
+* Thu Nov 19 2026 Alexandre Fiori <fiorix@gmail.com> - 0.22.1-1
+- Translate --port rules to the form nspawn parses. --port udp:51820:51820
+  was rejected, and --port 51820:51820/udp was accepted but handed to nspawn
+  as is, which then refused to start the container, so no UDP port could be
+  forwarded. [PROTO:]HOST[:CONTAINER] and HOST[:CONTAINER]/PROTO are both
+  accepted and stored as PROTO:HOST:CONTAINER. A container created with a
+  /PROTO rule keeps it and must be recreated.
+- Require exact container names for start, stop, restart, rm, enable,
+  disable, set, exec and cp destinations, and exact pod names for pod rm and
+  pod net attach and detach, also with --force. A unique prefix used to
+  select the container, so a mistyped name could stop or remove a
+  neighbour. join, logs, diff, cp sources, --pod and --oci-pod still accept
+  unique prefixes.
+
 * Fri Oct 23 2026 Alexandre Fiori <fiorix@gmail.com> - 0.22.0-1
 - Add ephemeral containers. --ephemeral on sdme new and sdme create runs the
   container as a transient systemd unit, sdme-ephemeral@NAME.service, and
