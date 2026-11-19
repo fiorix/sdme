@@ -223,6 +223,32 @@ Totals                       712     0    12  25 suites
 
 ## Log
 
+### 0.22.1 -- UDP port forwarding, exact names for state changes (2026-11-19, x86_64)
+
+Standalone suite runs on Linux 7.1.8-1-cachyos (x86_64), CachyOS, systemd 262 (262.1-1-arch), ufw active. Not a full `run-parallel.sh` gate: the host runs its own containers, so the suites covering the two changes since 0.22.0 (9a62c01 for `--port`, b1f8001 for exact names) ran one at a time against the release build of 0.22.1, with `SDME` a wrapper passing `--config` for an isolated datadir (`/var/lib/sdme-e2e`, btrfs) and the wrapper first in `PATH`. The base rootfs was imported from a local Ubuntu 26.04 copy. Every failure below also occurs with v0.22.0 (its scripts and binary) on the same host and datadir. `cargo test` passes 1024 library tests and 22 binary tests; 20 library tests fail here with `lsetxattr` EPERM in the build sandbox and pass in CI.
+
+```
+Suite                       Pass  Fail  Skip  Result
+--------------------------  ----  ----  ----  ------
+smoke                         33     2     0  FAIL (host)
+verify-cp                     23     0     0  PASS
+verify-pods                   18     0     0  PASS
+verify-oci                    14     4     0  FAIL (host)
+verify-ephemeral              31     1     0  FAIL (host)
+verify-kube-L4-networking      6     0     0  PASS
+verify-network                 4     3     2  FAIL (host)
+verify-tutorial (3 tests)     20     1     0  FAIL (host)
+```
+
+- `verify-tutorial` ran with `--only first_container --only networking --only pod_networking`. The new `net/veth-port-udp` passes: a `--network-veth` container created with `--port udp:5353:5353 --port 51820:51820/udp` starts. With 0.22.0, `udp:` fails validation and `/udp` reaches nspawn, which fails with "Failed to parse host port".
+- Checked by hand: a container with `udp:45353:5353`, `45820:51820/udp` and `48080:80` gets `--port=udp:45353:5353 --port=udp:45820:51820 --port=tcp:48080:80`, nspawn's `map_port_ipport` gains the three entries once the container has an IPv4 address, and a UDP datagram to the host IP on 45820 reaches a listener on 51820 in the container. The address and default route were set by hand (see below).
+- `smoke` and `verify-cp` and `verify-pods` cover b1f8001: abbreviated `start`, `stop`, `restart`, `rm -f`, `enable`, `disable`, `set` and `exec` are refused and leave the container running with the same leader, `logs`, `diff` and `join` still resolve a unique prefix, and `pod rm` and `pod net` need exact pod names.
+- `smoke` "start after an unclean kill" (and the stop after it): the restart's overlay mount fails with EBUSY, which mount(8) words as "overlay already mounted on" an unrelated container's overlay. Reproduced 3 of 3 with 0.22.1 and with 0.22.0; the 0.22.0 gate host passed it.
+- No routable container address: ufw drops DHCP on new `ve-` links, so veth containers keep only a link-local address. nspawn installs no DNAT rule for one, which fails `verify-ephemeral`'s "port forward rule present while running", and `verify-oci`'s curl checks get HTTP 000 via the 169.254 address.
+- No bridges: the running kernel's module tree lacks `stp.ko`, so `bridge` cannot load and nspawn fails with "Failed to create bridge interface vz-sdmezone: Operation not supported". That fails the 3 zone checks and skips the 2 bridge checks of `verify-network`, and fails the tutorial's `net/zone`.
+- Not run: `verify-interrupt`, the full tutorial, the other kube levels, the distro matrices, and aarch64.
+- `lib.sh`'s `ensure_base_fs`, `verify-distro-oci.sh` and `build-nixos-rootfs.sh` call `sdme` instead of `$SDME`, so with a `--config` wrapper they act on the default datadir unless the wrapper is also first in `PATH`.
+
 ### 0.22.0 -- ephemeral containers, host user units, pod name prefixes (2026-10-23, x86_64)
 
 Full `run-parallel.sh` gate on Linux 7.0.0-38-generic (x86_64), Ubuntu 26.04, systemd 259 (259.5-0ubuntu3.4), against the release build of a99e167, the last code commit (43a4d99 changes a test script only). Eight parallel jobs, timeout scale 1, wall clock 17m28s. The datadir is a dedicated btrfs mount (Mode A) with `user_subvol_rm_allowed`; AppArmor is active with the `sdme-default` profile loaded, and kubeconform v0.7.0 is installed. The host has no direct internet access: downloads use an HTTP proxy, and containers have no route to the internet. Checks that failed only for that reason are counted as skipped. The `smoke` and `interrupt` gates passed 14 and 8 checks. `cargo test` passes (1037 library tests, 21 binary tests).
